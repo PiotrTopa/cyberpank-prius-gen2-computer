@@ -6,5 +6,7 @@ Contains all application screens (main dashboard, submenus, etc.)
 
 from .base import Screen
 from .main_screen import MainScreen
+from .audio_screen import AudioScreen
+from .climate_screen import ClimateScreen
 
-__all__ = ["Screen", "MainScreen"]
+__all__ = ["Screen", "MainScreen", "AudioScreen", "ClimateScreen"]

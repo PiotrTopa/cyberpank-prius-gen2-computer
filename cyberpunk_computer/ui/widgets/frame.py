@@ -10,7 +10,7 @@ from typing import Optional, Callable, TYPE_CHECKING
 
 from .base import Widget, Rect
 from ..colors import COLORS, lerp_color
-from ..fonts import get_font
+from ..fonts import get_font, get_title_font, get_mono_font
 
 if TYPE_CHECKING:
     from ...input.manager import InputEvent
@@ -25,9 +25,10 @@ class Frame(Widget):
     """
     
     # Layout constants
-    TITLE_HEIGHT = 16
+    TITLE_HEIGHT = 22
     BORDER_WIDTH = 1
     PADDING = 4
+    TITLE_FONT_SIZE = 14
     
     def __init__(
         self,
@@ -89,26 +90,32 @@ class Frame(Widget):
         if not self.visible:
             return
         
-        # Calculate colors based on focus state
+        # Calculate colors based on focus and active state
         focus_t = self._focus_anim
         
-        bg_color = lerp_color(
-            COLORS["bg_frame"],
-            COLORS["bg_frame_focus"],
-            focus_t
-        )
-        
-        border_color = lerp_color(
-            COLORS["border_normal"],
-            COLORS["border_focus"],
-            focus_t
-        )
-        
-        title_color = lerp_color(
-            COLORS["text_secondary"],
-            COLORS["cyan"],
-            focus_t
-        )
+        # Active state uses different colors (editing mode)
+        if self._active:
+            bg_color = COLORS["bg_frame_focus"]
+            border_color = COLORS["border_active"]
+            title_color = COLORS["active"]
+        else:
+            bg_color = lerp_color(
+                COLORS["bg_frame"],
+                COLORS["bg_frame_focus"],
+                focus_t
+            )
+            
+            border_color = lerp_color(
+                COLORS["border_normal"],
+                COLORS["border_focus"],
+                focus_t
+            )
+            
+            title_color = lerp_color(
+                COLORS["text_secondary"],
+                COLORS["cyan"],
+                focus_t
+            )
         
         # Draw background
         pygame.draw.rect(
@@ -117,12 +124,13 @@ class Frame(Widget):
             self.rect.to_pygame()
         )
         
-        # Draw border
+        # Draw border (thicker when active)
+        border_width = 2 if self._active else self.BORDER_WIDTH
         pygame.draw.rect(
             surface,
             border_color,
             self.rect.to_pygame(),
-            self.BORDER_WIDTH
+            border_width
         )
         
         # Draw corner accents when focused
@@ -139,9 +147,9 @@ class Frame(Widget):
             1
         )
         
-        # Draw title text
+        # Draw title text (using Interceptor Bold for headers)
         if self.title:
-            font = get_font(10, bold=self.focused)
+            font = get_title_font(self.TITLE_FONT_SIZE)
             title_surface = font.render(self.title.upper(), True, title_color)
             title_x = self.rect.x + self.PADDING + 2
             title_y = self.rect.y + (self.TITLE_HEIGHT - title_surface.get_height()) // 2

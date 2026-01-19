@@ -2,71 +2,220 @@
 Cyberpunk color palette.
 
 VFD-inspired colors for the retro-futuristic aesthetic.
-All colors are RGB tuples. Use COLORS_ALPHA for colors with transparency.
+Supports multiple color themes (VFD, Amber, etc.)
 """
 
 from typing import Dict, Tuple
+from dataclasses import dataclass
+from enum import Enum
 
 # Type aliases
 RGB = Tuple[int, int, int]
 RGBA = Tuple[int, int, int, int]
 
+
+class Theme(Enum):
+    """Available color themes."""
+    VFD = "vfd"           # Classic VFD cyan/teal
+    AMBER = "amber"       # Amber/orange monochrome
+    SYNTHWAVE = "synthwave"  # Pink/purple synthwave
+
+
+@dataclass
+class ColorPalette:
+    """Color palette definition for a theme."""
+    
+    # Base colors from the palette
+    bg_darkest: RGB       # Darkest background
+    bg_dark: RGB          # Dark background
+    bg_mid: RGB           # Mid-tone background
+    
+    # Accent colors
+    accent_bright: RGB    # Brightest accent
+    accent_mid: RGB       # Medium accent
+    accent_dim: RGB       # Dimmed accent
+    accent_dark: RGB      # Very dark accent
+    
+    # Secondary accent
+    secondary_bright: RGB
+    secondary_mid: RGB
+    
+    # Warm tones
+    warm_bright: RGB      # Yellow/amber highlights
+    warm_mid: RGB
+    
+    # Alert/status
+    alert_bright: RGB     # Red/warning
+    alert_mid: RGB
+    
+    # Additional
+    highlight: RGB        # Pure highlights
+    inactive: RGB         # Inactive/disabled
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Main Color Palette
+# Theme Definitions
 # ─────────────────────────────────────────────────────────────────────────────
 
-COLORS: Dict[str, RGB] = {
-    # Backgrounds (dark, blue-tinted)
-    "bg_dark": (8, 10, 15),           # Main background - near black
-    "bg_panel": (12, 16, 24),         # Panel background
-    "bg_frame": (18, 22, 32),         # Frame/widget background
-    "bg_frame_focus": (25, 32, 45),   # Focused frame background
+# VFD Theme - Classic cyan/teal vacuum fluorescent display
+VFD_PALETTE = ColorPalette(
+    # Backgrounds
+    bg_darkest=(0, 0, 0),
+    bg_dark=(32, 17, 39),
+    bg_mid=(27, 30, 52),
     
-    # Primary Accent - Cyan (VFD-style)
-    "cyan": (0, 255, 255),            # Bright cyan
-    "cyan_bright": (128, 255, 255),   # Extra bright
-    "cyan_mid": (0, 180, 200),        # Medium cyan
-    "cyan_dim": (0, 100, 120),        # Dimmed cyan
-    "cyan_dark": (0, 50, 60),         # Dark cyan
+    # VFD Cyan/Teal accents
+    accent_bright=(0, 255, 204),      # VFD jasny
+    accent_mid=(0, 168, 150),         # VFD przydymiony
+    accent_dim=(53, 93, 104),
+    accent_dark=(0, 51, 51),          # VFD bardzo ciemny
     
-    # Secondary Accent - Magenta/Pink
-    "magenta": (255, 0, 128),         # Hot pink/magenta
-    "magenta_dim": (150, 0, 80),      # Dimmed magenta
+    # Secondary - teal/green
+    secondary_bright=(148, 197, 172),
+    secondary_mid=(106, 175, 157),
     
-    # Tertiary Accent - Orange (warnings, highlights)
-    "orange": (255, 140, 0),          # Warm orange
-    "orange_dim": (180, 100, 0),      # Dimmed orange
-    "amber": (255, 180, 0),           # Amber/gold
+    # Warm highlights
+    warm_bright=(255, 235, 153),
+    warm_mid=(255, 194, 122),
     
-    # Status Colors
-    "active": (0, 255, 128),          # Active/enabled - green
-    "inactive": (60, 70, 80),         # Inactive/disabled - gray
-    "warning": (255, 200, 0),         # Warning - yellow
-    "error": (255, 60, 60),           # Error - red
+    # Alerts - red
+    alert_bright=(255, 36, 36),       # red triangle of death
+    alert_mid=(217, 98, 107),
     
-    # Text Colors
-    "text_primary": (200, 220, 240),  # Main text - slightly blue
-    "text_secondary": (100, 120, 140),# Secondary text - dimmed
-    "text_highlight": (255, 255, 255),# Highlighted text - pure white
-    "text_accent": (0, 255, 255),     # Accent text - cyan
-    "text_value": (128, 255, 200),    # Value display - bright teal
+    # Others
+    highlight=(255, 255, 255),
+    inactive=(53, 93, 104),
+)
+
+# Amber Theme - Classic amber monochrome
+AMBER_PALETTE = ColorPalette(
+    bg_darkest=(0, 0, 0),
+    bg_dark=(20, 12, 5),
+    bg_mid=(35, 25, 15),
     
-    # Frame/Border Colors
-    "border_normal": (40, 50, 65),    # Normal border
-    "border_focus": (0, 200, 255),    # Focused border
-    "border_active": (0, 255, 200),   # Active/selected border
+    accent_bright=(255, 183, 51),     # amber shade
+    accent_mid=(255, 159, 0),         # amber
+    accent_dim=(180, 100, 30),
+    accent_dark=(80, 50, 20),
     
-    # Special
-    "scanline": (0, 0, 0),            # Scanline overlay
-    "glow": (0, 200, 255),            # Glow effect base
+    secondary_bright=(255, 194, 122),
+    secondary_mid=(236, 154, 109),
+    
+    warm_bright=(255, 235, 153),
+    warm_mid=(255, 194, 122),
+    
+    alert_bright=(255, 77, 77),       # red shade
+    alert_mid=(217, 98, 107),
+    
+    highlight=(255, 255, 255),
+    inactive=(100, 80, 60),
+)
+
+# Synthwave Theme - Pink/purple
+SYNTHWAVE_PALETTE = ColorPalette(
+    bg_darkest=(0, 0, 0),
+    bg_dark=(32, 20, 51),
+    bg_mid=(53, 30, 80),
+    
+    accent_bright=(255, 100, 200),
+    accent_mid=(194, 75, 110),
+    accent_dim=(167, 49, 105),
+    accent_dark=(80, 30, 60),
+    
+    secondary_bright=(0, 255, 204),
+    secondary_mid=(0, 168, 150),
+    
+    warm_bright=(255, 235, 153),
+    warm_mid=(255, 194, 122),
+    
+    alert_bright=(255, 36, 36),
+    alert_mid=(217, 98, 107),
+    
+    highlight=(255, 255, 255),
+    inactive=(80, 60, 90),
+)
+
+# Available themes
+THEMES = {
+    Theme.VFD: VFD_PALETTE,
+    Theme.AMBER: AMBER_PALETTE,
+    Theme.SYNTHWAVE: SYNTHWAVE_PALETTE,
 }
+
+# Current active theme
+_current_theme = Theme.VFD
+
+
+def set_theme(theme: Theme) -> None:
+    """Set the active color theme."""
+    global _current_theme, COLORS
+    _current_theme = theme
+    COLORS = _build_color_dict(THEMES[theme])
+
+
+def get_theme() -> Theme:
+    """Get current theme."""
+    return _current_theme
+
+
+def _build_color_dict(palette: ColorPalette) -> Dict[str, RGB]:
+    """Build the COLORS dict from a palette."""
+    return {
+        # Backgrounds
+        "bg_dark": palette.bg_darkest,
+        "bg_panel": palette.bg_dark,
+        "bg_frame": palette.bg_dark,
+        "bg_frame_focus": palette.bg_mid,
+        
+        # Primary accent
+        "cyan": palette.accent_bright,        # Keep name for compatibility
+        "cyan_bright": palette.accent_bright,
+        "cyan_mid": palette.accent_mid,
+        "cyan_dim": palette.accent_dim,
+        "cyan_dark": palette.accent_dark,
+        
+        # Secondary
+        "magenta": palette.secondary_bright,
+        "magenta_dim": palette.secondary_mid,
+        
+        # Warm colors
+        "orange": palette.warm_mid,
+        "orange_dim": palette.warm_mid,
+        "amber": palette.warm_bright,
+        
+        # Status
+        "active": palette.warm_bright,        # Changed from green to warm
+        "inactive": palette.inactive,
+        "warning": palette.warm_bright,
+        "error": palette.alert_bright,
+        
+        # Text
+        "text_primary": palette.secondary_bright,
+        "text_secondary": palette.accent_dim,
+        "text_highlight": palette.highlight,
+        "text_accent": palette.accent_bright,
+        "text_value": palette.accent_bright,
+        
+        # Borders
+        "border_normal": palette.accent_dark,
+        "border_focus": palette.accent_mid,
+        "border_active": palette.warm_mid,    # Changed to warm/amber
+        
+        # Effects
+        "scanline": (0, 0, 0),
+        "glow": palette.accent_mid,
+    }
+
+
+# Initialize default COLORS dict
+COLORS: Dict[str, RGB] = _build_color_dict(VFD_PALETTE)
 
 # Colors with alpha channel
 COLORS_ALPHA: Dict[str, RGBA] = {
-    "focus_glow": (0, 200, 255, 60),      # Focus glow overlay
-    "scanline": (0, 0, 0, 20),            # Scanline alpha
-    "overlay_dark": (0, 0, 0, 180),       # Dark overlay for modals
-    "highlight": (255, 255, 255, 30),     # Subtle highlight
+    "focus_glow": (0, 200, 255, 60),
+    "scanline": (0, 0, 0, 20),
+    "overlay_dark": (0, 0, 0, 180),
+    "highlight": (255, 255, 255, 30),
 }
 
 

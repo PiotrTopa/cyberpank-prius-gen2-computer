@@ -2,11 +2,23 @@
 Font management.
 
 Handles font loading and provides consistent typography across the UI.
+
+Font Hierarchy:
+- Interceptor Bold: Headers/titles (large decorative text)
+- Terminus: Standard text (labels, values, general UI)
+- 04B_03: Tiny text below 8px height (pixel-perfect at small sizes)
 """
 
+import logging
 import pygame
 from typing import Dict, Optional
 from pathlib import Path
+
+# Set up logging for font operations
+logger = logging.getLogger(__name__)
+
+# Font size threshold - below this, use 04B pixel font
+TINY_FONT_THRESHOLD = 8
 
 
 class FontManager:
@@ -15,15 +27,21 @@ class FontManager:
     
     Provides cached access to fonts at different sizes with fallback
     to system fonts when custom fonts are not available.
+    
+    Font selection:
+    - "title" / "header": Interceptor Bold (decorative headers)
+    - "mono" / "standard": Terminus (general purpose)
+    - "tiny": 04B_03 (pixel font for small sizes)
+    - Auto-select: Uses size threshold to pick appropriate font
     """
     
     # Font size presets
-    SIZE_TINY = 10
-    SIZE_SMALL = 12
-    SIZE_NORMAL = 14
-    SIZE_LARGE = 18
-    SIZE_XLARGE = 24
-    SIZE_TITLE = 32
+    SIZE_TINY = 8
+    SIZE_SMALL = 10
+    SIZE_NORMAL = 12
+    SIZE_LARGE = 14
+    SIZE_XLARGE = 18
+    SIZE_TITLE = 24
     
     _instance: Optional["FontManager"] = None
     _fonts: Dict[tuple, pygame.font.Font] = {}
@@ -44,29 +62,47 @@ class FontManager:
         
         # Try to find asset directory
         self.asset_dir = self._find_asset_dir()
+        logger.info(f"Font asset directory: {self.asset_dir}")
         
-        # Font file names (would be in assets/fonts/)
+        # Font file names (in assets/fonts/)
+        # Organized by purpose
         self.font_files = {
-            "mono": "RobotoMono-Regular.ttf",
-            "mono_bold": "RobotoMono-Bold.ttf",
-            "display": "ShareTechMono-Regular.ttf",
+            # Standard UI text - Terminus monospace
+            "mono": "Terminus.ttf",
+            "standard": "Terminus.ttf",
+            # Headers/titles - Interceptor decorative
+            "title": "Interceptor Bold.otf",
+            "header": "Interceptor Bold.otf",
+            "display": "Interceptor Bold.otf",
+            # Tiny pixel font - 04B for small sizes
+            "tiny": "04B_03__.TTF",
+            "pixel": "04B_03__.TTF",
         }
         
+        # Log available fonts
+        if self.asset_dir:
+            available = list(self.asset_dir.glob("*.*"))
+            logger.info(f"Available font files: {[f.name for f in available]}")
+        
         self._initialized = True
+        self._load_errors: list[str] = []
     
     def _find_asset_dir(self) -> Optional[Path]:
         """Find the assets directory."""
         # Try relative to this file
         current = Path(__file__).parent.parent.parent
         assets = current / "assets" / "fonts"
+        logger.debug(f"Looking for fonts in: {assets}")
         if assets.exists():
+            logger.info(f"Found font directory: {assets}")
             return assets
+        logger.warning(f"Font directory not found: {assets}")
         return None
     
     def get_font(
         self, 
         size: int, 
-        font_name: str = "mono",
+        font_name: str = "auto",
         bold: bool = False
     ) -> pygame.font.Font:
         """
@@ -74,12 +110,20 @@ class FontManager:
         
         Args:
             size: Font size in pixels
-            font_name: Font identifier ('mono', 'display')
-            bold: Use bold variant
+            font_name: Font identifier:
+                - "auto": Auto-select based on size (tiny for <8px, mono otherwise)
+                - "mono"/"standard": Terminus monospace
+                - "title"/"header": Interceptor Bold
+                - "tiny"/"pixel": 04B pixel font
+            bold: Use bold variant (only affects some fonts)
         
         Returns:
             Pygame font object
         """
+        # Auto-select font based on size
+        if font_name == "auto":
+            font_name = "tiny" if size < TINY_FONT_THRESHOLD else "mono"
+        
         cache_key = (font_name, size, bold)
         
         if cache_key in self._fonts:
@@ -98,17 +142,27 @@ class FontManager:
         """Load a font from file or system."""
         # Try custom font file first
         if self.asset_dir:
-            key = f"{font_name}_bold" if bold else font_name
-            if key in self.font_files:
-                font_path = self.asset_dir / self.font_files[key]
+            # Direct lookup by font_name
+            if font_name in self.font_files:
+                font_path = self.asset_dir / self.font_files[font_name]
+                logger.debug(f"Trying to load font: {font_path}")
                 if font_path.exists():
                     try:
-                        return pygame.font.Font(str(font_path), size)
-                    except pygame.error:
-                        pass
+                        font = pygame.font.Font(str(font_path), size)
+                        logger.info(f"Loaded font: {font_path.name} size={size}")
+                        return font
+                    except pygame.error as e:
+                        error_msg = f"Failed to load {font_path}: {e}"
+                        logger.error(error_msg)
+                        if error_msg not in self._load_errors:
+                            self._load_errors.append(error_msg)
+                else:
+                    logger.warning(f"Font file not found: {font_path}")
         
         # Fallback to system monospace font
+        logger.info(f"Falling back to system font for {font_name} size={size}")
         system_fonts = [
+            "terminus",
             "robotomono",
             "consolas", 
             "monaco",
@@ -116,9 +170,9 @@ class FontManager:
             "monospace"
         ]
         
-        for font_name in system_fonts:
+        for sys_font in system_fonts:
             try:
-                font = pygame.font.SysFont(font_name, size, bold=bold)
+                font = pygame.font.SysFont(sys_font, size, bold=bold)
                 if font:
                     return font
             except:
@@ -132,15 +186,31 @@ class FontManager:
 fonts = FontManager()
 
 
-def get_font(size: int, bold: bool = False) -> pygame.font.Font:
+def get_font(size: int, font_name: str = "auto", bold: bool = False) -> pygame.font.Font:
     """
     Convenience function to get a font.
     
     Args:
         size: Font size in pixels
+        font_name: Font type ("auto", "mono", "title", "tiny")
         bold: Use bold variant
     
     Returns:
         Pygame font object
     """
-    return fonts.get_font(size, "mono", bold)
+    return fonts.get_font(size, font_name, bold)
+
+
+def get_title_font(size: int) -> pygame.font.Font:
+    """Get Interceptor Bold font for titles/headers."""
+    return fonts.get_font(size, "title")
+
+
+def get_mono_font(size: int) -> pygame.font.Font:
+    """Get Terminus font for standard UI text."""
+    return fonts.get_font(size, "mono")
+
+
+def get_tiny_font(size: int = 8) -> pygame.font.Font:
+    """Get 04B pixel font for tiny text."""
+    return fonts.get_font(size, "tiny")

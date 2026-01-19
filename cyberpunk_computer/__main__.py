@@ -12,10 +12,34 @@ Options:
 """
 
 import argparse
+import logging
 import sys
 
 from .config import Config
 from .core.app import Application
+
+
+def setup_logging(dev_mode: bool = False) -> None:
+    """Configure logging for the application."""
+    level = logging.DEBUG if dev_mode else logging.INFO
+    
+    # Create formatter
+    formatter = logging.Formatter(
+        '%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+        datefmt='%H:%M:%S'
+    )
+    
+    # Console handler
+    console = logging.StreamHandler(sys.stdout)
+    console.setLevel(level)
+    console.setFormatter(formatter)
+    
+    # Root logger
+    root = logging.getLogger()
+    root.setLevel(level)
+    root.addHandler(console)
+    
+    logging.info("Logging initialized")
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,8 +56,8 @@ def parse_args() -> argparse.Namespace:
         "--scale",
         type=int,
         choices=[1, 2, 4],
-        default=1,
-        help="Display scale factor (1, 2, or 4)"
+        default=None,
+        help="Display scale factor (1, 2, or 4). Default: 2 in dev mode, 1 otherwise"
     )
     parser.add_argument(
         "--fullscreen",
@@ -59,18 +83,25 @@ def main() -> int:
     """Main entry point."""
     args = parse_args()
     
+    # Setup logging first
+    setup_logging(dev_mode=args.dev)
+    
+    logger = logging.getLogger(__name__)
+    logger.info("CyberPunk Prius Gen 2 - Onboard Computer starting...")
+    
+    # Determine scale factor (default: 2 for dev mode, 1 otherwise)
+    scale = args.scale if args.scale is not None else (2 if args.dev else 1)
+    
     # Build configuration from arguments
     config = Config(
         dev_mode=args.dev,
-        scale_factor=args.scale,
+        scale_factor=scale,
         fullscreen=args.fullscreen,
         gateway_port=args.port,
         gateway_enabled=not args.no_gateway
     )
     
-    # If dev mode, default to 2x scale if not specified
-    if args.dev and args.scale == 1:
-        config.scale_factor = 2
+    logger.info(f"Config: dev={config.dev_mode}, scale={config.scale_factor}")
     
     # Create and run application
     app = Application(config)
