@@ -1,0 +1,12 @@
+# CyberPunk Prius Gen 2 - Onboard Computer
+# Python dependencies
+
+# Core
+pygame>=2.5.0
+
+# Serial communication (for Gateway)
+pyserial>=3.5
+
+# Development dependencies
+# pytest>=7.4.0
+# pytest-asyncio>=0.21.0
