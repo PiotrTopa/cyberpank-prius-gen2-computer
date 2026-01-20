@@ -84,7 +84,7 @@ VFD_PALETTE = ColorPalette(
     
     # Others
     highlight=(255, 255, 255),
-    inactive=(53, 93, 104),
+    inactive=(80, 120, 130),
 )
 
 # Amber Theme - Classic amber monochrome
@@ -108,7 +108,7 @@ AMBER_PALETTE = ColorPalette(
     alert_mid=(217, 98, 107),
     
     highlight=(255, 255, 255),
-    inactive=(100, 80, 60),
+    inactive=(130, 110, 80),
 )
 
 # Synthwave Theme - Pink/purple
@@ -132,7 +132,7 @@ SYNTHWAVE_PALETTE = ColorPalette(
     alert_mid=(217, 98, 107),
     
     highlight=(255, 255, 255),
-    inactive=(80, 60, 90),
+    inactive=(110, 85, 120),
 )
 
 # Available themes

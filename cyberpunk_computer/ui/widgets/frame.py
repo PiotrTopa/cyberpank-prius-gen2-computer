@@ -6,6 +6,8 @@ Used for the main dashboard panels.
 """
 
 import pygame
+import math
+import time
 from typing import Optional, Callable, TYPE_CHECKING
 
 from .base import Widget, Rect
@@ -29,6 +31,9 @@ class Frame(Widget):
     BORDER_WIDTH = 1
     PADDING = 4
     TITLE_FONT_SIZE = 14
+    
+    # Animation
+    _global_time: float = 0.0  # Shared animation time
     
     def __init__(
         self,
@@ -59,6 +64,9 @@ class Frame(Widget):
         
         # Child widgets
         self._children: list[Widget] = []
+        
+        # Animation phase offset (unique per frame for staggered effect)
+        self._anim_offset = hash(title) % 100 / 100.0
     
     def _calculate_content_rect(self) -> Rect:
         """Calculate the content area rectangle."""
@@ -82,8 +90,14 @@ class Frame(Widget):
     def update(self, dt: float) -> None:
         """Update frame and children."""
         super().update(dt)
+        Frame._global_time += dt  # Shared animation timer
         for child in self._children:
             child.update(dt)
+    
+    def _get_pulse(self, speed: float = 1.0) -> float:
+        """Get a pulsing value 0.0-1.0 for animations."""
+        t = (Frame._global_time + self._anim_offset) * speed
+        return (math.sin(t * math.pi * 2) + 1) / 2
     
     def render(self, surface: pygame.Surface) -> None:
         """Render the frame with cyberpunk styling."""
@@ -93,10 +107,18 @@ class Frame(Widget):
         # Calculate colors based on focus and active state
         focus_t = self._focus_anim
         
+        # Pulsing effect for focused/active frames
+        pulse = self._get_pulse(1.5) if (focus_t > 0.5 or self._active) else 0
+        
         # Active state uses different colors (editing mode)
         if self._active:
             bg_color = COLORS["bg_frame_focus"]
-            border_color = COLORS["border_active"]
+            # Pulsing border color for active state
+            border_color = lerp_color(
+                COLORS["border_active"],
+                COLORS["active"],
+                pulse * 0.3
+            )
             title_color = COLORS["active"]
         else:
             bg_color = lerp_color(
@@ -105,10 +127,16 @@ class Frame(Widget):
                 focus_t
             )
             
-            border_color = lerp_color(
+            # Pulsing border for focused state
+            base_border = lerp_color(
                 COLORS["border_normal"],
                 COLORS["border_focus"],
                 focus_t
+            )
+            border_color = lerp_color(
+                base_border,
+                COLORS["cyan"],
+                pulse * focus_t * 0.4
             )
             
             title_color = lerp_color(
@@ -169,55 +197,64 @@ class Frame(Widget):
         color: tuple,
         intensity: float
     ) -> None:
-        """Draw small corner accents for focused state."""
-        length = 6
+        """Draw cyberpunk corner accents for focused state."""
+        # Longer, more dramatic corner lines
+        length = 10 + int(intensity * 4)  # Dynamic length
+        pulse = self._get_pulse(2.0)
         
-        # Modify color intensity
-        accent_color = lerp_color(color, COLORS["cyan"], intensity * 0.5)
+        # Bright accent color with pulse
+        accent_color = lerp_color(color, COLORS["cyan"], intensity * 0.5 + pulse * 0.3)
         
-        # Top-left
+        # Top-left corner - L shape
         pygame.draw.line(surface, accent_color,
             (self.rect.x, self.rect.y),
-            (self.rect.x + length, self.rect.y), 1)
+            (self.rect.x + length, self.rect.y), 2)
         pygame.draw.line(surface, accent_color,
             (self.rect.x, self.rect.y),
-            (self.rect.x, self.rect.y + length), 1)
+            (self.rect.x, self.rect.y + length), 2)
         
-        # Top-right
+        # Top-right corner
         pygame.draw.line(surface, accent_color,
             (self.rect.right - 1, self.rect.y),
-            (self.rect.right - length - 1, self.rect.y), 1)
+            (self.rect.right - length - 1, self.rect.y), 2)
         pygame.draw.line(surface, accent_color,
             (self.rect.right - 1, self.rect.y),
-            (self.rect.right - 1, self.rect.y + length), 1)
+            (self.rect.right - 1, self.rect.y + length), 2)
         
-        # Bottom-left
+        # Bottom-left corner
         pygame.draw.line(surface, accent_color,
             (self.rect.x, self.rect.bottom - 1),
-            (self.rect.x + length, self.rect.bottom - 1), 1)
+            (self.rect.x + length, self.rect.bottom - 1), 2)
         pygame.draw.line(surface, accent_color,
             (self.rect.x, self.rect.bottom - 1),
-            (self.rect.x, self.rect.bottom - length - 1), 1)
+            (self.rect.x, self.rect.bottom - length - 1), 2)
         
-        # Bottom-right
+        # Bottom-right corner
         pygame.draw.line(surface, accent_color,
             (self.rect.right - 1, self.rect.bottom - 1),
-            (self.rect.right - length - 1, self.rect.bottom - 1), 1)
+            (self.rect.right - length - 1, self.rect.bottom - 1), 2)
         pygame.draw.line(surface, accent_color,
             (self.rect.right - 1, self.rect.bottom - 1),
-            (self.rect.right - 1, self.rect.bottom - length - 1), 1)
+            (self.rect.right - 1, self.rect.bottom - length - 1), 2)
     
     def _draw_focus_indicator(
         self, 
         surface: pygame.Surface,
         intensity: float
     ) -> None:
-        """Draw a small focus indicator next to title."""
-        # Small glowing dot
-        x = self.rect.right - self.PADDING - 4
+        """Draw a pulsing focus indicator next to title."""
+        pulse = self._get_pulse(0.15)
+        
+        # Glowing dot
+        x = self.rect.right - self.PADDING - 6
         y = self.rect.y + self.TITLE_HEIGHT // 2
         
-        color = lerp_color(COLORS["cyan_dim"], COLORS["cyan"], intensity)
+        # Outer glow
+        glow_color = lerp_color(COLORS["cyan_dark"], COLORS["cyan_dim"], pulse)
+        pygame.draw.circle(surface, glow_color, (x, y), 4)
+        
+        # Inner bright dot
+        color = lerp_color(COLORS["cyan_dim"], COLORS["cyan"], intensity * pulse)
         pygame.draw.circle(surface, color, (x, y), 2)
     
     def handle_input(self, event: "InputEvent") -> bool:

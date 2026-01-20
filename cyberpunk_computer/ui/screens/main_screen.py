@@ -234,24 +234,21 @@ class MainScreen(Screen):
         self._ac_icon = ModeIcon(
             Rect(content.x, icon_y, icon_width, icon_height),
             icon="ac",
-            active=self._climate_ac,
-            label="A/C"
+            active=self._climate_ac
         )
         self._climate_frame.add_child(self._ac_icon)
         
         self._auto_icon = ModeIcon(
             Rect(content.x + icon_width, icon_y, icon_width, icon_height),
             icon="auto",
-            active=self._climate_auto,
-            label="AUTO"
+            active=self._climate_auto
         )
         self._climate_frame.add_child(self._auto_icon)
         
         self._recirc_icon = ModeIcon(
             Rect(content.x + icon_width * 2, icon_y, icon_width, icon_height),
             icon="recirc",
-            active=self._climate_recirc,
-            label="RECIRC"
+            active=self._climate_recirc
         )
         self._climate_frame.add_child(self._recirc_icon)
         
