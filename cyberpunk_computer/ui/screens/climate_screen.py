@@ -94,9 +94,6 @@ class ClimateScreen(Screen):
     ITEM_PADDING = 2
     SIDE_MARGIN = 16
     
-    # Inactivity timeout (seconds)
-    INACTIVITY_TIMEOUT = 10.0
-    
     def __init__(
         self,
         size: Tuple[int, int],
@@ -155,11 +152,17 @@ class ClimateScreen(Screen):
         """Reset activity timer on enter."""
         self._last_activity = time.time()
     
+    def _get_timeout(self) -> float:
+        """Get screen exit timeout from config."""
+        if self.app and hasattr(self.app, 'config'):
+            return self.app.config.timeout_screen_exit
+        return 30.0  # Default fallback
+    
     def update(self, dt: float) -> None:
         """Check for inactivity timeout."""
         super().update(dt)
         
-        if time.time() - self._last_activity > self.INACTIVITY_TIMEOUT:
+        if time.time() - self._last_activity > self._get_timeout():
             self._exit_screen()
     
     def _reset_activity(self) -> None:

@@ -34,6 +34,19 @@ class Config:
     effects_enabled: bool = True
     
     # ─────────────────────────────────────────────────────────────────────────
+    # Timeout Settings (seconds)
+    # ─────────────────────────────────────────────────────────────────────────
+    
+    # Hide visual focus on main screen after inactivity
+    timeout_focus_hide: float = 15.0
+    
+    # Exit submenu screens (audio settings, climate settings) after inactivity
+    timeout_screen_exit: float = 30.0
+    
+    # Exit editing mode (volume control, temperature setting) after inactivity
+    timeout_editing_exit: float = 60.0
+    
+    # ─────────────────────────────────────────────────────────────────────────
     # Development Settings
     # ─────────────────────────────────────────────────────────────────────────
     

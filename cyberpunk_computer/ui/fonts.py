@@ -4,7 +4,7 @@ Font management.
 Handles font loading and provides consistent typography across the UI.
 
 Font Hierarchy:
-- Interceptor Bold: Headers/titles (large decorative text)
+- Orbitron: Headers/titles (large decorative text)
 - Terminus: Standard text (labels, values, general UI)
 - 04B_03: Tiny text below 8px height (pixel-perfect at small sizes)
 """
@@ -29,7 +29,7 @@ class FontManager:
     to system fonts when custom fonts are not available.
     
     Font selection:
-    - "title" / "header": Interceptor Bold (decorative headers)
+    - "title" / "header": Orbitron (decorative headers)
     - "mono" / "standard": Terminus (general purpose)
     - "tiny": 04B_03 (pixel font for small sizes)
     - Auto-select: Uses size threshold to pick appropriate font
@@ -65,18 +65,21 @@ class FontManager:
         logger.info(f"Font asset directory: {self.asset_dir}")
         
         # Font file names (in assets/fonts/)
-        # Organized by purpose
+        # Naming convention: lowercase, no spaces
         self.font_files = {
             # Standard UI text - Terminus monospace
-            "mono": "Terminus.ttf",
-            "standard": "Terminus.ttf",
-            # Headers/titles - Interceptor decorative
-            "title": "Interceptor Bold.otf",
-            "header": "Interceptor Bold.otf",
-            "display": "Interceptor Bold.otf",
+            "mono": "terminus.ttf",
+            "standard": "terminus.ttf",
+            # Headers/titles - Orbitron decorative
+            "title": "orbitron.ttf",
+            "header": "orbitron.ttf",
+            "display": "orbitron.ttf",
             # Tiny pixel font - 04B for small sizes
-            "tiny": "04B_03__.TTF",
-            "pixel": "04B_03__.TTF",
+            "tiny": "04b03.ttf",
+            "pixel": "04b03.ttf",
+            # Icon font - Font Awesome 7 Free Solid
+            "icons": "fontawesome.otf",
+            "icon": "fontawesome.otf",
         }
         
         # Log available fonts
@@ -214,3 +217,8 @@ def get_mono_font(size: int) -> pygame.font.Font:
 def get_tiny_font(size: int = 8) -> pygame.font.Font:
     """Get 04B pixel font for tiny text."""
     return fonts.get_font(size, "tiny")
+
+
+def get_icon_font(size: int = 14) -> pygame.font.Font:
+    """Get Font Awesome icon font."""
+    return fonts.get_font(size, "icons")

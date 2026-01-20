@@ -9,7 +9,7 @@ from typing import Optional, Callable
 
 from .base import Widget, Rect
 from ..colors import COLORS, lerp_color
-from ..fonts import get_font, get_mono_font, get_tiny_font
+from ..fonts import get_font, get_mono_font, get_tiny_font, get_icon_font
 
 
 class VolumeBar(Widget):
@@ -121,7 +121,7 @@ class VolumeBar(Widget):
         pygame.draw.rect(surface, COLORS["cyan_mid"], highlight_rect)
     
     def _render_segmented(self, surface: pygame.Surface, fill_width: int) -> None:
-        """Render as segmented bar."""
+        """Render as segmented bar with partial segment support."""
         # Inner area (inside border)
         inner_x = self.rect.x + 1
         inner_width = self.rect.width - 2
@@ -133,6 +133,11 @@ class VolumeBar(Widget):
         total_gaps = (self.segments - 1) * gap
         segment_width = (inner_width - total_gaps) / self.segments
         
+        # Calculate exact fill level (e.g., 3.5 means 3 full + 1 half)
+        exact_segments = self.normalized_value * self.segments
+        full_segments = int(exact_segments)
+        partial_fill = exact_segments - full_segments  # 0.0 to 1.0
+        
         for i in range(self.segments):
             # Use float calculation for position to avoid gaps
             seg_x = inner_x + i * (segment_width + gap)
@@ -142,12 +147,15 @@ class VolumeBar(Widget):
             if i == self.segments - 1:
                 seg_w = inner_x + inner_width - seg_x
             
-            # Determine if this segment is filled
-            filled_segments = round(self.normalized_value * self.segments)
-            
-            if i < filled_segments:
+            # Determine segment color
+            if i < full_segments:
+                # Fully filled segment
                 color = COLORS["cyan"]
+            elif i == full_segments and partial_fill >= 0.4:
+                # Partial segment (half-brightness for ~50% fill)
+                color = COLORS["cyan_dim"]
             else:
+                # Empty segment
                 color = COLORS["bg_panel"]
             
             seg_rect = pygame.Rect(
@@ -345,11 +353,18 @@ class ValueDisplay(Widget):
         self.value = value
         self.unit = unit
         self.compact = compact
+        self._active = False  # Amber highlight when active (editing)
     
     def set_value(self, value: str) -> None:
         """Update the displayed value."""
         if self.value != value:
             self.value = value
+            self._dirty = True
+    
+    def set_active(self, active: bool) -> None:
+        """Set active state (amber highlight for label when editing)."""
+        if self._active != active:
+            self._active = active
             self._dirty = True
     
     def render(self, surface: pygame.Surface) -> None:
@@ -361,6 +376,9 @@ class ValueDisplay(Widget):
         font_label = get_tiny_font(8)
         font_value = get_mono_font(13)
         
+        # Label color: amber when active, otherwise secondary
+        label_color = COLORS["amber"] if self._active else COLORS["text_secondary"]
+        
         # Calculate positions
         center_x = self.rect.x + self.rect.width // 2
         
@@ -370,7 +388,7 @@ class ValueDisplay(Widget):
             
             # Draw label (top)
             if self.label:
-                label_surf = font_label.render(self.label, True, COLORS["text_secondary"])
+                label_surf = font_label.render(self.label, True, label_color)
                 label_x = center_x - label_surf.get_width() // 2
                 surface.blit(label_surf, (label_x, y_offset))
                 y_offset += label_surf.get_height() + 1
@@ -384,7 +402,7 @@ class ValueDisplay(Widget):
             # Original layout: label top, value bottom
             # Draw label (top)
             if self.label:
-                label_surf = font_label.render(self.label, True, COLORS["text_secondary"])
+                label_surf = font_label.render(self.label, True, label_color)
                 label_x = center_x - label_surf.get_width() // 2
                 surface.blit(label_surf, (label_x, self.rect.y))
             
@@ -398,21 +416,41 @@ class ValueDisplay(Widget):
 
 class ModeIcon(Widget):
     """
-    A simple icon display using text characters/symbols.
+    A mode icon display using Font Awesome icons.
     
     Displays mode indicators like fan, AC, recirculation, etc.
-    Uses Unicode symbols or custom characters.
+    Uses Font Awesome Unicode code points.
     """
     
-    # Common climate mode icons (ASCII-safe alternatives)
+    # Font Awesome 7 Free Solid icon Unicode code points
+    # See: https://fontawesome.com/icons
     ICONS = {
-        "fan": "*",       # Fan/blower
-        "ac": "#",        # AC cooling
-        "heat": "~",      # Heating
-        "recirc": "@",    # Recirculation
-        "auto": "A",      # Auto mode
-        "eco": "E",       # Eco mode
-        "defrost": "D",   # Defrost
+        "fan": "\uf863",        # fa-fan
+        "ac": "\uf2dc",         # fa-snowflake (A/C cooling)
+        "heat": "\uf7e4",       # fa-temperature-high
+        "recirc": "\uf079",     # fa-retweet (recirculation)
+        "auto": "\uf1b9",       # fa-car (auto mode)
+        "eco": "\uf06c",        # fa-leaf (eco mode)
+        "defrost": "\uf72e",    # fa-wind (defrost)
+        "temp": "\uf2c9",       # fa-thermometer-half
+        "power": "\uf011",      # fa-power-off
+        "sun": "\uf185",        # fa-sun
+        "moon": "\uf186",       # fa-moon
+        "lightbulb": "\uf0eb",  # fa-lightbulb
+        "gear": "\uf013",       # fa-gear
+        "music": "\uf001",      # fa-music
+        "car": "\uf1b9",        # fa-car
+    }
+    
+    # Fallback ASCII characters (if font fails to load)
+    FALLBACK_ICONS = {
+        "fan": "*",
+        "ac": "#",
+        "heat": "~",
+        "recirc": "@",
+        "auto": "A",
+        "eco": "E",
+        "defrost": "D",
     }
     
     def __init__(
@@ -420,7 +458,8 @@ class ModeIcon(Widget):
         rect: Rect,
         icon: str = "auto",
         active: bool = False,
-        label: str = ""
+        label: str = "",
+        use_icon_font: bool = True
     ):
         """
         Initialize mode icon.
@@ -430,17 +469,22 @@ class ModeIcon(Widget):
             icon: Icon key from ICONS dict or custom character
             active: Whether the mode is active
             label: Optional label below icon
+            use_icon_font: Whether to use Font Awesome (True) or fallback ASCII (False)
         """
         super().__init__(rect, focusable=False)
         
         self.icon = icon
         self._active = active
         self.label = label
+        self.use_icon_font = use_icon_font
     
     @property
     def icon_char(self) -> str:
         """Get the icon character to display."""
-        return self.ICONS.get(self.icon, self.icon)
+        if self.use_icon_font:
+            return self.ICONS.get(self.icon, self.icon)
+        else:
+            return self.FALLBACK_ICONS.get(self.icon, self.icon)
     
     def set_active(self, active: bool) -> None:
         """Set the active state."""
@@ -463,8 +507,12 @@ class ModeIcon(Widget):
         
         center_x = self.rect.x + self.rect.width // 2
         
-        # Draw icon (using mono font for symbols)
-        font_icon = get_mono_font(14)
+        # Draw icon (using icon font or mono font)
+        if self.use_icon_font:
+            font_icon = get_icon_font(14)
+        else:
+            font_icon = get_mono_font(14)
+        
         icon_surf = font_icon.render(self.icon_char, True, icon_color)
         icon_x = center_x - icon_surf.get_width() // 2
         icon_y = self.rect.y + 2

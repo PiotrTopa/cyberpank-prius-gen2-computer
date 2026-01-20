@@ -1,18 +1,27 @@
 # Fonts Directory
 
-Place custom fonts here for the cyberpunk aesthetic.
+Custom fonts for the CyberPunk aesthetic.
 
-## Recommended Fonts
+## Font Hierarchy
 
-- **RobotoMono** - Clean monospace for general UI
-- **ShareTechMono** - Technical/futuristic feel
-- **Orbitron** - Display font for headers
+| File | Purpose | Usage |
+|------|---------|-------|
+| `orbitron.ttf` | Headers and titles | Futuristic display font |
+| `terminus.ttf` | Standard UI text | Clean monospace for labels/values |
+| `04b03.ttf` | Tiny pixel font | Small text below 8px height |
+| `fontawesome.otf` | Icons | Climate/status icons (FA7 Free Solid) |
 
-## Font Files
+## Naming Convention
 
-The application will look for these files:
-- `RobotoMono-Regular.ttf`
-- `RobotoMono-Bold.ttf`
-- `ShareTechMono-Regular.ttf`
+All font files use lowercase names with no spaces.
+
+## Font Sources
+
+- **Orbitron** - Google Fonts (OFL)
+- **Terminus** - Terminus Font Project (OFL)
+- **04b03** - 04 font family (freeware)
+- **Font Awesome** - Font Awesome Free (OFL/CC BY 4.0)
+
+## Fallback
 
 If fonts are not found, system monospace fonts will be used as fallback.

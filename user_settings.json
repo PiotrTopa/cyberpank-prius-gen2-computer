@@ -1,0 +1,30 @@
+{
+  "ambient": {
+    "mode": "MANUAL",
+    "hue": 180,
+    "saturation": 100,
+    "brightness": 80
+  },
+  "lights": {
+    "mode": "MANUAL",
+    "biled_mode": "OFF",
+    "biled_brightness": 100,
+    "drl_enabled": true
+  },
+  "audio": {
+    "volume": 35,
+    "bass": 0,
+    "treble": 0,
+    "balance": 0,
+    "fader": 0,
+    "position": 0
+  },
+  "climate": {
+    "target_temp": 21,
+    "fan_speed": 3,
+    "mode": 0,
+    "ac_on": true,
+    "recirculation": false,
+    "air_direction": 0
+  }
+}
