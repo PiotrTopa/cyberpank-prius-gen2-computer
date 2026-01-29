@@ -109,29 +109,40 @@ cyberpunk-prius-gen2-computer/
 │   ├── __main__.py              # Entry point
 │   ├── config.py                # Configuration
 │   ├── core/                    # Core engine
-│   │   ├── __init__.py
 │   │   ├── app.py               # Main application loop
 │   │   └── renderer.py          # Rendering with scaling
 │   ├── ui/                      # UI framework
-│   │   ├── __init__.py
 │   │   ├── colors.py            # Cyberpunk color palette
 │   │   ├── fonts.py             # Font management
-│   │   ├── widgets/             # Base widgets
+│   │   ├── widgets/             # Reusable UI widgets
 │   │   └── screens/             # Screen definitions
 │   ├── input/                   # Input handling
-│   │   ├── __init__.py
 │   │   ├── manager.py           # Input abstraction
-│   │   └── encoder.py           # Encoder protocol
-│   └── comm/                    # Communication
-│       ├── __init__.py
-│       ├── gateway.py           # Gateway connection
-│       └── protocol.py          # NDJSON handling
+│   │   └── touch.py             # Touch event handling
+│   ├── io/                      # Virtual Twin IO layer
+│   │   ├── ports.py             # InputPort/OutputPort interfaces
+│   │   ├── ingress.py           # Data input → State
+│   │   ├── egress.py            # State → Hardware output
+│   │   ├── file_io.py           # File replay (development)
+│   │   ├── serial_io.py         # Serial UART (production)
+│   │   └── factory.py           # VirtualTwin factory
+│   ├── state/                   # State management
+│   │   ├── store.py             # Central state store
+│   │   ├── app_state.py         # State dataclasses
+│   │   ├── actions.py           # Action definitions
+│   │   └── rules.py             # Rules engine
+│   └── comm/                    # Protocol decoders
+│       ├── avc_decoder.py       # AVC-LAN protocol
+│       ├── avc_commands.py      # AVC-LAN commands
+│       └── can_decoder.py       # CAN bus decoder
 ├── assets/                      # Static assets
-│   └── fonts/
+│   ├── fonts/
+│   └── data/                    # Sample recordings
 ├── docs/                        # Documentation
-│   ├── PROTOCOL.md
-│   └── ARCHITECTURE.md
-├── tests/                       # Unit tests
+│   ├── ARCHITECTURE.md
+│   ├── VIRTUAL_TWIN_ARCHITECTURE.md
+│   └── PROTOCOL.md
+├── examples/                    # Usage examples
 ├── requirements.txt
 └── README.md
 ```

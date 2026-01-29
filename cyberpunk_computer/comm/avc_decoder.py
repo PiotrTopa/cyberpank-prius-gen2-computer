@@ -266,16 +266,30 @@ class AVCDecoder:
         Decode a raw gateway message dict into an AVCMessage.
         
         Args:
-            raw: Raw message dict from gateway NDJSON
+            raw: Raw message dict - can be either:
+                 - Full message: {"id": 2, "d": {"m": "10C", "s": "310", ...}}
+                 - Data only: {"m": "10C", "s": "310", ...}
             
         Returns:
             Decoded AVCMessage or None if not an AVC frame
         """
-        # Check message type
-        if raw.get("id") != 2:
+        # Handle both full message format and data-only format
+        # Full message has "id" and "d" fields
+        if "id" in raw:
+            # Full message format
+            if raw.get("id") != 2:
+                return None
+            data = raw.get("d", {})
+            timestamp = raw.get("ts", 0)
+            sequence = raw.get("seq", 0)
+        elif "m" in raw and "s" in raw:
+            # Data-only format (already extracted "d" field)
+            data = raw
+            timestamp = 0
+            sequence = 0
+        else:
             return None
         
-        data = raw.get("d", {})
         if not data:
             return None
         
@@ -286,8 +300,8 @@ class AVCDecoder:
             raw_data = [int(b, 16) for b in data.get("d", [])]
             
             msg = AVCMessage(
-                timestamp=raw.get("ts", 0),
-                sequence=raw.get("seq", 0),
+                timestamp=timestamp,
+                sequence=sequence,
                 master_addr=master_addr,
                 slave_addr=slave_addr,
                 control=control,

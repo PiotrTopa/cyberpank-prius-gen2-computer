@@ -2,9 +2,11 @@
 Main application class.
 
 Handles the main game loop, event processing, and screen management.
+Uses Virtual Twin architecture for all communication.
 """
 
 import pygame
+import logging
 
 from ..config import Config
 from ..ui.colors import COLORS
@@ -12,13 +14,15 @@ from ..ui.screens.main_screen import MainScreen
 from ..input.manager import InputManager, InputEvent
 from .renderer import Renderer
 
+logger = logging.getLogger(__name__)
+
 
 class Application:
     """
     Main application controller.
     
     Manages the game loop, screen stack, and coordinates
-    between input, rendering, and communication systems.
+    between input, rendering, and the Virtual Twin system.
     """
     
     def __init__(self, config: Config):
@@ -52,9 +56,9 @@ class Application:
         # Debug info
         self.frame_count = 0
         
-        # Input source (file replay or real gateway)
-        self._input_source = None
-        self._gateway_adapter = None
+        # Virtual Twin system (new architecture)
+        self._virtual_twin = None
+        self._store = None
         
         # Verbose logging flags
         self._verbose_in = False   # Log incoming messages
@@ -67,39 +71,32 @@ class Application:
         
         # Developer analysis mode - detailed logging for reverse engineering
         self._analysis_mode = False
-        self._analysis_log_file = None
         
         # Jump mode state (for entering row numbers)
         self._jump_mode = False
         self._jump_buffer = ""
     
-    def set_input_source(self, input_source) -> None:
+    def set_virtual_twin(self, virtual_twin) -> None:
         """
-        Set input source for gateway data.
+        Set the Virtual Twin system.
         
         Args:
-            input_source: FileInput or GatewayConnection instance
+            virtual_twin: VirtualTwin instance from io.factory
         """
-        self._input_source = input_source
-        
-        # Create gateway adapter to process messages
-        from ..comm.gateway_adapter import GatewayAdapter
-        from ..state.store import Store
-        
-        # Create store and adapter
-        store = Store()
-        self._gateway_adapter = GatewayAdapter(store)
+        self._virtual_twin = virtual_twin
+        self._store = virtual_twin.store
         
         # Set up verbose logging callback
-        self._gateway_adapter.set_message_log_callback(self._log_gateway_message)
+        virtual_twin.ingress.set_message_log_callback(self._log_gateway_message)
         
-        # Store reference for UI
-        self._store = store
+        # Start the Virtual Twin
+        virtual_twin.start()
+        
+        logger.info("Virtual Twin connected to application")
     
     def _log_gateway_message(self, message, direction: str) -> None:
         """Log gateway message if verbose enabled."""
-        from ..comm.gateway_adapter import MessageType
-        from ..comm.protocol import DEVICE_SATELLITE_BASE
+        from ..io.ports import DEVICE_SATELLITE_BASE, MessageCategory
         
         # Check direction filter
         if direction == "IN" and not self._verbose_in:
@@ -108,14 +105,14 @@ class Application:
             return
         
         # Check source filter based on message type
-        raw = message.raw
-        device_id = raw.get("id", 0)
+        device_id = message.device_id
+        category = message.category
         
-        if message.type == MessageType.AVC_LAN:
+        if category == MessageCategory.AVC_LAN:
             if not self._verbose_avc:
                 return
             source_tag = "AVC"
-        elif message.type == MessageType.CAN:
+        elif category == MessageCategory.CAN:
             if not self._verbose_can:
                 return
             source_tag = "CAN"
@@ -124,23 +121,21 @@ class Application:
                 return
             source_tag = f"SAT{device_id}"
         else:
-            # Gateway system messages - always show when verbose is on
+            # System messages - always show when verbose is on
             source_tag = "SYS"
         
         # Format the message based on type
-        d = raw.get("d", {})
-        seq = raw.get("seq", "-")
-        if seq is None:
-            seq = "-"
+        d = message.data
+        seq = message.sequence or "-"
         
         arrow = "<--" if direction == "IN" else "-->"
         prefix = "[IN]" if direction == "IN" else "[OUT]"
         
-        if message.type == MessageType.AVC_LAN:
+        if category == MessageCategory.AVC_LAN:
             # AVC-LAN format: master->slave: [data]
             master = d.get("m", "???")
             slave = d.get("s", "???")
-            data = d.get("d", [])
+            data_bytes = d.get("d", [])
             
             # Format addresses - convert int to hex if needed
             if isinstance(master, int):
@@ -149,26 +144,26 @@ class Application:
                 slave = f"{slave:03X}"
             
             # Format data bytes
-            if data:
+            if data_bytes:
                 data_hex = " ".join(
                     f"{b:02X}" if isinstance(b, int) else b 
-                    for b in data
+                    for b in data_bytes
                 )
             else:
                 data_hex = ""
             
             print(f"{prefix} [{source_tag}] [{seq:>4}] {arrow} {master}->{slave}: [{data_hex}]", flush=True)
             
-        elif message.type == MessageType.CAN:
+        elif category == MessageCategory.CAN:
             # CAN format: id [data]
             can_id = d.get("id", d.get("i", "???"))
-            data = d.get("data", d.get("d", []))
+            data_bytes = d.get("data", d.get("d", []))
             
             # Format data bytes
-            if data:
+            if data_bytes:
                 data_hex = " ".join(
                     f"{b:02X}" if isinstance(b, int) else str(b)
-                    for b in data
+                    for b in data_bytes
                 )
             else:
                 data_hex = ""
@@ -191,22 +186,25 @@ class Application:
         print(f"      Sources: AVC-LAN={avc}, CAN={can}, RS485={sat}")
     
     def _print_stats(self) -> None:
-        """Print message statistics from gateway adapter."""
+        """Print message statistics from ingress controller."""
         print("\n===================================================================")
         print("                    MESSAGE STATISTICS")
         print("===================================================================")
         
-        if self._gateway_adapter:
-            stats = self._gateway_adapter.stats
-            print(f"  Messages received:  {stats.get('messages_received', 0):>6}")
-            print(f"  AVC-LAN messages:   {stats.get('avc_messages', 0):>6}")
-            print(f"  CAN messages:       {stats.get('can_messages', 0):>6}")
-            print(f"  Errors:             {stats.get('errors', 0):>6}")
-        
-        if self._input_source:
-            print(f"\n  Playback position:  {self._input_source.position}/{self._input_source.total_entries}")
-            progress = int(self._input_source.progress * 100)
-            print(f"  Progress:           {progress}%")
+        if self._virtual_twin:
+            stats = self._virtual_twin.ingress.stats
+            print(f"  Messages received:  {stats.messages_received:>6}")
+            print(f"  AVC-LAN messages:   {stats.avc_messages:>6}")
+            print(f"  CAN messages:       {stats.can_messages:>6}")
+            print(f"  Errors:             {stats.errors:>6}")
+            
+            # Playback position from file input
+            from ..io import FileInputPort
+            input_port = self._virtual_twin.input_port
+            if isinstance(input_port, FileInputPort):
+                print(f"\n  Playback position:  {input_port.position}/{input_port.total_entries}")
+                progress = int(input_port.progress * 100)
+                print(f"  Progress:           {progress}%")
         
         # Show logging filter status
         v_in = "ON" if self._verbose_in else "OFF"
@@ -270,24 +268,9 @@ class Application:
             self.delta_time = self.clock.tick(self.config.target_fps) / 1000.0
             self.frame_count += 1
             
-            # Update input source (file replay or gateway)
-            if self._input_source:
-                self._input_source.update()
-                
-                # Process incoming messages through gateway adapter
-                if self._gateway_adapter:
-                    while True:
-                        msg = self._input_source.receive()
-                        if msg is None:
-                            break
-                        # Convert Message to raw dict format for adapter
-                        raw = {
-                            "id": msg.device_id,
-                            "d": msg.data,
-                            "ts": msg.timestamp,
-                            "seq": msg.sequence
-                        }
-                        self._gateway_adapter.process_message(raw)
+            # Update Virtual Twin (process incoming messages)
+            if self._virtual_twin:
+                self._virtual_twin.update()
             
             # Process events
             self._process_events()
@@ -307,17 +290,19 @@ class Application:
                 return
             
             # Handle playback control keys for file input
-            if self._input_source and event.type == pygame.KEYDOWN:
-                from ..comm.file_input import FileInput
-                if isinstance(self._input_source, FileInput):
+            if self._virtual_twin and event.type == pygame.KEYDOWN:
+                from ..io import FileInputPort
+                input_port = self._virtual_twin.input_port
+                
+                if isinstance(input_port, FileInputPort):
                     # Handle jump mode number input
                     if self._jump_mode:
                         if event.key == pygame.K_RETURN:
                             # Execute jump
                             try:
                                 pos = int(self._jump_buffer)
-                                self._input_source.seek(pos)
-                                print(f"[PLAY] Jumped to row {pos} - {self._input_source.get_status()}")
+                                input_port.seek(pos)
+                                print(f"[PLAY] Jumped to row {pos} - {input_port.get_status()}")
                             except ValueError:
                                 print("[ERR] Invalid row number")
                             self._jump_mode = False
@@ -344,44 +329,44 @@ class Application:
                             continue
                     
                     if event.key == pygame.K_p:
-                        self._input_source.toggle()
-                        print(f"[PLAY] {self._input_source.get_status()}")
+                        input_port.toggle()
+                        print(f"[PLAY] {input_port.get_status()}")
                         continue
                     elif event.key == pygame.K_r:
-                        self._input_source.stop()
-                        self._input_source.start()
+                        input_port.stop()
+                        input_port.start()
                         print("[PLAY] Restarted")
                         continue
                     elif event.key == pygame.K_j:
                         # J = enter jump mode
-                        self._input_source.pause()
+                        input_port.pause()
                         self._jump_mode = True
                         self._jump_buffer = ""
                         print(f"[JMP] Jump to row: _  (Enter=confirm, Esc=cancel)", end="", flush=True)
                         continue
                     elif event.key == pygame.K_LEFTBRACKET:
                         # [ = step backward 1
-                        self._input_source.pause()
-                        self._input_source.seek(self._input_source.position - 1)
-                        print(f"[PLAY] {self._input_source.get_status()}")
+                        input_port.pause()
+                        input_port.seek(input_port.position - 1)
+                        print(f"[PLAY] {input_port.get_status()}")
                         continue
                     elif event.key == pygame.K_RIGHTBRACKET:
                         # ] = step forward 1
-                        self._input_source.pause()
-                        self._input_source.seek(self._input_source.position + 1)
-                        print(f"[PLAY] {self._input_source.get_status()}")
+                        input_port.pause()
+                        input_port.seek(input_port.position + 1)
+                        print(f"[PLAY] {input_port.get_status()}")
                         continue
                     elif event.key == pygame.K_MINUS:
                         # - = step backward 10
-                        self._input_source.pause()
-                        self._input_source.seek(self._input_source.position - 10)
-                        print(f"[PLAY] {self._input_source.get_status()}")
+                        input_port.pause()
+                        input_port.seek(input_port.position - 10)
+                        print(f"[PLAY] {input_port.get_status()}")
                         continue
                     elif event.key in (pygame.K_PLUS, pygame.K_EQUALS):
                         # + = step forward 10
-                        self._input_source.pause()
-                        self._input_source.seek(self._input_source.position + 10)
-                        print(f"[PLAY] {self._input_source.get_status()}")
+                        input_port.pause()
+                        input_port.seek(input_port.position + 10)
+                        print(f"[PLAY] {input_port.get_status()}")
                         continue
             
             # Verbose logging toggle keys (dev mode only)
@@ -408,9 +393,10 @@ class Application:
                     continue
                 elif event.key == pygame.K_t:
                     # T = toggle state change logging
-                    self._store.verbose = not self._store.verbose
-                    status = "ON" if self._store.verbose else "OFF"
-                    print(f"[LOG] State change logging: {status}")
+                    if self._store:
+                        self._store.verbose = not self._store.verbose
+                        status = "ON" if self._store.verbose else "OFF"
+                        print(f"[LOG] State change logging: {status}")
                     continue
                 elif event.key == pygame.K_s:
                     # S = print statistics
@@ -455,8 +441,8 @@ class Application:
                     if self._analysis_mode:
                         print("      Logging: Button presses, Touch events, Energy packets (A00->258)")
                         print("      Press A again to disable")
-                    if self._gateway_adapter:
-                        self._gateway_adapter.set_analysis_mode(self._analysis_mode)
+                    if self._virtual_twin:
+                        self._virtual_twin.ingress.set_analysis_mode(self._analysis_mode)
                     continue
             
             # Convert pygame events to input events
@@ -499,7 +485,7 @@ class Application:
             self._render_fps(surface)
         
         # Render playback overlay in dev mode
-        if self.config.dev_mode and self._input_source:
+        if self.config.dev_mode and self._virtual_twin:
             self._render_playback_overlay(surface)
         
         # Present the frame (handles scaling)
@@ -514,17 +500,19 @@ class Application:
     
     def _render_playback_overlay(self, surface: pygame.Surface) -> None:
         """Render playback time overlay (dev mode only)."""
-        if not self._input_source:
+        if not self._virtual_twin:
             return
         
-        from ..comm.file_input import FileInput, PlaybackState
-        if not isinstance(self._input_source, FileInput):
+        from ..io import FileInputPort, PlaybackState
+        input_port = self._virtual_twin.input_port
+        
+        if not isinstance(input_port, FileInputPort):
             return
         
         # Get timing info
-        current_time = self._input_source.current_playback_time
-        total_duration = self._input_source.total_duration
-        state = self._input_source.state
+        current_time = input_port.current_playback_time
+        total_duration = input_port.total_duration
+        state = input_port.state
         
         # Format times as MM:SS
         def format_time(seconds: float) -> str:
@@ -555,6 +543,10 @@ class Application:
     
     def cleanup(self) -> None:
         """Clean up resources."""
+        # Stop Virtual Twin
+        if self._virtual_twin:
+            self._virtual_twin.stop()
+        
         # Exit all screens
         while self.current_screen:
             self.current_screen.on_exit()

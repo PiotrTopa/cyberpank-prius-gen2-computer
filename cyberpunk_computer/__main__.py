@@ -24,6 +24,10 @@ import sys
 
 from .config import Config
 from .core.app import Application
+from .io import (
+    VirtualTwin, VirtualTwinConfig, ExecutionMode,
+    create_virtual_twin
+)
 
 
 def setup_logging(dev_mode: bool = False) -> None:
@@ -121,14 +125,19 @@ def main() -> int:
     
     logger.info(f"Config: dev={config.dev_mode}, scale={config.scale_factor}")
     
-    # Setup input source (file replay or real gateway)
-    input_source = None
+    # Create Virtual Twin based on mode
+    virtual_twin = None
     if args.replay:
-        from .comm.file_input import FileInput
-        input_source = FileInput(args.replay)
-        count = input_source.load()
-        logger.info(f"Loaded {count} entries from {args.replay}")
-        input_source.start()
+        # Development mode with file replay
+        twin_config = VirtualTwinConfig(
+            mode=ExecutionMode.DEVELOPMENT,
+            replay_file=args.replay,
+            playback_speed=1.0,
+            verbose=args.dev,
+            log_commands=True
+        )
+        virtual_twin = create_virtual_twin(twin_config)
+        logger.info(f"Created Virtual Twin in DEVELOPMENT mode with replay: {args.replay}")
         
         # Show keyboard shortcuts (using ASCII for Windows compatibility)
         print("""
@@ -163,13 +172,22 @@ def main() -> int:
     ESC       Exit application
     ===================================================================
 """)
+    elif not args.no_gateway and not args.test:
+        # Production mode with serial
+        twin_config = VirtualTwinConfig(
+            mode=ExecutionMode.PRODUCTION,
+            serial_port=args.port or "/dev/ttyACM0",
+            verbose=args.dev
+        )
+        virtual_twin = create_virtual_twin(twin_config)
+        logger.info(f"Created Virtual Twin in PRODUCTION mode")
     
     # Create and run application
     app = Application(config)
     
-    # Connect input source to app if using file replay
-    if input_source:
-        app.set_input_source(input_source)
+    # Connect Virtual Twin to app
+    if virtual_twin:
+        app.set_virtual_twin(virtual_twin)
     
     try:
         app.run()

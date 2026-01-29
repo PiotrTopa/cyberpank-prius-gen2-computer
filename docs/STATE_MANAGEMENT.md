@@ -12,15 +12,15 @@ The CyberPunk Prius Gen 2 Computer uses a centralized state management system in
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
 │   ┌────────────────┐                                    ┌────────────────┐  │
-│   │    GATEWAY     │                                    │    DISPLAY     │  │
-│   │   (Serial)     │                                    │     (UI)       │  │
+│   │  INPUT PORTS   │                                    │    DISPLAY     │  │
+│   │ (Serial/File)  │                                    │     (UI)       │  │
 │   │                │                                    │                │  │
 │   │  ┌──────────┐  │      ┌──────────────────┐         │  ┌──────────┐  │  │
-│   │  │ AVC-LAN  │──┼─────▶│  GatewayAdapter  │         │  │ Screens  │  │  │
+│   │  │ AVC-LAN  │──┼─────▶│ IngressController│         │  │ Screens  │  │  │
 │   │  │ Messages │  │      │                  │         │  │          │  │  │
 │   │  └──────────┘  │      │  - Decode msgs   │         │  └──────────┘  │  │
 │   │                │      │  - Create Actions│         │        ▲       │  │
-│   │  ┌──────────┐  │      │  - Encode cmds   │         │        │       │  │
+│   │  ┌──────────┐  │      │  - Dispatch      │         │        │       │  │
 │   │  │   CAN    │──┼─────▶│                  │         │  ┌─────┴────┐  │  │
 │   │  │ Messages │  │      └────────┬─────────┘         │  │ Widgets  │  │  │
 │   │  └──────────┘  │               │                   │  │          │  │  │
@@ -30,32 +30,30 @@ The CyberPunk Prius Gen 2 Computer uses a centralized state management system in
 │           │                        ▼                           │           │
 │           │              ┌──────────────────┐                  │           │
 │           │              │                  │                  │           │
-│           │              │      STORE       │──────────────────┘           │
-│           │              │   (AppState)     │    subscribe(AUDIO, cb)      │
-│           │              │                  │    subscribe(CLIMATE, cb)    │
-│           │              │  ┌────────────┐  │                              │
-│           │              │  │ AudioState │  │                              │
-│           │              │  ├────────────┤  │                              │
-│           │              │  │ClimateState│  │                              │
-│           │              │  ├────────────┤  │                              │
-│           │              │  │VehicleState│  │                              │
-│           │              │  ├────────────┤  │                              │
-│           │              │  │EnergyState │  │                              │
-│           │              │  ├────────────┤  │                              │
-│           │              │  │ConnectionSt│  │                              │
-│           │              │  └────────────┘  │                              │
-│           │              │                  │                              │
-│           │              └────────┬─────────┘                              │
-│           │                       │                                        │
-│           │                       │ dispatch(Action)                       │
-│           │                       ▼                                        │
-│           │              ┌──────────────────┐                              │
-│           │              │    MIDDLEWARE    │                              │
-│           └──────────────│                  │                              │
-│              send_cmd()  │  - Log actions   │                              │
-│                          │  - Route to GW   │◀─────────────────────────────┤
-│                          │  - Side effects  │     dispatch(SetVolume,      │
-│                          └──────────────────┘        source=UI)            │
+│   ┌───────┴───────┐      │      STORE       │──────────────────┘           │
+│   │ OUTPUT PORTS  │      │   (AppState)     │    subscribe(AUDIO, cb)      │
+│   │ (Serial/Log)  │      │                  │    subscribe(CLIMATE, cb)    │
+│   │               │      │  ┌────────────┐  │                              │
+│   │  ┌─────────┐  │      │  │ AudioState │  │                              │
+│   │  │ Egress  │◀─┼──────│  ├────────────┤  │                              │
+│   │  │Controller│ │      │  │ClimateState│  │                              │
+│   │  └─────────┘  │      │  ├────────────┤  │                              │
+│   │               │      │  │VehicleState│  │                              │
+│   └───────────────┘      │  ├────────────┤  │                              │
+│                          │  │EnergyState │  │                              │
+│                          │  ├────────────┤  │                              │
+│                          │  │ConnectionSt│  │                              │
+│                          │  └────────────┘  │                              │
+│                          │                  │                              │
+│                          └────────┬─────────┘                              │
+│                                   │                                        │
+│                                   │ dispatch(Action)                       │
+│                                   ▼                                        │
+│                          ┌──────────────────┐                              │
+│                          │   RULES ENGINE   │◀─────────────────────────────┤
+│                          │  - Compute state │     dispatch(SetVolume,      │
+│                          │  - React to chgs │        source=UI)            │
+│                          └──────────────────┘                              │
 │                                                                            │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -110,19 +108,21 @@ store.subscribe(StateSlice.ALL, self._on_any_change)
 store.dispatch(SetVolumeAction(50, source=ActionSource.UI))
 ```
 
-### 4. Gateway Adapter
+### 4. Virtual Twin IO
 
-Bridges Gateway protocol ↔ State Store:
+The IO layer bridges hardware to the state store:
 
 ```python
-adapter = GatewayAdapter(store)
+# Ingress: raw messages → Actions → Store
+ingress = IngressController(store, input_port)
+ingress.update()  # Processes pending messages
 
-# Incoming: raw JSON → Actions → Store
-adapter.process_message({"id": 2, "d": {...}})
-
-# Outgoing: UI Action → Command → Gateway
-# (handled via middleware, automatic)
+# Egress: UI Actions → Commands → OutputPort
+egress = EgressController(store, output_port)
+# (automatically sends when UI actions dispatched)
 ```
+
+See [VIRTUAL_TWIN_ARCHITECTURE.md](./VIRTUAL_TWIN_ARCHITECTURE.md) for full details.
 
 ### 5. Middleware
 
@@ -142,8 +142,8 @@ store.add_middleware(gateway_middleware)
 ### Example 1: Volume Change from Vehicle
 
 ```
-1. Gateway receives: {"id":2,"d":{"m":"190","s":"110","d":["00","23"]}}
-2. GatewayAdapter.process_message() decodes AVC-LAN
+1. InputPort receives: {"id":2,"d":{"m":"190","s":"110","d":["00","23"]}}
+2. IngressController decodes AVC-LAN message
 3. Creates: SetVolumeAction(volume=35, source=GATEWAY)
 4. Store.dispatch() updates state
 5. Subscribers notified: UI redraws volume bar
@@ -155,16 +155,16 @@ store.add_middleware(gateway_middleware)
 1. User presses + on AudioScreen
 2. UI calls: store.dispatch(SetVolumeAction(36, source=UI))
 3. Store updates state
-4. Middleware sees source=UI, generates AVC command
-5. Gateway sends command to vehicle
+4. EgressController sees source=UI, generates AVC command
+5. OutputPort sends command to vehicle
 6. UI subscriber redraws (already updated)
 ```
 
 ### Example 3: CAN Battery Update
 
 ```
-1. Gateway receives CAN: {"id":1,"d":{"id":"3C8","data":[...]}}
-2. GatewayAdapter parses CAN ID 0x3C8 (battery SOC)
+1. InputPort receives CAN: {"id":1,"d":{"i":"3C8","d":[...]}}
+2. IngressController parses CAN ID 0x3C8 (battery SOC)
 3. Creates: SetBatterySOCAction(soc=0.72, source=GATEWAY)
 4. Store.dispatch() updates energy state
 5. Energy Monitor widget redraws
@@ -179,18 +179,57 @@ cyberpunk_computer/
 │   ├── app_state.py        # State definitions
 │   ├── actions.py          # Action types
 │   ├── store.py            # Store implementation
-│   └── selectors.py        # State accessors
+│   ├── rules.py            # Rules engine
+│   ├── selectors.py        # State accessors
+│   └── rules_examples/     # Example rule implementations
 │
-├── comm/
-│   ├── gateway_adapter.py  # Gateway ↔ Store bridge
-│   ├── avc_decoder.py      # AVC-LAN protocol
-│   ├── avc_commands.py     # Command generation
-│   └── gateway.py          # Serial communication
+├── io/                     # Virtual Twin IO layer
+│   ├── ports.py            # InputPort/OutputPort interfaces
+│   ├── ingress.py          # Input → Store
+│   ├── egress.py           # Store → Output
+│   ├── file_io.py          # File replay for development
+│   ├── serial_io.py        # Serial for production
+│   ├── mock_io.py          # Mocks for testing
+│   └── factory.py          # VirtualTwin factory
+│
+├── comm/                   # Protocol decoders/encoders
+│   ├── avc_decoder.py      # AVC-LAN protocol decoder
+│   ├── avc_commands.py     # AVC-LAN command generation
+│   └── can_decoder.py      # CAN bus decoder
 │
 └── ui/
     ├── screens/            # Full-screen views
     └── widgets/            # Reusable components
 ```
+
+## Rules Engine
+
+For computed state based on multiple inputs, use the Rules Engine:
+
+```python
+from cyberpunk_computer.state.rules import StateRule, RulesEngine
+
+class DRLControlRule(StateRule):
+    """Compute DRL output from user mode + gear + sensors."""
+    
+    @property
+    def name(self) -> str:
+        return "DRLControlRule"
+    
+    @property
+    def watches(self) -> Set[StateSlice]:
+        return {StateSlice.VEHICLE, StateSlice.LIGHTS}
+    
+    def evaluate(self, old_state, new_state, store):
+        # Compute and dispatch...
+        pass
+
+# Register with engine
+rules_engine = RulesEngine(store)
+rules_engine.register(DRLControlRule())
+```
+
+See [VIRTUAL_TWIN_ARCHITECTURE.md](./VIRTUAL_TWIN_ARCHITECTURE.md) for complete details on the rules system.
 
 ## Usage in UI Components
 

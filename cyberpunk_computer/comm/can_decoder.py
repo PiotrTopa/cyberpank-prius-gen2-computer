@@ -152,7 +152,14 @@ class CANDecoder:
         """
         self._stats["total"] += 1
         
-        d = raw.get("d", {})
+        # Handle both nested and flat formats
+        # Nested: {"d": {"i": "0x3C8", "d": [...]}}
+        # Flat: {"i": "0x3C8", "d": [...]}
+        if "d" in raw and isinstance(raw["d"], dict) and "i" in raw["d"]:
+            d = raw["d"]
+        else:
+            d = raw
+        
         can_id_str = d.get("i")
         data = d.get("d", [])
         

@@ -4,6 +4,12 @@
 
 The CyberPunk Computer is a pygame-based HMI application designed for embedded deployment on Raspberry Pi Zero 2W, with development support on desktop systems.
 
+**See also:** [VIRTUAL_TWIN_ARCHITECTURE.md](./VIRTUAL_TWIN_ARCHITECTURE.md) for the detailed Virtual Twin pattern documentation, including:
+- IO abstraction layers (InputPort/OutputPort)
+- Ingress/Egress controllers
+- State Rules Engine for reactive business logic
+- How to implement new features like DRL lights, RS485 satellites, etc.
+
 ## Core Design Principles
 
 ### 1. Resolution Independence
@@ -19,11 +25,6 @@ The application always renders at **480×240** internally. Display scaling is ha
 │  │   Logic     │───►│   Surface   │───►│   Window        │  │
 │  │             │    │   480×240   │    │   (960×480 etc) │  │
 │  └─────────────┘    └─────────────┘    └─────────────────┘  │
-│                           │                                  │
-│                     (post-process)                           │
-│                     - Scanlines                              │
-│                     - Glow effects                           │
-│                     - CRT simulation                         │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -171,6 +172,53 @@ class FocusManager:
 
 ## Communication Layer
 
+### Virtual Twin IO Architecture
+
+The application uses a **Virtual Twin** pattern with abstracted IO:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          IO ABSTRACTION LAYER                            │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  INPUT PORTS                            OUTPUT PORTS                     │
+│  ┌─────────────────┐                   ┌─────────────────┐              │
+│  │ SerialInputPort │ (production)      │SerialOutputPort │ (production) │
+│  │ FileInputPort   │ (development)     │ LogOutputPort   │ (development)│
+│  │ MockInputPort   │ (testing)         │ MockOutputPort  │ (testing)    │
+│  └────────┬────────┘                   └────────▲────────┘              │
+│           │                                      │                       │
+│           ▼                                      │                       │
+│  ┌─────────────────┐                   ┌─────────────────┐              │
+│  │IngressController│                   │EgressController │              │
+│  │ - Decode AVC    │                   │ - Encode AVC    │              │
+│  │ - Decode CAN    │                   │ - Encode RS485  │              │
+│  │ - Decode RS485  │                   │ - Send commands │              │
+│  └────────┬────────┘                   └────────▲────────┘              │
+│           │ dispatch()                          │ subscribe()           │
+│           ▼                                      │                       │
+│  ┌──────────────────────────────────────────────┴───────────────────┐   │
+│  │                     VIRTUAL TWIN (Store)                          │   │
+│  │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐    │   │
+│  │  │ Audio   │ │ Climate │ │ Vehicle │ │ Energy  │ │ Lights  │    │   │
+│  │  └─────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘    │   │
+│  │                     ┌─────────────────┐                          │   │
+│  │                     │  Rules Engine   │ (computed state)         │   │
+│  │                     └─────────────────┘                          │   │
+│  └───────────────────────────────▲──────────────────────────────────┘   │
+│                                   │ subscribe()                          │
+│                                   │                                      │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │                         UI LAYER                                   │   │
+│  │  Screens → Widgets → Render from state only                       │   │
+│  │                       Dispatch actions on user input               │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+See [VIRTUAL_TWIN_ARCHITECTURE.md](./VIRTUAL_TWIN_ARCHITECTURE.md) for complete details.
+
 ### Gateway Connection
 
 ```python
@@ -261,9 +309,22 @@ cyberpunk_computer/
 │   ├── screens/    # Full-screen layouts
 │   ├── colors.py   # Color definitions
 │   └── fonts.py    # Font management
-├── input/          # Input abstraction layer
-├── comm/           # Gateway communication
+├── input/          # Input abstraction layer (keyboard/encoder)
+├── io/             # Virtual Twin IO layer
+│   ├── ports.py    # InputPort/OutputPort interfaces
+│   ├── ingress.py  # Ingress controller (input → state)
+│   ├── egress.py   # Egress controller (state → output)
+│   ├── file_io.py  # File replay for development
+│   ├── serial_io.py# Serial/UART for production
+│   ├── mock_io.py  # Mock for testing
+│   └── factory.py  # VirtualTwin factory
+├── comm/           # Protocol decoders/encoders (AVC-LAN, CAN)
 ├── state/          # Application state management
+│   ├── store.py    # Central state store
+│   ├── app_state.py# State dataclasses
+│   ├── actions.py  # Action definitions
+│   ├── rules.py    # Rules engine
+│   └── rules_examples/ # Example rules
 └── config.py       # All configuration in one place
 ```
 
@@ -271,3 +332,5 @@ This separation allows:
 - Easy testing of individual components
 - Clear dependency graph
 - Simple mocking for development
+- **Pluggable IO** for different environments
+- **Reactive rules** for business logic
