@@ -78,14 +78,14 @@ class ClimateScreen(Screen):
     """
     Climate settings screen.
     
-    Shows climate control settings:
-    - Target temperature
-    - Fan speed
-    - Mode (Auto/Manual/Eco)
-    - A/C on/off
-    - Recirculation
-    - Air direction
-    - Current temperatures (read-only)
+    Shows climate control settings based on real Prius Gen 2 HVAC:
+    - Target temperature: 18-28°C (0.5°C steps in real, 1°C here for simplicity)
+    - Fan speed: 0-7 (0 = OFF, 1-7 = speed levels)
+    - Mode: AUTO, MANUAL, OFF
+    - A/C: ON/OFF
+    - Recirculation: FRESH/RECIRC
+    - Air direction: FACE, FEET, FACE+FEET, DEFROST
+    - Current temperatures (read-only from sensors)
     """
     
     # Layout constants
@@ -98,9 +98,9 @@ class ClimateScreen(Screen):
         self,
         size: Tuple[int, int],
         app=None,
-        temp_target: int = 21,
-        temp_in: int = 22,
-        temp_out: int = -5,
+        temp_target: float = 22.0,
+        temp_in: float = 22.0,
+        temp_out: float = -5.0,
         ac_on: bool = True,
         auto_mode: bool = True,
         recirc: bool = False
@@ -108,17 +108,24 @@ class ClimateScreen(Screen):
         """Initialize climate screen."""
         super().__init__(size, app)
         
-        # Build menu items
+        # Build menu items with real Prius Gen 2 AVC-LAN capabilities
         self.items: List[ClimateMenuItem] = [
-            ClimateMenuItem("TARGET TEMP", temp_target, 16, 28, 1, unit="°C"),
+            # Temperature: 18.0-28.0°C (step 1 for encoder, real Prius has 0.5°C steps)
+            ClimateMenuItem("TARGET TEMP", int(temp_target), 18, 28, 1, unit="°C"),
+            # Fan: 0-7 (0=OFF, 1-7=speed)
             ClimateMenuItem("FAN SPEED", 3, 0, 7, 1),
-            ClimateMenuItem("MODE", 0 if auto_mode else 1, options=["AUTO", "MANUAL", "ECO"]),
+            # Mode: AUTO automatically adjusts fan and direction
+            ClimateMenuItem("MODE", 0 if auto_mode else 1, options=["AUTO", "MANUAL", "OFF"]),
+            # A/C compressor toggle
             ClimateMenuItem("A/C", 0 if ac_on else 1, options=["ON", "OFF"]),
-            ClimateMenuItem("RECIRCULATION", 1 if recirc else 0, options=["OFF", "ON"]),
+            # Air intake (recirculation)
+            ClimateMenuItem("AIR INTAKE", 0 if not recirc else 1, options=["FRESH", "RECIRC"]),
+            # Air direction (FACE/FEET/etc)
             ClimateMenuItem("AIR DIRECTION", 0, options=["FACE", "FACE+FEET", "FEET", "DEFROST"]),
-            # Read-only current values
-            ClimateMenuItem("INSIDE TEMP", temp_in, unit="°C", readonly=True),
-            ClimateMenuItem("OUTSIDE TEMP", temp_out, unit="°C", readonly=True),
+            # Outside temp - read from AVC-LAN 10C->310 byte[5] / 2
+            # Inside temp - NOT available on AVC-LAN (would need CAN bus)
+            ClimateMenuItem("OUTSIDE TEMP", int(temp_out), unit="°C", readonly=True),
+            ClimateMenuItem("INSIDE TEMP", "N/A", readonly=True),
         ]
         
         # Navigation
@@ -127,6 +134,9 @@ class ClimateScreen(Screen):
         
         # Inactivity tracking
         self._last_activity = time.time()
+        
+        # AVC-LAN callback (set by app to send commands to vehicle)
+        self._on_value_changed = None
     
     @property
     def target_temp(self) -> int:
@@ -174,6 +184,66 @@ class ClimateScreen(Screen):
         if self.app:
             self.app.pop_screen()
     
+    def _notify_value_changed(self, item_label: str, value: Any) -> None:
+        """
+        Notify that a value was changed by user.
+        
+        This triggers AVC-LAN command generation.
+        
+        Args:
+            item_label: The item that changed
+            value: New value
+        """
+        if self._on_value_changed:
+            self._on_value_changed(item_label, value)
+    
+    def set_on_value_changed(self, callback) -> None:
+        """
+        Set callback for value changes.
+        
+        Args:
+            callback: Function(label: str, value: Any)
+        """
+        self._on_value_changed = callback
+    
+    def set_value_from_avc(self, label: str, value: Any) -> None:
+        """
+        Update value from AVC-LAN (without triggering callback).
+        
+        Args:
+            label: Item label
+            value: New value from vehicle
+        """
+        for item in self.items:
+            if item.label == label:
+                if item.options:
+                    if isinstance(value, int) and 0 <= value < len(item.options):
+                        item._option_index = value
+                        item.value = value
+                else:
+                    item.value = value
+                break
+    
+    def update_temperatures(self, inside: Optional[float] = None, 
+                          outside: Optional[float] = None) -> None:
+        """
+        Update temperature readings from sensors.
+        
+        Args:
+            inside: Inside temperature (°C)
+            outside: Outside temperature (°C)
+        """
+        if inside is not None:
+            for item in self.items:
+                if item.label == "INSIDE TEMP":
+                    item.value = int(inside)
+                    break
+        if outside is not None:
+            for item in self.items:
+                if item.label == "OUTSIDE TEMP":
+                    item.value = int(outside)
+                    break
+
     def handle_input(self, event) -> bool:
         """Handle input events."""
         from ...input.manager import InputEvent as IE
@@ -190,9 +260,11 @@ class ClimateScreen(Screen):
             
             if event == IE.ROTATE_LEFT:
                 current_item.adjust(-1)
+                self._notify_value_changed(current_item.label, current_item.value)
                 return True
             elif event == IE.ROTATE_RIGHT:
                 current_item.adjust(1)
+                self._notify_value_changed(current_item.label, current_item.value)
                 return True
             elif event == IE.PRESS_LIGHT:
                 self._editing = False

@@ -15,7 +15,12 @@ from ..fonts import get_font, get_title_font, get_mono_font
 
 
 class MenuItem:
-    """A single menu item with label and value."""
+    """
+    A single menu item with label and value.
+    
+    Supports numeric values with min/max bounds and option-based values.
+    Provides formatted display strings for audio parameters.
+    """
     
     def __init__(
         self,
@@ -24,7 +29,8 @@ class MenuItem:
         min_val: Any = None,
         max_val: Any = None,
         step: Any = 1,
-        options: Optional[List[str]] = None
+        options: Optional[List[str]] = None,
+        display_format: Optional[str] = None
     ):
         """
         Initialize menu item.
@@ -36,6 +42,7 @@ class MenuItem:
             max_val: Maximum value (for numeric)
             step: Step size for adjustments
             options: List of options (for select type)
+            display_format: Format string for display ("balance", "fade", "tone", None)
         """
         self.label = label
         self.value = value
@@ -43,6 +50,7 @@ class MenuItem:
         self.max_val = max_val
         self.step = step
         self.options = options  # For select-type items
+        self.display_format = display_format
         
         # If options provided, value is an index
         if options and isinstance(value, int):
@@ -52,9 +60,40 @@ class MenuItem:
     
     @property
     def display_value(self) -> str:
-        """Get value as display string."""
+        """
+        Get value as display string.
+        
+        For audio parameters, provides formatted display:
+        - Balance: "L7" to "R7" with "C" for center
+        - Fade: "F7" to "R7" with "C" for center
+        - Tone (bass/mid/treble): "-5" to "+5" with "0" for flat
+        """
         if self.options:
             return self.options[self._option_index]
+        
+        # Special formatting for audio parameters
+        if self.label == "BALANCE":
+            if self.value < 0:
+                return f"L{abs(self.value)}"
+            elif self.value > 0:
+                return f"R{self.value}"
+            else:
+                return "C"  # Center
+        
+        elif self.label == "FADER":
+            if self.value < 0:
+                return f"F{abs(self.value)}"  # Front
+            elif self.value > 0:
+                return f"R{self.value}"       # Rear
+            else:
+                return "C"  # Center
+        
+        elif self.label in ("BASS", "MID", "TREBLE"):
+            if self.value > 0:
+                return f"+{self.value}"
+            else:
+                return str(self.value)
+        
         return str(self.value)
     
     def adjust(self, delta: int) -> None:
@@ -72,12 +111,18 @@ class AudioScreen(Screen):
     """
     Audio settings screen.
     
-    Shows a scrollable list of audio settings:
-    - Volume
-    - Bass
-    - Treble
-    - Balance
-    - Sound position
+    Shows a scrollable list of audio settings based on real Prius Gen 2 AVC-LAN:
+    
+    Based on Flerchinger document "AN IN-DEPTH LOOK AT THE TOYOTA AVC-LAN":
+    - Volume: Uses increment/decrement commands (step 1-4)
+    - Bass:   0x0B to 0x15 (protocol), displayed as -5 to +5
+    - Mid:    0x0B to 0x15 (protocol), displayed as -5 to +5
+    - Treble: 0x0B to 0x15 (protocol), displayed as -5 to +5
+    - Balance: 0x09 (L7) to 0x17 (R7), center=0x10, displayed as -7 to +7
+    - Fader:  0x09 (F7) to 0x17 (R7), center=0x10, displayed as -7 to +7
+    
+    Commands are sent to DSP-Amp (0x440) from Audio H/U (0x190 on Prius):
+    Format: [00 25 74 XX YY] where XX is param code, YY is value.
     """
     
     # Layout constants
@@ -86,18 +131,33 @@ class AudioScreen(Screen):
     ITEM_PADDING = 4
     SIDE_MARGIN = 20
     
-    def __init__(self, size: Tuple[int, int], app=None, initial_volume: int = 50):
+    def __init__(self, size: Tuple[int, int], app=None, initial_volume: int = 25):
         """Initialize audio screen."""
         super().__init__(size, app)
         
-        # Build menu items
+        # Build menu items with correct Prius Gen 2 AVC-LAN ranges
+        # Based on Flerchinger document specifications
         self.items: List[MenuItem] = [
-            MenuItem("VOLUME", initial_volume, 0, 100, 5),
-            MenuItem("BASS", 0, -10, 10, 1),
-            MenuItem("TREBLE", 0, -10, 10, 1),
-            MenuItem("BALANCE", 0, -10, 10, 1),
-            MenuItem("FADER", 0, -10, 10, 1),
-            MenuItem("POSITION", 0, options=["DRIVER", "FRONT", "CENTER", "ALL"]),
+            # Volume: 0-63 (Toyota uses 6-bit volume), step 1
+            # Note: AVC-LAN uses volume_up/down commands with step size 1-4
+            MenuItem("VOLUME", initial_volume, 0, 63, 1),
+            
+            # Bass: -5 to +5 (protocol: 0x0B to 0x15, center 0x10)
+            MenuItem("BASS", 0, -5, 5, 1),
+            
+            # Mid: -5 to +5 (protocol: 0x0B to 0x15, center 0x10)  
+            MenuItem("MID", 0, -5, 5, 1),
+            
+            # Treble: -5 to +5 (protocol: 0x0B to 0x15, center 0x10)
+            MenuItem("TREBLE", 0, -5, 5, 1),
+            
+            # Balance: -7 (full left) to +7 (full right), center 0
+            # Protocol: 0x09 to 0x17, center 0x10
+            MenuItem("BALANCE", 0, -7, 7, 1),
+            
+            # Fader: -7 (full front) to +7 (full rear), center 0
+            # Protocol: 0x09 to 0x17, center 0x10
+            MenuItem("FADER", 0, -7, 7, 1),
         ]
         
         # Navigation
@@ -106,6 +166,9 @@ class AudioScreen(Screen):
         
         # Inactivity tracking
         self._last_activity = time.time()
+        
+        # AVC-LAN callback (set by app to send commands to vehicle)
+        self._on_value_changed = None
     
     @property
     def volume(self) -> int:
@@ -139,6 +202,47 @@ class AudioScreen(Screen):
         if self.app:
             self.app.pop_screen()
     
+    def _notify_value_changed(self, item_label: str, value: Any) -> None:
+        """
+        Notify that a value was changed by user.
+        
+        This triggers AVC-LAN command generation.
+        
+        Args:
+            item_label: The item that changed (VOLUME, BASS, etc.)
+            value: New value
+        """
+        if self._on_value_changed:
+            self._on_value_changed(item_label, value)
+    
+    def set_on_value_changed(self, callback) -> None:
+        """
+        Set callback for value changes.
+        
+        Args:
+            callback: Function(label: str, value: Any)
+        """
+        self._on_value_changed = callback
+    
+    def set_value_from_avc(self, label: str, value: Any) -> None:
+        """
+        Update value from AVC-LAN (without triggering callback).
+        
+        Args:
+            label: Item label (VOLUME, BASS, etc.)
+            value: New value from vehicle
+        """
+        for item in self.items:
+            if item.label == label:
+                if item.options:
+                    # For option items, value is index
+                    if isinstance(value, int) and 0 <= value < len(item.options):
+                        item._option_index = value
+                        item.value = value
+                else:
+                    item.value = value
+                break
+
     def handle_input(self, event) -> bool:
         """Handle input events."""
         from ...input.manager import InputEvent as IE
@@ -148,10 +252,14 @@ class AudioScreen(Screen):
         if self._editing:
             # Editing mode: arrows adjust value
             if event == IE.ROTATE_LEFT:
-                self.items[self._selected_index].adjust(-1)
+                item = self.items[self._selected_index]
+                item.adjust(-1)
+                self._notify_value_changed(item.label, item.value)
                 return True
             elif event == IE.ROTATE_RIGHT:
-                self.items[self._selected_index].adjust(1)
+                item = self.items[self._selected_index]
+                item.adjust(1)
+                self._notify_value_changed(item.label, item.value)
                 return True
             elif event == IE.PRESS_LIGHT:
                 # Exit editing mode

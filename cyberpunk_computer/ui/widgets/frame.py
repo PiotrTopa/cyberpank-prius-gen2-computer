@@ -108,7 +108,7 @@ class Frame(Widget):
         focus_t = self._focus_anim
         
         # Pulsing effect for focused/active frames
-        pulse = self._get_pulse(1.5) if (focus_t > 0.5 or self._active) else 0
+        pulse = self._get_pulse(0.15) if (focus_t > 0.5 or self._active) else 0
         
         # Active state uses different colors (editing mode)
         if self._active:
@@ -200,7 +200,7 @@ class Frame(Widget):
         """Draw cyberpunk corner accents for focused state."""
         # Longer, more dramatic corner lines
         length = 10 + int(intensity * 4)  # Dynamic length
-        pulse = self._get_pulse(2.0)
+        pulse = self._get_pulse(0.)
         
         # Bright accent color with pulse
         accent_color = lerp_color(color, COLORS["cyan"], intensity * 0.5 + pulse * 0.3)

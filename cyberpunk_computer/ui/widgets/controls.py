@@ -335,7 +335,9 @@ class ValueDisplay(Widget):
         label: str = "",
         value: str = "",
         unit: str = "",
-        compact: bool = False
+        compact: bool = False,
+        value_size: int = 13,
+        label_size: int = 8
     ):
         """
         Initialize value display.
@@ -346,6 +348,8 @@ class ValueDisplay(Widget):
             value: Value text
             unit: Unit suffix (e.g., "°C")
             compact: Use compact vertical layout
+            value_size: Font size for the value text (default: 13)
+            label_size: Font size for the label text (default: 8)
         """
         super().__init__(rect, focusable=False)
         
@@ -353,6 +357,8 @@ class ValueDisplay(Widget):
         self.value = value
         self.unit = unit
         self.compact = compact
+        self.value_size = value_size
+        self.label_size = label_size
         self._active = False  # Amber highlight when active (editing)
     
     def set_value(self, value: str) -> None:
@@ -360,7 +366,19 @@ class ValueDisplay(Widget):
         if self.value != value:
             self.value = value
             self._dirty = True
-    
+            
+    def set_unit(self, unit: str) -> None:
+        """Update the displayed unit."""
+        if self.unit != unit:
+            self.unit = unit
+            self._dirty = True
+            
+    def set_label(self, label: str) -> None:
+        """Update the displayed label."""
+        if self.label != label:
+            self.label = label
+            self._dirty = True
+
     def set_active(self, active: bool) -> None:
         """Set active state (amber highlight for label when editing)."""
         if self._active != active:
@@ -373,8 +391,8 @@ class ValueDisplay(Widget):
             return
         
         # Use tiny font for small labels, mono for values
-        font_label = get_tiny_font(8)
-        font_value = get_mono_font(13)
+        font_label = get_tiny_font(self.label_size)
+        font_value = get_mono_font(self.value_size)
         
         # Label color: amber when active, otherwise secondary
         label_color = COLORS["amber"] if self._active else COLORS["text_secondary"]
@@ -384,20 +402,28 @@ class ValueDisplay(Widget):
         
         if self.compact:
             # Compact layout: label and value close together at top
-            y_offset = self.rect.y + 2
             
             # Draw label (top)
             if self.label:
+                y_offset = self.rect.y + 2
+                
                 label_surf = font_label.render(self.label, True, label_color)
                 label_x = center_x - label_surf.get_width() // 2
                 surface.blit(label_surf, (label_x, y_offset))
                 y_offset += label_surf.get_height() + 1
             
-            # Draw value with unit (directly below label)
-            value_text = f"{self.value}{self.unit}"
-            value_surf = font_value.render(value_text, True, COLORS["text_value"])
-            value_x = center_x - value_surf.get_width() // 2
-            surface.blit(value_surf, (value_x, y_offset))
+                # Draw value with unit (directly below label)
+                value_text = f"{self.value}{self.unit}"
+                value_surf = font_value.render(value_text, True, COLORS["text_value"])
+                value_x = center_x - value_surf.get_width() // 2
+                surface.blit(value_surf, (value_x, y_offset))
+            else:
+                # No label, center value vertically
+                value_text = f"{self.value}{self.unit}"
+                value_surf = font_value.render(value_text, True, COLORS["text_value"])
+                value_x = center_x - value_surf.get_width() // 2
+                value_y = self.rect.y + (self.rect.height - value_surf.get_height()) // 2
+                surface.blit(value_surf, (value_x, value_y))
         else:
             # Original layout: label top, value bottom
             # Draw label (top)

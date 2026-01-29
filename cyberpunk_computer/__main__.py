@@ -9,6 +9,13 @@ Options:
     --scale N       Display scale factor (1, 2, or 4) [default: 1]
     --fullscreen    Run in fullscreen mode
     --port PORT     Serial port for Gateway connection
+    --test          Enable test mode with mock events (keyboard control)
+    --replay FILE   Replay log file (NDJSON format, supports AVC-LAN and CAN)
+
+Examples:
+    python -m cyberpunk_computer --dev --scale 2
+    python -m cyberpunk_computer --replay assets/data/avc_lan.ndjson
+    python -m cyberpunk_computer --replay assets/data/can_1.ndjson --dev
 """
 
 import argparse
@@ -75,6 +82,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run without Gateway connection (UI only)"
     )
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Enable test mode with mock events (keyboard: 1-4 vehicle, +/- volume, [/] temp)"
+    )
+    parser.add_argument(
+        "--replay",
+        type=str,
+        default=None,
+        help="Replay log file (NDJSON format, supports AVC-LAN and CAN recordings)"
+    )
     
     return parser.parse_args()
 
@@ -98,13 +116,60 @@ def main() -> int:
         scale_factor=scale,
         fullscreen=args.fullscreen,
         gateway_port=args.port,
-        gateway_enabled=not args.no_gateway
+        gateway_enabled=not args.no_gateway and not args.test and not args.replay
     )
     
     logger.info(f"Config: dev={config.dev_mode}, scale={config.scale_factor}")
     
+    # Setup input source (file replay or real gateway)
+    input_source = None
+    if args.replay:
+        from .comm.file_input import FileInput
+        input_source = FileInput(args.replay)
+        count = input_source.load()
+        logger.info(f"Loaded {count} entries from {args.replay}")
+        input_source.start()
+        
+        # Show keyboard shortcuts (using ASCII for Windows compatibility)
+        print("""
+    ===================================================================
+    REPLAY MODE - Keyboard Shortcuts
+    ===================================================================
+    P         Play/Pause playback
+    R         Restart from beginning
+    S         Print message statistics
+    
+    J         Jump to row (enter row number)
+    [/]       Step backward/forward 1 message
+    -/+       Step backward/forward 10 messages
+    
+    --- Direction Filters ---
+    V         Toggle ALL verbose logging (IN + OUT)
+    I         Toggle incoming message logging only
+    O         Toggle outgoing commands logging only
+    T         Toggle STATE change logging
+    
+    --- Source Filters ---
+    1         Toggle AVC-LAN messages
+    2         Toggle CAN messages  
+    3         Toggle RS485/Satellite messages
+    0         Toggle ALL sources on/off
+    
+    --- Analysis Mode ---
+    A         Toggle ANALYSIS mode (detailed reverse-engineering output)
+              Shows: Button presses, Touch events, Energy packets
+              (A00->258), ICE status (210->490)
+    
+    ESC       Exit application
+    ===================================================================
+""")
+    
     # Create and run application
     app = Application(config)
+    
+    # Connect input source to app if using file replay
+    if input_source:
+        app.set_input_source(input_source)
     
     try:
         app.run()

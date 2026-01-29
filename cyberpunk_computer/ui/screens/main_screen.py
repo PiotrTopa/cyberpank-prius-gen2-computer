@@ -16,9 +16,16 @@ from .ambient_screen import AmbientScreen
 from ..widgets.base import Rect
 from ..widgets.frame import Frame
 from ..widgets.controls import VolumeBar, ToggleSwitch, ValueDisplay, ModeIcon, StatusIcon
+from ..widgets.vehicle_status import ConnectionIndicator
 from ..colors import COLORS
 from ..fonts import get_font
 from ...persistence import get_settings, save_settings
+from ...state.actions import (
+    ActionSource, SetVolumeAction, SetBassAction, SetMidAction, SetTrebleAction,
+    SetBalanceAction, SetFaderAction, SetMuteAction,
+    SetTargetTempAction, SetFanSpeedAction, SetACAction, SetAutoModeAction,
+    SetRecirculationAction, SetAirDirectionAction
+)
 
 
 class MainScreen(Screen):
@@ -29,11 +36,11 @@ class MainScreen(Screen):
     ┌───────────┬─────────────────────────────┬───────────────────┐
     │  AUDIO    │                             │   CLIMATE         │
     │  120×80   │                             │   120×80          │
-    ├───────────┤        MAIN AREA            ├───────────────────┤
-    │  AMBIENT  │         240×240             │   LIGHTS          │
-    │  120×80   │       (reserved)            │   120×80          │
+    ├───────────┤      CENTER AREA            ├───────────────────┤
+    │  AMBIENT  │      (available)            │   LIGHTS          │
+    │  120×80   │                             │   120×80          │
     ├───────────┤                             ├───────────────────┤
-    │  (spare)  │                             │   (spare)         │
+    │  ENGINE   │                             │   BATTERY         │
     │  120×80   │                             │   120×80          │
     └───────────┴─────────────────────────────┴───────────────────┘
     """
@@ -55,8 +62,8 @@ class MainScreen(Screen):
         # Sample data (will be replaced with live data from Gateway)
         self._volume = 35
         self._ambient_on = True
-        self._temp_in = "22"
-        self._temp_out = "-5"
+        self._temp_in = "N/A"  # Inside temp not available on AVC-LAN
+        self._temp_out = "N/A"  # Updated from AVC-LAN 10C->310
         self._temp_target = "21"
         self._climate_ac = True
         self._climate_auto = True
@@ -76,6 +83,10 @@ class MainScreen(Screen):
         self._ambient_saturation = 100
         self._ambient_brightness = 80
         
+        # AVC bridge and store
+        self._avc_bridge = None
+        self._store = None
+        
         # Editing mode states
         self._editing_volume = False
         self._editing_target_temp = False
@@ -89,6 +100,15 @@ class MainScreen(Screen):
         
         # Focus visibility tracking
         self._last_activity_time = time.time()
+        
+        # AVC Input visualization (touch and button events)
+        self._last_touch_x = 0
+        self._last_touch_y = 0
+        self._last_touch_time = 0.0
+        self._last_button_name = ""
+        self._last_button_time = 0.0
+        self._touch_display_duration = 1.0  # How long to show touch indicator
+        self._button_display_duration = 2.0  # How long to show button text
         
         # Create frames (order of creation doesn't affect focus order)
         self._create_left_panels()
@@ -111,11 +131,11 @@ class MainScreen(Screen):
         self.focus_manager.add_widget(self._climate_frame)
         self.focus_manager.add_widget(self._ambient_frame)
         self.focus_manager.add_widget(self._lights_frame)
-        self.focus_manager.add_widget(self._system_frame)
         self.focus_manager.add_widget(self._vehicle_frame)
+        self.focus_manager.add_widget(self._battery_frame)
     
     def _create_left_panels(self) -> None:
-        """Create left side panels (Audio, Ambient, spare)."""
+        """Create left side panels (Audio, Ambient, Engine)."""
         x = 0
         
         # Audio frame
@@ -174,16 +194,59 @@ class MainScreen(Screen):
         
         self.add_widget(self._ambient_frame)
         
-        # System frame (placeholder for future use)
-        self._system_frame = Frame(
+        # Vehicle/Engine frame
+        self._vehicle_frame = Frame(
             Rect(x, self.FRAME_HEIGHT * 2, self.SIDE_PANEL_WIDTH, self.FRAME_HEIGHT),
-            title="SYSTEM",
+            title="ENGINE",
             focusable=True
         )
-        self.add_widget(self._system_frame)
+        
+        content = self._vehicle_frame.content_rect
+        
+        # 2x2 Grid
+        h_half = content.height // 2
+        w_half = content.width // 2
+        
+        self._rpm_display = ValueDisplay(
+            Rect(content.x, content.y, w_half, h_half),
+            label="RPM",
+            value="0",
+            unit="",
+            compact=True
+        )
+        self._vehicle_frame.add_child(self._rpm_display)
+        
+        self._fuel_display = ValueDisplay(
+            Rect(content.x + w_half, content.y, w_half, h_half),
+            label="CONS",
+            value="--.-",
+            unit="L", # L/100
+            compact=True
+        )
+        self._vehicle_frame.add_child(self._fuel_display)
+        
+        self._ice_temp_display = ValueDisplay(
+            Rect(content.x, content.y + h_half, w_half, h_half),
+            label="ICE",
+            value="--",
+            unit="°C",
+            compact=True
+        )
+        self._vehicle_frame.add_child(self._ice_temp_display)
+        
+        self._speed_display = ValueDisplay(
+            Rect(content.x + w_half, content.y + h_half, w_half, h_half),
+            label="SPD",
+            value="--",
+            unit="km",
+            compact=True
+        )
+        self._vehicle_frame.add_child(self._speed_display)
+        
+        self.add_widget(self._vehicle_frame)
     
     def _create_right_panels(self) -> None:
-        """Create right side panels (Climate, Lights, spare)."""
+        """Create right side panels (Climate, Lights, Battery)."""
         x = self.width - self.SIDE_PANEL_WIDTH
         
         # Climate frame
@@ -309,23 +372,326 @@ class MainScreen(Screen):
         
         self.add_widget(self._lights_frame)
         
-        # Vehicle frame (placeholder)
-        self._vehicle_frame = Frame(
+        # Battery frame (bottom right)
+        self._battery_frame = Frame(
             Rect(x, self.FRAME_HEIGHT * 2, self.SIDE_PANEL_WIDTH, self.FRAME_HEIGHT),
-            title="VEHICLE",
+            title="BATTERY",
             focusable=True
         )
-        self.add_widget(self._vehicle_frame)
+        
+        content = self._battery_frame.content_rect
+        third_height = content.height // 3
+        half_width = content.width // 2
+        
+        # Row 1: Power (kW) - full width, most important
+        self._batt_power_display = ValueDisplay(
+            Rect(content.x, content.y, content.width, third_height),
+            label="",
+            value="--.-",
+            unit="kW",
+            compact=True,
+            value_size=16  # Slightly larger
+        )
+        self._battery_frame.add_child(self._batt_power_display)
+        
+        # Row 2: Voltage and Current side by side
+        self._batt_volt_display = ValueDisplay(
+            Rect(content.x, content.y + third_height, half_width, third_height),
+            label="",
+            value="---",
+            unit="V",
+            compact=True,
+            value_size=12  # Slightly smaller
+        )
+        self._battery_frame.add_child(self._batt_volt_display)
+        
+        self._batt_curr_display = ValueDisplay(
+            Rect(content.x + half_width, content.y + third_height, half_width, third_height),
+            label="",
+            value="--",
+            unit="A",
+            compact=True,
+            value_size=12  # Slightly smaller
+        )
+        self._battery_frame.add_child(self._batt_curr_display)
+        
+        # Row 3: Temperature with SOC
+        self._batt_temp_display = ValueDisplay(
+            Rect(content.x, content.y + third_height * 2, half_width, third_height),
+            label="",
+            value="--",
+            unit="°C",
+            compact=True
+        )
+        self._battery_frame.add_child(self._batt_temp_display)
+        
+        self._batt_soc_display = ValueDisplay(
+            Rect(content.x + half_width, content.y + third_height * 2, half_width, third_height),
+            label="",
+            value="--",
+            unit="%",
+            compact=True
+        )
+        self._battery_frame.add_child(self._batt_soc_display)
+        
+        self.add_widget(self._battery_frame)
     
     def _create_center_area(self) -> None:
-        """Create center area (reserved for future content)."""
-        # The center area is currently empty
-        # Will be used for main content display
+        """Create center area with connection indicator and status bar."""
+        center_x = self.SIDE_PANEL_WIDTH
+        center_width = self.width - 2 * self.SIDE_PANEL_WIDTH
+        
+        # Connection indicator (moved slightly)
+        self._connection_indicator = ConnectionIndicator(
+            Rect(center_x + center_width - 16, 6, 12, 12)
+        )
+        self.add_widget(self._connection_indicator)
+        
+        # Status Bar Frame (Visual Only for now, or simple displays)
+        # Using ValueDisplay for clock for now, positioned top center
+        
+        clock_width = 100
+        self._clock_display = ValueDisplay(
+            Rect(center_x + (center_width - clock_width) // 2, 0, clock_width, 25),
+            label="",
+            value="12:00",
+            unit="",
+            compact=True
+        )
+        self.add_widget(self._clock_display)
+        
+        # Gear Display (Left of clock)
+        self._gear_display = ValueDisplay(
+            Rect(center_x + 10, 0, 40, 25),
+            label="",
+            value="P",
+            unit="",
+            compact=True,
+            value_size=16
+        )
+        self.add_widget(self._gear_display)
+        
+        # We could add more status icons here
+
+    
+    def _update_center_widgets(self) -> None:
+        """Update center area widgets with current state."""
+        # Center area is empty for now - connection indicator updates itself
         pass
+    
+    def set_avc_bridge(self, bridge) -> None:
+        """
+        Connect AVC-LAN UI bridge for live updates.
+        
+        Args:
+            bridge: AVCUIBridge instance
+        """
+        self._avc_bridge = bridge
+        
+        # Subscribe to state changes
+        bridge.subscribe("audio", self._on_avc_audio_update)
+        bridge.subscribe("climate", self._on_avc_climate_update)
+        bridge.subscribe("vehicle", self._on_avc_vehicle_update)
+        bridge.subscribe("energy", self._on_avc_energy_update)
+        bridge.subscribe("connection", self._on_avc_connection_update)
+    
+    def set_store(self, store) -> None:
+        """
+        Connect state store for live updates.
+        
+        Args:
+            store: State Store instance
+        """
+        from ...state.store import StateSlice
+        
+        self._store = store
+        
+        # Subscribe to all state changes
+        store.subscribe(StateSlice.ALL, self._on_store_update)
+    
+    def _on_store_update(self, state) -> None:
+        """Handle state update from Store."""
+        # Update audio
+        self._volume = state.audio.volume
+        if hasattr(self, '_volume_bar') and self._volume_bar:
+            self._volume_bar.set_value(state.audio.volume)
+        if hasattr(self, '_volume_label') and self._volume_label:
+            self._volume_label.set_value(str(state.audio.volume))
+        
+        # Update climate state variables
+        self._temp_target = f"{state.climate.target_temp:.0f}"
+        if state.climate.inside_temp is not None:
+            self._temp_in = f"{state.climate.inside_temp:.0f}"
+        else:
+            self._temp_in = "N/A"
+        if state.climate.outside_temp is not None:
+            self._temp_out = f"{state.climate.outside_temp:.0f}"
+        else:
+            self._temp_out = "N/A"
+        self._climate_ac = state.climate.ac_on
+        self._climate_auto = state.climate.auto_mode
+        self._climate_recirc = getattr(state.climate, 'recirculation', False)
+        
+        # Update climate display widgets
+        if hasattr(self, '_temp_target_display') and self._temp_target_display:
+            self._temp_target_display.set_value(self._temp_target)
+        if hasattr(self, '_temp_in_display') and self._temp_in_display:
+            self._temp_in_display.set_value(self._temp_in)
+        if hasattr(self, '_temp_out_display') and self._temp_out_display:
+            self._temp_out_display.set_value(self._temp_out)
+        if hasattr(self, '_ac_icon') and self._ac_icon:
+            self._ac_icon.set_active(self._climate_ac)
+        if hasattr(self, '_auto_icon') and self._auto_icon:
+            self._auto_icon.set_active(self._climate_auto)
+        if hasattr(self, '_recirc_icon') and self._recirc_icon:
+            self._recirc_icon.set_active(self._climate_recirc)
+            
+        # Update Gear
+        if hasattr(self, '_gear_display') and self._gear_display:
+            from ...state.app_state import GearPosition
+            gear = state.vehicle.gear
+            text = "P"
+            if gear == GearPosition.PARK: text = "P"
+            elif gear == GearPosition.REVERSE: text = "R"
+            elif gear == GearPosition.NEUTRAL: text = "N"
+            elif gear == GearPosition.DRIVE: text = "D"
+            elif gear == GearPosition.B: text = "B"
+            self._gear_display.set_value(text)
+
+        # Update Engine Telemetry
+        if hasattr(self, '_rpm_display') and self._rpm_display:
+             val = str(int(state.vehicle.rpm)) if state.vehicle.rpm is not None else "0"
+             self._rpm_display.set_value(val)
+        if hasattr(self, '_ice_temp_display') and self._ice_temp_display:
+             val = str(int(state.vehicle.ice_coolant_temp)) if state.vehicle.ice_coolant_temp is not None else "--"
+             self._ice_temp_display.set_value(val)
+        if hasattr(self, '_speed_display') and self._speed_display:
+             val = str(int(state.vehicle.speed_kmh)) if state.vehicle.speed_kmh is not None else "--"
+             self._speed_display.set_value(val)
+        if hasattr(self, '_fuel_display') and self._fuel_display:
+            flow_rate = state.vehicle.fuel_flow_rate
+            speed = state.vehicle.speed_kmh if state.vehicle.speed_kmh is not None else 0.0
+            
+            # Logic: If ICE is not running OR flow is 0, show --.-
+            # Use flow_rate > 0.05 as threshold for "running/consuming" to avoid flicker
+            is_consuming = flow_rate is not None and flow_rate > 0.05
+            ice_running = state.vehicle.ice_running if state.vehicle.ice_running is not None else False
+            # Or use rpm > 0
+            
+            if is_consuming and ice_running:
+                # We are consuming fuel
+                if speed > 5.0:
+                     # L/100km = (L/h / km/h) * 100
+                     l_100 = (flow_rate / speed) * 100
+                     l_100 = min(99.9, l_100)
+                     val = f"{l_100:.1f}"
+                     self._fuel_display.set_label("L/100km")
+                else:
+                     # L/h
+                     val = f"{flow_rate:.1f}"
+                     self._fuel_display.set_label("L/h")
+            else:
+                 val = "--.-"
+                 # Default labels based on speed mode
+                 if speed > 5.0:
+                     self._fuel_display.set_label("L/100km")
+                 else:
+                     self._fuel_display.set_label("L/h")
+            
+            self._fuel_display.set_unit("") # Clear unit (moved to label)
+            self._fuel_display.set_value(val)
+             
+        # Update Battery Telemetry
+        if hasattr(self, '_batt_power_display') and self._batt_power_display:
+             power_kw = state.energy.battery_power_kw
+             if power_kw is not None:
+                 # Show sign: + for discharge, - for charge
+                 val = f"{power_kw:+.1f}" if abs(power_kw) >= 0.1 else "0.0"
+             else:
+                 val = "--.-"
+             self._batt_power_display.set_value(val)
+        if hasattr(self, '_batt_volt_display') and self._batt_volt_display:
+             val = f"{state.energy.hv_battery_voltage:.0f}" if state.energy.hv_battery_voltage is not None else "---"
+             self._batt_volt_display.set_value(val)
+        if hasattr(self, '_batt_curr_display') and self._batt_curr_display:
+             val = f"{state.energy.hv_battery_current:.0f}" if state.energy.hv_battery_current is not None else "--"
+             self._batt_curr_display.set_value(val)
+        if hasattr(self, '_batt_temp_display') and self._batt_temp_display:
+             val = str(int(state.energy.battery_temp)) if state.energy.battery_temp is not None else "--"
+             self._batt_temp_display.set_value(val)
+        if hasattr(self, '_batt_soc_display') and self._batt_soc_display:
+             soc_pct = int(state.energy.battery_soc * 100)
+             val = str(soc_pct) if state.energy.battery_soc > 0 else "--"
+             self._batt_soc_display.set_value(val)
+        
+        # Update connection
+        if hasattr(self, '_connection_indicator') and self._connection_indicator:
+            self._connection_indicator.set_connected(state.connection.connected)
+        
+        # Update AVC Input visualization (touch and button events)
+        if hasattr(state, 'input'):
+            if state.input.last_touch_time > self._last_touch_time:
+                self._last_touch_x = state.input.last_touch_x
+                self._last_touch_y = state.input.last_touch_y
+                self._last_touch_time = state.input.last_touch_time
+            if state.input.last_button_time > self._last_button_time:
+                self._last_button_name = state.input.last_button_name
+                self._last_button_time = state.input.last_button_time
+        
+        self._dirty = True
+        
+    def _on_avc_audio_update(self, state) -> None:
+        """Handle audio state update from AVC-LAN."""
+        self._volume = state.volume
+        
+        # Update volume bar in audio frame
+        if hasattr(self, '_volume_bar') and self._volume_bar:
+            self._volume_bar.set_value(state.volume)
+        self._dirty = True
+        
+    def _on_avc_climate_update(self, state) -> None:
+        """Handle climate state update from AVC-LAN."""
+        self._temp_target = f"{state.target_temp:.0f}"
+        self._climate_ac = state.ac_on
+        self._climate_auto = state.auto_mode
+        self._climate_recirc = state.recirculation
+        
+        if state.inside_temp is not None:
+            self._temp_in = f"{state.inside_temp:.0f}"
+        else:
+            self._temp_in = "N/A"
+        if state.outside_temp is not None:
+            self._temp_out = f"{state.outside_temp:.0f}"
+        else:
+            self._temp_out = "N/A"
+        self._dirty = True
+        
+    def _on_avc_vehicle_update(self, state) -> None:
+        """Handle vehicle state update from AVC-LAN."""
+        # Vehicle state updates can be handled here if needed
+        self._dirty = True
+        
+    def _on_avc_energy_update(self, state) -> None:
+        """Handle energy state update from AVC-LAN."""
+        # Energy state updates can be handled here if needed
+        self._dirty = True
+        
+    def _on_avc_connection_update(self, state) -> None:
+        """Handle connection state update."""
+        if state.connected:
+            self._connection_indicator.on_message_received()
+        self._connection_indicator.set_connected(state.connected)
+        self._dirty = True
     
     def update(self, dt: float) -> None:
         """Update screen and check for focus timeout."""
         super().update(dt)
+        
+        # Update clock
+        if hasattr(self, '_clock_display') and self._clock_display:
+            import time
+            current_time = time.strftime("%H:%M")
+            self._clock_display.set_value(current_time)
         
         # Get timeout from config
         focus_timeout = 15.0  # Default fallback
@@ -398,6 +764,82 @@ class MainScreen(Screen):
         sub_surf = font_small.render(subtitle, True, COLORS["text_secondary"])
         sub_x = center_x + (center_width - sub_surf.get_width()) // 2
         surface.blit(sub_surf, (sub_x, title_y + 20))
+        
+        # Render AVC Input visualization (touch and button events)
+        self._render_avc_input_visualization(surface, center_x, center_width)
+    
+    def _render_avc_input_visualization(
+        self, 
+        surface: pygame.Surface, 
+        center_x: int, 
+        center_width: int
+    ) -> None:
+        """
+        Render AVC-LAN input events (touch and button) for debugging.
+        
+        Shows:
+        - Touch events as a crosshair in the center area
+        - Button names as text at the bottom
+        """
+        current_time = time.time()
+        
+        # Draw touch indicator if recent touch event
+        touch_age = current_time - self._last_touch_time
+        if self._last_touch_time > 0 and touch_age < self._touch_display_duration:
+            # Calculate alpha fade (1.0 -> 0.0)
+            alpha = 1.0 - (touch_age / self._touch_display_duration)
+            
+            # Map touch coordinates (0-255) to center area
+            # Touch area is in center: center_x to center_x + center_width
+            touch_screen_x = center_x + int((self._last_touch_x / 255.0) * center_width)
+            touch_screen_y = int((self._last_touch_y / 255.0) * self.height)
+            
+            # Clamp to center area
+            touch_screen_x = max(center_x, min(center_x + center_width, touch_screen_x))
+            touch_screen_y = max(0, min(self.height, touch_screen_y))
+            
+            # Draw crosshair
+            color = (0, int(255 * alpha), int(255 * alpha))  # Cyan with fade
+            line_len = 15
+            
+            # Horizontal line
+            pygame.draw.line(
+                surface, color,
+                (touch_screen_x - line_len, touch_screen_y),
+                (touch_screen_x + line_len, touch_screen_y),
+                2
+            )
+            # Vertical line
+            pygame.draw.line(
+                surface, color,
+                (touch_screen_x, touch_screen_y - line_len),
+                (touch_screen_x, touch_screen_y + line_len),
+                2
+            )
+            # Circle in center
+            pygame.draw.circle(surface, color, (touch_screen_x, touch_screen_y), 5, 1)
+            
+            # Draw coordinate text
+            coord_font = get_font(9)
+            coord_text = f"TOUCH: {self._last_touch_x},{self._last_touch_y}"
+            coord_surf = coord_font.render(coord_text, True, color)
+            coord_x = center_x + (center_width - coord_surf.get_width()) // 2
+            coord_y = self.height - 45
+            surface.blit(coord_surf, (coord_x, coord_y))
+        
+        # Draw button text if recent button event
+        button_age = current_time - self._last_button_time
+        if self._last_button_time > 0 and button_age < self._button_display_duration:
+            # Calculate alpha fade
+            alpha = 1.0 - (button_age / self._button_display_duration)
+            color = (int(255 * alpha), int(200 * alpha), 0)  # Yellow/orange with fade
+            
+            btn_font = get_font(12, "title")
+            btn_text = f"BTN: {self._last_button_name}"
+            btn_surf = btn_font.render(btn_text, True, color)
+            btn_x = center_x + (center_width - btn_surf.get_width()) // 2
+            btn_y = self.height - 25
+            surface.blit(btn_surf, (btn_x, btn_y))
     
     # ─────────────────────────────────────────────────────────────────────────
     # Event Handlers
@@ -470,6 +912,10 @@ class MainScreen(Screen):
         self._volume = max(0, min(100, self._volume + delta))
         self._volume_bar.set_value(self._volume)
         self._volume_label.set_value(str(self._volume))
+        
+        # Dispatch action to Store -> Gateway
+        if self._store:
+            self._store.dispatch(SetVolumeAction(self._volume, source=ActionSource.UI))
     
     def _adjust_target_temp(self, delta: int) -> None:
         """Adjust target temperature by delta."""
@@ -477,6 +923,10 @@ class MainScreen(Screen):
         new_temp = max(16, min(28, new_temp))
         self._temp_target = str(new_temp)
         self._temp_target_display.set_value(self._temp_target)
+        
+        # Dispatch action to Store -> Gateway
+        if self._store:
+            self._store.dispatch(SetTargetTempAction(float(new_temp), source=ActionSource.UI))
     
     def _enter_volume_edit(self) -> None:
         """Enter volume editing mode."""
@@ -574,6 +1024,37 @@ class MainScreen(Screen):
                 self.app,
                 initial_volume=self._volume
             )
+            
+            # Connect Store for value changes (dispatches actions to gateway)
+            if self._store:
+                store = self._store  # Capture for closure
+                
+                # When user changes value in AudioScreen, dispatch to Store
+                def on_audio_value_changed(label: str, value) -> None:
+                    if label == "VOLUME":
+                        store.dispatch(SetVolumeAction(value, source=ActionSource.UI))
+                    elif label == "BASS":
+                        store.dispatch(SetBassAction(value, source=ActionSource.UI))
+                    elif label == "MID":
+                        store.dispatch(SetMidAction(value, source=ActionSource.UI))
+                    elif label == "TREBLE":
+                        store.dispatch(SetTrebleAction(value, source=ActionSource.UI))
+                    elif label == "BALANCE":
+                        store.dispatch(SetBalanceAction(value, source=ActionSource.UI))
+                    elif label == "FADER":
+                        store.dispatch(SetFaderAction(value, source=ActionSource.UI))
+                    
+                audio_screen.set_on_value_changed(on_audio_value_changed)
+                
+                # Sync current state from Store
+                state = store.state
+                audio_screen.set_value_from_avc("VOLUME", state.audio.volume)
+                audio_screen.set_value_from_avc("BASS", state.audio.bass)
+                audio_screen.set_value_from_avc("MID", state.audio.mid)
+                audio_screen.set_value_from_avc("TREBLE", state.audio.treble)
+                audio_screen.set_value_from_avc("BALANCE", state.audio.balance)
+                audio_screen.set_value_from_avc("FADER", state.audio.fader)
+            
             self.app.push_screen(audio_screen)
     
     def _on_ambient_select(self) -> None:
@@ -601,16 +1082,52 @@ class MainScreen(Screen):
     def _on_climate_action(self) -> None:
         """Handle climate frame action (open climate settings screen)."""
         if self.app:
+            # Parse temp values safely (could be "N/A" or numeric strings)
+            try:
+                temp_out = int(self._temp_out)
+            except (ValueError, TypeError):
+                temp_out = 0  # Default if not available
+            try:
+                temp_in = int(self._temp_in)
+            except (ValueError, TypeError):
+                temp_in = 0
+            
             climate_screen = ClimateScreen(
                 (self.width, self.height),
                 self.app,
                 temp_target=int(self._temp_target),
-                temp_in=int(self._temp_in),
-                temp_out=int(self._temp_out),
+                temp_in=temp_in,
+                temp_out=temp_out,
                 ac_on=self._climate_ac,
                 auto_mode=self._climate_auto,
                 recirc=self._climate_recirc
             )
+            
+            # Connect Store for value changes (dispatches actions to gateway)
+            if self._store:
+                store = self._store  # Capture for closure
+                
+                # When user changes value in ClimateScreen, dispatch to Store
+                def on_climate_value_changed(label: str, value) -> None:
+                    if label == "TARGET TEMP":
+                        store.dispatch(SetTargetTempAction(float(value), source=ActionSource.UI))
+                    elif label == "FAN SPEED":
+                        store.dispatch(SetFanSpeedAction(value, source=ActionSource.UI))
+                    elif label == "A/C":
+                        # value is 0=ON, 1=OFF, convert to bool
+                        store.dispatch(SetACAction(value == 0, source=ActionSource.UI))
+                    elif label == "MODE":
+                        # value is 0=AUTO, 1=MANUAL, 2=OFF
+                        store.dispatch(SetAutoModeAction(value == 0, source=ActionSource.UI))
+                    elif label == "AIR INTAKE":
+                        # value is 0=FRESH, 1=RECIRC
+                        store.dispatch(SetRecirculationAction(value == 1, source=ActionSource.UI))
+                    elif label == "AIR DIRECTION":
+                        # value is 0=FACE, 1=FACE+FEET, 2=FEET, 3=DEFROST
+                        store.dispatch(SetAirDirectionAction(value, source=ActionSource.UI))
+                
+                climate_screen.set_on_value_changed(on_climate_value_changed)
+            
             self.app.push_screen(climate_screen)
     
     def _on_lights_select(self) -> None:
