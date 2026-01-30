@@ -24,6 +24,8 @@ from .egress import EgressController
 
 from ..state.store import Store
 from ..state.rules import RulesEngine
+from ..state.rules.park_speed import ParkSpeedRule
+from ..state.rules.fuel_consumption import FuelConsumptionRule
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +120,8 @@ def create_virtual_twin(config: VirtualTwinConfig) -> VirtualTwin:
     
     # Create rules engine
     rules_engine = RulesEngine(store)
+    rules_engine.register(ParkSpeedRule())
+    rules_engine.register(FuelConsumptionRule())
     
     # Set up logging if enabled
     if config.log_commands:

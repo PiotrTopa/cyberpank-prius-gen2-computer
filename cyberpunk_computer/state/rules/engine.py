@@ -3,17 +3,6 @@ State Rules Engine - Reactive business logic for computed state.
 
 The Rules Engine provides a declarative way to define business logic
 that reacts to state changes and computes derived/output state.
-
-Examples:
-- DRL lights: Combine user mode + gear + sensor data → DRL output status
-- Auto AC: Combine temperatures → AC should run
-- Screen brightness: Combine time of day + ambient light → brightness level
-
-Rules are:
-1. Pure functions that compute new state from current state
-2. Registered with the engine
-3. Automatically triggered when watched state slices change
-4. Can dispatch new actions to update computed state
 """
 
 import logging
@@ -22,9 +11,9 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Set, Callable, Any, Dict
 from enum import Enum, auto
 
-from .store import Store, StateSlice
-from .app_state import AppState
-from .actions import Action, ActionSource
+from ..store import Store, StateSlice
+from ..app_state import AppState
+from ..actions import Action, ActionSource
 
 logger = logging.getLogger(__name__)
 
@@ -48,24 +37,6 @@ class RuleResult:
 class StateRule(ABC):
     """
     Base class for reactive state rules.
-    
-    Rules subscribe to specific state slices and compute derived state
-    based on input states. They should be pure functions - computing
-    state without side effects.
-    
-    Usage:
-        class DRLControlRule(StateRule):
-            @property
-            def name(self) -> str:
-                return "DRLControlRule"
-            
-            @property
-            def watches(self) -> Set[StateSlice]:
-                return {StateSlice.LIGHTS, StateSlice.VEHICLE}
-            
-            def evaluate(self, old_state, new_state, store):
-                # Compute DRL status and dispatch action
-                pass
     """
     
     @property
@@ -97,35 +68,13 @@ class StateRule(ABC):
         new_state: AppState, 
         store: Store
     ) -> None:
-        """
-        Evaluate rule and dispatch any resulting actions.
-        
-        Called when any watched state slice changes.
-        
-        IMPORTANT: Actions dispatched from rules should use
-        ActionSource.RULE to avoid re-triggering the same rule
-        and to allow proper egress handling.
-        
-        Args:
-            old_state: Previous state (None on first call)
-            new_state: Current state
-            store: Store for dispatching actions
-        """
+        """Evaluate rule and dispatch any resulting actions."""
         pass
 
 
 class FunctionalRule(StateRule):
     """
     Functional wrapper for simple rules.
-    
-    Allows defining rules as functions instead of classes.
-    
-    Usage:
-        rule = FunctionalRule(
-            name="SimpleRule",
-            watches={StateSlice.AUDIO},
-            evaluator=lambda old, new, store: ...
-        )
     """
     
     def __init__(
@@ -170,31 +119,22 @@ class FunctionalRule(StateRule):
         self._evaluator(old_state, new_state, store)
 
 
+@dataclass
+class RulesEngineStats:
+    """Statistics for the rules engine."""
+    evaluations: int = 0
+    actions_triggered: int = 0
+    errors: int = 0
+
+
 class RulesEngine:
     """
     Manages and executes state rules.
-    
-    Rules are evaluated when their watched slices change.
-    Rules can dispatch actions which may trigger other rules,
-    but the engine prevents infinite loops.
-    
-    Usage:
-        store = Store()
-        engine = RulesEngine(store)
-        
-        engine.register(DRLControlRule())
-        engine.register(AutoACRule())
-        
-        # Engine automatically evaluates rules on state changes
     """
     
     def __init__(self, store: Store, max_cascades: int = 10):
         """
         Initialize rules engine.
-        
-        Args:
-            store: State store to monitor
-            max_cascades: Maximum cascade depth to prevent infinite loops
         """
         self._store = store
         self._rules: List[StateRule] = []
@@ -212,7 +152,7 @@ class RulesEngine:
         store.subscribe(StateSlice.ALL, self._on_state_change)
     
     @property
-    def stats(self) -> "RulesEngineStats":
+    def stats(self) -> RulesEngineStats:
         """Get engine statistics."""
         return self._stats
     
@@ -223,11 +163,6 @@ class RulesEngine:
     def register(self, rule: StateRule) -> None:
         """
         Register a rule with the engine.
-        
-        Rules are sorted by priority (lower priority value = earlier execution).
-        
-        Args:
-            rule: Rule to register
         """
         self._rules.append(rule)
         # Sort by priority
@@ -237,12 +172,6 @@ class RulesEngine:
     def unregister(self, rule_name: str) -> bool:
         """
         Unregister a rule by name.
-        
-        Args:
-            rule_name: Name of rule to remove
-            
-        Returns:
-            True if rule was found and removed
         """
         for i, rule in enumerate(self._rules):
             if rule.name == rule_name:
@@ -266,14 +195,6 @@ class RulesEngine:
     def evaluate_all(self, force: bool = False) -> List[RuleResult]:
         """
         Manually evaluate all rules.
-        
-        Useful for initialization or testing.
-        
-        Args:
-            force: If True, evaluate even if state hasn't changed
-            
-        Returns:
-            List of rule evaluation results
         """
         state = self._store.state
         results = []
@@ -398,18 +319,6 @@ class RulesEngine:
         return changed
 
 
-@dataclass
-class RulesEngineStats:
-    """Statistics for the rules engine."""
-    evaluations: int = 0
-    actions_triggered: int = 0
-    errors: int = 0
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Helper for creating simple computed state rules
-# ─────────────────────────────────────────────────────────────────────────────
-
 def create_computed_rule(
     name: str,
     watches: Set[StateSlice],
@@ -420,27 +329,6 @@ def create_computed_rule(
 ) -> FunctionalRule:
     """
     Create a rule that computes a value and dispatches an action if changed.
-    
-    Args:
-        name: Rule name
-        watches: State slices to watch
-        compute: Function to compute the new value from state
-        action_factory: Function to create action from computed value
-        get_current: Function to get current value from state (for comparison)
-        priority: Rule priority
-        
-    Returns:
-        Configured FunctionalRule
-        
-    Example:
-        # Auto-mute when in reverse
-        rule = create_computed_rule(
-            name="AutoMuteInReverse",
-            watches={StateSlice.VEHICLE},
-            compute=lambda s: s.vehicle.gear == GearPosition.REVERSE,
-            action_factory=lambda mute: SetMuteAction(mute, ActionSource.RULE),
-            get_current=lambda s: s.audio.muted
-        )
     """
     def evaluator(old_state: Optional[AppState], new_state: AppState, store: Store) -> None:
         computed_value = compute(new_state)

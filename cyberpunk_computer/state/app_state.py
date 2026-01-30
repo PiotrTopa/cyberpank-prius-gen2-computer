@@ -132,6 +132,10 @@ class VehicleState:
     fuel_level: int = 0           # Liters (approx 0-45)
     fuel_flow_rate: float = 0.0   # L/h
     
+    # Consumption
+    instant_consumption: float = 0.0
+    consumption_unit: str = "L/h" # "L/h" or "L/100km"
+    
     # Temperatures
     ice_coolant_temp: Optional[float] = None  # Engine coolant temp (C)
     inverter_temp: Optional[float] = None     # Inverter/motor temp (C)

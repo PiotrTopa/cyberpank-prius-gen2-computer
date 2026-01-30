@@ -569,37 +569,18 @@ class MainScreen(Screen):
              val = str(int(state.vehicle.speed_kmh)) if state.vehicle.speed_kmh is not None else "--"
              self._speed_display.set_value(val)
         if hasattr(self, '_fuel_display') and self._fuel_display:
-            flow_rate = state.vehicle.fuel_flow_rate
-            speed = state.vehicle.speed_kmh if state.vehicle.speed_kmh is not None else 0.0
-            
-            # Logic: If ICE is not running OR flow is 0, show --.-
-            # Use flow_rate > 0.05 as threshold for "running/consuming" to avoid flicker
-            is_consuming = flow_rate is not None and flow_rate > 0.05
-            ice_running = state.vehicle.ice_running if state.vehicle.ice_running is not None else False
-            # Or use rpm > 0
-            
-            if is_consuming and ice_running:
-                # We are consuming fuel
-                if speed > 5.0:
-                     # L/100km = (L/h / km/h) * 100
-                     l_100 = (flow_rate / speed) * 100
-                     l_100 = min(99.9, l_100)
-                     val = f"{l_100:.1f}"
-                     self._fuel_display.set_label("L/100km")
-                else:
-                     # L/h
-                     val = f"{flow_rate:.1f}"
-                     self._fuel_display.set_label("L/h")
-            else:
+             consumption = state.vehicle.instant_consumption
+             unit = state.vehicle.consumption_unit
+             
+             # If consumption is effectively 0, show placeholder to match previous behavior
+             if consumption > 0.0:
+                 val = f"{consumption:.1f}"
+             else:
                  val = "--.-"
-                 # Default labels based on speed mode
-                 if speed > 5.0:
-                     self._fuel_display.set_label("L/100km")
-                 else:
-                     self._fuel_display.set_label("L/h")
-            
-            self._fuel_display.set_unit("") # Clear unit (moved to label)
-            self._fuel_display.set_value(val)
+
+             self._fuel_display.set_value(val)
+             self._fuel_display.set_label(unit)
+
              
         # Update Battery Telemetry
         if hasattr(self, '_batt_power_display') and self._batt_power_display:

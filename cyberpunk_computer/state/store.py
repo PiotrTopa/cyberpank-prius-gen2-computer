@@ -384,6 +384,17 @@ class Store:
                 vehicle=replace(self._state.vehicle, fuel_flow_rate=action.flow_rate)
             )
             affected.add(StateSlice.VEHICLE)
+
+        elif action.type == ActionType.SET_INSTANT_CONSUMPTION:
+            self._state = replace(
+                self._state,
+                vehicle=replace(
+                    self._state.vehicle, 
+                    instant_consumption=action.value,
+                    consumption_unit=action.unit
+                )
+            )
+            affected.add(StateSlice.VEHICLE)
             
         # Energy reducers
         elif action.type == ActionType.SET_BATTERY_SOC:
