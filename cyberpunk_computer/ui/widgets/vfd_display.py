@@ -14,7 +14,7 @@ from typing import Tuple, List, Optional
 from dataclasses import dataclass
 
 from .base import Widget, Rect
-from .vfd_icons import ICON_LIGHTNING, ICON_ENGINE
+from .vfd_icons import ICON_LIGHTNING, ICON_ENGINE, ICON_BATTERY, ICON_WHEEL
 
 
 # VFD Display dimensions (actual hardware)
@@ -277,6 +277,232 @@ class VFDFramebuffer:
 
 
 # ==============================================================================
+# VFD Power Flow Diagram - Tesla-inspired energy flow visualization
+# ==============================================================================
+
+class VFDPowerFlow:
+    """
+    Power flow diagram for VFD display - Tesla-inspired.
+    
+    Uses the first quarter of the display (0-63, 64x48 pixels).
+    Shows simplified energy flow:
+    - ICE → Battery (charging)
+    - Battery → MG (assist)
+    - Brakes → Battery (regen)
+    Animated arrows show direction and intensity.
+    """
+    
+    # Display region - second 1/4 of VFD (x: 64-127)
+    REGION_X = 64
+    REGION_WIDTH = 64
+    REGION_HEIGHT = 48
+    
+    def __init__(self, framebuffer: VFDFramebuffer):
+        """Initialize power flow diagram."""
+        self.fb = framebuffer
+        
+        # Current power flows (0.0-1.0 normalized for visualization)
+        self._ice_to_battery: float = 0.0  # ICE charging battery
+        self._battery_to_wheels: float = 0.0   # Battery powering wheels
+        self._wheels_to_battery: float = 0.0  # Regen braking
+        self._ice_to_wheels: float = 0.0  # ICE driving wheels
+        
+        # Animation state
+        self._anim_phase: int = 0  # 0-7 for arrow animation
+        
+    def update(
+        self,
+        ice_power_kw: float = 0.0,
+        mg_power_kw: float = 0.0,
+        brake_regen_kw: float = 0.0,
+        ice_running: bool = False,
+        speed_kmh: float = 0.0
+    ) -> None:
+        """
+        Update power flow data based on CAN data.
+        
+        Simple logic for now (will improve with solicited OBD2 torque data):
+        - BATT → WHEELS: Battery power > 2kW (discharging)
+        - WHEELS → BATT: Battery power < -2kW AND speed > 0 (regen)
+        - ICE → BATT: ICE running AND battery power < -2kW (charging)
+        - ICE → WHEELS: ICE running AND speed > 0 (driving)
+        
+        Args:
+            ice_power_kw: ICE power output (positive = producing power)
+            mg_power_kw: MG power (positive = motor, negative = generator/charging)
+            brake_regen_kw: Brake regen power (positive value)
+            ice_running: Whether ICE is running
+            speed_kmh: Vehicle speed
+        """
+        # Reset all flows
+        self._ice_to_battery = 0.0
+        self._battery_to_wheels = 0.0
+        self._wheels_to_battery = 0.0
+        self._ice_to_wheels = 0.0
+        
+        # BATT → WHEELS: Battery discharging > 1.5kW
+        if mg_power_kw > 1.5:
+            self._battery_to_wheels = min(1.0, mg_power_kw / 20.0)
+        
+        # WHEELS → BATT: Regenerative braking (power < -1.5kW AND moving)
+        if mg_power_kw < -1.5 and speed_kmh > 1.0:
+            self._wheels_to_battery = min(1.0, abs(mg_power_kw) / 20.0)
+        
+        # ICE → BATT: ICE charging battery (power < -1.5kW while ICE running)
+        # BUT: If WHEELS → BATT is active, prioritize showing regen instead
+        if ice_running and mg_power_kw < -1.5 and self._wheels_to_battery < 0.05:
+            self._ice_to_battery = min(1.0, abs(mg_power_kw) / 20.0)
+        
+        # ICE → WHEELS: ICE running and moving
+        if ice_running and speed_kmh > 1.0:
+            # Show flow proportional to speed/load (approximate)
+            self._ice_to_wheels = min(1.0, speed_kmh / 100.0)
+    
+    def tick(self) -> None:
+        """Advance animation frame."""
+        # Use larger cycle for smoother animation (240 = ~4 seconds at 60fps)
+        self._anim_phase = (self._anim_phase + 1) % 240
+    
+    def render(self) -> None:
+        """Render power flow diagram to framebuffer."""
+        # Clear region
+        for y in range(self.REGION_HEIGHT):
+            for x in range(self.REGION_X, self.REGION_X + self.REGION_WIDTH):
+                self.fb.set_pixel(x, y, False)
+        
+        # Advance animation
+        self.tick()
+        
+        # Triangle layout:
+        #       ICE (top center)
+        #      /   \
+        #   BAT     MG (bottom corners)
+        
+        cx = self.REGION_X + self.REGION_WIDTH // 2
+        
+        # Node positions (triangle)
+        ice_x = cx
+        ice_y = 10
+        
+        battery_x = self.REGION_X + 16
+        battery_y = 38
+        
+        mg_x = self.REGION_X + self.REGION_WIDTH - 16
+        mg_y = 38
+        
+        # Draw nodes with icons
+        self._draw_icon_node(ice_x, ice_y, ICON_ENGINE)
+        self._draw_icon_node(battery_x, battery_y, ICON_BATTERY)
+        self._draw_icon_node(mg_x, mg_y, ICON_WHEEL)
+        
+        # Draw flow arrows (triangle edges)
+        # ICE → Battery (left diagonal down)
+        if self._ice_to_battery > 0.05:
+            self._draw_flow_arrow(ice_x - 3, ice_y + 5, battery_x + 3, battery_y - 3, 
+                                 self._ice_to_battery)
+        
+        # Battery → Wheels (horizontal right)
+        if self._battery_to_wheels > 0.05:
+            self._draw_flow_arrow(battery_x + 5, battery_y, mg_x - 5, mg_y, 
+                                 self._battery_to_wheels)
+        
+        # Wheels → Battery (regen, horizontal left)
+        if self._wheels_to_battery > 0.05:
+            self._draw_flow_arrow(mg_x - 5, mg_y, battery_x + 5, battery_y, 
+                                 self._wheels_to_battery)
+        
+        # ICE → Wheels (right diagonal down)
+        if self._ice_to_wheels > 0.05:
+            self._draw_flow_arrow(ice_x + 3, ice_y + 5, mg_x - 3, mg_y - 3, 
+                                 self._ice_to_wheels)
+    
+    def _draw_icon_node(self, cx: int, cy: int, icon: List[List[int]]) -> None:
+        """Draw a node using an icon centered at position."""
+        icon_h = len(icon)
+        icon_w = len(icon[0]) if icon else 0
+        
+        # Center the icon
+        x = cx - icon_w // 2
+        y = cy - icon_h // 2
+        
+        # Draw icon
+        for row_idx, row in enumerate(icon):
+            for col_idx, pixel in enumerate(row):
+                if pixel:
+                    self.fb.set_pixel(x + col_idx, y + row_idx, True)
+    
+    def _draw_flow_arrow(self, x0: int, y0: int, x1: int, y1: int, intensity: float) -> None:
+        """
+        Draw animated triangles showing power flow.
+        
+        Args:
+            x0, y0: Start position
+            x1, y1: End position
+            intensity: 0.0-1.0 (affects number of triangles)
+        """
+        # Calculate line length and direction
+        dx = x1 - x0
+        dy = y1 - y0
+        length = int((dx**2 + dy**2)**0.5)
+        
+        if length == 0:
+            return
+        
+        # Normalize direction
+        ndx = dx / length
+        ndy = dy / length
+        
+        # Determine triangle orientation based on flow direction
+        # Calculate angle to determine which direction triangle points
+        is_horizontal = abs(dx) > abs(dy)
+        is_right = dx > 0
+        is_down = dy > 0
+        
+        # Draw animated chevrons - evenly spaced (3 visible at once)
+        triangle_spacing = 14  # For ~40px path, this gives 3 chevrons
+        # Calculate how many fit on the path
+        num_triangles = max(3, int(length / triangle_spacing))
+        
+        for i in range(num_triangles):
+            # Calculate position along line with animation offset
+            # Use modulo to ensure even spacing and prevent clustering
+            offset = (i * triangle_spacing + self._anim_phase / 1.5) % length
+            t = offset / length
+            
+            tri_x = int(x0 + dx * t)
+            tri_y = int(y0 + dy * t)
+            
+            # Draw chevron (< or >) pointing in flow direction
+            self._draw_chevron(tri_x, tri_y, is_horizontal, is_right, is_down)
+    
+    def _draw_chevron(self, x: int, y: int, is_horizontal: bool, is_right: bool, is_down: bool) -> None:
+        """Draw a chevron (< or >) pointing in the flow direction."""
+        
+        if is_horizontal:
+            if is_right:
+                # Right-pointing chevron: >
+                self.fb.set_pixel(x, y, True)
+                self.fb.set_pixel(x - 1, y - 1, True)
+                self.fb.set_pixel(x - 1, y + 1, True)
+            else:
+                # Left-pointing chevron: <
+                self.fb.set_pixel(x, y, True)
+                self.fb.set_pixel(x + 1, y - 1, True)
+                self.fb.set_pixel(x + 1, y + 1, True)
+        else:
+            if is_down:
+                # Down-pointing chevron: v
+                self.fb.set_pixel(x, y, True)
+                self.fb.set_pixel(x - 1, y - 1, True)
+                self.fb.set_pixel(x + 1, y - 1, True)
+            else:
+                # Up-pointing chevron: ^
+                self.fb.set_pixel(x, y, True)
+                self.fb.set_pixel(x - 1, y + 1, True)
+                self.fb.set_pixel(x + 1, y + 1, True)
+
+
+# ==============================================================================
 # VFD Fuel Gauge - Dual fuel level display with active indicator
 # ==============================================================================
 
@@ -284,13 +510,13 @@ class VFDFuelGauge:
     """
     Fuel gauge for VFD display - Horizontal layout.
     
-    Uses the first quarter of the display (0-63, 64x48 pixels).
+    Uses the second quarter of the display (64-127, 64x48 pixels).
     Layout:
-    - Top: 3 vertical bars side-by-side (Petrol, Battery, LPG)
-    - Bottom: 3 indicators horizontally (PTR, BTT, LPG)
+    - Top: 3 vertical bars side-by-side (Petrol, LPG, Battery)
+    - Bottom: 3 indicators horizontally (PTR, LPG, BTT)
     """
     
-    # Display region - first 1/4 of VFD (leftmost)
+    # Display region - first 1/4 of VFD (leftmost, x: 0-63)
     REGION_X = 0
     REGION_WIDTH = 64
     REGION_HEIGHT = 48
@@ -337,7 +563,7 @@ class VFDFuelGauge:
                 self.fb.set_pixel(x, y, False)
         
         # Layout: 64px wide, 48px tall
-        # Bottom 9px for indicators: PTR BTT LPG
+        # Bottom 9px for indicators: PTR LPG BTT
         # Top 39px for bars (reaching y=0 at top)
         
         indicator_height = 9  # 5px text + 4px padding
@@ -349,20 +575,20 @@ class VFDFuelGauge:
         bar_gap = 2
         bar_y = 0  # Start at y=0 (top)
         
-        # Bar positions
+        # Bar positions (order: Petrol, LPG, Battery)
         petrol_bar_x = self.REGION_X + 2
-        battery_bar_x = petrol_bar_x + bar_width + bar_gap
-        lpg_bar_x = battery_bar_x + bar_width + bar_gap
+        lpg_bar_x = petrol_bar_x + bar_width + bar_gap
+        battery_bar_x = lpg_bar_x + bar_width + bar_gap
         
-        # Render 3 vertical bars
+        # Render 3 vertical bars (PTR, LPG, BTT order)
         self._render_fuel_bar(petrol_bar_x, bar_y, bar_width, bar_height, 
                              self._petrol_level, self._petrol_max)
         
-        # Battery bar - use Prius-style 6-bar visualization (0.4-0.8 range mapped to 6 bars)
-        self._render_battery_bar(battery_bar_x, bar_y, bar_width, bar_height, self._battery_soc)
-        
         self._render_fuel_bar(lpg_bar_x, bar_y, bar_width, bar_height,
                              self._lpg_level, self._lpg_max)
+        
+        # Battery bar - authentic Prius Gen 2 8-bar display
+        self._render_battery_bar(battery_bar_x, bar_y, bar_width, bar_height, self._battery_soc)
         
         # Render 3 horizontal indicators at bottom
         self._render_indicators(indicator_y)
@@ -371,16 +597,14 @@ class VFDFuelGauge:
         """
         Render a vertical fuel level bar with quantized segments.
         
-        For h=39 (bar height):
-        - Frame: 1px
-        - Inner: 37px
-        - 6 segments: margin(2) + [seg(5) + gap(1)]*5 + seg(5) + margin(2) = 2 + 30 + 5 + 2 = 39 (perfect)
+        Pixel-perfect layout for h=39 (bar height), 8 segments, no frame:
+        - Total: 39px (no frame, no margins)
+        - Pattern: [seg(4) + gap(1)]×7 + seg(4)
+        - Calculation: (4+1)×7 + 4 = 35 + 4 = 39px ✓
+        - Full width used for segments (w=19px)
         """
-        # Draw outer frame
-        self.fb.draw_rect(x, y, w, h, True)
-        
-        # Calculate segments (6 segments for fuel)
-        num_segments = 6
+        # Calculate segments (8 segments to match original Prius display)
+        num_segments = 8
         if max_level > 0:
             fill_ratio = min(1.0, max(0.0, level / max_level))
         else:
@@ -388,19 +612,18 @@ class VFDFuelGauge:
         
         filled_segments = int(fill_ratio * num_segments + 0.5)  # Round to nearest
         
-        # Inner dimensions
-        inner_x = x + 2  # 1px frame + 1px margin
-        inner_w = w - 4
+        # Use full width (no frame)
+        inner_x = x + 1  # 1px margin
+        inner_w = w - 2  # 1px margin on each side
         
-        # Segment layout: h=39, inner=37
-        # Pattern: margin(2) + [seg(5) + gap(1)]*5 + seg(5) + margin(2) = 2 + 30 + 5 + 2 = 39
-        segment_h = 5
+        # Segment layout for 8 segments: h=39, no margins
+        # Pattern: [seg(4) + gap(1)]×7 + seg(4) = 39
+        segment_h = 4
         segment_gap = 1
-        top_margin = 2
         
         # Draw segments from bottom to top
         for i in range(num_segments):
-            seg_y = y + h - top_margin - (i + 1) * segment_h - i * segment_gap
+            seg_y = y + h - (i + 1) * segment_h - i * segment_gap
             
             if i < filled_segments:
                 for py in range(seg_y, seg_y + segment_h):
@@ -409,39 +632,50 @@ class VFDFuelGauge:
     
     def _render_battery_bar(self, x: int, y: int, w: int, h: int, soc: float) -> None:
         """
-        Render battery bar with Prius-style SOC display.
+        Render battery bar with authentic Prius Gen 2 SOC display (8 bars).
         
-        Prius shows 6 bars representing the usable range (typically 0.4-0.8 SOC).
-        Map 0.4-0.8 range to 6 bars (each bar = ~6.7% of total capacity).
+        Prius Gen 2 MFD shows 8 bars with non-linear mapping:
+        - 8 bars: >75% SOC (Green, rare - after long downhill)
+        - 7 bars: ~70% SOC (Green, full EV assist ready)
+        - 6 bars: ~60% SOC (Blue, Target SOC - optimal state)
+        - 5 bars: ~55% SOC (Blue, normal operation)
+        - 4 bars: ~50% SOC (Blue, ICE stays on more in traffic)
+        - 3 bars: ~45% SOC (Blue, limited EV mode)
+        - 2 bars: ~40% SOC (Purple/Pink, forced charging)
+        - 1 bar: <35% SOC (Purple/Pink, critical state)
         """
-        # Draw outer frame
-        self.fb.draw_rect(x, y, w, h, True)
-        
-        # Prius-style: map 0.4-0.8 SOC to 6 bars
-        # Below 0.4 = 0 bars, above 0.8 = 6 bars
-        usable_min = 0.4
-        usable_max = 0.8
-        
-        if soc <= usable_min:
-            usable_ratio = 0.0
-        elif soc >= usable_max:
-            usable_ratio = 1.0
+        # Authentic Prius Gen 2 mapping (8 bars)
+        # Map SOC percentage to number of bars
+        if soc >= 0.75:
+            filled_segments = 8
+        elif soc >= 0.70:
+            filled_segments = 7
+        elif soc >= 0.60:
+            filled_segments = 6
+        elif soc >= 0.55:
+            filled_segments = 5
+        elif soc >= 0.50:
+            filled_segments = 4
+        elif soc >= 0.45:
+            filled_segments = 3
+        elif soc >= 0.40:
+            filled_segments = 2
+        elif soc >= 0.35:
+            filled_segments = 1
         else:
-            usable_ratio = (soc - usable_min) / (usable_max - usable_min)
+            filled_segments = 0
         
-        num_segments = 6
-        filled_segments = int(usable_ratio * num_segments + 0.5)
+        num_segments = 8
         
-        # Same layout as fuel bars
-        inner_x = x + 2
-        inner_w = w - 4
-        segment_h = 5
+        # Use full width (no frame)
+        inner_x = x + 1
+        inner_w = w - 2
+        segment_h = 4
         segment_gap = 1
-        top_margin = 2
         
         # Draw segments from bottom to top
         for i in range(num_segments):
-            seg_y = y + h - top_margin - (i + 1) * segment_h - i * segment_gap
+            seg_y = y + h - (i + 1) * segment_h - i * segment_gap
             
             if i < filled_segments:
                 for py in range(seg_y, seg_y + segment_h):
@@ -449,7 +683,7 @@ class VFDFuelGauge:
                         self.fb.set_pixel(px, py, True)
     
     def _render_indicators(self, y: int) -> None:
-        """Render three indicators horizontally at bottom: PTR BTT LPG."""
+        """Render three indicators horizontally at bottom: PTR LPG BTT."""
         # 3 indicators, each ~19px wide (matching bar width)
         # Text is 3 chars = 11px, centered in 19px
         
@@ -458,8 +692,8 @@ class VFDFuelGauge:
         
         indicators = [
             ("PTR", self.REGION_X + 2, self._active_fuel == "PETROL"),
-            ("BTT", self.REGION_X + 2 + bar_width + bar_gap, self._active_fuel == "BATTERY"),  # Battery never active
-            ("LPG", self.REGION_X + 2 + 2 * (bar_width + bar_gap), self._active_fuel == "LPG"),
+            ("LPG", self.REGION_X + 2 + bar_width + bar_gap, self._active_fuel == "LPG"),
+            ("BTT", self.REGION_X + 2 + 2 * (bar_width + bar_gap), False),  # Battery never active
         ]
         
         for text, base_x, is_active in indicators:
@@ -506,7 +740,7 @@ class VFDEnergyMonitor:
     """
     
     # Display region - power chart uses 1/4 of VFD (64 pixels)
-    # Chart: x=128-191, Power bars: x=192-255
+    # Power flow: x=64-127, Chart: x=128-191, Power bars: x=192-255
     REGION_X = 128
     REGION_WIDTH = 64  # 1/4 of VFD width (128 to 191)
     REGION_HEIGHT = 48
@@ -910,11 +1144,12 @@ class VFDPowerBars:
         if brake_pressure > 5:  # Some threshold to avoid noise
             # Braking takes priority - show negative
             self._fuel_brake_target = -min(1.0, brake_pressure / max_brake)
-        elif ice_running and fuel_flow_rate > 0.1:  # ICE must be running for positive fuel
-            # Fuel consumption - show positive only when ICE is running
+        elif ice_running and fuel_flow_rate > 0.05:
+            # ICE must be running to show fuel consumption
+            # Threshold 0.05 L/h to filter noise
             self._fuel_brake_target = min(1.0, fuel_flow_rate / max_fuel_flow)
         else:
-            # ICE off or N/A fuel reading - cannot show positive value
+            # ICE off or no significant fuel flow
             self._fuel_brake_target = 0.0
     
     def tick(self) -> None:
@@ -1049,6 +1284,9 @@ class VFDDisplayWidget(Widget):
         # Create framebuffer
         self.framebuffer = VFDFramebuffer(VFD_WIDTH, VFD_HEIGHT)
         
+        # Create power flow diagram (first quarter, x=0-63)
+        self.power_flow = VFDPowerFlow(self.framebuffer)
+        
         # Create fuel gauge (second quarter, x=64-127)
         self.fuel_gauge = VFDFuelGauge(self.framebuffer)
         
@@ -1071,14 +1309,22 @@ class VFDDisplayWidget(Widget):
         ice_load_percent: float,
         fuel_flow_rate: float = 0.0,
         brake_pressure: int = 0,
-        ice_running: bool = False
+        ice_running: bool = False,
+        speed_kmh: float = 0.0
     ) -> None:
-        """Update energy monitor and power bars data."""
+        """Update energy monitor, power bars, and power flow diagram."""
         # Update history graph (pass ice_running for ICE indicator line)
         self.energy_monitor.update(mg_power_kw, ice_rpm, ice_load_percent, ice_running)
         
         # Update power bars (pass ice_running for fuel display logic)
         self.power_bars.update(mg_power_kw, fuel_flow_rate, brake_pressure, ice_running)
+        
+        # Update power flow diagram
+        # Estimate ICE power from fuel flow: ~2.5 kW per L/h (rough estimate)
+        ice_power_kw = fuel_flow_rate * 2.5 if fuel_flow_rate > 0 else 0.0
+        # Estimate brake regen from brake pressure
+        brake_regen_kw = (brake_pressure / 127.0) * 15.0 if brake_pressure > 5 else 0.0
+        self.power_flow.update(ice_power_kw, mg_power_kw, brake_regen_kw, ice_running, speed_kmh)
     
     def update_fuel(
         self,
@@ -1103,6 +1349,9 @@ class VFDDisplayWidget(Widget):
             (VFD_HEIGHT + self.FRAME_WIDTH * 2 - 2) * self.scale
         )
         pygame.draw.rect(self._surface, self.COLOR_FRAME_INNER, inner_rect)
+        
+        # Render power flow diagram to framebuffer
+        self.power_flow.render()
         
         # Render fuel gauge to framebuffer
         self.fuel_gauge.render()

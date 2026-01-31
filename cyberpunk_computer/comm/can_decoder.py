@@ -303,10 +303,15 @@ class CANDecoder:
             msg.values["flow_byte_6"] = data[6]
 
         # 0x520: Fuel Consumption
-        # Bytes 0-1: Fuel Injector Time
-        elif can_id == 0x520 and len(data) >= 2:
+        # Byte 0: Constant (0xA4 = 164) - status/multiplexer
+        # Byte 1: Page/multiplier (0-4 observed) - slow incrementing
+        # Byte 2: Primary value (0-255) - rapidly varying
+        # Interpretation: (Byte1 * 256) + Byte2 gives total injector time
+        # Range observed: 0 (off) to ~1200 (high load)
+        elif can_id == 0x520 and len(data) >= 3:
             msg.msg_type = CANMessageType.FUEL_CONSUMPTION
-            injector_time = (data[0] << 8) | data[1]
+            # Standard Big Endian with Byte 1 as multiplier
+            injector_time = (data[1] * 256) + data[2]
             msg.values["injector_time"] = injector_time
 
 

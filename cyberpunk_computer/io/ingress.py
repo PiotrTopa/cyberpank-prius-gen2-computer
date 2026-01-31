@@ -368,6 +368,19 @@ class IngressController:
                     source=ActionSource.GATEWAY
                 ))
         
+        # Capture debug bytes for manual correlation
+        # 0x110→0x490: MFD status/flow arrows (8 bytes)
+        # 0xA00→0x258: SOC/energy broadcast (32 bytes)
+        if (msg.master_addr == 0x110 and msg.slave_addr == 0x490) or \
+           (msg.master_addr == 0xA00 and msg.slave_addr == 0x258):
+            from ..state.actions import AVCDebugBytesAction
+            actions.append(AVCDebugBytesAction(
+                master_addr=msg.master_addr,
+                slave_addr=msg.slave_addr,
+                data=list(data),
+                source=ActionSource.GATEWAY
+            ))
+        
         return actions
     
     # ─────────────────────────────────────────────────────────────────────────
@@ -441,11 +454,25 @@ class IngressController:
         # Fuel Consumption (0x520)
         elif msg.msg_type == CANMessageType.FUEL_CONSUMPTION:
             injector_time = msg.values.get("injector_time", 0)
-            if injector_time > 0:
-                flow_rate = injector_time * 0.0001
-                actions.append(SetFuelFlowAction(flow_rate, ActionSource.GATEWAY))
+            # Prius Gen 2 1.5L 1NZ-FXE Engine Fuel Flow
+            # Based on observed data: 0x520 bytes 1-2 as 16-bit Big Endian
+            # - ICE off: 0
+            # - Idle (1000 RPM): ~200-400 → ~0.6-1.2 L/h
+            # - Light load: ~500-700 → ~2-3 L/h
+            # - Moderate: ~800-1000 → ~4-6 L/h
+            # - High load: ~1100-1200 → ~7-9 L/h
+            # - WOT: Can reach 20-30 L/h (off-scale for normal driving)
+            #
+            # Empirical scaling factor: 0.01 gives reasonable results
+            # Adjust threshold and multiplier based on real-world testing
+            if injector_time > 50:  # Filter noise
+                # Linear scaling with offset adjustment
+                # Typical: 200-1200 maps to ~0.6-9 L/h
+                flow_rate = injector_time * 0.008  # 1000 * 0.008 = 8 L/h
+                flow_rate = max(0.0, min(30.0, flow_rate))  # Clamp 0-30 L/h
             else:
-                actions.append(SetFuelFlowAction(0.0, ActionSource.GATEWAY))
+                flow_rate = 0.0
+            actions.append(SetFuelFlowAction(flow_rate, ActionSource.GATEWAY))
         
         # Vehicle Speed
         elif msg.msg_type == CANMessageType.VEHICLE_SPEED:

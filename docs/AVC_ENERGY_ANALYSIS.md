@@ -130,3 +130,84 @@ python -m cyberpunk_computer --replay assets/data/avc_lan.ndjson --dev --scale 1
 # Naciśnij 'A' aby włączyć tryb analizy
 # Naciśnij 'V' aby włączyć verbose logging
 ```
+
+## ✅ NOWE: Deep Correlation Analysis (Jan 2026)
+
+### Wyniki analizy full.ndjson (20 min nagrania z CAN+AVC-LAN)
+
+Dane wejściowe:
+- **88,065 CAN messages** (7,215 unique energy data points)
+- **2,614 AVC-LAN messages**
+- **63x** `0xA00→0x258` (32-byte packets)
+- **1,028x** `0x110→0x490` (MFD status messages)
+
+### SOC Encoding - 0xA00→0x258
+
+**Bytes z najlepszą korelacją z SOC (Battery %):**
+
+| Byte | Linear R | Change R | Unique Vals | Notes |
+|------|----------|----------|-------------|-------|
+| [23] | +0.58 | +0.58 | 4 | **MODERATE correlation** |
+| [25] | +0.53 | +0.50 | 3 | Moderate |
+| [24] | +0.49 | +0.58 | 4 | |
+| [17] | +0.44 | **+0.92** | 7 | **TRACKS CHANGES** |
+| [21] | -0.43 | **+0.83** | 6 | Tracks changes |
+| [26] | -0.28 | **+0.83** | 8 | Tracks changes |
+| [14] | -0.40 | **+0.67** | 4 | Tracks changes |
+
+**Wnioski SOC:**
+- **Byte[17]** - najlepszy kandydat (92% track changes, 7 unique values)
+- **Bytes[21,23,25,26]** - dodatkowe bity informacji o SOC
+- Prawdopodobnie SOC jest enkodowany w kilku bajtach (multi-byte format)
+- Wartości 0x00, 0x21, 0x24, 0x25 obserwowane dla SOC 49-61%
+
+### Battery Power Encoding - 0xA00→0x258
+
+**Bytes z korelacją z mocą baterii (kW):**
+
+| Byte | Linear R | Change R | Unique Vals | Notes |
+|------|----------|----------|-------------|-------|
+| [12] | +0.26 | +0.26 | 4 | Słaba korelacja |
+| [26] | +0.11 | **+0.49** | 14 | Tracks power changes |
+| [28] | -0.22 | +0.42 | 6 | |
+| [31] | -0.16 | +0.41 | 13 | |
+| [21] | -0.18 | +0.38 | 15 | |
+| [18] | +0.10 | **+0.45** | 9 | Tracks changes |
+
+**Wnioski Battery Power:**
+- Korelacje słabe (< 0.3 linear) - **brak jednoznacznego bajtu**
+- **Byte[26]** i **Byte[18]** śledzą zmiany mocy (45-49% change correlation)
+- Moc może być enkodowana w złożonym formacie (signed, scaled, multi-byte)
+- Potrzeba więcej danych z większym zakresem mocy (-20 kW do +20 kW)
+
+### 0x110→0x490 (MFD Status)
+
+Brak silnych korelacji:
+- SOC: max R = 0.12 (brak użytecznej informacji)
+- Power: max R = 0.05 (brak użytecznej informacji)
+
+**Wniosek:** `0x110→0x490` **NIE zawiera** surowych danych energetycznych.
+Prawdopodobnie zawiera komendy/statusy MFD, nie raw data.
+
+### Rekomendacje
+
+1. **`0xA00→0x258` jest głównym kandydatem** dla danych energetycznych
+   - Bytes 17, 21, 23-26 - potencjalny SOC cluster
+   - Bytes 12, 18, 26, 28, 31 - potencjalny Power cluster
+
+2. **Wymagane dalsze badania:**
+   - Nagranie z pełnym cyklem SOC (40% → 80%)
+   - Nagranie z ekstremalną mocą (full throttle, full regen)
+   - Test enkodowania: direct, BCD, scaled integer, signed 16-bit
+
+3. **Narzędzia do analizy:**
+```bash
+# Deep correlation analysis
+python -m cyberpunk_computer.comm.decode_avc_energy assets/data/full.ndjson
+
+# Pattern correlation
+python -m cyberpunk_computer.comm.correlate_energy assets/data/full.ndjson
+
+# ICE status tracking
+python -m cyberpunk_computer.comm.correlate_ice assets/data/full.ndjson
+```

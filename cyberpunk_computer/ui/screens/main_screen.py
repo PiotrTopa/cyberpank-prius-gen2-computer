@@ -117,6 +117,10 @@ class MainScreen(Screen):
         self._touch_display_duration = 1.0  # How long to show touch indicator
         self._button_display_duration = 2.0  # How long to show button text
         
+        # AVC-LAN byte debug display (for flow arrow correlation)
+        self._avc_110_490_bytes = [0] * 8  # Last 0x110→0x490 message bytes
+        self._avc_a00_258_bytes = [0] * 32  # Last 0xA00→0x258 message bytes (SOC/flow data)
+        
         # Create frames (order of creation doesn't affect focus order)
         self._create_left_panels()
         self._create_right_panels()
@@ -714,7 +718,8 @@ class MainScreen(Screen):
                 ice_load_percent,
                 fuel_flow,
                 brake_pressure,
-                ice_running
+                ice_running,
+                state.vehicle.speed_kmh
             )
             
             # Update fuel gauge
@@ -878,6 +883,62 @@ class MainScreen(Screen):
         sub_surf = font_small.render(subtitle, True, COLORS["text_secondary"])
         sub_x = center_x + (center_width - sub_surf.get_width()) // 2
         surface.blit(sub_surf, (sub_x, title_y + 20))
+    
+    def _render_avc_lan_debug(
+        self,
+        surface: pygame.Surface,
+        center_x: int,
+        center_width: int
+    ) -> None:
+        """
+        Render AVC-LAN byte values for manual correlation with driving state.
+        
+        Shows:
+        - 0x110→0x490 bytes (MFD status - flow arrows)
+        - 0xA00→0x258 bytes (SOC/energy data)
+        """
+        font_small = get_font(8, "mono")
+        font_label = get_font(9)
+        
+        # Position in top-right of center area
+        debug_x = center_x + center_width - 200
+        debug_y = 5
+        
+        # Draw semi-transparent background
+        bg_rect = pygame.Rect(debug_x - 5, debug_y - 2, 195, 58)
+        bg_surface = pygame.Surface((bg_rect.width, bg_rect.height), pygame.SRCALPHA)
+        bg_surface.fill((0, 0, 0, 180))
+        surface.blit(bg_surface, (bg_rect.x, bg_rect.y))
+        
+        # Title
+        title_surf = font_label.render("AVC-LAN DEBUG", True, COLORS["cyan_bright"])
+        surface.blit(title_surf, (debug_x, debug_y))
+        debug_y += 12
+        
+        # 0x110→0x490 (MFD Status - Flow Arrows)
+        label_surf = font_label.render("110→490:", True, COLORS["text_secondary"])
+        surface.blit(label_surf, (debug_x, debug_y))
+        
+        # Show bytes in hex
+        bytes_text = " ".join(f"{b:02X}" for b in self._avc_110_490_bytes)
+        bytes_surf = font_small.render(bytes_text, True, COLORS["green_bright"])
+        surface.blit(bytes_surf, (debug_x + 50, debug_y))
+        debug_y += 11
+        
+        # Highlight key discriminating bytes
+        key_bytes_text = f"[1]={self._avc_110_490_bytes[1]:02X} [2]={self._avc_110_490_bytes[2]:02X} [3]={self._avc_110_490_bytes[3]:02X} [5]={self._avc_110_490_bytes[5]:02X}"
+        key_surf = font_small.render(key_bytes_text, True, COLORS["yellow"])
+        surface.blit(key_surf, (debug_x + 50, debug_y))
+        debug_y += 13
+        
+        # 0xA00→0x258 (SOC/Energy) - show first 8 bytes
+        label_surf = font_label.render("A00→258:", True, COLORS["text_secondary"])
+        surface.blit(label_surf, (debug_x, debug_y))
+        
+        bytes_text = " ".join(f"{b:02X}" for b in self._avc_a00_258_bytes[:8])
+        bytes_surf = font_small.render(bytes_text, True, COLORS["green_bright"])
+        surface.blit(bytes_surf, (debug_x + 50, debug_y))
+        debug_y += 11
     
     def _render_avc_input_visualization(
         self, 

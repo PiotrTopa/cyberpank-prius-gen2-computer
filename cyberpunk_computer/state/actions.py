@@ -82,6 +82,7 @@ class ActionType(Enum):
     AVC_BUTTON_PRESS = auto()
     AVC_BUTTON_RELEASE = auto()
     AVC_TOUCH_EVENT = auto()
+    AVC_DEBUG_BYTES = auto()  # Raw AVC-LAN bytes for manual correlation
     
     # Debug/Analysis actions
     UPDATE_DEBUG_INFO = auto()
@@ -650,6 +651,33 @@ class AVCTouchEventAction(Action):
     def normalized_y(self) -> float:
         """Get Y as 0.0-1.0 value."""
         return self.y / 255.0
+
+
+@dataclass
+class AVCDebugBytesAction(Action):
+    """
+    Store raw AVC-LAN message bytes for debug visualization.
+    
+    Used for manual correlation between byte patterns and driving states.
+    Captures key messages:
+    - 0x110→0x490: MFD status/flow arrows (8 bytes)
+    - 0xA00→0x258: SOC/energy broadcast (32 bytes)
+    """
+    master_addr: int = 0
+    slave_addr: int = 0
+    data: List[int] = None
+    
+    def __init__(
+        self,
+        master_addr: int,
+        slave_addr: int,
+        data: List[int],
+        source: ActionSource = ActionSource.GATEWAY
+    ):
+        super().__init__(ActionType.AVC_DEBUG_BYTES, source)
+        self.master_addr = master_addr
+        self.slave_addr = slave_addr
+        self.data = data or []
 
 
 # ─────────────────────────────────────────────────────────────────────────────

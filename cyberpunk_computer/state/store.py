@@ -537,6 +537,29 @@ class Store:
             )
             affected.add(StateSlice.INPUT)
         
+        elif action.type == ActionType.AVC_DEBUG_BYTES:
+            from ..state.actions import AVCDebugBytesAction
+            a = action  # type: AVCDebugBytesAction
+            
+            # Update appropriate byte array based on message address
+            new_input = self._state.input
+            if a.master_addr == 0x110 and a.slave_addr == 0x490:
+                # MFD status/flow arrows
+                new_input = replace(
+                    new_input,
+                    last_avc_110_490_bytes=tuple(a.data[:8])
+                )
+            elif a.master_addr == 0xA00 and a.slave_addr == 0x258:
+                # SOC/energy broadcast
+                new_input = replace(
+                    new_input,
+                    last_avc_a00_258_bytes=tuple(a.data[:32])
+                )
+            
+            if new_input != self._state.input:
+                self._state = replace(self._state, input=new_input)
+                affected.add(StateSlice.INPUT)
+        
         # Display reducers
         elif action.type == ActionType.SET_POWER_CHART_TIME_BASE:
             a = action  # type: SetPowerChartTimeBaseAction

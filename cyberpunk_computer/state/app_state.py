@@ -252,6 +252,10 @@ class InputState:
     # Note: For immutable state, we track just the last few raw codes
     recent_buttons: tuple = ()  # Up to 5 recent button codes
     
+    # AVC-LAN debug bytes (for manual correlation)
+    last_avc_110_490_bytes: tuple = (0, 0, 0, 0, 0, 0, 0, 0)  # MFD status/flow arrows
+    last_avc_a00_258_bytes: tuple = tuple([0] * 32)  # SOC/energy broadcast
+    
     @property
     def touch_active(self) -> bool:
         """Check if touch is currently active (within last 500ms)."""
