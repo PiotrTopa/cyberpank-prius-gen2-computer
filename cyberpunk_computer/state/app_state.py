@@ -38,6 +38,13 @@ class GearPosition(Enum):
     B = auto()  # Engine braking mode
 
 
+class FuelType(Enum):
+    """Active fuel type."""
+    OFF = auto()
+    PETROL = auto()
+    LPG = auto()
+
+
 @dataclass(frozen=True)
 class AudioState:
     """
@@ -129,7 +136,9 @@ class VehicleState:
     # Pedals & Fuel
     throttle_position: int = 0    # 0-100% (approx) or raw 0-255
     brake_pressed: int = 0        # 0-127 (measure of pressure)
-    fuel_level: int = 0           # Liters (approx 0-45)
+    fuel_level: int = 30          # Petrol liters (approx 0-45) - default for testing
+    lpg_level: int = 45           # LPG liters (approx 0-60) - default for testing
+    active_fuel: FuelType = FuelType.OFF  # Currently active fuel type
     fuel_flow_rate: float = 0.0   # L/h
     
     # Consumption
@@ -251,6 +260,25 @@ class InputState:
 
 
 @dataclass(frozen=True)
+class DisplayState:
+    """
+    Display settings state.
+    
+    Controls VFD and other display-related settings.
+    """
+    # Power chart time base in seconds
+    # Options: 15, 60, 300, 900, 3600 (15s, 1m, 5m, 15m, 1h)
+    power_chart_time_base: int = 60
+    
+    def with_time_base(self, seconds: int) -> "DisplayState":
+        """Return new state with updated time base."""
+        valid_options = [15, 60, 300, 900, 3600]
+        if seconds in valid_options:
+            return replace(self, power_chart_time_base=seconds)
+        return self
+
+
+@dataclass(frozen=True)
 class AppState:
     """
     Complete application state.
@@ -266,6 +294,7 @@ class AppState:
     connection: ConnectionState = field(default_factory=ConnectionState)
     debug: DebugState = field(default_factory=DebugState)
     input: InputState = field(default_factory=InputState)
+    display: DisplayState = field(default_factory=DisplayState)
     
     # UI-only state (not from vehicle)
     screen_brightness: int = 100

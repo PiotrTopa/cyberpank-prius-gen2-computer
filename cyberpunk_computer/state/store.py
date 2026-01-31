@@ -15,7 +15,7 @@ from enum import Enum, auto
 
 from .app_state import (
     AppState, AudioState, ClimateState, VehicleState, 
-    EnergyState, ConnectionState, GearPosition, InputState
+    EnergyState, ConnectionState, GearPosition, InputState, DisplayState
 )
 from .actions import (
     Action, ActionType, ActionSource, BatchAction,
@@ -28,7 +28,8 @@ from .actions import (
     SetSpeedAction, SetRPMAction, SetICECoolantTempAction, SetInverterTempAction,
     SetBatteryVoltageAction, SetBatteryCurrentAction, SetBatteryTempAction,
     SetBatteryDeltaSOCAction,
-    UpdateDebugInfoAction, AVCButtonPressAction, AVCTouchEventAction
+    UpdateDebugInfoAction, AVCButtonPressAction, AVCTouchEventAction,
+    SetPowerChartTimeBaseAction
 )
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,7 @@ class StateSlice(Enum):
     CONNECTION = auto()
     DEBUG = auto()
     INPUT = auto()  # AVC button/touch input events
+    DISPLAY = auto()  # Display settings (power chart time base, etc.)
     ALL = auto()
 
 
@@ -378,6 +380,22 @@ class Store:
             )
             affected.add(StateSlice.VEHICLE)
 
+        elif action.type == ActionType.SET_LPG_LEVEL:
+            self._state = replace(
+                self._state,
+                vehicle=replace(self._state.vehicle, lpg_level=action.liters)
+            )
+            affected.add(StateSlice.VEHICLE)
+
+        elif action.type == ActionType.SET_ACTIVE_FUEL:
+            from .app_state import FuelType
+            fuel_type = FuelType[action.fuel_type] if action.fuel_type in FuelType.__members__ else FuelType.OFF
+            self._state = replace(
+                self._state,
+                vehicle=replace(self._state.vehicle, active_fuel=fuel_type)
+            )
+            affected.add(StateSlice.VEHICLE)
+
         elif action.type == ActionType.SET_FUEL_FLOW:
             self._state = replace(
                 self._state,
@@ -518,6 +536,15 @@ class Store:
                 )
             )
             affected.add(StateSlice.INPUT)
+        
+        # Display reducers
+        elif action.type == ActionType.SET_POWER_CHART_TIME_BASE:
+            a = action  # type: SetPowerChartTimeBaseAction
+            self._state = replace(
+                self._state,
+                display=self._state.display.with_time_base(a.time_base)
+            )
+            affected.add(StateSlice.DISPLAY)
         
         return affected
     

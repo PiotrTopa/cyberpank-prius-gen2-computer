@@ -10,6 +10,7 @@ from .audio_screen import AudioScreen
 from .climate_screen import ClimateScreen
 from .lights_screen import LightsScreen
 from .ambient_screen import AmbientScreen
+from .engine_screen import EngineScreen
 
 __all__ = [
     "Screen",
@@ -18,4 +19,5 @@ __all__ = [
     "ClimateScreen",
     "LightsScreen",
     "AmbientScreen",
+    "EngineScreen",
 ]

@@ -13,6 +13,7 @@ from .audio_screen import AudioScreen
 from .climate_screen import ClimateScreen
 from .lights_screen import LightsScreen
 from .ambient_screen import AmbientScreen
+from .engine_screen import EngineScreen
 from ..widgets.base import Rect
 from ..widgets.frame import Frame
 from ..widgets.controls import VolumeBar, ToggleSwitch, ValueDisplay, ModeIcon, StatusIcon
@@ -137,7 +138,7 @@ class MainScreen(Screen):
         self.focus_manager.add_widget(self._climate_frame)
         self.focus_manager.add_widget(self._ambient_frame)
         self.focus_manager.add_widget(self._lights_frame)
-        # Excluded: self.focus_manager.add_widget(self._vehicle_frame)
+        self.focus_manager.add_widget(self._vehicle_frame)
         # Excluded: self.focus_manager.add_widget(self._battery_frame)
         
         # Add pagination control to focus loop
@@ -208,7 +209,8 @@ class MainScreen(Screen):
         self._vehicle_frame = Frame(
             Rect(x, self.FRAME_HEIGHT * 2, self.SIDE_PANEL_WIDTH, self.FRAME_HEIGHT),
             title="ENGINE",
-            focusable=True
+            focusable=True,
+            on_action=self._on_engine_action
         )
         
         content = self._vehicle_frame.content_rect
@@ -527,6 +529,12 @@ class MainScreen(Screen):
             Rect(vfd_x, vfd_y, vfd_total_width, vfd_total_height),
             scale=vfd_scale
         )
+        
+        # Initialize VFD time base from state if available
+        if self._store:
+            time_base = self._store.state.display.power_chart_time_base
+            self._vfd_display.energy_monitor.set_time_base(time_base)
+        
         # Note: VFD widget is managed separately, not added to widget list
         # It's only rendered on page 1
 
@@ -708,6 +716,13 @@ class MainScreen(Screen):
                 brake_pressure,
                 ice_running
             )
+            
+            # Update fuel gauge
+            petrol_level = state.vehicle.fuel_level
+            lpg_level = state.vehicle.lpg_level
+            battery_soc = state.energy.battery_soc
+            active_fuel = state.vehicle.active_fuel  # Pass the enum directly
+            self._vfd_display.update_fuel(petrol_level, lpg_level, battery_soc, active_fuel)
         
         # Update AVC Input visualization (touch and button events)
         if hasattr(state, 'input'):
@@ -1243,3 +1258,20 @@ class MainScreen(Screen):
                 biled_brightness=settings.lights.biled_brightness
             )
             self.app.push_screen(lights_screen)
+    
+    def _on_engine_action(self) -> None:
+        """Handle engine frame action (open engine settings screen)."""
+        if not self.app:
+            return
+        
+        # Get current time base from state (default to 60s)
+        current_timebase = 60
+        if self._store:
+            current_timebase = self._store.state.display.power_chart_time_base
+        
+        engine_screen = EngineScreen(
+            (self.width, self.height),
+            self.app,
+            initial_timebase=current_timebase
+        )
+        self.app.push_screen(engine_screen)

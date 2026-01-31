@@ -51,6 +51,8 @@ class ActionType(Enum):
     SET_THROTTLE_POSITION = auto()
     SET_BRAKE_PRESSED = auto()
     SET_FUEL_LEVEL = auto()
+    SET_LPG_LEVEL = auto()
+    SET_ACTIVE_FUEL = auto()
     SET_FUEL_FLOW = auto() # Instant fuel flow rate (L/h)
     SET_INSTANT_CONSUMPTION = auto() # Calculated instant consumption
     
@@ -74,6 +76,7 @@ class ActionType(Enum):
     # UI actions
     SET_SCREEN_BRIGHTNESS = auto()
     SET_AMBIENT_COLOR = auto()
+    SET_POWER_CHART_TIME_BASE = auto()
     
     # AVC Input actions (buttons and touch)
     AVC_BUTTON_PRESS = auto()
@@ -338,6 +341,26 @@ class SetFuelLevelAction(Action):
     def __init__(self, liters: int, source: ActionSource = ActionSource.INTERNAL):
         super().__init__(ActionType.SET_FUEL_LEVEL, source)
         self.liters = liters
+
+
+@dataclass
+class SetLpgLevelAction(Action):
+    """Set LPG fuel level in liters."""
+    liters: int = 0
+    
+    def __init__(self, liters: int, source: ActionSource = ActionSource.INTERNAL):
+        super().__init__(ActionType.SET_LPG_LEVEL, source)
+        self.liters = liters
+
+
+@dataclass
+class SetActiveFuelAction(Action):
+    """Set active fuel type (OFF, PETROL, LPG)."""
+    fuel_type: str = "OFF"  # "OFF", "PETROL", "LPG"
+    
+    def __init__(self, fuel_type: str, source: ActionSource = ActionSource.INTERNAL):
+        super().__init__(ActionType.SET_ACTIVE_FUEL, source)
+        self.fuel_type = fuel_type.upper()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -627,6 +650,24 @@ class AVCTouchEventAction(Action):
     def normalized_y(self) -> float:
         """Get Y as 0.0-1.0 value."""
         return self.y / 255.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Display Actions
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class SetPowerChartTimeBaseAction(Action):
+    """
+    Set power chart time base.
+    
+    Valid options: 15, 60, 300, 900, 3600 seconds (15s, 1m, 5m, 15m, 1h)
+    """
+    time_base: int = 60
+    
+    def __init__(self, time_base: int, source: ActionSource = ActionSource.UI):
+        super().__init__(ActionType.SET_POWER_CHART_TIME_BASE, source)
+        self.time_base = time_base
 
 
 # ─────────────────────────────────────────────────────────────────────────────

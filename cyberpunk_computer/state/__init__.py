@@ -19,9 +19,11 @@ from .app_state import (
     VehicleState,
     EnergyState,
     ConnectionState,
+    DisplayState,
     AudioSource,
     ClimateMode,
     GearPosition,
+    FuelType,
 )
 from .store import Store, StateSlice
 from .actions import (
