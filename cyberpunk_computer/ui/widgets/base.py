@@ -34,6 +34,16 @@ class Rect:
     def center(self) -> Tuple[int, int]:
         """Get center point."""
         return (self.x + self.width // 2, self.y + self.height // 2)
+
+    @property
+    def centerx(self) -> int:
+        """Get center x coordinate."""
+        return self.x + self.width // 2
+
+    @property
+    def centery(self) -> int:
+        """Get center y coordinate."""
+        return self.y + self.height // 2
     
     @property
     def size(self) -> Tuple[int, int]:

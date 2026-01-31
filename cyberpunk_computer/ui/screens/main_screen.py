@@ -17,6 +17,8 @@ from ..widgets.base import Rect
 from ..widgets.frame import Frame
 from ..widgets.controls import VolumeBar, ToggleSwitch, ValueDisplay, ModeIcon, StatusIcon
 from ..widgets.vehicle_status import ConnectionIndicator
+from ..widgets.pagination import PaginationControl
+from ..widgets.vfd_display import VFDDisplayWidget, VFD_WIDTH, VFD_HEIGHT
 from ..colors import COLORS
 from ..fonts import get_font
 from ...persistence import get_settings, save_settings
@@ -98,6 +100,10 @@ class MainScreen(Screen):
         self._lights_frame = None
         self._climate_frame = None
         
+        # Pagination
+        self._current_page = 0
+        self._num_pages = 2
+        
         # Focus visibility tracking
         self._last_activity_time = time.time()
         
@@ -131,8 +137,12 @@ class MainScreen(Screen):
         self.focus_manager.add_widget(self._climate_frame)
         self.focus_manager.add_widget(self._ambient_frame)
         self.focus_manager.add_widget(self._lights_frame)
-        self.focus_manager.add_widget(self._vehicle_frame)
-        self.focus_manager.add_widget(self._battery_frame)
+        # Excluded: self.focus_manager.add_widget(self._vehicle_frame)
+        # Excluded: self.focus_manager.add_widget(self._battery_frame)
+        
+        # Add pagination control to focus loop
+        if hasattr(self, '_pagination_control'):
+            self.focus_manager.add_widget(self._pagination_control)
     
     def _create_left_panels(self) -> None:
         """Create left side panels (Audio, Ambient, Engine)."""
@@ -436,6 +446,13 @@ class MainScreen(Screen):
         
         self.add_widget(self._battery_frame)
     
+    def _update_center_widgets(self) -> None:
+        """Update center area widgets with current state."""
+        # Update connection indicator
+        if self._avc_bridge:
+             connected = self._avc_bridge.is_connected
+             self._connection_indicator.set_connected(connected)
+    
     def _create_center_area(self) -> None:
         """Create center area with connection indicator and status bar."""
         center_x = self.SIDE_PANEL_WIDTH
@@ -471,13 +488,62 @@ class MainScreen(Screen):
         )
         self.add_widget(self._gear_display)
         
-        # We could add more status icons here
+        # Center Content Area (Pages)
+        self._content_rect = Rect(center_x, 30, center_width, self.height - 30 - 30)
+        
+        # Initial pages labels
+        self._page_label = ValueDisplay(
+            Rect(self._content_rect.x, self._content_rect.centery - 15, self._content_rect.width, 30),
+            label="",
+            value="VFD ENERGY",  # Page 1 initial label
+            unit="",
+            compact=False,
+            value_size=20
+        )
+        self.add_widget(self._page_label)
+        
+        # Pagination Control
+        self._pagination_control = PaginationControl(
+            Rect(center_x + (center_width - 100) // 2, self.height - 25, 100, 20),
+            num_pages=self._num_pages,
+            current_page=self._current_page,
+            on_change=self._on_page_change
+        )
+        self.add_widget(self._pagination_control)
+        
+        # VFD Display Simulator (Page 1 content)
+        # Display dimensions: 256x48 with 3px frame
+        # Using scale=1 for now (native resolution)
+        vfd_scale = 1
+        vfd_frame_width = 3
+        vfd_total_width = (VFD_WIDTH + vfd_frame_width * 2) * vfd_scale
+        vfd_total_height = (VFD_HEIGHT + vfd_frame_width * 2) * vfd_scale
+        
+        # Position centered in the content area
+        vfd_x = center_x + (center_width - vfd_total_width) // 2
+        vfd_y = self._content_rect.y + (self._content_rect.height - vfd_total_height) // 2
+        
+        self._vfd_display = VFDDisplayWidget(
+            Rect(vfd_x, vfd_y, vfd_total_width, vfd_total_height),
+            scale=vfd_scale
+        )
+        # Note: VFD widget is managed separately, not added to widget list
+        # It's only rendered on page 1
 
-    
-    def _update_center_widgets(self) -> None:
-        """Update center area widgets with current state."""
-        # Center area is empty for now - connection indicator updates itself
-        pass
+    def _on_page_change(self, page_index: int) -> None:
+        """Handle page change."""
+        self._current_page = page_index
+        # Verify page index valid (though control handles it)
+        self._current_page = max(0, min(self._current_page, self._num_pages - 1))
+        
+        # Update content based on page
+        if self._current_page == 0:
+            self._page_label.set_value("VFD ENERGY")
+        elif self._current_page == 1:
+            self._page_label.set_value("PAGE 2")
+            
+        # Page visibility is handled in render()
+
     
     def set_avc_bridge(self, bridge) -> None:
         """
@@ -609,6 +675,40 @@ class MainScreen(Screen):
         if hasattr(self, '_connection_indicator') and self._connection_indicator:
             self._connection_indicator.set_connected(state.connection.connected)
         
+        # Update VFD Energy Monitor
+        if hasattr(self, '_vfd_display') and self._vfd_display:
+            # Calculate MG power from battery data (positive = assist, negative = regen)
+            mg_power_kw = state.energy.battery_power_kw or 0.0
+            # Invert sign: positive battery current = discharge = MG assist
+            # So battery_power_kw > 0 means MG is consuming power (assist)
+            
+            # Get ICE data
+            ice_rpm = state.vehicle.rpm or 0
+            ice_running = state.vehicle.ice_running if hasattr(state.vehicle, 'ice_running') else False
+            
+            # Estimate ICE load from fuel consumption
+            # Rough estimate: idle ~0.5 L/h, max load ~8 L/h for Prius 1.5L
+            fuel_flow = state.vehicle.fuel_flow_rate if hasattr(state.vehicle, 'fuel_flow_rate') else 0.0
+            if fuel_flow > 0:
+                ice_load_percent = min(100.0, (fuel_flow / 8.0) * 100.0)
+            elif ice_rpm > 0:
+                # Fallback: estimate from RPM (idle 1000, redline ~5000)
+                ice_load_percent = min(100.0, (ice_rpm / 4500.0) * 100.0)
+            else:
+                ice_load_percent = 0.0
+            
+            # Get brake pressure
+            brake_pressure = state.vehicle.brake_pressed if hasattr(state.vehicle, 'brake_pressed') else 0
+            
+            self._vfd_display.update_energy(
+                mg_power_kw, 
+                ice_rpm, 
+                ice_load_percent,
+                fuel_flow,
+                brake_pressure,
+                ice_running
+            )
+        
         # Update AVC Input visualization (touch and button events)
         if hasattr(state, 'input'):
             if state.input.last_touch_time > self._last_touch_time:
@@ -732,6 +832,24 @@ class MainScreen(Screen):
             1
         )
         
+        # Render page-specific content
+        if self._current_page == 0:
+            # Page 1: VFD Energy Monitor
+            self._render_vfd_page(surface, center_x, center_width)
+        else:
+            # Page 2+: Default placeholder
+            self._render_default_page(surface, center_x, center_width)
+        
+        # Render AVC Input visualization (touch and button events)
+        self._render_avc_input_visualization(surface, center_x, center_width)
+    
+    def _render_vfd_page(self, surface: pygame.Surface, center_x: int, center_width: int) -> None:
+        """Render Page 1: VFD Energy Monitor."""
+        if hasattr(self, '_vfd_display') and self._vfd_display:
+            self._vfd_display.render(surface)
+    
+    def _render_default_page(self, surface: pygame.Surface, center_x: int, center_width: int) -> None:
+        """Render default page with logo placeholder."""
         # Center logo/title (placeholder)
         font = get_font(16, "title")
         title = "CYBERPUNK"
@@ -745,9 +863,6 @@ class MainScreen(Screen):
         sub_surf = font_small.render(subtitle, True, COLORS["text_secondary"])
         sub_x = center_x + (center_width - sub_surf.get_width()) // 2
         surface.blit(sub_surf, (sub_x, title_y + 20))
-        
-        # Render AVC Input visualization (touch and button events)
-        self._render_avc_input_visualization(surface, center_x, center_width)
     
     def _render_avc_input_visualization(
         self, 

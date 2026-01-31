@@ -6,7 +6,7 @@
     "brightness": 80
   },
   "lights": {
-    "mode": "AUTO",
+    "mode": "OFF",
     "biled_mode": "OFF",
     "biled_brightness": 100,
     "drl_enabled": true

@@ -98,17 +98,18 @@ class Screen:
         """
         from ...input.manager import InputEvent as IE
         
-        # Navigation events are handled by focus manager
+        # Try focused widget first (allows widgets to consume navigation when active)
+        focused = self.focus_manager.focused_widget
+        if focused:
+            if focused.handle_input(event):
+                return True
+
+        # Navigation events are handled by focus manager if not consumed
         if event == IE.ROTATE_LEFT:
             self.focus_manager.prev()
             return True
         elif event == IE.ROTATE_RIGHT:
             self.focus_manager.next()
             return True
-        
-        # Other events go to focused widget
-        focused = self.focus_manager.focused_widget
-        if focused:
-            return focused.handle_input(event)
         
         return False
