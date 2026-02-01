@@ -9,12 +9,11 @@ from .frame import Frame
 from .controls import VolumeBar, ToggleSwitch, ValueDisplay, ModeIcon, StatusIcon
 from .energy_monitor import EnergyMonitorWidget, MiniEnergyMonitor
 from .vehicle_status import VehicleStatusWidget, ConnectionIndicator
-from .vfd_display import VFDDisplayWidget, VFDFramebuffer, VFDEnergyMonitor
+# VFD widget moved to separate satellite app - see vfd_satellite/
 
 __all__ = [
     "Widget", "Rect", "Frame",
     "VolumeBar", "ToggleSwitch", "ValueDisplay", "ModeIcon", "StatusIcon",
     "EnergyMonitorWidget", "MiniEnergyMonitor",
     "VehicleStatusWidget", "ConnectionIndicator",
-    "VFDDisplayWidget", "VFDFramebuffer", "VFDEnergyMonitor"
 ]

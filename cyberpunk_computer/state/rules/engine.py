@@ -297,6 +297,8 @@ class RulesEngine:
                 StateSlice.VEHICLE,
                 StateSlice.ENERGY,
                 StateSlice.CONNECTION,
+                StateSlice.DISPLAY,
+                StateSlice.VFD_SATELLITE,
             }
         
         changed: Set[StateSlice] = set()
@@ -315,6 +317,10 @@ class RulesEngine:
             changed.add(StateSlice.DEBUG)
         if old_state.input != new_state.input:
             changed.add(StateSlice.INPUT)
+        if old_state.display != new_state.display:
+            changed.add(StateSlice.DISPLAY)
+        if old_state.vfd_satellite != new_state.vfd_satellite:
+            changed.add(StateSlice.VFD_SATELLITE)
         
         return changed
 

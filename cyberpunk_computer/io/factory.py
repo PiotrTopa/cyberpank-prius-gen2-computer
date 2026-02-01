@@ -6,27 +6,30 @@ instances of all Virtual Twin components based on the execution mode.
 
 Modes:
 - Production: Serial IO to RP2040 Gateway
-- Development: File replay + console logging
+- Development: File replay + console logging + UDP to satellites
 - Test: Mock IO for unit tests
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Optional
+from typing import Optional, List, Tuple
 
 from .ports import InputPort, OutputPort
 from .file_io import FileInputPort
 from .serial_io import SerialPort, SerialConfig
 from .mock_io import MockInputPort, MockOutputPort, LogOutputPort
+from .udp_output import UDPOutputPort, MultiOutputPort
 from .ingress import IngressController
 from .egress import EgressController
+from .vfd_output import register_vfd_handlers
 
 from ..state.store import Store
 from ..state.rules import RulesEngine
 from ..state.rules.park_speed import ParkSpeedRule
 from ..state.rules.fuel_consumption import FuelConsumptionRule
 from ..state.rules.active_fuel import ActiveFuelRule
+from ..state.rules.vfd_display import VFDDisplayRule
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +54,11 @@ class VirtualTwinConfig:
     replay_file: Optional[str] = None
     playback_speed: float = 1.0
     playback_loop: bool = False
+    
+    # UDP satellite config (development mode)
+    enable_vfd_satellite: bool = True
+    vfd_udp_host: str = "localhost"
+    vfd_udp_port: int = 5110
     
     # Logging
     verbose: bool = False
@@ -119,11 +127,20 @@ def create_virtual_twin(config: VirtualTwinConfig) -> VirtualTwin:
     ingress = IngressController(store, input_port)
     egress = EgressController(store, output_port)
     
-    # Create rules engine
+    # Create rules engine with core rules
     rules_engine = RulesEngine(store)
     rules_engine.register(ParkSpeedRule())
     rules_engine.register(FuelConsumptionRule())
     rules_engine.register(ActiveFuelRule())
+    
+    # Register VFD satellite support
+    if config.enable_vfd_satellite:
+        # Add VFD display rule (computes VFD state from vehicle state)
+        rules_engine.register(VFDDisplayRule())
+        
+        # Register VFD output handlers (sends VFD state to satellite)
+        register_vfd_handlers(egress)
+        logger.info("VFD satellite support enabled")
     
     # Set up logging if enabled
     if config.log_commands:
@@ -141,20 +158,50 @@ def create_virtual_twin(config: VirtualTwinConfig) -> VirtualTwin:
 
 
 def _create_production_io(config: VirtualTwinConfig):
-    """Create production serial IO."""
+    """Create production serial IO with optional UDP for satellites."""
     serial_config = SerialConfig(
         port=config.serial_port,
         baudrate=config.serial_baudrate
     )
     
-    # Use bidirectional serial port
+    # Input: Serial port
     serial_port = SerialPort(serial_config)
+    input_port = serial_port
     
-    return serial_port, serial_port
+    # Output: Serial + UDP for satellite development/debugging
+    outputs: List[OutputPort] = []
+    
+    # Primary output: Serial to Gateway
+    outputs.append(serial_port)
+    
+    # Secondary output: UDP for satellites (allows monitoring on dev machine)
+    if config.enable_vfd_satellite:
+        udp_output = _create_vfd_udp_output(config)
+        outputs.append(udp_output)
+        logger.info(f"Production mode: UDP mirror enabled for VFD at {config.vfd_udp_host}:{config.vfd_udp_port}")
+    
+    # Combine outputs
+    if len(outputs) > 1:
+        output_port = MultiOutputPort(outputs)
+    else:
+        output_port = outputs[0]
+    
+    return input_port, output_port
+
+
+def _create_vfd_udp_output(config: VirtualTwinConfig) -> UDPOutputPort:
+    """Create UDP output port for VFD satellite."""
+    udp_output = UDPOutputPort()
+    udp_output.add_target(
+        config.vfd_udp_host,
+        config.vfd_udp_port,
+        device_ids={110}  # VFD device ID
+    )
+    return udp_output
 
 
 def _create_development_io(config: VirtualTwinConfig):
-    """Create development file replay + logging IO."""
+    """Create development file replay + logging + UDP IO."""
     # Input: file replay or mock
     if config.replay_file:
         input_port = FileInputPort(
@@ -165,8 +212,24 @@ def _create_development_io(config: VirtualTwinConfig):
     else:
         input_port = MockInputPort()
     
-    # Output: logging to console
-    output_port = LogOutputPort(prefix="[WOULD SEND]")
+    # Output: combine logging and UDP for satellites
+    outputs: List[OutputPort] = []
+    
+    # Console logging (shows what would be sent to Gateway)
+    log_output = LogOutputPort(prefix="[WOULD SEND]")
+    outputs.append(log_output)
+    
+    # UDP output for VFD satellite
+    if config.enable_vfd_satellite:
+        udp_output = _create_vfd_udp_output(config)
+        outputs.append(udp_output)
+        logger.info(f"Development mode: UDP output enabled for VFD at {config.vfd_udp_host}:{config.vfd_udp_port}")
+    
+    # Use multi-output if we have multiple outputs
+    if len(outputs) > 1:
+        output_port = MultiOutputPort(outputs)
+    else:
+        output_port = outputs[0]
     
     return input_port, output_port
 

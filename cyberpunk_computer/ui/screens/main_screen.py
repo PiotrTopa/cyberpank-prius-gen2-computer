@@ -19,7 +19,8 @@ from ..widgets.frame import Frame
 from ..widgets.controls import VolumeBar, ToggleSwitch, ValueDisplay, ModeIcon, StatusIcon
 from ..widgets.vehicle_status import ConnectionIndicator
 from ..widgets.pagination import PaginationControl
-from ..widgets.vfd_display import VFDDisplayWidget, VFD_WIDTH, VFD_HEIGHT
+# VFD widget removed - now runs as separate satellite app (device 110)
+# See vfd_satellite/ and docs/VFD_SATELLITE_PROTOCOL.md
 from ..colors import COLORS
 from ..fonts import get_font
 from ...persistence import get_settings, save_settings
@@ -517,30 +518,9 @@ class MainScreen(Screen):
         )
         self.add_widget(self._pagination_control)
         
-        # VFD Display Simulator (Page 1 content)
-        # Display dimensions: 256x48 with 3px frame
-        # Using scale=1 for now (native resolution)
-        vfd_scale = 1
-        vfd_frame_width = 3
-        vfd_total_width = (VFD_WIDTH + vfd_frame_width * 2) * vfd_scale
-        vfd_total_height = (VFD_HEIGHT + vfd_frame_width * 2) * vfd_scale
-        
-        # Position centered in the content area
-        vfd_x = center_x + (center_width - vfd_total_width) // 2
-        vfd_y = self._content_rect.y + (self._content_rect.height - vfd_total_height) // 2
-        
-        self._vfd_display = VFDDisplayWidget(
-            Rect(vfd_x, vfd_y, vfd_total_width, vfd_total_height),
-            scale=vfd_scale
-        )
-        
-        # Initialize VFD time base from state if available
-        if self._store:
-            time_base = self._store.state.display.power_chart_time_base
-            self._vfd_display.energy_monitor.set_time_base(time_base)
-        
-        # Note: VFD widget is managed separately, not added to widget list
-        # It's only rendered on page 1
+        # VFD Display has been moved to separate satellite app (device 110)
+        # Page 1 now shows placeholder indicating VFD is on external display
+        # See: vfd_satellite/ package and docs/VFD_SATELLITE_PROTOCOL.md
 
     def _on_page_change(self, page_index: int) -> None:
         """Handle page change."""
@@ -687,47 +667,8 @@ class MainScreen(Screen):
         if hasattr(self, '_connection_indicator') and self._connection_indicator:
             self._connection_indicator.set_connected(state.connection.connected)
         
-        # Update VFD Energy Monitor
-        if hasattr(self, '_vfd_display') and self._vfd_display:
-            # Calculate MG power from battery data (positive = assist, negative = regen)
-            mg_power_kw = state.energy.battery_power_kw or 0.0
-            # Invert sign: positive battery current = discharge = MG assist
-            # So battery_power_kw > 0 means MG is consuming power (assist)
-            
-            # Get ICE data
-            ice_rpm = state.vehicle.rpm or 0
-            ice_running = state.vehicle.ice_running if hasattr(state.vehicle, 'ice_running') else False
-            
-            # Estimate ICE load from fuel consumption
-            # Rough estimate: idle ~0.5 L/h, max load ~8 L/h for Prius 1.5L
-            fuel_flow = state.vehicle.fuel_flow_rate if hasattr(state.vehicle, 'fuel_flow_rate') else 0.0
-            if fuel_flow > 0:
-                ice_load_percent = min(100.0, (fuel_flow / 8.0) * 100.0)
-            elif ice_rpm > 0:
-                # Fallback: estimate from RPM (idle 1000, redline ~5000)
-                ice_load_percent = min(100.0, (ice_rpm / 4500.0) * 100.0)
-            else:
-                ice_load_percent = 0.0
-            
-            # Get brake pressure
-            brake_pressure = state.vehicle.brake_pressed if hasattr(state.vehicle, 'brake_pressed') else 0
-            
-            self._vfd_display.update_energy(
-                mg_power_kw, 
-                ice_rpm, 
-                ice_load_percent,
-                fuel_flow,
-                brake_pressure,
-                ice_running,
-                state.vehicle.speed_kmh
-            )
-            
-            # Update fuel gauge
-            petrol_level = state.vehicle.fuel_level
-            lpg_level = state.vehicle.lpg_level
-            battery_soc = state.energy.battery_soc
-            active_fuel = state.vehicle.active_fuel  # Pass the enum directly
-            self._vfd_display.update_fuel(petrol_level, lpg_level, battery_soc, active_fuel)
+        # VFD Energy Monitor removed - handled by VFDDisplayRule and satellite app
+        # See: VFDDisplayRule in state/rules/vfd_display.py
         
         # Update AVC Input visualization (touch and button events)
         if hasattr(state, 'input'):
@@ -864,9 +805,10 @@ class MainScreen(Screen):
         self._render_avc_input_visualization(surface, center_x, center_width)
     
     def _render_vfd_page(self, surface: pygame.Surface, center_x: int, center_width: int) -> None:
-        """Render Page 1: VFD Energy Monitor."""
-        if hasattr(self, '_vfd_display') and self._vfd_display:
-            self._vfd_display.render(surface)
+        """Render Page 1: VFD moved to satellite - show default page."""
+        # VFD display has been moved to separate satellite app.
+        # Just show the default page content here.
+        self._render_default_page(surface, center_x, center_width)
     
     def _render_default_page(self, surface: pygame.Surface, center_x: int, center_width: int) -> None:
         """Render default page with logo placeholder."""

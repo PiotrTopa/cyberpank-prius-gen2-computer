@@ -78,6 +78,9 @@ class ActionType(Enum):
     SET_AMBIENT_COLOR = auto()
     SET_POWER_CHART_TIME_BASE = auto()
     
+    # VFD Satellite actions (device 110)
+    UPDATE_VFD_SATELLITE = auto()  # Update VFD computed state
+    
     # AVC Input actions (buttons and touch)
     AVC_BUTTON_PRESS = auto()
     AVC_BUTTON_RELEASE = auto()
@@ -696,6 +699,55 @@ class SetPowerChartTimeBaseAction(Action):
     def __init__(self, time_base: int, source: ActionSource = ActionSource.UI):
         super().__init__(ActionType.SET_POWER_CHART_TIME_BASE, source)
         self.time_base = time_base
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VFD Satellite Actions
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class UpdateVFDSatelliteAction(Action):
+    """
+    Update VFD Satellite display state (Device ID 110).
+    
+    This action updates the pre-computed VFD state that will be
+    sent to the VFD satellite device via egress.
+    
+    Fields are optional - only set fields will be updated.
+    """
+    # Energy data
+    mg_power: float = None
+    fuel_flow: float = None
+    brake: float = None
+    speed: float = None
+    battery_soc: float = None
+    petrol_level: int = None
+    lpg_level: int = None
+    ice_running: bool = None
+    
+    # State flags
+    active_fuel: str = None  # "OFF", "PTR", "LPG"
+    gear: str = None         # "P", "R", "N", "D", "B"
+    ready_mode: bool = None
+    
+    # Configuration
+    time_base: int = None
+    brightness: int = None
+    
+    # Transmission tracking
+    last_energy_send_time: float = None
+    last_state_send_time: float = None
+    needs_config_send: bool = None
+    
+    def __init__(
+        self,
+        source: ActionSource = ActionSource.INTERNAL,
+        **kwargs
+    ):
+        super().__init__(ActionType.UPDATE_VFD_SATELLITE, source)
+        for key, value in kwargs.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -334,3 +334,80 @@ This separation allows:
 - Simple mocking for development
 - **Pluggable IO** for different environments
 - **Reactive rules** for business logic
+
+---
+
+## Satellite Architecture
+
+### VFD Display Satellite (Device 110)
+
+The VFD (Vacuum Fluorescent Display) has been separated into a standalone satellite application that runs independently and communicates via NDJSON protocol.
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                       VFD SATELLITE ARCHITECTURE                        │
+├────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ┌─────────────────────────────────┐     ┌────────────────────────────┐│
+│  │       MAIN APPLICATION          │     │    VFD SATELLITE APP       ││
+│  │                                 │     │                            ││
+│  │  Vehicle State                  │     │   ┌──────────────────┐    ││
+│  │  ┌─────────┐ ┌─────────┐       │     │   │   UDPReceiver    │    ││
+│  │  │ Energy  │ │ Vehicle │       │     │   │ or SerialReceiver│    ││
+│  │  └────┬────┘ └────┬────┘       │     │   └────────┬─────────┘    ││
+│  │       │           │            │     │            │               ││
+│  │       ▼           ▼            │     │            ▼               ││
+│  │  ┌────────────────────────┐    │     │   ┌──────────────────┐    ││
+│  │  │    VFDDisplayRule      │    │     │   │    VFDState      │    ││
+│  │  │ (normalize & compute)  │    │     │   │  (receive msg)   │    ││
+│  │  └────────────┬───────────┘    │     │   └────────┬─────────┘    ││
+│  │               │                │     │            │               ││
+│  │               ▼                │     │            ▼               ││
+│  │  ┌────────────────────────┐    │     │   ┌──────────────────┐    ││
+│  │  │  VFDSatelliteState     │    │     │   │   VFDRenderer    │    ││
+│  │  │ (in Store)             │    │     │   │ (pygame display) │    ││
+│  │  └────────────┬───────────┘    │     │   └────────┬─────────┘    ││
+│  │               │                │     │            │               ││
+│  │               ▼                │     │            ▼               ││
+│  │  ┌────────────────────────┐    │     │   ┌──────────────────┐    ││
+│  │  │  VFD Output Handlers   │    │     │   │   256×48 VFD     │    ││
+│  │  │ (energy, state, config)│    │     │   │   Framebuffer    │    ││
+│  │  └────────────┬───────────┘    │     │   └──────────────────┘    ││
+│  │               │                │     │                            ││
+│  │               ▼                │     │                            ││
+│  │  ┌────────────────────────┐    │     │                            ││
+│  │  │   UDPOutputPort (dev)  │────┼─────┼────► UDP :5110             ││
+│  │  │  SerialPort (prod)     │    │     │     RS485 @115200          ││
+│  │  └────────────────────────┘    │     └────────────────────────────┘│
+│  └─────────────────────────────────┘                                  │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Message Protocol
+
+See [VFD_SATELLITE_PROTOCOL.md](./VFD_SATELLITE_PROTOCOL.md) for full details.
+
+| Type | Name | Rate | Purpose |
+|------|------|------|---------|
+| `E` | Energy | 20Hz | MG power, fuel flow, brake, speed, levels |
+| `S` | State | On-change | ICE running, gear, fuel type, ready mode |
+| `C` | Config | On-change | Brightness |
+| `R` | Reset | Once | Initialize display |
+
+Values are normalized to 0.0-1.0 (or -1.0 to +1.0 for bidirectional values).
+
+#### Development Setup
+
+```bash
+# Terminal 1: Main app with file replay
+python -m cyberpunk_computer --dev --replay assets/data/full.ndjson
+
+# Terminal 2: VFD satellite
+python -m vfd_satellite --udp
+```
+
+#### Production Setup
+
+Both applications connect to the same RS485 bus via the Gateway:
+- Main app: `/dev/ttyACM0` (Gateway USB)
+- VFD satellite: Direct RS485 connection to Noritake VFD

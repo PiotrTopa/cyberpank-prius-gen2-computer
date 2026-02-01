@@ -29,6 +29,7 @@ DEVICE_SATELLITE_BASE = 100 # RS485 satellites start here
 # Known satellite device IDs
 DEVICE_SATELLITE_DRL = 106       # DRL controller (output)
 DEVICE_SATELLITE_LIGHT_SENSOR = 107  # Rain/light sensor (input)
+DEVICE_VFD = 110                 # VFD display satellite (output)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

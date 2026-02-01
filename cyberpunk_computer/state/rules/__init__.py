@@ -12,3 +12,6 @@ from .engine import (
     create_computed_rule,
     RuleResult
 )
+
+from .active_fuel import ActiveFuelRule
+from .vfd_display import VFDDisplayRule

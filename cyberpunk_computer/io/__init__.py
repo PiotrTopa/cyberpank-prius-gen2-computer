@@ -27,6 +27,7 @@ from .ports import (
     DEVICE_SATELLITE_BASE,
     DEVICE_SATELLITE_DRL,
     DEVICE_SATELLITE_LIGHT_SENSOR,
+    DEVICE_VFD,
 )
 
 from .ingress import IngressController
@@ -35,6 +36,14 @@ from .egress import EgressController, OutputHandler, create_satellite_output_han
 from .file_io import FileInputPort, PlaybackState
 from .serial_io import SerialPort, SerialConfig, SerialInputPort, SerialOutputPort
 from .mock_io import MockInputPort, MockOutputPort, LogOutputPort
+from .udp_output import UDPOutputPort, MultiOutputPort
+from .vfd_output import (
+    register_vfd_handlers,
+    create_vfd_energy_handler,
+    create_vfd_state_handler,
+    create_vfd_config_handler,
+    create_all_vfd_handlers,
+)
 
 from .factory import (
     VirtualTwin,
@@ -67,12 +76,21 @@ __all__ = [
     "MockInputPort",
     "MockOutputPort",
     "LogOutputPort",
+    "UDPOutputPort",
+    "MultiOutputPort",
     
     # Controllers
     "IngressController",
     "EgressController",
     "OutputHandler",
     "create_satellite_output_handler",
+    
+    # VFD handlers
+    "register_vfd_handlers",
+    "create_vfd_energy_handler",
+    "create_vfd_state_handler",
+    "create_vfd_config_handler",
+    "create_all_vfd_handlers",
     
     # Factory
     "VirtualTwin",
@@ -90,4 +108,5 @@ __all__ = [
     "DEVICE_SATELLITE_BASE",
     "DEVICE_SATELLITE_DRL",
     "DEVICE_SATELLITE_LIGHT_SENSOR",
+    "DEVICE_VFD",
 ]

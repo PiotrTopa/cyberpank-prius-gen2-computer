@@ -283,6 +283,45 @@ class DisplayState:
 
 
 @dataclass(frozen=True)
+class VFDSatelliteState:
+    """
+    VFD Satellite Display state (Device ID 110).
+    
+    Contains pre-computed, normalized data for the VFD satellite display.
+    This state is computed by the VFDDisplayRule and sent via egress
+    to the VFD satellite device.
+    
+    All values are normalized for efficient transmission:
+    - Power values: -1.0 to +1.0
+    - Levels: 0.0 to 1.0 or integer liters
+    - States: enums/booleans
+    """
+    # Energy data (normalized for transmission)
+    mg_power: float = 0.0        # -1.0 to +1.0 (motor/generator)
+    fuel_flow: float = 0.0       # 0.0 to 1.0 (normalized fuel consumption)
+    brake: float = 0.0           # 0.0 to 1.0 (brake pressure)
+    speed: float = 0.0           # 0.0 to 1.0 (normalized speed)
+    battery_soc: float = 0.6     # 0.0 to 1.0 (state of charge)
+    petrol_level: int = 30       # Liters (0-45)
+    lpg_level: int = 45          # Liters (0-60)
+    ice_running: bool = False    # ICE engine running
+    
+    # State flags
+    active_fuel: str = "OFF"     # "OFF", "PTR", "LPG"
+    gear: str = "P"              # "P", "R", "N", "D", "B"
+    ready_mode: bool = False     # Vehicle READY mode
+    
+    # Configuration
+    time_base: int = 60          # Power chart time base (seconds)
+    brightness: int = 100        # Display brightness (0-100)
+    
+    # Transmission tracking
+    last_energy_send_time: float = 0.0
+    last_state_send_time: float = 0.0
+    needs_config_send: bool = True  # Send config on startup/change
+
+
+@dataclass(frozen=True)
 class AppState:
     """
     Complete application state.
@@ -299,6 +338,7 @@ class AppState:
     debug: DebugState = field(default_factory=DebugState)
     input: InputState = field(default_factory=InputState)
     display: DisplayState = field(default_factory=DisplayState)
+    vfd_satellite: VFDSatelliteState = field(default_factory=VFDSatelliteState)
     
     # UI-only state (not from vehicle)
     screen_brightness: int = 100

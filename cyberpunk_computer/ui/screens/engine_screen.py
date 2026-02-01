@@ -143,22 +143,16 @@ class EngineScreen(Screen):
             self.app.pop_screen()
     
     def _on_value_changed(self) -> None:
-        """Handle value change - update store and VFD display time base."""
+        """Handle value change - update store time base setting."""
         if not self.app:
             return
         
         timebase = self.get_timebase_seconds()
         
-        # Dispatch action to store
+        # Dispatch action to store - VFD satellite receives via egress
         from ...state.actions import SetPowerChartTimeBaseAction
         if hasattr(self.app, '_store') and self.app._store:
             self.app._store.dispatch(SetPowerChartTimeBaseAction(timebase))
-        
-        # Also update VFD display directly for immediate feedback
-        if self.app.screen_stack:
-            main_screen = self.app.screen_stack[0]
-            if hasattr(main_screen, '_vfd_display') and main_screen._vfd_display:
-                main_screen._vfd_display.energy_monitor.set_time_base(timebase)
 
     def handle_input(self, event) -> bool:
         """Handle input events."""

@@ -45,6 +45,7 @@ class StateSlice(Enum):
     DEBUG = auto()
     INPUT = auto()  # AVC button/touch input events
     DISPLAY = auto()  # Display settings (power chart time base, etc.)
+    VFD_SATELLITE = auto()  # VFD satellite display state (device 110)
     ALL = auto()
 
 
@@ -568,6 +569,31 @@ class Store:
                 display=self._state.display.with_time_base(a.time_base)
             )
             affected.add(StateSlice.DISPLAY)
+        
+        # VFD Satellite reducers
+        elif action.type == ActionType.UPDATE_VFD_SATELLITE:
+            from .actions import UpdateVFDSatelliteAction
+            a = action  # type: UpdateVFDSatelliteAction
+            
+            # Build kwargs for fields that are set (not None)
+            kwargs = {}
+            for field_name in [
+                'mg_power', 'fuel_flow', 'brake', 'speed', 'battery_soc',
+                'petrol_level', 'lpg_level', 'ice_running',
+                'active_fuel', 'gear', 'ready_mode',
+                'time_base', 'brightness',
+                'last_energy_send_time', 'last_state_send_time', 'needs_config_send'
+            ]:
+                value = getattr(a, field_name, None)
+                if value is not None:
+                    kwargs[field_name] = value
+            
+            if kwargs:
+                self._state = replace(
+                    self._state,
+                    vfd_satellite=replace(self._state.vfd_satellite, **kwargs)
+                )
+                affected.add(StateSlice.VFD_SATELLITE)
         
         return affected
     
