@@ -1,0 +1,30 @@
+[Unit]
+Description=CyberPunk Prius Gen 2 Computer
+After=network.target
+Documentation=https://github.com/yourusername/cyberpunk-prius-gen2-computer
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/home/piotr/cyberpunk_computer
+
+# Use the wrapper script which sets up environment for direct framebuffer output
+ExecStart=/home/piotr/cyberpunk_computer/deployment/run-on-console.sh
+
+# Restart policy - always restart on failure with exponential backoff
+Restart=always
+RestartSec=10
+
+# Output to systemd journal
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening (optional - uncomment if needed)
+# ProtectSystem=strict
+# ProtectHome=yes
+# NoNewPrivileges=true
+# ReadWritePaths=/var/log/cyberpunk_computer
+
+[Install]
+WantedBy=multi-user.target

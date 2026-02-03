@@ -87,9 +87,32 @@ pip install -r requirements.txt
 # Development mode (2x upscale, keyboard input)
 python -m cyberpunk_computer --dev --scale 2
 
-# Production mode (native resolution, encoder input)
-python -m cyberpunk_computer
+# Production mode (native resolution, serial connection with auto-reconnect)
+python -m cyberpunk_computer --production
+
+# Replay recorded data for testing
+python -m cyberpunk_computer --replay assets/data/full.ndjson --dev --scale 2
 ```
+
+### Deployment to Raspberry Pi
+
+For production deployment to RPI Zero 2W:
+
+```bash
+# First-time setup (installs service and enables auto-start)
+python deploy.py --install --restart --logs
+
+# Regular updates (sync code and restart service)
+python deploy.py --restart
+```
+
+See [DEPLOYMENT.md](./docs/DEPLOYMENT.md) for complete deployment guide and [Quick Reference](./deployment/QUICK_REFERENCE.md) for common commands.
+
+**Production mode features:**
+- ✓ Auto-reconnect to USB UART (handles disconnect/reconnect)
+- ✓ Proper logging (INFO level, file rotation)
+- ✓ Fullscreen display (native resolution)
+- ✓ systemd service (auto-start, restart on failure)
 
 ### Controls (Development)
 

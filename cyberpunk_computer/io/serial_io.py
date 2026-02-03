@@ -45,6 +45,8 @@ class SerialConfig:
     port: str = "/dev/ttyACM0"  # Default Linux USB CDC port
     baudrate: int = 1_000_000
     timeout: float = 0.1
+    auto_reconnect: bool = True  # Auto-reconnect on disconnect
+    reconnect_delay: float = 2.0  # Seconds between reconnect attempts
 
 
 class SerialPort(BidirectionalPort):
@@ -82,7 +84,11 @@ class SerialPort(BidirectionalPort):
             "tx_messages": 0,
             "rx_errors": 0,
             "tx_errors": 0,
+            "reconnects": 0,
         }
+        
+        # Reconnection state
+        self._last_reconnect_attempt = 0.0
     
     @property
     def stats(self) -> dict:
@@ -189,7 +195,15 @@ class SerialPort(BidirectionalPort):
     
     def _reader_loop(self) -> None:
         """Background thread for reading from serial."""
-        while self._running and self._serial:
+        while self._running:
+            # Check if we need to reconnect
+            if not self._connected and self.config.auto_reconnect:
+                self._attempt_reconnect()
+            
+            if not self._serial or not self._connected:
+                time.sleep(0.1)
+                continue
+            
             try:
                 line = self._serial.readline()
                 if not line:
@@ -210,6 +224,12 @@ class SerialPort(BidirectionalPort):
                     logger.debug(f"Invalid JSON from serial: {e}")
                     self._stats["rx_errors"] += 1
                     
+            except (serial.SerialException, OSError) as e:
+                # Connection lost - mark as disconnected
+                if self._running:
+                    logger.warning(f"Serial connection lost: {e}")
+                    self._handle_disconnect()
+                    
             except Exception as e:
                 if self._running:
                     logger.error(f"Serial reader error: {e}")
@@ -217,7 +237,16 @@ class SerialPort(BidirectionalPort):
     
     def _writer_loop(self) -> None:
         """Background thread for writing to serial."""
-        while self._running and self._serial:
+        while self._running:
+            if not self._serial or not self._connected:
+                # Drain queue while disconnected to prevent buildup
+                try:
+                    self._tx_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                time.sleep(0.1)
+                continue
+            
             try:
                 command = self._tx_queue.get(timeout=0.1)
                 
@@ -225,16 +254,61 @@ class SerialPort(BidirectionalPort):
                 json_data = command.to_gateway_json()
                 line = json.dumps(json_data) + "\n"
                 
-                if self._serial:
+                if self._serial and self._connected:
                     self._serial.write(line.encode('utf-8'))
                     self._stats["tx_messages"] += 1
                     
             except queue.Empty:
                 continue
+            except (serial.SerialException, OSError) as e:
+                # Connection lost
+                if self._running:
+                    logger.warning(f"Serial write failed: {e}")
+                    self._handle_disconnect()
             except Exception as e:
                 if self._running:
                     logger.error(f"Serial writer error: {e}")
                     self._stats["tx_errors"] += 1
+    
+    def _handle_disconnect(self) -> None:
+        """Handle serial port disconnection."""
+        self._connected = False
+        if self._serial:
+            try:
+                self._serial.close()
+            except Exception:
+                pass
+            self._serial = None
+        logger.info("Serial port disconnected")
+    
+    def _attempt_reconnect(self) -> bool:
+        """
+        Attempt to reconnect to serial port.
+        
+        Returns:
+            True if reconnection successful
+        """
+        now = time.time()
+        if now - self._last_reconnect_attempt < self.config.reconnect_delay:
+            return False
+        
+        self._last_reconnect_attempt = now
+        
+        try:
+            logger.info(f"Attempting to reconnect to {self.config.port}...")
+            self._serial = serial.Serial(
+                port=self.config.port,
+                baudrate=self.config.baudrate,
+                timeout=self.config.timeout
+            )
+            self._connected = True
+            self._stats["reconnects"] += 1
+            logger.info(f"Serial port reconnected successfully (attempt #{self._stats['reconnects']})")
+            return True
+            
+        except Exception as e:
+            logger.debug(f"Reconnection failed: {e}")
+            return False
 
 
 # Separate classes for when only input or output is needed

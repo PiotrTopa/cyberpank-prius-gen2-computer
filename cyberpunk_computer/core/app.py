@@ -5,6 +5,7 @@ Handles the main game loop, event processing, and screen management.
 Uses Virtual Twin architecture for all communication.
 """
 
+import os
 import pygame
 import logging
 
@@ -35,9 +36,20 @@ class Application:
         self.config = config
         self.running = False
         
+        # Check video driver for fbcon-specific initialization
+        video_driver = os.environ.get('SDL_VIDEODRIVER', '')
+        is_fbcon = video_driver == 'fbcon'
+        
+        if is_fbcon:
+            # For fbcon, disable mouse and set display hints before init
+            os.environ.setdefault('SDL_NOMOUSE', '1')
+            logger.info(f"Initializing pygame with fbcon driver (fb={os.environ.get('SDL_FBDEV', 'default')})")
+        
         # Initialize Pygame
         pygame.init()
-        pygame.display.set_caption("CyberPunk Prius - Onboard Computer")
+        
+        if not is_fbcon:
+            pygame.display.set_caption("CyberPunk Prius - Onboard Computer")
         
         # Create renderer (handles display and scaling)
         self.renderer = Renderer(config)

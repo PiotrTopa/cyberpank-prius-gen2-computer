@@ -49,6 +49,8 @@ class VirtualTwinConfig:
     # Serial config (production mode)
     serial_port: str = "/dev/ttyACM0"
     serial_baudrate: int = 1_000_000
+    serial_auto_reconnect: bool = True
+    serial_reconnect_delay: float = 2.0
     
     # File config (development mode)
     replay_file: Optional[str] = None
@@ -161,7 +163,9 @@ def _create_production_io(config: VirtualTwinConfig):
     """Create production serial IO with optional UDP for satellites."""
     serial_config = SerialConfig(
         port=config.serial_port,
-        baudrate=config.serial_baudrate
+        baudrate=config.serial_baudrate,
+        auto_reconnect=config.serial_auto_reconnect,
+        reconnect_delay=config.serial_reconnect_delay
     )
     
     # Input: Serial port

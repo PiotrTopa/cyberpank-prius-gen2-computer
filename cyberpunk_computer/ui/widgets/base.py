@@ -4,6 +4,7 @@ Base widget class.
 All UI components inherit from Widget.
 """
 
+from __future__ import annotations
 import pygame
 from dataclasses import dataclass
 from typing import Optional, Tuple, TYPE_CHECKING
@@ -55,7 +56,7 @@ class Rect:
         """Get top-left corner."""
         return (self.x, self.y)
     
-    def to_pygame(self) -> pygame.Rect:
+    def to_pygame(self) -> "pygame.Rect":
         """Convert to pygame Rect."""
         return pygame.Rect(self.x, self.y, self.width, self.height)
     

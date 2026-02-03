@@ -21,6 +21,8 @@ Examples:
 import argparse
 import logging
 import sys
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from .config import Config
 from .core.app import Application
@@ -30,9 +32,15 @@ from .io import (
 )
 
 
-def setup_logging(dev_mode: bool = False) -> None:
+def setup_logging(dev_mode: bool = False, production_mode: bool = False) -> None:
     """Configure logging for the application."""
-    level = logging.DEBUG if dev_mode else logging.INFO
+    # Determine log level
+    if production_mode:
+        level = logging.INFO
+    elif dev_mode:
+        level = logging.DEBUG
+    else:
+        level = logging.INFO
     
     # Create formatter
     formatter = logging.Formatter(
@@ -50,6 +58,24 @@ def setup_logging(dev_mode: bool = False) -> None:
     root.setLevel(level)
     root.addHandler(console)
     
+    # Add file handler in production mode
+    if production_mode:
+        log_dir = Path("/var/log/cyberpunk_computer")
+        if log_dir.exists():
+            log_file = log_dir / "app.log"
+            try:
+                file_handler = RotatingFileHandler(
+                    log_file,
+                    maxBytes=10 * 1024 * 1024,  # 10 MB
+                    backupCount=5
+                )
+                file_handler.setLevel(level)
+                file_handler.setFormatter(formatter)
+                root.addHandler(file_handler)
+                logging.info(f"File logging enabled: {log_file}")
+            except Exception as e:
+                logging.warning(f"Could not enable file logging: {e}")
+    
     logging.info("Logging initialized")
 
 
@@ -57,6 +83,11 @@ def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
         description="CyberPunk Prius Gen 2 - Onboard Computer"
+    )
+    parser.add_argument(
+        "--production",
+        action="store_true",
+        help="Enable production mode (for deployment to RPI)"
     )
     parser.add_argument(
         "--dev",
@@ -106,24 +137,34 @@ def main() -> int:
     args = parse_args()
     
     # Setup logging first
-    setup_logging(dev_mode=args.dev)
+    setup_logging(dev_mode=args.dev, production_mode=args.production)
     
     logger = logging.getLogger(__name__)
     logger.info("CyberPunk Prius Gen 2 - Onboard Computer starting...")
     
-    # Determine scale factor (default: 2 for dev mode, 1 otherwise)
-    scale = args.scale if args.scale is not None else (2 if args.dev else 1)
+    # Determine scale factor
+    if args.scale is not None:
+        scale = args.scale
+    elif args.production:
+        scale = 1  # Native resolution for production
+    elif args.dev:
+        scale = 2  # Larger for development
+    else:
+        scale = 1
+    
+    # Determine fullscreen
+    fullscreen = args.fullscreen or args.production
     
     # Build configuration from arguments
     config = Config(
         dev_mode=args.dev,
         scale_factor=scale,
-        fullscreen=args.fullscreen,
+        fullscreen=fullscreen,
         gateway_port=args.port,
         gateway_enabled=not args.no_gateway and not args.test and not args.replay
     )
     
-    logger.info(f"Config: dev={config.dev_mode}, scale={config.scale_factor}")
+    logger.info(f"Config: dev={config.dev_mode}, scale={config.scale_factor}, production={args.production}")
     
     # Create Virtual Twin based on mode
     virtual_twin = None
@@ -172,15 +213,21 @@ def main() -> int:
     ESC       Exit application
     ===================================================================
 """)
-    elif not args.no_gateway and not args.test:
+    elif args.production or (not args.no_gateway and not args.test):
         # Production mode with serial
         twin_config = VirtualTwinConfig(
             mode=ExecutionMode.PRODUCTION,
             serial_port=args.port or "/dev/ttyACM0",
-            verbose=args.dev
+            serial_baudrate=1_000_000,
+            serial_auto_reconnect=args.production,  # Enable auto-reconnect in production
+            serial_reconnect_delay=2.0,
+            enable_vfd_satellite=True,
+            verbose=args.dev,
+            log_commands=args.dev  # Only log commands in dev mode
         )
         virtual_twin = create_virtual_twin(twin_config)
-        logger.info(f"Created Virtual Twin in PRODUCTION mode")
+        mode_str = "PRODUCTION" if args.production else "STANDARD"
+        logger.info(f"Created Virtual Twin in {mode_str} mode")
     
     # Create and run application
     app = Application(config)
