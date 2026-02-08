@@ -284,17 +284,58 @@ Mode change events through display control. Look for `112 → 060` messages.
 
 Climate AUTO mode activation visible in `A00 → 258` messages.
 
-### Row 590-620: Outside Temperature Messages
+### Row 590-620: Climate Temperature Messages (10C → 310)
 
-```json
-{"m":"10C","s":"310","c":8,"d":["00","00","00","00","08","0A","90","80"]}
-```
+**Source:** Master `10C` (Climate Control ECU) → Slave `310` (HVAC ECU)
 
-**CORRECTED:** Byte[5] encoding: `temp_C = (byte5 - 18) / 2`
-- `0A` = 10 → (10-18)/2 = **-4°C** (matches actual recorded outside temp of -2 to -4°C)
-- `1C` = 28 → (28-18)/2 = **+5°C** (initial warmer reading at start of drive)
+These 8-byte messages carry climate/temperature data. The message subtype is
+determined by bytes 6-7, while byte 5 always carries a temperature value using
+the formula `temp_C = (byte5 - 18) / 2`.
 
-The original `/2` formula was incorrect. Empirical analysis shows an offset of 18 is required before dividing by 2.
+#### Message Format
+
+| Byte | Purpose | Notes |
+|------|---------|-------|
+| 0-3  | Always `00 00 00 00` | Padding / reserved |
+| 4    | Mode / control byte | `08` = normal, `09` = init, `0C` = off |
+| 5    | Temperature value | Formula: `(byte5 - 18) / 2` → °C |
+| 6-7  | Subtype discriminator | Determines what the temperature represents |
+
+#### Subtypes (by bytes 6-7)
+
+| Bytes 6-7 | Subtype | Example b5 | Temperature | Count in log |
+|-----------|---------|------------|-------------|--------------|
+| `90 80`   | Outside / Ambient temp | `0A` (10) | -4.0°C | 11 |
+| `60 80`   | Cabin / Interior temp | `20` (32) | 7.0°C | 3 |
+| `00 20`   | Target / Set temp | `21` (33) | 7.5°C | 3 |
+
+#### Special Messages (byte 4 ≠ 0x08)
+
+| Byte 4 | Meaning | Full data example |
+|--------|---------|-------------------|
+| `09`   | System initialization | `00 00 00 00 09 1C 01 C4` |
+| `0C`   | Climate system off | `00 00 00 00 0C 00 46 C1` |
+
+#### Temporal Behaviour
+
+Messages alternate between subtypes during normal operation:
+1. Outside temp (`90 80`) — most frequent, ~58% of messages
+2. Cabin temp (`60 80`) — interleaved, ~16%
+3. Target temp (`00 20`) — interleaved, ~16%
+4. Init/Off — appear at session start/end
+
+#### Cross-Validation with CAN Bus
+
+The outside temperature reading (-4°C) was independently confirmed against
+CAN ID `0x5CC` (byte 0 = 36, formula `byte0 - 40 = -4°C`). All 259 CAN 0x5CC
+messages in the log and all 11 AVC-LAN outside temp messages agree on -4°C,
+providing strong validation of both formulas.
+
+#### Implementation
+
+- **AVC-LAN decoder:** `avc_decoder.py` — `_decode_climate_10c_310()` method
+- **State tracking:** `avc_state.py` — `_handle_climate_state()` routes subtypes to `outside_temp` and `cabin_temp` fields
+- **CAN decoder:** `can_decoder.py` — CAN `0x5CC` decoded as `CLIMATE_DATA` with `ambient_temp`
 
 ### Row ~642-660: Volume/Audio Changes
 

@@ -157,7 +157,9 @@ class ClimateState:
     
     mode: ClimateMode = ClimateMode.OFF
     fan_speed: int = 0         # 0-7
-    temperature: float = 22.0  # Celsius
+    temperature: float = 22.0  # Celsius (target/setpoint)
+    outside_temp: Optional[float] = None   # Outside temperature in Celsius
+    cabin_temp: Optional[float] = None     # Cabin/inside temperature in Celsius
     ac_on: bool = False
     recirculate: bool = False
     defrost: bool = False
@@ -338,29 +340,70 @@ class AVCStateManager:
                 self._emit(AVCEventType.HEARTBEAT)
     
     def _handle_climate_state(self, msg: AVCMessage) -> None:
-        """Handle climate control messages (10C → 310)."""
+        """
+        Handle climate control messages (10C -> 310).
+        
+        These messages carry temperature data in byte 5 with the formula:
+            temp_C = (byte5 - 18) / 2
+        
+        The message subtype is determined by bytes 6-7:
+            - 0x90 0x80: Outside temperature report
+            - 0x60 0x80: Cabin (inside) temperature report
+            - 0x00 0x20: Target temperature setpoint
+        
+        And byte 4 for special states:
+            - 0x08: Normal active status
+            - 0x09: Initialization/boot
+            - 0x0C: Climate off/reset
+        """
         if len(msg.data) < 8:
             return
         
         old_mode = self.climate.mode
-        
-        # Parse climate bytes
-        # Byte 4-7 seem to contain climate state
         b4, b5, b6, b7 = msg.data[4:8]
         
-        # 0x0A 0x90 0x80 pattern seems to indicate active climate
-        if b5 == 0x0A and b6 == 0x90:
+        # Update climate mode based on byte 4
+        if b4 == 0x0C:
+            # Climate system off
+            if self.climate.mode != ClimateMode.OFF:
+                self.climate.mode = ClimateMode.OFF
+                self._emit(AVCEventType.CLIMATE_OFF, self.climate)
+        elif b4 in (0x08, 0x09):
+            # Climate system active
             if self.climate.mode == ClimateMode.OFF:
                 self.climate.mode = ClimateMode.AUTO
                 self._emit(AVCEventType.CLIMATE_AUTO, self.climate)
         
-        # 0x00 0x00 0x00 might indicate off
-        elif b5 == 0x00 and b6 == 0x00 and b7 == 0x00:
-            if self.climate.mode != ClimateMode.OFF:
-                self.climate.mode = ClimateMode.OFF
-                self._emit(AVCEventType.CLIMATE_OFF, self.climate)
+        # Extract temperature based on message subtype (bytes 6-7)
+        if b5 > 0:
+            temp_c = (b5 - 18) / 2.0
+            
+            if b6 == 0x90 and b7 == 0x80:
+                # Outside temperature report
+                self.climate.outside_temp = temp_c
+                self._emit(AVCEventType.TEMPERATURE, {
+                    "type": "outside",
+                    "temp_c": temp_c,
+                    "raw": b5,
+                })
+            elif b6 == 0x00 and b7 == 0x20:
+                # Target temperature setpoint
+                self.climate.temperature = temp_c
+                self._emit(AVCEventType.TEMPERATURE, {
+                    "type": "target",
+                    "temp_c": temp_c,
+                    "raw": b5,
+                })
+            elif b6 == 0x60 and b7 == 0x80:
+                # Cabin (inside) temperature report
+                self.climate.cabin_temp = temp_c
+                self._emit(AVCEventType.TEMPERATURE, {
+                    "type": "cabin",
+                    "temp_c": temp_c,
+                    "raw": b5,
+                })
         
-        # Emit general climate state if changed
+        # Emit general climate state change
         if old_mode != self.climate.mode:
             self._emit(AVCEventType.CLIMATE_STATE, self.climate)
     

@@ -49,6 +49,12 @@ class CANMessageType(Enum):
     CLIMATE_DATA = auto()       # Climate/Temperature data
     ENERGY_FLOW = auto()        # Energy flow arrows (0x3B6)
     FUEL_CONSUMPTION = auto()   # Fuel consumption (0x520)
+    STEERING_ANGLE = auto()     # Steering angle (0x025)
+    ACCELERATION = auto()       # Lateral/longitudinal acceleration (0x022, 0x023)
+    WHEEL_PULSES = auto()       # Wheel pulse counters (0x0B1, 0x0B3)
+    HEADLIGHT_STATUS = auto()   # Headlight state (0x57F)
+    SOC_BARS_EVENT = auto()     # MFD SOC bars & events (0x529)
+    YAW_RATE = auto()           # Yaw rate / vehicle dynamics (0x03A)
     # Solicited response types (OBD-II style)
     SOLICITED_RESPONSE = auto()        # Generic solicited response
     SOLICITED_ENGINE = auto()          # Response from Engine ECU (0x7E8)
@@ -95,9 +101,20 @@ KNOWN_CAN_IDS = {
     0x030: "ENGINE_STATUS",        # ICE status flags
     
     # Speed and position
-    0x03A: "VEHICLE_SPEED",        # Vehicle speed data
+    0x03A: "YAW_RATE",             # Yaw rate / vehicle dynamics
     0x0B4: "VEHICLE_SPEED_ALT",    # Vehicle speed alternative
     0x120: "GEAR_POSITION",        # PRND gear position
+    
+    # Vehicle dynamics
+    0x022: "LATERAL_ACCEL",        # Lateral + longitudinal acceleration
+    0x023: "LONGITUDINAL_ACCEL",   # Longitudinal acceleration (alt)
+    0x025: "STEERING_ANGLE",       # Steering wheel angle
+    0x0B1: "FRONT_WHEEL_PULSES",   # Front wheel pulse counters
+    0x0B3: "REAR_WHEEL_PULSES",    # Rear wheel pulse counters
+    
+    # Status & events
+    0x529: "SOC_BARS_EVENT",       # MFD SOC bars, EV mode, warnings
+    0x57F: "HEADLIGHT_STATUS",     # Headlight state
     
     # Energy Flow
     0x3B6: "ENERGY_FLOW",          # Energy flow arrows
@@ -391,17 +408,19 @@ class CANDecoder:
         # Observed: [C8, 0D, 08, 00, 00, 00, 1C] when running
         #           [C0, 00, 08, 00, 00, 00, 07] when ICE off (most common: 4093 occurrences)
         # Byte 0: Status flags - bit 6 is NOT reliable for ICE on/off detection
-        # Byte 1: RPM value (range 0-118, *32 = 0-3776 RPM)
+        # Byte 1: RPM value (range 0-118, *64 = 0-7552 RPM)
         #         When byte 1 = 0, ICE is definitely OFF
-        #         When byte 1 > 0, ICE is running with RPM = byte1 * 32
+        #         When byte 1 > 0, ICE is running with RPM = byte1 * 64
+        #         Typical idle (byte1=13) = 832 RPM, matches 1NZ-FXE warm idle
+        # Byte 2: Status/flag field (mostly 12 when running, 8 when off) - NOT RPM
         # Note: Coolant temperature NOT reliably found in 0x038
         elif can_id == 0x038 and len(data) >= 7:
             msg.msg_type = CANMessageType.ENGINE_STATUS
             
-            # Byte 1: RPM scaling (range 0-118, *32 = 0-3776 RPM)
+            # Byte 1: RPM scaling (range 0-118, *64 = 0-7552 RPM)
             # Also serves as ICE running indicator: 0 = off, >0 = running
             rpm_byte = data[1]
-            msg.values["rpm"] = rpm_byte * 32
+            msg.values["rpm"] = rpm_byte * 64
             
             # ICE running status determined by RPM byte (not byte 0 flags)
             msg.values["ice_running"] = rpm_byte > 0
@@ -428,11 +447,119 @@ class CANDecoder:
         # Inverter temps require SOLICITED PID 21C3 to ECU 0x7E2
         # See docs/TODO_SOLICITED_OBD2.md
         
+        # 0x5CC: Outside / Ambient Temperature (broadcast, unsolicited)
+        # Observed: 3 bytes [24, xx, xx] where byte 0 = temp + 40 offset
+        # Formula: ambient_temp = byte0 - 40 (°C)
+        # Cross-validated against AVC-LAN 10C->310 outside temp messages
+        elif can_id == 0x5CC and len(data) >= 1:
+            msg.msg_type = CANMessageType.CLIMATE_DATA
+            msg.values["ambient_temp"] = data[0] - 40
+        
+        # ---------------------------------------------------
+        # VEHICLE DYNAMICS
+        # ---------------------------------------------------
+        
+        # 0x025: Steering Angle (13ms period)
+        # Docs: (256*A+B) unsigned, 12-bit signed interpretation
+        # Straight-ahead offset is vehicle-specific (needs calibration)
+        elif can_id == 0x025 and len(data) >= 2:
+            msg.msg_type = CANMessageType.STEERING_ANGLE
+            raw = (data[0] << 8) | data[1]
+            # 12-bit signed: values > 2047 are negative
+            if raw > 2047:
+                raw -= 4096
+            msg.values["steering_angle_raw"] = raw
+            # Approximate degrees (scaling ~0.1 deg/count typical for Toyota)
+            msg.values["steering_angle"] = raw * 0.1
+        
+        # 0x022: Lateral + Longitudinal Acceleration (13ms period)
+        # Docs: (256*A+B) - 0x0200 for each axis
+        elif can_id == 0x022 and len(data) >= 4:
+            msg.msg_type = CANMessageType.ACCELERATION
+            lat_raw = (data[0] << 8) | data[1]
+            lon_raw = (data[2] << 8) | data[3]
+            msg.values["lateral_accel_raw"] = lat_raw - 0x200
+            msg.values["longitudinal_accel_raw"] = lon_raw - 0x200
+            # TODO: Scale factor to m/s² needs real-world calibration
+        
+        # 0x023: Longitudinal Acceleration alternative (13ms period)
+        elif can_id == 0x023 and len(data) >= 4:
+            msg.msg_type = CANMessageType.ACCELERATION
+            lon_raw = (data[0] << 8) | data[1]
+            msg.values["longitudinal_accel_alt_raw"] = lon_raw - 0x200
+        
+        # 0x0B1: Front Wheel Pulses (13ms period, 185 pulses/rev)
+        elif can_id == 0x0B1 and len(data) >= 4:
+            msg.msg_type = CANMessageType.WHEEL_PULSES
+            msg.values["front_right_pulses"] = (data[0] << 8) | data[1]
+            msg.values["front_left_pulses"] = (data[2] << 8) | data[3]
+            msg.values["wheel_position"] = "front"
+        
+        # 0x0B3: Rear Wheel Pulses (13ms period, 185 pulses/rev)
+        elif can_id == 0x0B3 and len(data) >= 4:
+            msg.msg_type = CANMessageType.WHEEL_PULSES
+            msg.values["rear_right_pulses"] = (data[0] << 8) | data[1]
+            msg.values["rear_left_pulses"] = (data[2] << 8) | data[3]
+            msg.values["wheel_position"] = "rear"
+        
+        # 0x03A: Yaw Rate / Vehicle Dynamics (13ms period, highest-volume undecoded)
+        # b0:b1 as 9-bit signed shows small values -7 to +27
+        # Likely yaw rate or rotational velocity sensor
+        elif can_id == 0x03A and len(data) >= 5:
+            msg.msg_type = CANMessageType.YAW_RATE
+            # 16-bit raw, offset by 0x200 (same pattern as 0x022)
+            yaw_raw = (data[0] << 8) | data[1]
+            msg.values["yaw_rate_raw"] = yaw_raw - 0x200
+            # b4: status flags (dominant values 0x24, 0x34)
+            msg.values["yaw_status"] = data[4]
+        
+        # ---------------------------------------------------
+        # HEADLIGHTS & EVENTS
+        # ---------------------------------------------------
+        
+        # 0x57F: Headlight Status (1050ms period)
+        # Byte B (data[1]) bits 3-5 encode light state:
+        #   0x00 = OFF, 0x10 = Parking lights, 0x30 = Low beam, 0x38 = High beam
+        # Byte D (data[3]) bit 7: DRL/auto headlight sensor active
+        # Byte A (data[0]): constant 0x68 (status/multiplexer)
+        # Byte C (data[2]): constant 0x10 (status flag)
+        elif can_id == 0x57F and len(data) >= 4:
+            msg.msg_type = CANMessageType.HEADLIGHT_STATUS
+            light_byte = data[1]
+            msg.values["headlight_raw"] = light_byte
+            msg.values["parking_lights"] = bool(light_byte & 0x10)
+            msg.values["low_beam"] = bool(light_byte & 0x20) and bool(light_byte & 0x10)
+            msg.values["high_beam"] = bool(light_byte & 0x08)
+            msg.values["drl_active"] = bool(data[3] & 0x80)
+            # Derive state string
+            if light_byte == 0x38:
+                msg.values["headlight_state"] = "HIGH"
+            elif light_byte == 0x30:
+                msg.values["headlight_state"] = "LOW"
+            elif light_byte == 0x10:
+                msg.values["headlight_state"] = "PARK"
+            else:
+                msg.values["headlight_state"] = "OFF"
+        
+        # 0x529: SOC Bars & Event Messages (1000ms period, immediate on event)
+        # Byte A (data[0]) bit 7: event flag
+        # Byte B (data[1]) bits 2,4,6: general problem (red triangle)
+        # Byte B (data[1]) bit 3: not in park / driver door open
+        # Byte D (data[3]) bits 0-2: MFD SOC bars (0-8)
+        # Byte E (data[4]) bit 6: EV mode active
+        # Byte F (data[5]) bits 5-7: EV mode denied reason
+        elif can_id == 0x529 and len(data) >= 6:
+            msg.msg_type = CANMessageType.SOC_BARS_EVENT
+            msg.values["event_flag"] = bool(data[0] & 0x80)
+            msg.values["warning_triangle"] = bool(data[1] & 0x54)  # bits 2,4,6
+            msg.values["door_park_warning"] = bool(data[1] & 0x08)
+            msg.values["soc_bars"] = data[3] & 0x07
+            msg.values["ev_mode_active"] = bool(data[4] & 0x40)
+            msg.values["ev_mode_denied"] = (data[5] >> 5) & 0x07
+        
         # ---------------------------------------------------
         # VEHICLE SPEED
         # ---------------------------------------------------
-        
-        # 0x03A: Status flags (NOT vehicle speed) - speed comes from 0x0B4
         
         # 0x0B4: Vehicle Speed Alternative
         # Observed: [00, 00, 00, 00, 00-01, 00-1D, 00-FF, 00-FF]

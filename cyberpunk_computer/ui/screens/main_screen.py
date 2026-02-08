@@ -509,17 +509,6 @@ class MainScreen(Screen):
         # Center Content Area (Pages)
         self._content_rect = Rect(center_x, 30, center_width, self.height - 30 - 30)
         
-        # Initial pages labels
-        self._page_label = ValueDisplay(
-            Rect(self._content_rect.x, self._content_rect.centery - 15, self._content_rect.width, 30),
-            label="",
-            value="VFD ENERGY",  # Page 1 initial label
-            unit="",
-            compact=False,
-            value_size=20
-        )
-        self.add_widget(self._page_label)
-        
         # Pagination Control
         self._pagination_control = PaginationControl(
             Rect(center_x + (center_width - 100) // 2, self.height - 25, 100, 20),
@@ -539,12 +528,6 @@ class MainScreen(Screen):
         # Verify page index valid (though control handles it)
         self._current_page = max(0, min(self._current_page, self._num_pages - 1))
         
-        # Update content based on page
-        if self._current_page == 0:
-            self._page_label.set_value("VFD ENERGY")
-        elif self._current_page == 1:
-            self._page_label.set_value("PAGE 2")
-            
         # Page visibility is handled in render()
 
     
@@ -811,8 +794,11 @@ class MainScreen(Screen):
         if self._current_page == 0:
             # Page 1: VFD Energy Monitor
             self._render_vfd_page(surface, center_x, center_width)
+        elif self._current_page == 1:
+            # Page 2: Vehicle Dynamics
+            self._render_dynamics_page(surface, center_x, center_width)
         else:
-            # Page 2+: Default placeholder
+            # Page 3+: Default placeholder
             self._render_default_page(surface, center_x, center_width)
         
         # Render AVC Input visualization (touch and button events)
@@ -826,12 +812,13 @@ class MainScreen(Screen):
     
     def _render_default_page(self, surface: pygame.Surface, center_x: int, center_width: int) -> None:
         """Render default page with logo placeholder."""
+        cr = self._content_rect
         # Center logo/title (placeholder)
         font = get_font(16, "title")
         title = "CYBERPUNK"
         title_surf = font.render(title, True, COLORS["cyan_dim"])
         title_x = center_x + (center_width - title_surf.get_width()) // 2
-        title_y = self.height // 2 - 20
+        title_y = cr.y + cr.height // 2 - 20
         surface.blit(title_surf, (title_x, title_y))
         
         font_small = get_font(10)
@@ -839,6 +826,209 @@ class MainScreen(Screen):
         sub_surf = font_small.render(subtitle, True, COLORS["text_secondary"])
         sub_x = center_x + (center_width - sub_surf.get_width()) // 2
         surface.blit(sub_surf, (sub_x, title_y + 20))
+    
+    def _render_dynamics_page(self, surface: pygame.Surface, center_x: int, center_width: int) -> None:
+        """Render Page 2: Vehicle Dynamics dashboard.
+        
+        Shows steering angle, accelerations, yaw rate, wheel pulses,
+        headlight status, SOC bars, and EV mode.
+        """
+        if not self._store:
+            self._render_default_page(surface, center_x, center_width)
+            return
+        
+        dyn = self._store.state.dynamics
+        font_label = get_font(8)
+        font_value = get_font(11, "mono")
+        font_title = get_font(10, "title")
+        font_small = get_font(7)
+        
+        # Layout: left column and right column within content area (below status bar)
+        cr = self._content_rect
+        pad = 6
+        col_width = (center_width - pad * 3) // 2
+        left_x = center_x + pad
+        right_x = center_x + pad * 2 + col_width
+        y = cr.y + 2
+        row_h = 13  # Row height for compact layout
+        
+        # ─── LEFT COLUMN: Motion sensors ───
+        
+        # Title
+        title_surf = font_title.render("MOTION", True, COLORS["cyan_bright"])
+        surface.blit(title_surf, (left_x, y))
+        y += row_h + 2
+        
+        # Steering Angle
+        lbl = font_label.render("STEER", True, COLORS["text_secondary"])
+        surface.blit(lbl, (left_x, y))
+        if dyn.steering_angle is not None:
+            angle = dyn.steering_angle
+            # Color: green near center, yellow/red at extremes
+            if abs(angle) < 5:
+                color = COLORS["green_bright"]
+            elif abs(angle) < 30:
+                color = COLORS["yellow"]
+            else:
+                color = COLORS["red_bright"]
+            val_text = f"{angle:+6.1f}\xb0"
+        else:
+            color = COLORS["text_dim"]
+            val_text = "  --.-\xb0"
+        val_surf = font_value.render(val_text, True, color)
+        surface.blit(val_surf, (left_x + col_width - val_surf.get_width(), y))
+        y += row_h
+        
+        # Lateral Acceleration
+        lbl = font_label.render("LAT G", True, COLORS["text_secondary"])
+        surface.blit(lbl, (left_x, y))
+        if dyn.lateral_accel_raw is not None:
+            val_text = f"{dyn.lateral_accel_raw:+5d}"
+            color = COLORS["green_bright"] if abs(dyn.lateral_accel_raw) < 50 else COLORS["yellow"]
+        else:
+            val_text = "   --"
+            color = COLORS["text_dim"]
+        val_surf = font_value.render(val_text, True, color)
+        surface.blit(val_surf, (left_x + col_width - val_surf.get_width(), y))
+        y += row_h
+        
+        # Longitudinal Acceleration
+        lbl = font_label.render("LON G", True, COLORS["text_secondary"])
+        surface.blit(lbl, (left_x, y))
+        if dyn.longitudinal_accel_raw is not None:
+            val_text = f"{dyn.longitudinal_accel_raw:+5d}"
+            color = COLORS["green_bright"] if abs(dyn.longitudinal_accel_raw) < 50 else COLORS["yellow"]
+        else:
+            val_text = "   --"
+            color = COLORS["text_dim"]
+        val_surf = font_value.render(val_text, True, color)
+        surface.blit(val_surf, (left_x + col_width - val_surf.get_width(), y))
+        y += row_h
+        
+        # Yaw Rate
+        lbl = font_label.render("YAW", True, COLORS["text_secondary"])
+        surface.blit(lbl, (left_x, y))
+        if dyn.yaw_rate_raw is not None:
+            val_text = f"{dyn.yaw_rate_raw:+5d}"
+            color = COLORS["green_bright"] if abs(dyn.yaw_rate_raw) < 30 else COLORS["yellow"]
+        else:
+            val_text = "   --"
+            color = COLORS["text_dim"]
+        val_surf = font_value.render(val_text, True, color)
+        surface.blit(val_surf, (left_x + col_width - val_surf.get_width(), y))
+        y += row_h + 4
+        
+        # ─── LEFT COLUMN: Wheel Pulses ───
+        
+        title_surf = font_title.render("WHEELS", True, COLORS["cyan_bright"])
+        surface.blit(title_surf, (left_x, y))
+        
+        # "185 p/rev" label
+        unit_surf = font_small.render("185p/rev", True, COLORS["text_dim"])
+        surface.blit(unit_surf, (left_x + col_width - unit_surf.get_width(), y + 2))
+        y += row_h + 2
+        
+        # Front wheels
+        lbl = font_label.render("FR", True, COLORS["text_secondary"])
+        surface.blit(lbl, (left_x, y))
+        fr_text = f"{dyn.front_right_pulses:5d}"
+        fl_text = f"{dyn.front_left_pulses:5d}"
+        val_surf = font_value.render(f"R{fr_text} L{fl_text}", True, COLORS["green_bright"])
+        surface.blit(val_surf, (left_x + col_width - val_surf.get_width(), y))
+        y += row_h
+        
+        # Rear wheels
+        lbl = font_label.render("RR", True, COLORS["text_secondary"])
+        surface.blit(lbl, (left_x, y))
+        rr_text = f"{dyn.rear_right_pulses:5d}"
+        rl_text = f"{dyn.rear_left_pulses:5d}"
+        val_surf = font_value.render(f"R{rr_text} L{rl_text}", True, COLORS["green_bright"])
+        surface.blit(val_surf, (left_x + col_width - val_surf.get_width(), y))
+        y += row_h
+        
+        # ─── RIGHT COLUMN: Status ───
+        
+        ry = cr.y + 2
+        title_surf = font_title.render("STATUS", True, COLORS["cyan_bright"])
+        surface.blit(title_surf, (right_x, ry))
+        ry += row_h + 2
+        
+        # Headlight State
+        lbl = font_label.render("LIGHTS", True, COLORS["text_secondary"])
+        surface.blit(lbl, (right_x, ry))
+        hl_state = dyn.headlight_state
+        if hl_state == "HIGH":
+            hl_color = COLORS["blue_bright"]
+            hl_icon = "\u2588\u2588 HIGH"  # Full block + HIGH
+        elif hl_state == "LOW":
+            hl_color = COLORS["green_bright"]
+            hl_icon = "\u2593\u2593 LOW"   # Medium shade + LOW
+        elif hl_state == "PARK":
+            hl_color = COLORS["yellow"]
+            hl_icon = "\u2592\u2592 PARK"  # Light shade + PARK
+        else:
+            hl_color = COLORS["text_dim"]
+            hl_icon = "\u2591\u2591 OFF"   # Lightest shade + OFF
+        val_surf = font_value.render(hl_icon, True, hl_color)
+        surface.blit(val_surf, (right_x + col_width - val_surf.get_width(), ry))
+        ry += row_h
+        
+        # DRL indicator
+        lbl = font_label.render("DRL", True, COLORS["text_secondary"])
+        surface.blit(lbl, (right_x, ry))
+        if dyn.drl_active:
+            val_surf = font_value.render("ON", True, COLORS["green_bright"])
+        else:
+            val_surf = font_value.render("OFF", True, COLORS["text_dim"])
+        surface.blit(val_surf, (right_x + col_width - val_surf.get_width(), ry))
+        ry += row_h
+        
+        # Parking lights
+        lbl = font_label.render("PARK", True, COLORS["text_secondary"])
+        surface.blit(lbl, (right_x, ry))
+        if dyn.parking_lights:
+            val_surf = font_value.render("ON", True, COLORS["yellow"])
+        else:
+            val_surf = font_value.render("OFF", True, COLORS["text_dim"])
+        surface.blit(val_surf, (right_x + col_width - val_surf.get_width(), ry))
+        ry += row_h + 4
+        
+        # ─── RIGHT COLUMN: Battery Bars ───
+        
+        title_surf = font_title.render("BATTERY", True, COLORS["cyan_bright"])
+        surface.blit(title_surf, (right_x, ry))
+        ry += row_h + 2
+        
+        # SOC Bars visualization (0-8 bars)
+        lbl = font_label.render("SOC BAR", True, COLORS["text_secondary"])
+        surface.blit(lbl, (right_x, ry))
+        bars = dyn.soc_bars
+        bar_text = "\u2588" * bars + "\u2591" * (8 - bars)  # Filled + empty blocks
+        if bars >= 6:
+            bar_color = COLORS["green_bright"]
+        elif bars >= 3:
+            bar_color = COLORS["yellow"]
+        else:
+            bar_color = COLORS["red_bright"]
+        val_surf = font_value.render(f"{bar_text} {bars}", True, bar_color)
+        surface.blit(val_surf, (right_x + col_width - val_surf.get_width(), ry))
+        ry += row_h
+        
+        # EV Mode
+        lbl = font_label.render("EV MODE", True, COLORS["text_secondary"])
+        surface.blit(lbl, (right_x, ry))
+        if dyn.ev_mode_active:
+            val_surf = font_value.render("ACTIVE", True, COLORS["green_bright"])
+        else:
+            val_surf = font_value.render("--", True, COLORS["text_dim"])
+        surface.blit(val_surf, (right_x + col_width - val_surf.get_width(), ry))
+        ry += row_h
+        
+        # Warning Triangle
+        if dyn.warning_triangle:
+            lbl = font_label.render("\u26a0 WARNING", True, COLORS["red_bright"])
+            surface.blit(lbl, (right_x, ry))
+        ry += row_h
     
     def _render_avc_lan_debug(
         self,

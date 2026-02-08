@@ -182,6 +182,12 @@ def _build_color_dict(palette: ColorPalette) -> Dict[str, RGB]:
         "orange": palette.warm_mid,
         "orange_dim": palette.warm_mid,
         "amber": palette.warm_bright,
+        "yellow": palette.warm_bright,
+        
+        # Status colors
+        "green_bright": (0, 230, 118),        # Bright green for OK/active
+        "red_bright": palette.alert_bright,   # Red for warnings/high values
+        "blue_bright": (66, 165, 245),        # Blue for headlights
         
         # Status
         "active": palette.warm_bright,        # Changed from green to warm
@@ -192,6 +198,7 @@ def _build_color_dict(palette: ColorPalette) -> Dict[str, RGB]:
         # Text
         "text_primary": palette.secondary_bright,
         "text_secondary": palette.accent_dim,
+        "text_dim": palette.inactive,         # Dimmed text for inactive/off states
         "text_highlight": palette.highlight,
         "text_accent": palette.accent_bright,
         "text_value": palette.accent_bright,

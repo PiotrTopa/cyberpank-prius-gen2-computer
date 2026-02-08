@@ -68,6 +68,17 @@
     * Eq: `(256*A+B)` | Unit: Un'Cal (12bit signed, straight-ahead is vehicle specific) | 13ms
 * [cite_start]**Brake Pedal Position** (PID: 0030) [cite: 229]
     * Eq: `E` | Range: 0-127 | 6ms | *Note: May be 0x7F when not pressed or on startup.*
+* **ICE RPM Actual** (PID: 0038)
+    * Eq: `B * 64` | Range: 0-7552 RPM | ~40ms
+    * Byte 0: Status flags (not reliable for ICE on/off detection)
+    * Byte 1 (B): RPM value. 0 = ICE off, >0 = ICE running. Typical idle = 13 (832 RPM).
+    * Byte 2: Status/flag field (mostly 0x0C when running, 0x08 when off) — NOT RPM.
+    * *Primary RPM source. Use this instead of 0x039.*
+* **ICE Coolant Temperature** (PID: 0039)
+    * Eq: `A` | Range: 0-255 °C | ~88ms
+    * Byte 0 (A): Direct temperature in °C (no offset needed). Warm engine range 54-90°C.
+    * Byte 2: NOT reliable for RPM — shows non-zero even when ICE is confirmed OFF.
+    * *Use 0x038 for RPM, this message for coolant only.*
 * [cite_start]**ICE Temperature** (PID: 0039) [cite: 229]
     * Eq: `A` | Range: 0-255 °C | 88ms | *Note: Use solicited 07E00105 instead.*
 * [cite_start]**EM Amp** (PID: 003B) [cite: 229]
@@ -118,6 +129,11 @@
     * Eq: `B` | Range: 0-0x20 (~44L) | 3400ms
 * [cite_start]**Doors/Hatch Open** (PID: 05B6) [cite: 229]
     * Eq: `(C:6-7)` | 1050ms | *Closed: 0x00, Driver: 0x80, Others: 0x40.*
+* **Outside / Ambient Temperature** (PID: 05CC)
+    * Eq: `A - 40` | Range: -40 to 215 °C | ~350ms
+    * Byte 0 (A): Temperature with +40 offset. Observed value 36 = -4°C.
+    * Bytes 1-2: Varying counter / status (not decoded).
+    * *Cross-validated against AVC-LAN 10C→310 outside temp subtype.*
 * [cite_start]**Cruise Control Active** (PID: 05C8) [cite: 229]
     * Eq: `(C:4)` | 1050ms
 

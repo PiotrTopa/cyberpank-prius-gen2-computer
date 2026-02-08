@@ -208,6 +208,44 @@ class EnergyState:
 
 
 @dataclass(frozen=True)
+class DynamicsState:
+    """
+    Vehicle dynamics state.
+    
+    Captures steering, acceleration, yaw, wheel data,
+    headlight status, and SOC bar indicators.
+    """
+    # Steering (0x025)
+    steering_angle: Optional[float] = None       # Degrees (approx, uncalibrated)
+    steering_angle_raw: Optional[int] = None     # Raw 12-bit signed value
+    
+    # Acceleration (0x022)
+    lateral_accel_raw: Optional[int] = None      # Raw offset value (uncalibrated)
+    longitudinal_accel_raw: Optional[int] = None # Raw offset value (uncalibrated)
+    
+    # Yaw Rate (0x03A)
+    yaw_rate_raw: Optional[int] = None           # Raw offset value (uncalibrated)
+    
+    # Wheel Pulses (0x0B1 / 0x0B3, 185 pulses/rev)
+    front_right_pulses: int = 0
+    front_left_pulses: int = 0
+    rear_right_pulses: int = 0
+    rear_left_pulses: int = 0
+    
+    # Headlights (0x57F)
+    headlight_state: str = "OFF"   # "OFF", "PARK", "LOW", "HIGH"
+    parking_lights: bool = False
+    low_beam: bool = False
+    high_beam: bool = False
+    drl_active: bool = False
+    
+    # SOC Bars & Events (0x529)
+    soc_bars: int = 0              # 0-8 bars on MFD
+    ev_mode_active: bool = False
+    warning_triangle: bool = False
+
+
+@dataclass(frozen=True)
 class ConnectionState:
     """
     Gateway connection state.
@@ -334,6 +372,7 @@ class AppState:
     climate: ClimateState = field(default_factory=ClimateState)
     vehicle: VehicleState = field(default_factory=VehicleState)
     energy: EnergyState = field(default_factory=EnergyState)
+    dynamics: DynamicsState = field(default_factory=DynamicsState)
     connection: ConnectionState = field(default_factory=ConnectionState)
     debug: DebugState = field(default_factory=DebugState)
     input: InputState = field(default_factory=InputState)

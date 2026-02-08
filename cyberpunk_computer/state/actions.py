@@ -68,6 +68,14 @@ class ActionType(Enum):
     SET_BATTERY_MAX_TEMP = auto() # New: Byte 5 of 0x3CB
     SET_BATTERY_DELTA_SOC = auto()  # Delta between min/max cell blocks
     
+    # Dynamics actions
+    SET_STEERING_ANGLE = auto()
+    SET_ACCELERATION = auto()
+    SET_YAW_RATE = auto()
+    SET_WHEEL_PULSES = auto()
+    SET_HEADLIGHT_STATUS = auto()
+    SET_SOC_BARS_EVENT = auto()
+    
     # Connection actions
     SET_CONNECTION_STATE = auto()
     GATEWAY_READY = auto()
@@ -524,6 +532,108 @@ class SetInverterTempAction(Action):
     def __init__(self, temp: float, source: ActionSource = ActionSource.INTERNAL):
         super().__init__(ActionType.SET_INVERTER_TEMP, source)
         self.temp = temp
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dynamics Actions
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class SetSteeringAngleAction(Action):
+    """Set steering wheel angle (degrees, approx)."""
+    angle: float = 0.0
+    angle_raw: int = 0
+    
+    def __init__(self, angle: float, angle_raw: int = 0,
+                 source: ActionSource = ActionSource.INTERNAL):
+        super().__init__(ActionType.SET_STEERING_ANGLE, source)
+        self.angle = angle
+        self.angle_raw = angle_raw
+
+
+@dataclass
+class SetAccelerationAction(Action):
+    """Set lateral/longitudinal acceleration (raw uncalibrated values)."""
+    lateral_raw: Optional[int] = None
+    longitudinal_raw: Optional[int] = None
+    
+    def __init__(self, lateral_raw: Optional[int] = None,
+                 longitudinal_raw: Optional[int] = None,
+                 source: ActionSource = ActionSource.INTERNAL):
+        super().__init__(ActionType.SET_ACCELERATION, source)
+        self.lateral_raw = lateral_raw
+        self.longitudinal_raw = longitudinal_raw
+
+
+@dataclass
+class SetYawRateAction(Action):
+    """Set yaw rate (raw uncalibrated value)."""
+    yaw_rate_raw: int = 0
+    
+    def __init__(self, yaw_rate_raw: int = 0,
+                 source: ActionSource = ActionSource.INTERNAL):
+        super().__init__(ActionType.SET_YAW_RATE, source)
+        self.yaw_rate_raw = yaw_rate_raw
+
+
+@dataclass
+class SetWheelPulsesAction(Action):
+    """Set wheel pulse counter values (185 pulses/rev)."""
+    front_right: Optional[int] = None
+    front_left: Optional[int] = None
+    rear_right: Optional[int] = None
+    rear_left: Optional[int] = None
+    
+    def __init__(self, front_right: Optional[int] = None,
+                 front_left: Optional[int] = None,
+                 rear_right: Optional[int] = None,
+                 rear_left: Optional[int] = None,
+                 source: ActionSource = ActionSource.INTERNAL):
+        super().__init__(ActionType.SET_WHEEL_PULSES, source)
+        self.front_right = front_right
+        self.front_left = front_left
+        self.rear_right = rear_right
+        self.rear_left = rear_left
+
+
+@dataclass
+class SetHeadlightStatusAction(Action):
+    """Set headlight status from CAN 0x57F."""
+    headlight_state: str = "OFF"  # "OFF", "PARK", "LOW", "HIGH"
+    parking_lights: bool = False
+    low_beam: bool = False
+    high_beam: bool = False
+    drl_active: bool = False
+    
+    def __init__(self, headlight_state: str = "OFF",
+                 parking_lights: bool = False,
+                 low_beam: bool = False,
+                 high_beam: bool = False,
+                 drl_active: bool = False,
+                 source: ActionSource = ActionSource.INTERNAL):
+        super().__init__(ActionType.SET_HEADLIGHT_STATUS, source)
+        self.headlight_state = headlight_state
+        self.parking_lights = parking_lights
+        self.low_beam = low_beam
+        self.high_beam = high_beam
+        self.drl_active = drl_active
+
+
+@dataclass
+class SetSOCBarsEventAction(Action):
+    """Set SOC bars and event flags from CAN 0x529."""
+    soc_bars: int = 0          # 0-8
+    ev_mode_active: bool = False
+    warning_triangle: bool = False
+    
+    def __init__(self, soc_bars: int = 0,
+                 ev_mode_active: bool = False,
+                 warning_triangle: bool = False,
+                 source: ActionSource = ActionSource.INTERNAL):
+        super().__init__(ActionType.SET_SOC_BARS_EVENT, source)
+        self.soc_bars = soc_bars
+        self.ev_mode_active = ev_mode_active
+        self.warning_triangle = warning_triangle
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -34,6 +34,8 @@ from ..state.actions import (
     SetSpeedAction, SetRPMAction, SetICECoolantTempAction, SetInverterTempAction,
     SetBatteryVoltageAction, SetBatteryCurrentAction, SetBatteryTempAction,
     SetBatteryDeltaSOCAction, SetGearAction,
+    SetSteeringAngleAction, SetAccelerationAction, SetYawRateAction,
+    SetWheelPulsesAction, SetHeadlightStatusAction, SetSOCBarsEventAction,
     AVCButtonPressAction, AVCTouchEventAction,
 )
 from ..comm.avc_decoder import (
@@ -579,6 +581,70 @@ class IngressController:
                 }
                 gear = gear_map.get(gear_str, GearPosition.PARK)
                 actions.append(SetGearAction(gear, ActionSource.GATEWAY))
+        
+        # ─────────────────────────────────────────────────────────────────────
+        # VEHICLE DYNAMICS (PAGE 2 DATA)
+        # ─────────────────────────────────────────────────────────────────────
+        
+        # Steering Angle (0x025)
+        elif msg.msg_type == CANMessageType.STEERING_ANGLE:
+            angle = msg.values.get("steering_angle")
+            raw = msg.values.get("steering_angle_raw", 0)
+            if angle is not None:
+                actions.append(SetSteeringAngleAction(angle, raw, ActionSource.GATEWAY))
+        
+        # Acceleration (0x022, 0x023)
+        elif msg.msg_type == CANMessageType.ACCELERATION:
+            lat = msg.values.get("lateral_accel_raw")
+            lon = msg.values.get("longitudinal_accel_raw")
+            if lat is not None or lon is not None:
+                actions.append(SetAccelerationAction(lat, lon, ActionSource.GATEWAY))
+        
+        # Yaw Rate (0x03A)
+        elif msg.msg_type == CANMessageType.YAW_RATE:
+            yaw = msg.values.get("yaw_rate_raw")
+            if yaw is not None:
+                actions.append(SetYawRateAction(yaw, ActionSource.GATEWAY))
+        
+        # Wheel Pulses (0x0B1 front, 0x0B3 rear)
+        elif msg.msg_type == CANMessageType.WHEEL_PULSES:
+            pos = msg.values.get("wheel_position")
+            if pos == "front":
+                actions.append(SetWheelPulsesAction(
+                    front_right=msg.values.get("front_right_pulses"),
+                    front_left=msg.values.get("front_left_pulses"),
+                    source=ActionSource.GATEWAY
+                ))
+            elif pos == "rear":
+                actions.append(SetWheelPulsesAction(
+                    rear_right=msg.values.get("rear_right_pulses"),
+                    rear_left=msg.values.get("rear_left_pulses"),
+                    source=ActionSource.GATEWAY
+                ))
+        
+        # Headlight Status (0x57F)
+        elif msg.msg_type == CANMessageType.HEADLIGHT_STATUS:
+            actions.append(SetHeadlightStatusAction(
+                headlight_state=msg.values.get("headlight_state", "OFF"),
+                parking_lights=msg.values.get("parking_lights", False),
+                low_beam=msg.values.get("low_beam", False),
+                high_beam=msg.values.get("high_beam", False),
+                drl_active=msg.values.get("drl_active", False),
+                source=ActionSource.GATEWAY
+            ))
+        
+        # SOC Bars & Events (0x529)
+        elif msg.msg_type == CANMessageType.SOC_BARS_EVENT:
+            actions.append(SetSOCBarsEventAction(
+                soc_bars=msg.values.get("soc_bars", 0),
+                ev_mode_active=msg.values.get("ev_mode_active", False),
+                warning_triangle=msg.values.get("warning_triangle", False),
+                source=ActionSource.GATEWAY
+            ))
+            # Also set EV mode on vehicle state
+            ev_active = msg.values.get("ev_mode_active", False)
+            if ev_active:
+                actions.append(SetReadyModeAction(True, ActionSource.GATEWAY))
         
         # ─────────────────────────────────────────────────────────────────────
         # SOLICITED CAN RESPONSES (OBD-II style)

@@ -15,7 +15,8 @@ from enum import Enum, auto
 
 from .app_state import (
     AppState, AudioState, ClimateState, VehicleState, 
-    EnergyState, ConnectionState, GearPosition, InputState, DisplayState
+    EnergyState, ConnectionState, GearPosition, InputState, DisplayState,
+    DynamicsState
 )
 from .actions import (
     Action, ActionType, ActionSource, BatchAction,
@@ -45,6 +46,7 @@ class StateSlice(Enum):
     DEBUG = auto()
     INPUT = auto()  # AVC button/touch input events
     DISPLAY = auto()  # Display settings (power chart time base, etc.)
+    DYNAMICS = auto()  # Vehicle dynamics (steering, accel, wheel pulses, etc.)
     VFD_SATELLITE = auto()  # VFD satellite display state (device 110)
     ALL = auto()
 
@@ -569,6 +571,84 @@ class Store:
                 display=self._state.display.with_time_base(a.time_base)
             )
             affected.add(StateSlice.DISPLAY)
+        
+        # Dynamics reducers
+        elif action.type == ActionType.SET_STEERING_ANGLE:
+            self._state = replace(
+                self._state,
+                dynamics=replace(
+                    self._state.dynamics,
+                    steering_angle=action.angle,
+                    steering_angle_raw=action.angle_raw
+                )
+            )
+            affected.add(StateSlice.DYNAMICS)
+        
+        elif action.type == ActionType.SET_ACCELERATION:
+            kwargs = {}
+            if action.lateral_raw is not None:
+                kwargs["lateral_accel_raw"] = action.lateral_raw
+            if action.longitudinal_raw is not None:
+                kwargs["longitudinal_accel_raw"] = action.longitudinal_raw
+            if kwargs:
+                self._state = replace(
+                    self._state,
+                    dynamics=replace(self._state.dynamics, **kwargs)
+                )
+                affected.add(StateSlice.DYNAMICS)
+        
+        elif action.type == ActionType.SET_YAW_RATE:
+            self._state = replace(
+                self._state,
+                dynamics=replace(
+                    self._state.dynamics,
+                    yaw_rate_raw=action.yaw_rate_raw
+                )
+            )
+            affected.add(StateSlice.DYNAMICS)
+        
+        elif action.type == ActionType.SET_WHEEL_PULSES:
+            kwargs = {}
+            if action.front_right is not None:
+                kwargs["front_right_pulses"] = action.front_right
+            if action.front_left is not None:
+                kwargs["front_left_pulses"] = action.front_left
+            if action.rear_right is not None:
+                kwargs["rear_right_pulses"] = action.rear_right
+            if action.rear_left is not None:
+                kwargs["rear_left_pulses"] = action.rear_left
+            if kwargs:
+                self._state = replace(
+                    self._state,
+                    dynamics=replace(self._state.dynamics, **kwargs)
+                )
+                affected.add(StateSlice.DYNAMICS)
+        
+        elif action.type == ActionType.SET_HEADLIGHT_STATUS:
+            self._state = replace(
+                self._state,
+                dynamics=replace(
+                    self._state.dynamics,
+                    headlight_state=action.headlight_state,
+                    parking_lights=action.parking_lights,
+                    low_beam=action.low_beam,
+                    high_beam=action.high_beam,
+                    drl_active=action.drl_active
+                )
+            )
+            affected.add(StateSlice.DYNAMICS)
+        
+        elif action.type == ActionType.SET_SOC_BARS_EVENT:
+            self._state = replace(
+                self._state,
+                dynamics=replace(
+                    self._state.dynamics,
+                    soc_bars=action.soc_bars,
+                    ev_mode_active=action.ev_mode_active,
+                    warning_triangle=action.warning_triangle
+                )
+            )
+            affected.add(StateSlice.DYNAMICS)
         
         # VFD Satellite reducers
         elif action.type == ActionType.UPDATE_VFD_SATELLITE:

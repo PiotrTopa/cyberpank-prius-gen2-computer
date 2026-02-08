@@ -204,6 +204,16 @@ PRIUS_GEN2_ADDRESSES: dict[int, str] = {
 }
 
 
+class ClimateMessageSubtype(Enum):
+    """Subtypes of climate messages from 10C -> 310."""
+    OUTSIDE_TEMP = auto()      # b6=0x90 b7=0x80: outside temperature report
+    CABIN_TEMP = auto()        # b6=0x60 b7=0x80: cabin/inside temperature report
+    TARGET_TEMP = auto()       # b6=0x00 b7=0x20: target temperature setpoint
+    INIT = auto()              # b4=0x09: initialization/boot message
+    OFF = auto()               # b4=0x0C: climate system off/reset
+    UNKNOWN = auto()
+
+
 class AVCMessageType(Enum):
     """Types of AVC-LAN messages."""
     UNKNOWN = auto()
@@ -319,8 +329,13 @@ class AVCDecoder:
             # Specific Decoding Logic
             # -----------------------------------------------------------------
             
-            # Climate Status (A/C Amp 0x130 broadcasting)
-            if master_addr == 0x130:
+            # Climate Control (10C → 310): Climate ECU → HVAC
+            # Primary source for outside/cabin/target temperature via AVC-LAN
+            if master_addr == 0x10C and slave_addr == 0x310:
+                self._decode_climate_10c_310(msg)
+            
+            # Climate Status (A/C Amp 0x130 broadcasting) - rarely seen
+            elif master_addr == 0x130:
                 self._decode_climate_status(msg)
                 
             return msg
@@ -328,6 +343,77 @@ class AVCDecoder:
         except (ValueError, KeyError, TypeError):
             return None
     
+    def _decode_climate_10c_310(self, msg: AVCMessage) -> None:
+        """
+        Decode Climate Control messages from 10C (Climate Control) -> 310 (HVAC).
+
+        Message format (8 bytes): [00 00 00 00 b4 b5 b6 b7]
+        - Bytes 0-3: Always 0x00 (reserved/padding)
+        - Byte 4: Message type / climate mode flags
+            - 0x08: Normal status message (most common)
+            - 0x09: Initialization / boot message
+            - 0x0C: Climate system off / reset
+        - Byte 5: Temperature value (interpretation depends on subtype)
+            - Formula: temp_C = (byte5 - 18) / 2
+        - Bytes 6-7: Message subtype discriminator
+            - 0x90 0x80: Outside temperature report
+            - 0x60 0x80: Cabin (inside) temperature report
+            - 0x00 0x20: Target temperature setpoint
+
+        Cross-validated: Outside temp from b5 with formula (b5-18)/2
+        matches CAN 0x5CC byte0 with formula (b0-40). Both show -4C
+        in winter recording session.
+
+        Note: Messages alternate between subtypes on the same channel.
+        All subtypes use the same temperature formula for byte 5.
+        """
+        data = msg.data
+        if len(data) < 8:
+            return
+
+        msg.msg_type = AVCMessageType.CLIMATE_STATUS
+
+        b4, b5, b6, b7 = data[4], data[5], data[6], data[7]
+
+        # Determine message subtype from byte 4 and bytes 6-7
+        if b4 == 0x09:
+            subtype = ClimateMessageSubtype.INIT
+        elif b4 == 0x0C:
+            subtype = ClimateMessageSubtype.OFF
+        elif b6 == 0x90 and b7 == 0x80:
+            subtype = ClimateMessageSubtype.OUTSIDE_TEMP
+        elif b6 == 0x00 and b7 == 0x20:
+            subtype = ClimateMessageSubtype.TARGET_TEMP
+        elif b6 == 0x60 and b7 == 0x80:
+            subtype = ClimateMessageSubtype.CABIN_TEMP
+        else:
+            subtype = ClimateMessageSubtype.UNKNOWN
+
+        msg.values["climate_subtype"] = subtype.name
+
+        # Temperature extraction (common formula for all subtypes)
+        if b5 > 0 or subtype == ClimateMessageSubtype.OFF:
+            temp_c = (b5 - 18) / 2.0
+            msg.values["raw_temp_byte"] = b5
+
+            if subtype == ClimateMessageSubtype.OUTSIDE_TEMP:
+                msg.values["outside_temp_c"] = temp_c
+            elif subtype == ClimateMessageSubtype.CABIN_TEMP:
+                msg.values["cabin_temp_c"] = temp_c
+            elif subtype == ClimateMessageSubtype.TARGET_TEMP:
+                msg.values["target_temp_c"] = temp_c
+            elif subtype == ClimateMessageSubtype.INIT:
+                # Init message - could be outside or cabin temp
+                msg.values["init_temp_c"] = temp_c
+            elif subtype == ClimateMessageSubtype.OFF:
+                msg.values["off_temp_c"] = temp_c
+
+        # Mode flags from byte 4
+        msg.values["climate_mode_byte"] = b4
+        msg.values["climate_active"] = b4 == 0x08
+        msg.values["climate_init"] = b4 == 0x09
+        msg.values["climate_off"] = b4 == 0x0C
+
     def _decode_climate_status(self, msg: AVCMessage) -> None:
         """
         Decode Climate Control status from A/C Amplifier (0x130).
@@ -842,7 +928,15 @@ def parse_volume_status(data: list[int]) -> Optional[int]:
 
 def parse_climate_state(data: list[int]) -> Optional[dict]:
     """
-    Parse climate control state from 10C → 310 messages.
+    Parse climate control state from 10C -> 310 messages.
+    
+    Message format (8 bytes): [00 00 00 00 b4 b5 b6 b7]
+    - Byte 4: Mode (0x08=normal, 0x09=init, 0x0C=off)
+    - Byte 5: Temperature raw value, formula: (b5 - 18) / 2 = degrees C
+    - Bytes 6-7: Subtype discriminator:
+        - 0x90 0x80: Outside temperature
+        - 0x60 0x80: Cabin temperature
+        - 0x00 0x20: Target temperature setpoint
     
     Args:
         data: Data bytes from the message
@@ -853,10 +947,39 @@ def parse_climate_state(data: list[int]) -> Optional[dict]:
     if len(data) < 8:
         return None
     
-    return {
+    b4, b5, b6, b7 = data[4], data[5], data[6], data[7]
+    
+    # Determine subtype
+    if b4 == 0x09:
+        subtype = "init"
+    elif b4 == 0x0C:
+        subtype = "off"
+    elif b6 == 0x90 and b7 == 0x80:
+        subtype = "outside_temp"
+    elif b6 == 0x00 and b7 == 0x20:
+        subtype = "target_temp"
+    elif b6 == 0x60 and b7 == 0x80:
+        subtype = "cabin_temp"
+    else:
+        subtype = "unknown"
+    
+    temp_c = (b5 - 18) / 2.0 if b5 > 0 else None
+    
+    result = {
         "raw": data,
-        "byte4": data[4] if len(data) > 4 else 0,
-        "byte5": data[5] if len(data) > 5 else 0,
-        "byte6": data[6] if len(data) > 6 else 0,
-        "byte7": data[7] if len(data) > 7 else 0,
+        "subtype": subtype,
+        "mode_byte": b4,
+        "temp_raw": b5,
+        "temp_c": temp_c,
+        "active": b4 == 0x08,
     }
+    
+    # Named temperature field based on subtype
+    if subtype == "outside_temp" and temp_c is not None:
+        result["outside_temp_c"] = temp_c
+    elif subtype == "cabin_temp" and temp_c is not None:
+        result["cabin_temp_c"] = temp_c
+    elif subtype == "target_temp" and temp_c is not None:
+        result["target_temp_c"] = temp_c
+    
+    return result
