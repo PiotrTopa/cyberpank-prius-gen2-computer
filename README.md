@@ -1,6 +1,8 @@
 # CyberPunk Prius Gen 2 - Onboard Computer
 
-Custom onboard computer system for the **Cybersecurity Field Unit** - a retro-modded Toyota Prius Gen 2.
+Custom onboard computer system for the **CyberPunk Prius Gen 2** retrofit, a retro-modded Toyota Prius.
+
+**Tags:** `cyberpunk` `prius` `gen2` `raspberry-pi` `pygame` `embedded` `hmi` `automotive` `can-bus` `ndjson`
 
 ## 🎯 Overview
 

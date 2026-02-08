@@ -1,7 +1,7 @@
 """
 CyberPunk Prius Gen 2 - Onboard Computer
 
-A pygame-based HMI application for the Cybersecurity Field Unit.
+A pygame-based HMI application for the CyberPunk Prius Gen 2 retrofit.
 """
 
 __version__ = "0.2.0"
