@@ -6,7 +6,7 @@ and environment-specific overrides.
 """
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Set
 
 
 @dataclass
@@ -74,6 +74,17 @@ class Config:
     
     # Connection timeout in seconds
     gateway_timeout: float = 0.1
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # Logging Settings
+    # ─────────────────────────────────────────────────────────────────────────
+    
+    # Message logging
+    log_incoming: bool = False
+    log_outgoing: bool = False
+    
+    # Device filters (None = all, or set of device IDs to show)
+    filter_devices: Optional[set] = None
     
     # ─────────────────────────────────────────────────────────────────────────
     # Input Settings

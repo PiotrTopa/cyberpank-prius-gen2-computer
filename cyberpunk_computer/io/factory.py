@@ -20,6 +20,7 @@ from .file_io import FileInputPort
 from .serial_io import SerialPort, SerialConfig
 from .mock_io import MockInputPort, MockOutputPort, LogOutputPort
 from .udp_output import UDPOutputPort, MultiOutputPort
+from .comm_logger import CommLogger, LogConfig, CommLoggerManager
 from .ingress import IngressController
 from .egress import EgressController
 from .vfd_output import register_vfd_handlers
@@ -46,6 +47,9 @@ class VirtualTwinConfig:
     """Configuration for Virtual Twin system."""
     mode: ExecutionMode = ExecutionMode.DEVELOPMENT
     
+    # Logging configuration
+    log_state_changes: bool = False  # Log [STATE] messages
+    
     # Serial config (production mode)
     serial_port: str = "/dev/ttyACM0"
     serial_baudrate: int = 1_000_000
@@ -61,6 +65,14 @@ class VirtualTwinConfig:
     enable_vfd_satellite: bool = True
     vfd_udp_host: str = "localhost"
     vfd_udp_port: int = 5110
+    
+    # Communication logging for replay (NEW in v2.8.0)
+    enable_comm_logging: bool = False  # Enable logging all comm for replay
+    comm_log_dir: Optional[str] = None  # Directory for log files
+    comm_log_devices: Optional[List[int]] = None  # Filter by device (None = all)
+    
+    # Solicited CAN mode (v2.8.0) - enables inverter temp, delta SOC, etc.
+    enable_solicited_can: bool = True  # Auto-subscribe to key PIDs on connect
     
     # Logging
     verbose: bool = False
@@ -81,14 +93,99 @@ class VirtualTwin:
     egress: EgressController
     rules_engine: RulesEngine
     mode: ExecutionMode
+    comm_logger: Optional[CommLogger] = None  # Communication logger for replay
+    _enable_solicited: bool = False  # Whether to send solicited CAN subscriptions
     
     def start(self) -> bool:
         """Start all components."""
-        return self.ingress.start()
+        result = self.ingress.start()
+        
+        # Initialize solicited CAN subscriptions after connection
+        if result and self._enable_solicited:
+            self._init_solicited_subscriptions()
+        
+        return result
+    
+    def _init_solicited_subscriptions(self) -> None:
+        """
+        Initialize solicited CAN subscriptions for key PIDs.
+        
+        This enables RPM, SOC from solicited queries.
+        NOTE: ISO-TP multi-frame (inverter temps) not yet supported by Gateway.
+        """
+        from .ports import OutgoingCommand, DEVICE_CAN
+        
+        logger.info("Initializing solicited CAN subscriptions...")
+        
+        # Switch to normal (active) CAN mode
+        self.output_port.send(OutgoingCommand(
+            device_id=DEVICE_CAN,
+            command_type="mode",
+            payload={"a": "mode", "m": "normal"}
+        ))
+        
+        # Wait briefly for mode switch
+        import time
+        time.sleep(0.1)
+        
+        # Subscribe to key PIDs (single-frame only - ISO-TP not yet in Gateway):
+        
+        # Slot 0: Broadcast 0x7DF, PID 010C (RPM) @ 200ms
+        # TESTED: Works! Response from 0x7E8
+        self.output_port.send(OutgoingCommand(
+            device_id=DEVICE_CAN,
+            command_type="sub",
+            payload={
+                "a": "sub",
+                "s": 0,
+                "i": "0x7DF",
+                "d": [0x02, 0x01, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x00],
+                "p": 200,
+                "t": 100,
+                "r": ["0x7E8"]
+            }
+        ))
+        
+        # Slot 1: Hybrid ECU 0x7E2, PID 21CF (delta SOC) @ 1000ms
+        # TESTED: Works! Single-frame response from 0x7EA
+        self.output_port.send(OutgoingCommand(
+            device_id=DEVICE_CAN,
+            command_type="sub",
+            payload={
+                "a": "sub",
+                "s": 1,
+                "i": "0x7E2",
+                "d": [0x03, 0x21, 0xCF, 0x00, 0x00, 0x00, 0x00, 0x00],
+                "p": 1000,
+                "t": 200,
+                "r": ["0x7EA"]
+            }
+        ))
+        
+        # Slot 2: DISABLED - Inverter temps (PID 21C3) needs ISO-TP multi-frame
+        # TODO: Enable when Gateway supports ISO-TP flow control
+        # self.output_port.send(OutgoingCommand(
+        #     device_id=DEVICE_CAN,
+        #     command_type="sub",
+        #     payload={
+        #         "a": "sub",
+        #         "s": 2,
+        #         "i": "0x7E2",
+        #         "d": [0x03, 0x21, 0xC3, 0x00, 0x00, 0x00, 0x00, 0x00],
+        #         "p": 1000,
+        #         "t": 500,
+        #         "r": ["0x7EA"],
+        #         "isotp": True
+        #     }
+        # ))
+        
+        logger.info("Solicited CAN subscriptions initialized (2 slots active: RPM, SOC)")
     
     def stop(self) -> None:
         """Stop all components."""
         self.ingress.stop()
+        if self.comm_logger:
+            self.comm_logger.stop()
     
     def update(self) -> int:
         """
@@ -115,7 +212,7 @@ def create_virtual_twin(config: VirtualTwinConfig) -> VirtualTwin:
     logger.info(f"Creating Virtual Twin in {config.mode.name} mode")
     
     # Create store
-    store = Store(verbose=config.verbose)
+    store = Store(verbose=config.log_state_changes)
     
     # Create IO ports based on mode
     if config.mode == ExecutionMode.PRODUCTION:
@@ -148,6 +245,47 @@ def create_virtual_twin(config: VirtualTwinConfig) -> VirtualTwin:
     if config.log_commands:
         egress.set_command_log_callback(_log_command)
     
+    # Set up communication logging for replay
+    comm_logger = None
+    if config.enable_comm_logging:
+        # Parse device filter into LogConfig booleans
+        include_can = True
+        include_avc = True
+        include_system = True
+        include_satellite = True
+        
+        if config.comm_log_devices:
+            device_set = set(config.comm_log_devices)
+            include_system = 0 in device_set
+            include_can = 1 in device_set
+            include_avc = 2 in device_set
+            include_satellite = any(d >= 100 for d in device_set)
+        
+        log_config = LogConfig(
+            directory=config.comm_log_dir or "logs",
+            include_system=include_system,
+            include_can=include_can,
+            include_avc=include_avc,
+            include_satellite=include_satellite
+        )
+        comm_logger = CommLogger(config=log_config)  # filepath=None for auto-generate
+        comm_logger.start()
+        
+        # Wire up ingress message logging
+        ingress.set_message_log_callback(comm_logger.log_incoming)
+        
+        # Wire up egress command logging (in addition to console logging)
+        egress.set_message_log_callback(comm_logger.log_outgoing)
+        
+        logger.info(f"Communication logging enabled, writing to: {comm_logger.filepath}")
+    
+    # Determine if solicited CAN should be enabled
+    # Only for production/serial mode, not for replay
+    enable_solicited = (
+        config.enable_solicited_can and 
+        config.mode == ExecutionMode.PRODUCTION
+    )
+    
     return VirtualTwin(
         store=store,
         input_port=input_port,
@@ -155,7 +293,9 @@ def create_virtual_twin(config: VirtualTwinConfig) -> VirtualTwin:
         ingress=ingress,
         egress=egress,
         rules_engine=rules_engine,
-        mode=config.mode
+        mode=config.mode,
+        comm_logger=comm_logger,
+        _enable_solicited=enable_solicited
     )
 
 

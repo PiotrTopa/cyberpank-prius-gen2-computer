@@ -1,4 +1,4 @@
-# TODO: Implement Solicited OBD2 Queries
+# Solicited OBD2 Queries - Implementation Guide
 
 ## Overview
 
@@ -6,62 +6,85 @@ Several important vehicle parameters are **not available** in unsolicited CAN br
 They require **solicited OBD2 queries** to specific ECUs. This document tracks the implementation
 of these features.
 
+**Status: ✅ IMPLEMENTED** (Gateway Protocol v2.8.0)
+
 ---
 
-## Priority 1: Inverter/Motor Temperatures
+## Implementation Summary
+
+The solicited CAN mode is now fully implemented:
+
+| Component | File | Status |
+|-----------|------|--------|
+| Protocol Documentation | [docs/PROTOCOL.md](PROTOCOL.md) | ✅ Updated |
+| Protocol Functions | `cyberpunk_computer/comm/protocol.py` | ✅ Added `create_can_request`, `create_can_subscription`, etc. |
+| Gateway Connection | `cyberpunk_computer/comm/gateway.py` | ✅ Added `can_switch_mode`, `can_subscribe`, `obd2_request`, etc. |
+| CAN Decoder | `cyberpunk_computer/comm/can_decoder.py` | ✅ Added solicited response parsing |
+| PID Manager | `cyberpunk_computer/comm/solicited_can.py` | ✅ New module with PID definitions |
+
+---
+
+## Priority 1: Inverter/Motor Temperatures ✅
 
 ### Current Status
 - UI element exists (`_inv_temp_display` in main_screen.py)
 - State field exists (`vehicle.inverter_temp` in app_state.py)
 - Action exists (`SetInverterTempAction`)
-- **NO DATA SOURCE** - 0x540 was incorrectly assumed to contain inverter temp
+- **✅ DATA SOURCE IMPLEMENTED** - PID 21C3 from ECU 0x7E2
 
-### Required Implementation
+### Implementation
 Send OBD2 query to **ECU 0x7E2** (Hybrid System) with **PID 21C3**
 
 #### Request Format
-```
-CAN ID: 0x7E2
-Data: [02, 21, C3, 00, 00, 00, 00, 00]
-       └─ length  └─ mode  └─ PID
+```python
+# Using new gateway methods:
+gateway.obd2_subscribe(slot=0, mode=0x21, pid=0xC3, interval_ms=500, ecu=0x7E2)
+
+# Or raw:
+gateway.can_subscribe(
+    slot=0,
+    can_id=0x7E2,
+    data=[0x02, 0x21, 0xC3, 0x00, 0x00, 0x00, 0x00, 0x00],
+    interval_ms=500,
+    response_ids=["0x7EA"]
+)
 ```
 
-#### Response (multi-frame from 0x7EA)
-| Byte | Parameter | Formula | Range |
-|------|-----------|---------|-------|
-| Y | MG1 Inverter Temp | `Y - 40` | -40 to 215 °C |
-| Z | MG2 Inverter Temp | `Z - 40` | -40 to 215 °C |
-| AA | Motor Temp No2 (MG2) | `AA - 40` | -40 to 215 °C |
-| AB | Motor Temp No1 (MG1) | `AB - 40` | -40 to 215 °C |
-
-#### Code Locations to Update
-- `cyberpunk_computer/comm/can_decoder.py` - Add response parser for 0x7EA
-- `cyberpunk_computer/comm/gateway_adapter.py` - Dispatch `SetInverterTempAction`
-- `cyberpunk_computer/comm/gateway.py` - Add periodic query mechanism
+#### Response (parsed by CANDecoder)
+| Value | Key in msg.values | Formula | Range |
+|-------|-------------------|---------|-------|
+| MG1 Inverter Temp | `mg1_inverter_temp` | `Y - 40` | -40 to 215 °C |
+| MG2 Inverter Temp | `mg2_inverter_temp` | `Z - 40` | -40 to 215 °C |
+| Motor Temp No2 (MG2) | `mg2_motor_temp` | `AA - 40` | -40 to 215 °C |
+| Motor Temp No1 (MG1) | `mg1_motor_temp` | `AB - 40` | -40 to 215 °C |
+| Primary inverter_temp | `inverter_temp` | Uses MG2 value | -40 to 215 °C |
 
 ---
 
-## Priority 2: Delta SOC (Battery Cell Imbalance)
+## Priority 2: Delta SOC (Battery Cell Imbalance) ✅
 
 ### Current Status
 - UI chart exists (`_draw_voltage_chart` in energy_monitor.py, labeled "ΔSOC")
 - State field exists (`energy.battery_delta_soc` in app_state.py)
 - Action exists (`SetBatteryDeltaSOCAction`)
-- **NO DATA SOURCE** - 0x3CB byte 2 was incorrectly assumed to be delta SOC
+- **✅ DATA SOURCE IMPLEMENTED** - PID 21CF from ECU 0x7E3
 
-### Required Implementation
-Send OBD2 query to **ECU 0x7E2** (Hybrid System) with **PID 21CF**
+### Implementation
+Send OBD2 query to **ECU 0x7E3** (HV Battery) with **PID 21CF**
 
 #### Request Format
-```
-CAN ID: 0x7E2
-Data: [02, 21, CF, 00, 00, 00, 00, 00]
+```python
+gateway.obd2_subscribe(slot=1, mode=0x21, pid=0xCF, interval_ms=2000, ecu=0x7E3)
 ```
 
-#### Response (multi-frame from 0x7EA)
-| Byte | Parameter | Formula | Range |
-|------|-----------|---------|-------|
-| G | Delta SOC | `0.01 * G` | 0-60% |
+#### Response (parsed by CANDecoder)
+| Value | Key in msg.values | Formula | Range |
+|-------|-------------------|---------|-------|
+| Delta SOC | `delta_soc` | `0.01 * G` | 0-60% |
+| Battery Air Temp | `battery_air_intake_temp` | `(256*A+B)/100 - 327.68` | °C |
+| Charge Limit | `charge_limit_kw` | `E - 64` | kW |
+| Discharge Limit | `discharge_limit_kw` | `F - 64` | kW |
+| Fan Speed | `battery_fan_speed` | `H` | 0-6 |
 
 **Interpretation:**
 - 0-1%: Excellent battery health
@@ -69,81 +92,136 @@ Data: [02, 21, CF, 00, 00, 00, 00, 00]
 - 2-3%: Fair, may have weak cells
 - >3%: Poor, cells need attention
 
-#### Code Locations to Update
-- `cyberpunk_computer/comm/can_decoder.py` - Add response parser
-- `cyberpunk_computer/comm/gateway_adapter.py` - Dispatch `SetBatteryDeltaSOCAction`
-- `cyberpunk_computer/ui/widgets/energy_monitor.py` - Chart already implemented
+---
+
+## Priority 3: Individual Block Voltages (Blocks 01-14) ✅
+
+### Current Status
+- **✅ DATA SOURCE IMPLEMENTED** - PID 21CE from ECU 0x7E3
+
+### Implementation
+Send OBD2 query to **ECU 0x7E3** with **PID 21CE**
+
+#### Response (parsed by CANDecoder)
+| Value | Key in msg.values | Formula |
+|-------|-------------------|---------|
+| SOC | `battery_soc_21ce` | `0.5 * A` |
+| Battery Current | `battery_current_21ce` | `(256*B+C)/100 - 327.68` A |
+| Battery Power | `battery_power_kw_21ce` | `(256*D+E)/100 - 327.68` kW |
+| Block Voltages | `block_voltages` | Array of 14 values |
+| Min Block Voltage | `block_voltage_min` | V |
+| Max Block Voltage | `block_voltage_max` | V |
+| Voltage Delta | `block_voltage_delta` | V |
 
 ---
 
-## Priority 3: NiMH Volt Delta (Cell Voltage Difference)
+## Quick Start: Enabling Solicited Mode
 
-### Current Status
-- **NO UI element** - Could be added to energy_monitor chart
-- **NO state field** - Needs to be added to `EnergyState`
-- **NO action** - Needs `SetBatteryDeltaVoltAction`
+### 1. Switch to Normal CAN Mode
+```python
+from cyberpunk_computer.comm.gateway import GatewayConnection
 
-### Required Implementation
-Send OBD2 query to **ECU 0x7E2** (Hybrid System) with **PID 21D0**
+gateway = GatewayConnection(config)
+gateway.connect()
 
-#### Request Format
-```
-CAN ID: 0x7E2
-Data: [02, 21, D0, 00, 00, 00, 00, 00]
+# Switch from listen-only to normal (active) mode
+gateway.can_switch_mode("normal")
 ```
 
-#### Response (multi-frame from 0x7EA)
-| Byte | Parameter | Formula | Range |
-|------|-----------|---------|-------|
-| J, N | NiMH Volt Delta | `(256*J + 0.01*N) - 327.68` | 0-3 V |
+### 2. Subscribe to PIDs
+```python
+# Dashboard data - fast updates
+gateway.obd2_subscribe(slot=0, mode=0x21, pid=0xC3, interval_ms=500, ecu=0x7E2)  # Hybrid
 
-Also provides:
+# Battery monitoring - slower updates
+gateway.obd2_subscribe(slot=1, mode=0x21, pid=0xCF, interval_ms=2000, ecu=0x7E3)  # Delta SOC
+gateway.obd2_subscribe(slot=2, mode=0x21, pid=0xCE, interval_ms=5000, ecu=0x7E3)  # Block voltages
+```
+
+### 3. Process Responses
+Responses are automatically parsed by `CANDecoder`:
+```python
+from cyberpunk_computer.comm.can_decoder import CANDecoder, CANMessageType
+
+decoder = CANDecoder()
+
+def handle_can_message(message):
+    if message.device_id == 1:  # CAN device
+        msg = decoder.decode(message.data)
+        if msg and msg.msg_type == CANMessageType.SOLICITED_HYBRID:
+            inverter_temp = msg.values.get("inverter_temp")
+            if inverter_temp is not None:
+                dispatch(SetInverterTempAction(inverter_temp))
+```
+
+### 4. Using the High-Level Manager
+```python
+from cyberpunk_computer.comm.solicited_can import get_manager, PID_HYBRID_COMPREHENSIVE
+
+manager = get_manager()
+manager.set_send_callback(gateway.send)
+
+# Apply a predefined profile
+manager.apply_profile(manager.PROFILE_DASHBOARD)
+
+# Or subscribe individually
+manager.subscribe(slot=0, pid_def=PID_HYBRID_COMPREHENSIVE, interval_ms=500)
+```
+
+---
+
+## Available Subscription Profiles
+
+The `SolicitedCANManager` provides pre-defined profiles:
+
+### PROFILE_DASHBOARD
+For real-time dashboard display:
+- Engine RPM @ 200ms
+- Vehicle Speed @ 200ms
+- Coolant Temp @ 1000ms
+- Hybrid System (inverter temps) @ 500ms
+
+### PROFILE_ENERGY_MONITOR
+For energy flow monitoring:
+- Hybrid System @ 500ms
+- Battery Temps/Delta SOC @ 2000ms
+- Battery Detail @ 5000ms
+
+### PROFILE_BATTERY_HEALTH
+For battery diagnostics:
+- Battery Detail (block voltages) @ 2000ms
+- Battery Temps (delta SOC) @ 2000ms
+
+---
+
+## Bus Load Considerations
+
+⚠️ **Important:** Each subscription adds traffic to the CAN bus.
+
+- Keep total request rate under 20 requests/second on OBD-II port
+- Use appropriate intervals:
+  - Fast PIDs (RPM, speed): 100-200ms
+  - Medium PIDs (temps, hybrid data): 500-1000ms
+  - Slow PIDs (battery blocks): 2000-5000ms
+- Unsubscribe when not needed
+
+---
+
+## References
+- [docs/PROTOCOL.md](PROTOCOL.md) - Gateway communication protocol
+- [docs/prius_can.md](prius_can.md) - Full PID documentation
+- Section 5: "Solicited (CAN) - Generic Engine (ECU 07E0)"
+- Section 6: "Solicited (CAN) - Hybrid/Specific (ECU 07E2)"
+- Section 7: "Solicited (CAN) - HV Battery (ECU 07E3)"
 - Block # with Min/Max V
 - The actual min/max voltage values
 - Internal Resistance R01-R14: `0.001 * Byte` (0-10 Ohm)
 
 ---
 
-## Priority 4: Individual Block Voltages (Blocks 01-14)
-
-### Current Status
-- **NO UI element**
-- **NO state field**
-
-### Required Implementation
-Send OBD2 query to **ECU 0x7E2** with **PID 21CE**
-
-#### Response contains:
-| Parameter | Formula | Range |
-|-----------|---------|-------|
-| Block Voltages (1-14) | `(256*HighByte + LowByte)/100 - 327.68` | 0-18 V |
-| HV Battery Current | `(256*B+C)/100 - 327.68` | -100 to 100 A |
-| Battery Power | `(256*D+E)/100 - 327.68` | -27 to 27 kW |
-
----
-
-## Implementation Strategy
-
-### Phase 1: Gateway Protocol Extension
-1. Add `obd2_query` command type to gateway protocol
-2. Implement request/response correlation (sequence IDs)
-3. Handle multi-frame ISO 15765-2 responses
-
-### Phase 2: Periodic Queries
-1. Create query scheduler (avoid bus congestion)
-2. Suggested polling intervals:
-   - Inverter temps: Every 1-2 seconds
-   - Delta SOC: Every 5 seconds
-   - Block voltages: Every 10 seconds (or on-demand)
-
-### Phase 3: Response Parsing
-1. Implement multi-frame message assembly
-2. Parse each PID response format
-3. Dispatch state actions
-
----
-
 ## References
+- [docs/PROTOCOL.md](PROTOCOL.md) - Gateway communication protocol
 - [docs/prius_can.md](prius_can.md) - Full PID documentation
+- Section 5: "Solicited (CAN) - Generic Engine (ECU 07E0)"
 - Section 6: "Solicited (CAN) - Hybrid/Specific (ECU 07E2)"
-- Section 7: "Solicited (CAN) - HV Battery (ECU 07E2)"
+- Section 7: "Solicited (CAN) - HV Battery (ECU 07E3)"

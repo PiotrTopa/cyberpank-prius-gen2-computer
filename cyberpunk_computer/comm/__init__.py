@@ -5,10 +5,19 @@ Handles serial communication with the Gateway using NDJSON protocol.
 Provides AVC-LAN message decoding, state management, and command generation.
 Also provides CAN bus message decoding for vehicle data.
 
+Supports Gateway Protocol v2.8.0 with solicited CAN mode.
+
 Reference: Flerchinger, J.J. "AN IN-DEPTH LOOK AT THE TOYOTA AUDIO & VIDEO BUS (AVC-LAN)" 2006
 """
 
-from .protocol import parse_message, create_message, Message, DEVICE_AVCLAN
+from .protocol import (
+    parse_message, create_message, Message, 
+    DEVICE_AVCLAN, DEVICE_CAN, DEVICE_SYSTEM,
+    # CAN solicited mode functions
+    create_can_request, create_can_subscription, create_can_unsubscribe,
+    create_can_mode_switch, create_can_list_subs,
+    create_obd2_request, create_obd2_subscription,
+)
 from .avc_decoder import (
     AVCMessage,
     AVCDecoder,
@@ -52,6 +61,19 @@ from .can_decoder import (
     CANMessageType,
     CANStateTracker,
 )
+from .solicited_can import (
+    SolicitedCANManager,
+    get_manager as get_solicited_manager,
+    ECUAddress,
+    PIDDefinition,
+    # Common PID definitions
+    PID_ENGINE_COOLANT_TEMP,
+    PID_ENGINE_RPM,
+    PID_VEHICLE_SPEED,
+    PID_HYBRID_COMPREHENSIVE,
+    PID_HV_BATTERY_DETAIL,
+    PID_HV_BATTERY_TEMPS,
+)
 
 __all__ = [
     # Protocol
@@ -59,6 +81,16 @@ __all__ = [
     "create_message",
     "Message",
     "DEVICE_AVCLAN",
+    "DEVICE_CAN",
+    "DEVICE_SYSTEM",
+    # CAN solicited mode
+    "create_can_request",
+    "create_can_subscription",
+    "create_can_unsubscribe",
+    "create_can_mode_switch",
+    "create_can_list_subs",
+    "create_obd2_request",
+    "create_obd2_subscription",
     # AVC Decoder
     "AVCMessage",
     "AVCDecoder",
@@ -98,4 +130,15 @@ __all__ = [
     "CANMessage",
     "CANMessageType",
     "CANStateTracker",
+    # Solicited CAN
+    "SolicitedCANManager",
+    "get_solicited_manager",
+    "ECUAddress",
+    "PIDDefinition",
+    "PID_ENGINE_COOLANT_TEMP",
+    "PID_ENGINE_RPM",
+    "PID_VEHICLE_SPEED",
+    "PID_HYBRID_COMPREHENSIVE",
+    "PID_HV_BATTERY_DETAIL",
+    "PID_HV_BATTERY_TEMPS",
 ]

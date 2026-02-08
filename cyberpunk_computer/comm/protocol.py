@@ -149,3 +149,180 @@ def create_satellite_message(satellite_id: int, data: Any) -> str:
         raise ValueError(f"Satellite ID must be >= {DEVICE_SATELLITE_BASE}")
     
     return create_message(satellite_id, data)
+
+
+# =============================================================================
+# CAN Solicited Mode Functions (Protocol v2.8.0)
+# =============================================================================
+
+def create_can_request(
+    can_id: int | str,
+    data: list[int],
+    response_ids: list[str] | None = None,
+    timeout_ms: int = 100,
+    extended: bool = False
+) -> str:
+    """
+    Create a single CAN request-response query message.
+    
+    Args:
+        can_id: Request CAN ID (e.g., 0x7DF for OBD-II broadcast)
+        data: Request data bytes (max 8)
+        response_ids: Expected response CAN IDs (default: 0x7E8-0x7EF)
+        timeout_ms: Response timeout in milliseconds
+        extended: True for 29-bit extended frames
+    
+    Returns:
+        NDJSON line ready to send
+    
+    Example:
+        >>> create_can_request(0x7DF, [2, 1, 12])  # Read RPM
+    """
+    payload = {
+        "a": "req",
+        "i": can_id if isinstance(can_id, str) else f"0x{can_id:03X}",
+        "d": data,
+        "t": timeout_ms
+    }
+    if response_ids:
+        payload["r"] = response_ids
+    if extended:
+        payload["e"] = True
+    
+    return create_message(DEVICE_CAN, payload)
+
+
+def create_can_subscription(
+    slot: int,
+    can_id: int | str,
+    data: list[int],
+    interval_ms: int = 1000,
+    response_ids: list[str] | None = None,
+    timeout_ms: int = 100,
+    extended: bool = False
+) -> str:
+    """
+    Create a CAN subscription for periodic polling.
+    
+    Args:
+        slot: Subscription slot (0-15)
+        can_id: Request CAN ID
+        data: Request data bytes
+        interval_ms: Polling interval in milliseconds
+        response_ids: Expected response CAN IDs
+        timeout_ms: Response timeout in milliseconds
+        extended: True for 29-bit extended frames
+    
+    Returns:
+        NDJSON line ready to send
+    
+    Example:
+        >>> create_can_subscription(0, 0x7DF, [2, 1, 12], interval_ms=200)
+    """
+    payload = {
+        "a": "sub",
+        "slot": slot,
+        "i": can_id if isinstance(can_id, str) else f"0x{can_id:03X}",
+        "d": data,
+        "int": interval_ms,
+        "t": timeout_ms
+    }
+    if response_ids:
+        payload["r"] = response_ids
+    if extended:
+        payload["e"] = True
+    
+    return create_message(DEVICE_CAN, payload)
+
+
+def create_can_unsubscribe(slot: int | str = "all") -> str:
+    """
+    Create a CAN unsubscribe message.
+    
+    Args:
+        slot: Slot to unsubscribe (0-15) or "all" for all slots
+    
+    Returns:
+        NDJSON line ready to send
+    """
+    payload = {"a": "unsub", "slot": slot}
+    return create_message(DEVICE_CAN, payload)
+
+
+def create_can_list_subs() -> str:
+    """
+    Create a message to list active CAN subscriptions.
+    
+    Returns:
+        NDJSON line ready to send
+    """
+    return create_message(DEVICE_CAN, {"a": "subs"})
+
+
+def create_can_mode_switch(mode: str) -> str:
+    """
+    Create a CAN mode switch message.
+    
+    Args:
+        mode: "normal" for active mode, "listen" for passive mode
+    
+    Returns:
+        NDJSON line ready to send
+    
+    Warning:
+        Switching to "listen" mode clears all active subscriptions.
+    """
+    if mode not in ("normal", "listen"):
+        raise ValueError("Mode must be 'normal' or 'listen'")
+    
+    return create_message(DEVICE_CAN, {"a": "mode", "m": mode})
+
+
+def create_obd2_request(mode: int, pid: int, ecu: int = 0x7DF) -> str:
+    """
+    Create a standard OBD-II request.
+    
+    Args:
+        mode: OBD-II mode (e.g., 0x01 for current data)
+        pid: PID within the mode
+        ecu: Target ECU (0x7DF for broadcast, or specific like 0x7E0)
+    
+    Returns:
+        NDJSON line ready to send
+    
+    Example:
+        >>> create_obd2_request(0x01, 0x0C)  # Engine RPM
+        >>> create_obd2_request(0x21, 0xC3, 0x7E2)  # Toyota hybrid data
+    """
+    # OBD-II data format: [length, mode, pid, 0, 0, 0, 0, 0]
+    data = [0x02, mode, pid, 0x00, 0x00, 0x00, 0x00, 0x00]
+    response_ids = [f"0x{ecu + 8:03X}"] if ecu != 0x7DF else None
+    
+    return create_can_request(ecu, data, response_ids)
+
+
+def create_obd2_subscription(
+    slot: int,
+    mode: int,
+    pid: int,
+    interval_ms: int = 1000,
+    ecu: int = 0x7DF
+) -> str:
+    """
+    Create a periodic OBD-II subscription.
+    
+    Args:
+        slot: Subscription slot (0-15)
+        mode: OBD-II mode
+        pid: PID
+        interval_ms: Polling interval
+        ecu: Target ECU
+    
+    Returns:
+        NDJSON line ready to send
+    """
+    data = [0x02, mode, pid, 0x00, 0x00, 0x00, 0x00, 0x00]
+    response_ids = [f"0x{ecu + 8:03X}"] if ecu != 0x7DF else None
+    
+    return create_can_subscription(slot, ecu, data, interval_ms, response_ids)
+

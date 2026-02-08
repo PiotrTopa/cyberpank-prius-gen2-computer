@@ -80,6 +80,7 @@ class Application:
         self._verbose_avc = True   # Show AVC-LAN messages
         self._verbose_can = True   # Show CAN messages
         self._verbose_sat = True   # Show RS485/Satellite messages
+        self._verbose_sys = True   # Show SYSTEM messages (TX_ACK, etc.)
         
         # Developer analysis mode - detailed logging for reverse engineering
         self._analysis_mode = False
@@ -133,7 +134,9 @@ class Application:
                 return
             source_tag = f"SAT{device_id}"
         else:
-            # System messages - always show when verbose is on
+            # System messages (TX_ACK, errors, status)
+            if not self._verbose_sys:
+                return
             source_tag = "SYS"
         
         # Format the message based on type
@@ -148,6 +151,7 @@ class Application:
             master = d.get("m", "???")
             slave = d.get("s", "???")
             data_bytes = d.get("d", [])
+            cnt = d.get("cnt")  # Burst count (aggregated messages)
             
             # Format addresses - convert int to hex if needed
             if isinstance(master, int):
@@ -164,7 +168,10 @@ class Application:
             else:
                 data_hex = ""
             
-            print(f"{prefix} [{source_tag}] [{seq:>4}] {arrow} {master}->{slave}: [{data_hex}]", flush=True)
+            # Add count if present (shows aggregated/repeated messages)
+            count_str = f" (x{cnt})" if cnt and cnt > 1 else ""
+            
+            print(f"{prefix} [{source_tag}] [{seq:>4}] {arrow} {master}->{slave}: [{data_hex}]{count_str}", flush=True)
             
         elif category == MessageCategory.CAN:
             # CAN format: id [data]
@@ -195,7 +202,8 @@ class Application:
         avc = "ON" if self._verbose_avc else "OFF"
         can = "ON" if self._verbose_can else "OFF"
         sat = "ON" if self._verbose_sat else "OFF"
-        print(f"      Sources: AVC-LAN={avc}, CAN={can}, RS485={sat}")
+        sys = "ON" if self._verbose_sys else "OFF"
+        print(f"      Sources: AVC-LAN={avc}, CAN={can}, RS485={sat}, SYSTEM={sys}")
     
     def _print_stats(self) -> None:
         """Print message statistics from ingress controller."""

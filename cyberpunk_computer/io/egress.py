@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Callable, Any, Set
 
-from .ports import OutputPort, OutgoingCommand, DEVICE_AVC, DEVICE_SATELLITE_BASE
+from .ports import OutputPort, OutgoingCommand, RawMessage, DEVICE_AVC, DEVICE_SATELLITE_BASE, MessageCategory
 from ..state.store import Store, StateSlice
 from ..state.app_state import AppState
 from ..state.actions import (
@@ -95,8 +95,11 @@ class EgressController:
         # Satellite command encoders (device_id -> encoder function)
         self._satellite_encoders: Dict[int, Callable[[str, dict], dict]] = {}
         
-        # Command logging callback
+        # Command logging callback (for console/debug)
         self._command_log_callback: Optional[Callable[[OutgoingCommand, str], None]] = None
+        
+        # Message logging callback (for comm replay, receives RawMessage format)
+        self._message_log_callback: Optional[Callable[["RawMessage", str], None]] = None
         
         # Register as middleware for action-based commands
         store.add_middleware(self._handle_action)
@@ -120,6 +123,17 @@ class EgressController:
     ) -> None:
         """Set callback for command logging (called with command and "OUT")."""
         self._command_log_callback = callback
+    
+    def set_message_log_callback(
+        self,
+        callback: Callable[["RawMessage", str], None]
+    ) -> None:
+        """
+        Set callback for message logging (for comm replay).
+        
+        Called with RawMessage-like object and "OUT" direction.
+        """
+        self._message_log_callback = callback
     
     def register_satellite_encoder(
         self,
@@ -177,9 +191,26 @@ class EgressController:
         Returns:
             True if sent successfully
         """
-        # Log if callback set
+        # Log if callback set (for console/debug)
         if self._command_log_callback:
             self._command_log_callback(command, "OUT")
+        
+        # Log for comm replay (RawMessage format)
+        if self._message_log_callback:
+            # Convert command to RawMessage for consistent logging
+            # Use SATELLITE category for outgoing commands (no COMMAND category)
+            category = MessageCategory.SATELLITE if command.device_id >= DEVICE_SATELLITE_BASE else MessageCategory.AVC_LAN
+            if command.device_id == 1:
+                category = MessageCategory.CAN
+            elif command.device_id == 0:
+                category = MessageCategory.SYSTEM
+            raw_msg = RawMessage(
+                device_id=command.device_id,
+                timestamp=time.time(),
+                data=command.payload or {},
+                category=category
+            )
+            self._message_log_callback(raw_msg, "OUT")
         
         success = self._output_port.send(command)
         

@@ -37,6 +37,7 @@ from .file_io import FileInputPort, PlaybackState
 from .serial_io import SerialPort, SerialConfig, SerialInputPort, SerialOutputPort
 from .mock_io import MockInputPort, MockOutputPort, LogOutputPort
 from .udp_output import UDPOutputPort, MultiOutputPort
+from .comm_logger import CommLogger, LogConfig, CommLoggerManager
 from .vfd_output import (
     register_vfd_handlers,
     create_vfd_energy_handler,
@@ -78,6 +79,11 @@ __all__ = [
     "LogOutputPort",
     "UDPOutputPort",
     "MultiOutputPort",
+    
+    # Communication logging
+    "CommLogger",
+    "LogConfig",
+    "CommLoggerManager",
     
     # Controllers
     "IngressController",

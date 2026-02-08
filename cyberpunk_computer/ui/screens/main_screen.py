@@ -251,14 +251,14 @@ class MainScreen(Screen):
         )
         self._vehicle_frame.add_child(self._ice_temp_display)
         
-        self._speed_display = ValueDisplay(
+        self._inverter_temp_display = ValueDisplay(
             Rect(content.x + w_half, content.y + h_half, w_half, h_half),
-            label="SPD",
+            label="INV",
             value="--",
-            unit="km",
+            unit="°C",
             compact=True
         )
-        self._vehicle_frame.add_child(self._speed_display)
+        self._vehicle_frame.add_child(self._inverter_temp_display)
         
         self.add_widget(self._vehicle_frame)
     
@@ -486,7 +486,7 @@ class MainScreen(Screen):
         
         # Gear Display (Left of clock)
         self._gear_display = ValueDisplay(
-            Rect(center_x + 10, 0, 40, 25),
+            Rect(center_x + 10, 0, 30, 25),
             label="",
             value="P",
             unit="",
@@ -494,6 +494,17 @@ class MainScreen(Screen):
             value_size=16
         )
         self.add_widget(self._gear_display)
+        
+        # Speed Display (Right of gear)
+        self._speed_display = ValueDisplay(
+            Rect(center_x + 45, 0, 55, 25),
+            label="",
+            value="0",
+            unit="km/h",
+            compact=True,
+            value_size=14
+        )
+        self.add_widget(self._speed_display)
         
         # Center Content Area (Pages)
         self._content_rect = Rect(center_x, 30, center_width, self.height - 30 - 30)
@@ -623,8 +634,11 @@ class MainScreen(Screen):
         if hasattr(self, '_ice_temp_display') and self._ice_temp_display:
              val = str(int(state.vehicle.ice_coolant_temp)) if state.vehicle.ice_coolant_temp is not None else "--"
              self._ice_temp_display.set_value(val)
+        if hasattr(self, '_inverter_temp_display') and self._inverter_temp_display:
+             val = str(int(state.vehicle.inverter_temp)) if state.vehicle.inverter_temp is not None else "--"
+             self._inverter_temp_display.set_value(val)
         if hasattr(self, '_speed_display') and self._speed_display:
-             val = str(int(state.vehicle.speed_kmh)) if state.vehicle.speed_kmh is not None else "--"
+             val = str(int(state.vehicle.speed_kmh)) if state.vehicle.speed_kmh is not None else "0"
              self._speed_display.set_value(val)
         if hasattr(self, '_fuel_display') and self._fuel_display:
              consumption = state.vehicle.instant_consumption

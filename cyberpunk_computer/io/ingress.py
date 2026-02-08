@@ -46,6 +46,15 @@ from ..state.app_state import GearPosition
 logger = logging.getLogger(__name__)
 
 
+# Solicited CAN response message types
+SOLICITED_CAN_TYPES = {
+    CANMessageType.SOLICITED_RESPONSE,
+    CANMessageType.SOLICITED_ENGINE,
+    CANMessageType.SOLICITED_HYBRID,
+    CANMessageType.SOLICITED_HV_BATTERY,
+}
+
+
 @dataclass
 class IngressStats:
     """Statistics for ingress processing."""
@@ -98,6 +107,9 @@ class IngressController:
         # Analysis/debug mode
         self._analysis_mode = False
         
+        # Solicited CAN debug mode
+        self._solicited_debug = False
+        
         # Message logging callback
         self._message_log_callback: Optional[Callable[[RawMessage, str], None]] = None
     
@@ -114,6 +126,10 @@ class IngressController:
     def set_analysis_mode(self, enabled: bool) -> None:
         """Enable/disable analysis mode for debugging."""
         self._analysis_mode = enabled
+    
+    def set_solicited_debug(self, enabled: bool) -> None:
+        """Enable/disable solicited CAN debug mode (prints 0x7E8/0x7EA/0x7EB responses)."""
+        self._solicited_debug = enabled
     
     def set_message_log_callback(
         self, 
@@ -243,9 +259,44 @@ class IngressController:
         """Handle CAN bus messages."""
         self._stats.can_messages += 1
         
+        can_id_raw = msg.data.get("i")
+        action = msg.data.get("a")  # Check if it's a subscription response
+        
+        # Normalize CAN ID for comparison (handle both string and int)
+        can_id_int = None
+        if isinstance(can_id_raw, str):
+            try:
+                can_id_int = int(can_id_raw, 16)
+            except ValueError:
+                pass
+        elif isinstance(can_id_raw, int):
+            can_id_int = can_id_raw
+        
+        # Debug: show raw CAN data for solicited response IDs and key unsolicited IDs
+        if self._solicited_debug:
+            # Subscription/single request responses have action="resp"
+            if action == "resp":
+                slot = msg.data.get("s", "?")
+                raw_data = msg.data.get("d", [])
+                error = msg.data.get("err")
+                if error:
+                    print(f"[RESP] slot={slot} {can_id_raw}: ERROR={error}")
+                else:
+                    print(f"[RESP] slot={slot} {can_id_raw}: len={len(raw_data)} data={[hex(b) if isinstance(b, int) else b for b in raw_data[:20]]}")
+            # Solicited response IDs (direct responses without action field)
+            elif can_id_int in (0x7E8, 0x7EA, 0x7EB):
+                raw_data = msg.data.get("d", [])
+                print(f"[SOL_RAW] CAN {can_id_raw}: {[hex(b) if isinstance(b, int) else b for b in raw_data[:16]]}")
+            # Key unsolicited IDs for battery temp and other data
+            elif can_id_int in (0x3CB, 0x03B, 0x038):
+                raw_data = msg.data.get("d", [])
+                print(f"[UNSOL] CAN {can_id_raw}: {[hex(b) if isinstance(b, int) else b for b in raw_data[:8]]}")
+        
         # Decode using CAN decoder
         decoded = self._can_decoder.decode(msg.data)
         if not decoded:
+            if self._solicited_debug and can_id_int in (0x7E8, 0x7EA, 0x7EB):
+                print(f"[SOL_RAW] Decode returned None for {can_id_raw}")
             return
         
         # Convert to actions
@@ -528,5 +579,169 @@ class IngressController:
                 }
                 gear = gear_map.get(gear_str, GearPosition.PARK)
                 actions.append(SetGearAction(gear, ActionSource.GATEWAY))
+        
+        # ─────────────────────────────────────────────────────────────────────
+        # SOLICITED CAN RESPONSES (OBD-II style)
+        # ─────────────────────────────────────────────────────────────────────
+        
+        # Solicited Engine ECU Response (0x7E8)
+        elif msg.msg_type == CANMessageType.SOLICITED_ENGINE:
+            if self._solicited_debug:
+                print(f"[SOL] 0x7E8 Engine: {msg.values}")
+            actions.extend(self._handle_solicited_engine(msg))
+        
+        # Solicited Hybrid ECU Response (0x7EA)
+        elif msg.msg_type == CANMessageType.SOLICITED_HYBRID:
+            if self._solicited_debug:
+                print(f"[SOL] 0x7EA Hybrid: {msg.values}")
+            actions.extend(self._handle_solicited_hybrid(msg))
+        
+        # Solicited HV Battery ECU Response (0x7EB)
+        elif msg.msg_type == CANMessageType.SOLICITED_HV_BATTERY:
+            if self._solicited_debug:
+                print(f"[SOL] 0x7EB Battery: {msg.values}")
+            actions.extend(self._handle_solicited_hv_battery(msg))
+        
+        return actions
+    
+    def _handle_solicited_engine(self, msg) -> List[Action]:
+        """
+        Handle solicited response from Engine ECU (0x7E8).
+        
+        Standard OBD-II PIDs (Mode 01) and Toyota extended (Mode 21).
+        """
+        actions: List[Action] = []
+        values = msg.values
+        
+        # Coolant temperature (PID 0x05)
+        coolant_temp = values.get("coolant_temp")
+        if coolant_temp is not None and -40 <= coolant_temp <= 215:
+            actions.append(SetICECoolantTempAction(coolant_temp, ActionSource.GATEWAY))
+        
+        # Engine RPM (PID 0x0C) - solicited alternative to 0x038
+        rpm = values.get("rpm")
+        if rpm is not None and 0 <= rpm <= 8000:
+            actions.append(SetRPMAction(int(rpm), ActionSource.GATEWAY))
+            # If RPM > 0, engine is running
+            if rpm > 0:
+                actions.append(SetICERunningAction(True, ActionSource.GATEWAY))
+        
+        # Vehicle speed (PID 0x0D)
+        speed = values.get("speed_kph")
+        if speed is not None and 0 <= speed <= 300:
+            actions.append(SetSpeedAction(speed, ActionSource.GATEWAY))
+        
+        # Intake air temperature (PID 0x0F)
+        intake_temp = values.get("intake_air_temp")
+        if intake_temp is not None:
+            # Could be used for climate or engine monitoring
+            pass  # No action defined yet
+        
+        # Throttle position (PID 0x11)
+        throttle = values.get("throttle_position")
+        if throttle is not None:
+            actions.append(SetThrottlePositionAction(int(throttle), ActionSource.GATEWAY))
+        
+        # Ambient temperature (PID 0x46)
+        ambient = values.get("ambient_temp")
+        if ambient is not None and -50 <= ambient <= 80:
+            actions.append(SetOutsideTempAction(ambient, ActionSource.GATEWAY))
+        
+        return actions
+    
+    def _handle_solicited_hybrid(self, msg) -> List[Action]:
+        """
+        Handle solicited response from Hybrid ECU (0x7EA).
+        
+        Contains inverter temps, MG1/MG2 data from PIDs 21C3, 21C4.
+        """
+        actions: List[Action] = []
+        values = msg.values
+        
+        # Inverter temperature - PRIMARY SOURCE for inverter temp!
+        # Use MG2 inverter temp as the main value (it's typically the hotter one)
+        inverter_temp = values.get("inverter_temp")
+        if inverter_temp is None:
+            inverter_temp = values.get("mg2_inverter_temp")
+        if inverter_temp is None:
+            inverter_temp = values.get("mg1_inverter_temp")
+        
+        if inverter_temp is not None and -40 <= inverter_temp <= 150:
+            actions.append(SetInverterTempAction(inverter_temp, ActionSource.GATEWAY))
+        
+        # MG2 motor temperature could also be tracked
+        mg2_motor_temp = values.get("mg2_motor_temp")
+        # Future: SetMotorTempAction if UI is added
+        
+        # Converter temperature from PID 21C4
+        converter_temp = values.get("converter_temp")
+        # Future: SetConverterTempAction if UI is added
+        
+        # MG RPMs could be tracked for energy flow visualization
+        mg1_rpm = values.get("mg1_rpm")
+        mg2_rpm = values.get("mg2_rpm")
+        # Future: SetMGRPMAction if needed
+        
+        # HV voltage from hybrid ECU (alternative source)
+        hv_voltage = values.get("hv_voltage_21c3")
+        if hv_voltage is not None and 150 <= hv_voltage <= 300:
+            actions.append(SetBatteryVoltageAction(hv_voltage, ActionSource.GATEWAY))
+        
+        # HV current from hybrid ECU
+        hv_current = values.get("hv_current_21c3")
+        if hv_current is not None:
+            actions.append(SetBatteryCurrentAction(hv_current, ActionSource.GATEWAY))
+        
+        # Accelerator pedal from PID 21C4
+        accel = values.get("accelerator_percent")
+        if accel is not None:
+            actions.append(SetThrottlePositionAction(int(accel), ActionSource.GATEWAY))
+        
+        return actions
+    
+    def _handle_solicited_hv_battery(self, msg) -> List[Action]:
+        """
+        Handle solicited response from HV Battery ECU (0x7EB).
+        
+        Contains detailed battery data from PIDs 21CE, 21CF, 21D0.
+        """
+        actions: List[Action] = []
+        values = msg.values
+        
+        # SOC from 21CE (alternative source)
+        soc = values.get("battery_soc_21ce")
+        if soc is not None and 10 <= soc <= 95:
+            actions.append(SetBatterySOCAction(soc / 100.0, ActionSource.GATEWAY))
+        
+        # Battery current from 21CE
+        current = values.get("battery_current_21ce")
+        if current is not None:
+            actions.append(SetBatteryCurrentAction(current, ActionSource.GATEWAY))
+            # Determine charging state
+            is_charging = current < -0.5
+            is_discharging = current > 0.5
+            actions.append(SetChargingStateAction(
+                charging=is_charging,
+                discharging=is_discharging,
+                source=ActionSource.GATEWAY
+            ))
+        
+        # Delta SOC from 21CF - THE REAL DELTA SOC!
+        delta_soc = values.get("delta_soc")
+        if delta_soc is not None:
+            actions.append(SetBatteryDeltaSOCAction(delta_soc, ActionSource.GATEWAY))
+        
+        # Battery air intake temperature from 21CF
+        air_temp = values.get("battery_air_intake_temp")
+        if air_temp is not None and -40 <= air_temp <= 80:
+            actions.append(SetBatteryTempAction(air_temp, ActionSource.GATEWAY))
+        
+        # Block voltage delta from 21CE
+        voltage_delta = values.get("block_voltage_delta")
+        # Future: Could be used for battery health monitoring
+        
+        # Fan speed from 21CF
+        fan_speed = values.get("battery_fan_speed")
+        # Future: SetBatteryFanSpeedAction if UI is added
         
         return actions

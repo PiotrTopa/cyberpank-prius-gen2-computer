@@ -50,6 +50,11 @@ class CANMessageType(Enum):
     CLIMATE_DATA = auto()       # Climate/Temperature data
     ENERGY_FLOW = auto()        # Energy flow arrows (0x3B6)
     FUEL_CONSUMPTION = auto()   # Fuel consumption (0x520)
+    # Solicited response types (OBD-II style)
+    SOLICITED_RESPONSE = auto()        # Generic solicited response
+    SOLICITED_ENGINE = auto()          # Response from Engine ECU (0x7E8)
+    SOLICITED_HYBRID = auto()          # Response from Hybrid ECU (0x7EA)
+    SOLICITED_HV_BATTERY = auto()      # Response from HV Battery ECU (0x7EB)
 
 
 @dataclass
@@ -109,6 +114,13 @@ KNOWN_CAN_IDS = {
     # Other frequent messages
     0x03E: "SYSTEM_STATUS_3E",     # Unknown status
     0x0B3: "SYSTEM_STATUS_B3",     # Unknown status
+    
+    # Solicited OBD-II/CAN Responses (Protocol v2.8.0)
+    # These are responses to queries sent in Normal CAN mode
+    0x7E8: "OBD2_RESP_ENGINE",     # Response from Engine ECU (0x7E0)
+    0x7E9: "OBD2_RESP_TRANS",      # Response from Transmission ECU
+    0x7EA: "OBD2_RESP_HYBRID",     # Response from Hybrid ECU (0x7E2)
+    0x7EB: "OBD2_RESP_HV_BATTERY", # Response from HV Battery ECU (0x7E3)
 }
 
 
@@ -486,6 +498,322 @@ class CANDecoder:
             else:
                 msg.values["gear"] = "?"
             msg.values["gear_raw"] = gear_val
+        
+        # ---------------------------------------------------
+        # SOLICITED OBD-II RESPONSES (Gateway Protocol v2.8.0)
+        # ---------------------------------------------------
+        # These are responses from ECUs to solicited queries.
+        # Format: [Length, Mode+0x40, PID, DataBytes...]
+        
+        # 0x7E8: Engine ECU Response (from 0x7E0)
+        elif can_id == 0x7E8 and len(data) >= 3:
+            msg.msg_type = CANMessageType.SOLICITED_ENGINE
+            self._decode_obd2_response(msg, data)
+        
+        # 0x7EA: Hybrid ECU Response (from 0x7E2)
+        # Contains inverter temps, MG1/MG2 data, etc.
+        elif can_id == 0x7EA and len(data) >= 3:
+            msg.msg_type = CANMessageType.SOLICITED_HYBRID
+            self._decode_hybrid_response(msg, data)
+        
+        # 0x7EB: HV Battery ECU Response (from 0x7E3)
+        # Contains detailed battery data, cell voltages, delta SOC
+        elif can_id == 0x7EB and len(data) >= 3:
+            msg.msg_type = CANMessageType.SOLICITED_HV_BATTERY
+            self._decode_hv_battery_response(msg, data)
+    
+    def _decode_obd2_response(self, msg: CANMessage, data: List[int]) -> None:
+        """
+        Decode standard OBD-II response from Engine ECU (0x7E8).
+        
+        Supports two formats:
+        1. Single-frame: [Length, Mode+0x40, PID, Data...] (8 bytes max)
+        2. ISO-TP reassembled: [Mode+0x40, PID, Data...] (no length byte, up to 64 bytes)
+        
+        Detection: If data[0] == 0x41 or 0x61 (Mode response), it's ISO-TP format.
+                   Otherwise, data[0] is the length byte.
+        """
+        if len(data) < 3:
+            return
+        
+        # Detect format: ISO-TP reassembled starts with mode response (0x41, 0x61),
+        # single-frame starts with length byte (typically 0x03-0x07)
+        if data[0] in (0x41, 0x61):
+            # ISO-TP format: [Mode, PID, Data...]
+            mode = data[0]
+            pid = data[1]
+            payload = data[2:] if len(data) > 2 else []
+        else:
+            # Single-frame format: [Length, Mode, PID, Data...]
+            mode = data[1]
+            pid = data[2]
+            payload = data[3:] if len(data) > 3 else []
+        
+        msg.values["obd2_mode"] = mode
+        msg.values["obd2_pid"] = pid
+        msg.values["obd2_raw"] = payload
+        
+        # Mode 0x41 = response to Mode 0x01 (Current Data)
+        if mode == 0x41:
+            if pid == 0x05 and payload:  # Coolant Temp
+                msg.values["coolant_temp"] = payload[0] - 40
+            elif pid == 0x0C and len(payload) >= 2:  # RPM
+                msg.values["rpm"] = ((payload[0] * 256) + payload[1]) / 4
+            elif pid == 0x0D and payload:  # Vehicle Speed
+                msg.values["speed_kph"] = payload[0]
+            elif pid == 0x0F and payload:  # Intake Air Temp
+                msg.values["intake_air_temp"] = payload[0] - 40
+            elif pid == 0x11 and payload:  # Throttle Position
+                msg.values["throttle_position"] = (payload[0] * 100) / 255
+            elif pid == 0x42 and len(payload) >= 2:  # Aux Battery Voltage
+                msg.values["aux_battery_voltage"] = ((payload[0] * 256) + payload[1]) / 1000
+            elif pid == 0x46 and payload:  # Ambient Air Temp
+                msg.values["ambient_temp"] = payload[0] - 40
+            elif pid == 0x04 and payload:  # Engine Load
+                msg.values["engine_load"] = payload[0]
+            elif pid == 0x0E and payload:  # Timing Advance
+                msg.values["timing_advance"] = (payload[0] / 2) - 64
+            elif pid == 0x10 and len(payload) >= 2:  # MAF Flow
+                msg.values["maf_flow"] = ((payload[0] * 256) + payload[1]) / 100
+        
+        # Mode 0x61 = response to Mode 0x21 (Toyota Extended)
+        elif mode == 0x61:
+            if pid == 0xF3 and len(payload) >= 1:  # Injector Time
+                msg.values["injector_time_ms"] = 0.128 * payload[0]
+    
+    def _decode_hybrid_response(self, msg: CANMessage, data: List[int]) -> None:
+        """
+        Decode response from Hybrid ECU (0x7EA).
+        
+        Handles Toyota extended diagnostic mode (0x21) responses.
+        PIDs 21C3, 21C4 contain comprehensive hybrid system data.
+        
+        Supports two formats:
+        1. Single-frame: [Length, Mode, PID, Data...] (8 bytes max)
+        2. ISO-TP reassembled: [Mode, PID, Data...] (no length byte, up to 64 bytes)
+        
+        Detection: If data[0] == 0x61 (Mode response), it's ISO-TP format.
+                   Otherwise, data[0] is the length byte.
+        """
+        if len(data) < 3:
+            return
+        
+        # Detect format: ISO-TP reassembled starts with mode (0x61),
+        # single-frame starts with length byte (typically 0x03-0x07)
+        if data[0] == 0x61:
+            # ISO-TP format: [Mode, PID, Data...]
+            mode = data[0]
+            pid = data[1]
+            payload = data[2:] if len(data) > 2 else []
+        else:
+            # Single-frame format: [Length, Mode, PID, Data...]
+            mode = data[1]
+            pid = data[2]
+            payload = data[3:] if len(data) > 3 else []
+        
+        msg.values["obd2_mode"] = mode
+        msg.values["obd2_pid"] = pid
+        msg.values["payload_length"] = len(payload)
+        
+        # Mode 0x61 = response to Mode 0x21 (Toyota Extended)
+        if mode == 0x61:
+            if pid == 0xC3:  # Comprehensive hybrid data
+                self._decode_pid_21c3(msg, payload)
+            elif pid == 0xC4:  # Additional hybrid data
+                self._decode_pid_21c4(msg, payload)
+    
+    def _decode_pid_21c3(self, msg: CANMessage, payload: List[int]) -> None:
+        """
+        Decode PID 21C3 - Comprehensive hybrid system data.
+        
+        This is a multi-frame response. Key data positions:
+        - Bytes 0-1: MG2 RPM = ((A*256)+B)-16383
+        - Bytes 2-3: MG2 Torque = (C*256+D)/8 - 500
+        - Bytes 6-7: MG1 RPM = ((G*256)+H)-16383
+        - Bytes 8-9: MG1 Torque = (I*256+J)/8 - 500
+        - Byte 24: MG1 Inverter Temp = Y - 40
+        - Byte 25: MG2 Inverter Temp = Z - 40
+        - Byte 26: MG2 Motor Temp = AA - 40
+        - Byte 27: MG1 Motor Temp = AB - 40
+        """
+        # Store payload length for debugging
+        msg.values["pid_21c3_payload_len"] = len(payload)
+        
+        if len(payload) >= 2:
+            msg.values["mg2_rpm"] = ((payload[0] * 256) + payload[1]) - 16383
+        
+        if len(payload) >= 4:
+            msg.values["mg2_torque"] = ((payload[2] * 256) + payload[3]) / 8 - 500
+        
+        if len(payload) >= 8:
+            msg.values["mg1_rpm"] = ((payload[6] * 256) + payload[7]) - 16383
+        
+        if len(payload) >= 10:
+            msg.values["mg1_torque"] = ((payload[8] * 256) + payload[9]) / 8 - 500
+        
+        # Inverter and motor temperatures
+        if len(payload) >= 25:
+            msg.values["mg1_inverter_temp"] = payload[24] - 40
+        
+        if len(payload) >= 26:
+            mg2_inv_temp = payload[25] - 40
+            msg.values["mg2_inverter_temp"] = mg2_inv_temp
+            # Use MG2 inverter temp as the primary inverter_temp value
+            msg.values["inverter_temp"] = mg2_inv_temp
+        
+        if len(payload) >= 27:
+            msg.values["mg2_motor_temp"] = payload[26] - 40
+        
+        if len(payload) >= 28:
+            msg.values["mg1_motor_temp"] = payload[27] - 40
+        
+        # HV Battery voltage (byte 28): 2 * AC
+        if len(payload) >= 29:
+            msg.values["hv_voltage_21c3"] = 2 * payload[28]
+        
+        # HV Battery current (byte 30): 2 * AE - 256
+        if len(payload) >= 31:
+            msg.values["hv_current_21c3"] = 2 * payload[30] - 256
+    
+    def _decode_pid_21c4(self, msg: CANMessage, payload: List[int]) -> None:
+        """
+        Decode PID 21C4 - Additional hybrid data.
+        
+        - Byte 2: Accelerator Pedal = (100*C)/255
+        - Byte 3: VL-Voltage Before Boost = 2 * D
+        - Byte 4: VH-Voltage After Boost = 2 * E
+        - Byte 5: Converter Temp = F - 40
+        """
+        if len(payload) >= 3:
+            msg.values["accelerator_percent"] = (100 * payload[2]) / 255
+        
+        if len(payload) >= 4:
+            msg.values["voltage_before_boost"] = 2 * payload[3]
+        
+        if len(payload) >= 5:
+            msg.values["voltage_after_boost"] = 2 * payload[4]
+        
+        if len(payload) >= 6:
+            msg.values["converter_temp"] = payload[5] - 40
+    
+    def _decode_hv_battery_response(self, msg: CANMessage, data: List[int]) -> None:
+        """
+        Decode response from HV Battery ECU (0x7EB).
+        
+        Handles PIDs 21CE (detailed battery data) and 21CF (temps, delta SOC).
+        
+        Supports two formats:
+        1. Single-frame: [Length, Mode, PID, Data...] (8 bytes max)
+        2. ISO-TP reassembled: [Mode, PID, Data...] (no length byte, up to 64 bytes)
+        
+        Detection: If data[0] == 0x61 (Mode response), it's ISO-TP format.
+                   Otherwise, data[0] is the length byte.
+        """
+        if len(data) < 3:
+            return
+        
+        # Detect format: ISO-TP reassembled starts with mode (0x61),
+        # single-frame starts with length byte (typically 0x03-0x07)
+        if data[0] == 0x61:
+            # ISO-TP format: [Mode, PID, Data...]
+            mode = data[0]
+            pid = data[1]
+            payload = data[2:] if len(data) > 2 else []
+        else:
+            # Single-frame format: [Length, Mode, PID, Data...]
+            mode = data[1]
+            pid = data[2]
+            payload = data[3:] if len(data) > 3 else []
+        
+        msg.values["obd2_mode"] = mode
+        msg.values["obd2_pid"] = pid
+        msg.values["payload_length"] = len(payload)
+        
+        # Mode 0x61 = response to Mode 0x21
+        if mode == 0x61:
+            if pid == 0xCE:  # Battery detail data
+                self._decode_pid_21ce(msg, payload)
+            elif pid == 0xCF:  # Battery temps and delta SOC
+                self._decode_pid_21cf(msg, payload)
+            elif pid == 0xD0:  # Internal resistance and voltage delta
+                self._decode_pid_21d0(msg, payload)
+    
+    def _decode_pid_21ce(self, msg: CANMessage, payload: List[int]) -> None:
+        """
+        Decode PID 21CE - HV Battery detailed data.
+        
+        - Byte 0: SOC = 0.5 * A
+        - Bytes 1-2: Battery Current = (256*B+C)/100 - 327.68
+        - Bytes 3-4: Battery Power = (256*D+E)/100 - 327.68 kW
+        - Bytes 5+: Block voltages in pairs
+        """
+        if len(payload) >= 1:
+            msg.values["battery_soc_21ce"] = 0.5 * payload[0]
+        
+        if len(payload) >= 3:
+            msg.values["battery_current_21ce"] = ((payload[1] * 256) + payload[2]) / 100 - 327.68
+        
+        if len(payload) >= 5:
+            msg.values["battery_power_kw_21ce"] = ((payload[3] * 256) + payload[4]) / 100 - 327.68
+        
+        # Decode block voltages (14 blocks, 2 bytes each starting at byte 5)
+        block_voltages = []
+        for i in range(14):
+            offset = 5 + (i * 2)
+            if len(payload) > offset + 1:
+                voltage = ((payload[offset] * 256) + payload[offset + 1]) / 100 - 327.68
+                block_voltages.append(voltage)
+        
+        if block_voltages:
+            msg.values["block_voltages"] = block_voltages
+            msg.values["block_voltage_min"] = min(block_voltages)
+            msg.values["block_voltage_max"] = max(block_voltages)
+            msg.values["block_voltage_delta"] = max(block_voltages) - min(block_voltages)
+    
+    def _decode_pid_21cf(self, msg: CANMessage, payload: List[int]) -> None:
+        """
+        Decode PID 21CF - Battery temps and delta SOC.
+        
+        - Bytes 0-1: Battery Air Intake Temp = (256*A+B)/100 - 327.68
+        - Byte 3: Aux Battery Voltage = (0.2*D) - 25.6
+        - Byte 4: Charge Limit = E - 64 kW
+        - Byte 5: Discharge Limit = F - 64 kW
+        - Byte 6: Delta SOC = 0.01 * G (%)
+        - Byte 7: Fan Speed (0-6)
+        """
+        if len(payload) >= 2:
+            msg.values["battery_air_intake_temp"] = ((payload[0] * 256) + payload[1]) / 100 - 327.68
+        
+        if len(payload) >= 4:
+            msg.values["aux_battery_voltage_21cf"] = (0.2 * payload[3]) - 25.6
+        
+        if len(payload) >= 5:
+            msg.values["charge_limit_kw"] = payload[4] - 64
+        
+        if len(payload) >= 6:
+            msg.values["discharge_limit_kw"] = payload[5] - 64
+        
+        if len(payload) >= 7:
+            # This is the REAL delta SOC (not from unsolicited 0x3CB)
+            msg.values["delta_soc"] = 0.01 * payload[6]
+        
+        if len(payload) >= 8:
+            msg.values["battery_fan_speed"] = payload[7]
+    
+    def _decode_pid_21d0(self, msg: CANMessage, payload: List[int]) -> None:
+        """
+        Decode PID 21D0 - Internal resistance and voltage delta.
+        
+        Contains internal resistance for blocks 1-14 and NiMH voltage delta.
+        """
+        # Internal resistance values (14 blocks, 1 byte each)
+        resistances = []
+        for i in range(min(14, len(payload))):
+            resistance_ohm = 0.001 * payload[i]  # 0-10 Ohm
+            resistances.append(resistance_ohm)
+        
+        if resistances:
+            msg.values["block_resistances"] = resistances
 
 
 class CANStateTracker:
