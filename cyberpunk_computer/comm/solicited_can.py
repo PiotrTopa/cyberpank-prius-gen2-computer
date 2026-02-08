@@ -20,7 +20,7 @@ References:
 import logging
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Optional, List, Callable, Any, Dict
+from typing import Callable, Any
 
 logger = logging.getLogger(__name__)
 
@@ -92,13 +92,13 @@ class PIDDefinition:
     pid: int
     name: str
     unit: str
-    formula: Callable[[List[int]], Any]
+    formula: Callable[[list[int]], Any]
     byte_count: int = 1
     interval_ms: int = 1000
     description: str = ""
     
     @property
-    def request_data(self) -> List[int]:
+    def request_data(self) -> list[int]:
         """Build request data bytes [length, mode, pid, 0, 0, 0, 0, 0]."""
         return [0x02, self.mode, self.pid, 0x00, 0x00, 0x00, 0x00, 0x00]
     
@@ -113,43 +113,43 @@ class PIDDefinition:
 # =============================================================================
 
 # Formula helpers
-def _coolant_temp(d: List[int]) -> float:
+def _coolant_temp(d: list[int]) -> float:
     """Coolant/intake temp: A - 40 °C."""
     return d[0] - 40 if d else 0
 
-def _rpm(d: List[int]) -> float:
+def _rpm(d: list[int]) -> float:
     """Engine RPM: ((A*256)+B)/4."""
     return ((d[0] * 256) + d[1]) / 4 if len(d) >= 2 else 0
 
-def _speed(d: List[int]) -> int:
+def _speed(d: list[int]) -> int:
     """Vehicle speed: A km/h."""
     return d[0] if d else 0
 
-def _throttle_pos(d: List[int]) -> float:
+def _throttle_pos(d: list[int]) -> float:
     """Throttle position: A*100/255 %."""
     return (d[0] * 100) / 255 if d else 0
 
-def _fuel_level(d: List[int]) -> float:
+def _fuel_level(d: list[int]) -> float:
     """Fuel level: A*100/255 %."""
     return (d[0] * 100) / 255 if d else 0
 
-def _maf_flow(d: List[int]) -> float:
+def _maf_flow(d: list[int]) -> float:
     """MAF air flow: ((A*256)+B)/100 g/s."""
     return ((d[0] * 256) + d[1]) / 100 if len(d) >= 2 else 0
 
-def _timing_advance(d: List[int]) -> float:
+def _timing_advance(d: list[int]) -> float:
     """Timing advance: (A/2)-64 degrees."""
     return (d[0] / 2) - 64 if d else 0
 
-def _aux_battery_voltage(d: List[int]) -> float:
+def _aux_battery_voltage(d: list[int]) -> float:
     """Aux battery voltage: ((A*256)+B)/1000 V."""
     return ((d[0] * 256) + d[1]) / 1000 if len(d) >= 2 else 0
 
-def _engine_load(d: List[int]) -> float:
+def _engine_load(d: list[int]) -> float:
     """Engine load: A %."""
     return d[0] if d else 0
 
-def _fuel_trim(d: List[int]) -> float:
+def _fuel_trim(d: list[int]) -> float:
     """Fuel trim: 0.7812 * (A-128) %."""
     return 0.7812 * (d[0] - 128) if d else 0
 
@@ -280,7 +280,7 @@ PID_MAF_FLOW = PIDDefinition(
 # Toyota Hybrid PIDs (Mode 0x21 - Hybrid ECU 0x7E2)
 # =============================================================================
 
-def _hybrid_21c3_parser(d: List[int]) -> Dict[str, Any]:
+def _hybrid_21c3_parser(d: list[int]) -> dict[str, Any]:
     """
     Parse PID 21C3 multi-frame response (Hybrid system comprehensive data).
     
@@ -365,7 +365,7 @@ def _hybrid_21c3_parser(d: List[int]) -> Dict[str, Any]:
     return result
 
 
-def _hybrid_21c4_parser(d: List[int]) -> Dict[str, Any]:
+def _hybrid_21c4_parser(d: list[int]) -> dict[str, Any]:
     """
     Parse PID 21C4 response (Additional hybrid data).
     
@@ -421,7 +421,7 @@ PID_HYBRID_ADDITIONAL = PIDDefinition(
 # HV Battery PIDs (Mode 0x21 - Battery ECU 0x7E3 -> Response on 0x7EB)
 # =============================================================================
 
-def _battery_21ce_parser(d: List[int]) -> Dict[str, Any]:
+def _battery_21ce_parser(d: list[int]) -> dict[str, Any]:
     """
     Parse PID 21CE response (HV Battery detailed data).
     
@@ -459,7 +459,7 @@ def _battery_21ce_parser(d: List[int]) -> Dict[str, Any]:
     return result
 
 
-def _battery_21cf_parser(d: List[int]) -> Dict[str, Any]:
+def _battery_21cf_parser(d: list[int]) -> dict[str, Any]:
     """
     Parse PID 21CF response (HV Battery temps and delta SOC).
     
@@ -528,7 +528,7 @@ class Subscription:
     pid_def: PIDDefinition
     interval_ms: int
     active: bool = True
-    last_response_ts: Optional[int] = None
+    last_response_ts: int | None = None
     error_count: int = 0
 
 
@@ -567,9 +567,9 @@ class SolicitedCANManager:
     
     def __init__(self):
         """Initialize the manager."""
-        self._subscriptions: Dict[int, Subscription] = {}
-        self._send_callback: Optional[Callable[[int, dict], None]] = None
-        self._response_handlers: Dict[str, List[Callable[[str, Any], None]]] = {}
+        self._subscriptions: dict[int, Subscription] = {}
+        self._send_callback: Callable[[int, dict | None, None]] = None
+        self._response_handlers: dict[str, list[Callable[[str, Any], None]]] = {}
         self._mode = "listen"  # Current CAN mode
     
     def set_send_callback(self, callback: Callable[[int, dict], None]) -> None:
@@ -613,7 +613,7 @@ class SolicitedCANManager:
         self, 
         slot: int, 
         pid_def: PIDDefinition, 
-        interval_ms: Optional[int] = None
+        interval_ms: int | None = None
     ) -> bool:
         """
         Create a subscription for periodic polling.
@@ -695,7 +695,7 @@ class SolicitedCANManager:
         self._send_callback(1, msg)
         logger.debug(f"Sent single query: {pid_def.name}")
     
-    def apply_profile(self, profile: List[tuple]) -> None:
+    def apply_profile(self, profile: list[tuple]) -> None:
         """
         Apply a subscription profile.
         
@@ -715,7 +715,7 @@ class SolicitedCANManager:
                 break
             self.subscribe(slot, pid_def, interval)
     
-    def process_response(self, data: dict) -> Optional[Dict[str, Any]]:
+    def process_response(self, data: dict) -> dict[str, Any | None]:
         """
         Process a CAN response from the gateway.
         
@@ -756,7 +756,7 @@ class SolicitedCANManager:
         self, 
         pid_def: PIDDefinition, 
         data: dict
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any | None]:
         """Parse a response using the PID's formula."""
         raw_data = data.get("d", [])
         
@@ -787,7 +787,7 @@ class SolicitedCANManager:
             logger.error(f"Parse error for {pid_def.name}: {e}")
             return None
     
-    def get_active_subscriptions(self) -> List[Subscription]:
+    def get_active_subscriptions(self) -> list[Subscription]:
         """Get list of active subscriptions."""
         return [s for s in self._subscriptions.values() if s.active]
 
@@ -850,7 +850,7 @@ def create_subscription(
 
 
 # Module-level manager instance
-_manager: Optional[SolicitedCANManager] = None
+_manager: SolicitedCANManager | None = None
 
 
 def get_manager() -> SolicitedCANManager:

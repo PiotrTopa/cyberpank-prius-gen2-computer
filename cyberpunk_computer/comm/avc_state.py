@@ -218,9 +218,6 @@ class AVCStateManager:
         self._msg_count = 0
         self._last_msg_time = 0.0
         self._connected = False
-        
-        # Pattern detection
-        self._last_patterns: dict[str, list[int]] = {}
     
     @property
     def connected(self) -> bool:
@@ -389,41 +386,21 @@ class AVCStateManager:
         self._emit(AVCEventType.BUTTON_PRESS, button_data)
     
     def _handle_system_status(self, msg: AVCMessage) -> None:
-        """Handle system status messages (→ 490)."""
-        if len(msg.data) < 4:
-            return
+        """Handle system status messages (→ 490).
         
-        # Common patterns:
-        # 00 46 C1 80 - status heartbeat
-        # 00 44 60 80 - audio status
-        # 00 00 00 08 A4 04 02 00 - command status
-        
-        b0, b1, b2, b3 = msg.data[0:4]
-        
-        # 46 C1 pattern - system status
-        if b1 == 0x46 and b2 == 0xC1:
-            # Bit 0 of b3 might indicate state change
-            pass
-        
-        # 44 60 pattern - audio/display status
-        elif b1 == 0x44 and b2 == 0x60:
-            # Bit patterns might indicate display mode
-            if b3 & 0x08:
-                # Some flag is set
-                pass
-        
-        # A4 04 pattern - operation mode
-        elif len(msg.data) >= 8:
-            if msg.data[4] == 0xA4 and msg.data[5] == 0x04:
-                mode_byte = msg.data[6]
-                # 0x02 - normal
-                # 0x03 - transition
-                # 0x05 - active
-                # 0x06 - config
+        Known patterns (not yet decoded):
+        - 00 46 C1 80: System status heartbeat
+        - 00 44 60 80: Audio/display status
+        - 00 00 00 08 A4 04 XX 00: Operation mode (XX: 02=normal, 03=transition, 05=active)
+        """
+        # TODO: Implement when system status patterns are better understood
+        pass
     
     def _handle_emv_status(self, msg: AVCMessage) -> None:
-        """Handle EMV/MFD status messages (110/112 → 490)."""
-        # Similar to system status but from display
+        """Handle EMV/MFD status messages (110/112 → 490).
+        
+        TODO: Implement when EMV status patterns are better understood.
+        """
         pass
     
     def _handle_audio_control(self, msg: AVCMessage) -> None:

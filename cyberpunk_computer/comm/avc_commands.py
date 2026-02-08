@@ -20,7 +20,6 @@ Known Prius commands (from Flerchinger document):
 - Volume down:  <1> <190> <440> <F> <5> <00 25 74 9D vd>         (vd=01-04 step)
 """
 
-from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 from enum import IntEnum
 import logging
@@ -61,33 +60,13 @@ VOLUME_STEP_MIN = 0x01
 VOLUME_STEP_MAX = 0x04
 
 
-class AudioCommand(IntEnum):
-    """Audio control command codes (legacy, for button simulation)."""
-    VOLUME_UP = 0x01
-    VOLUME_DOWN = 0x02
-    MUTE_TOGGLE = 0x03
-    SOURCE_NEXT = 0x04
-    SOURCE_PREV = 0x05
-
-
-class ClimateCommand(IntEnum):
-    """Climate control command codes."""
-    TEMP_UP = 0x01
-    TEMP_DOWN = 0x02
-    FAN_UP = 0x03
-    FAN_DOWN = 0x04
-    AC_TOGGLE = 0x05
-    AUTO_TOGGLE = 0x06
-    RECIRC_TOGGLE = 0x07
-
-
 @dataclass
 class AVCLANCommand:
     """AVC-LAN command to send to gateway."""
     master: int          # Master device address (12-bit)
     slave: int           # Slave device address (12-bit)
     control: int         # Control byte (0x0F for data commands)
-    data: List[int]      # Data bytes
+    data: list[int]      # Data bytes
     
     def to_gateway_format(self) -> dict:
         """
@@ -321,59 +300,26 @@ class AVCCommandGenerator:
         
         Master: 110 (MFD), Slave: 130 (A/C Amp)
         
-        Encoding according to docs:
-        LO = 0x00
-        18°C (65°F) = 0x22
-        Increments 1 hex per 1°F step.
-        HI = 0x37 or 0xFF
+        Encoding: LO=0x00, 18°C(65°F)=0x22, increments 1 hex per 1°F, HI=0x37
         
         Args:
-            temp_c: Target temperature in Celsius
+            temp_c: Target temperature in Celsius (18.0-30.0)
         """
         if temp_c < 18.0:
-            # LO
-            hex_val = 0x00
+            hex_val = 0x00  # LO
         elif temp_c > 30.0:
-             # HI (approx > 85F)
-             hex_val = 0x37 # or 0xFF
+            hex_val = 0x37  # HI
         else:
-            # Calculate offset from 18C (65F)
-            # 18C = 65F = 0x22 (34)
-            # 1F step = 0.55C step
-            
-            # Using F logic:
-            # temp_f = temp_c * 1.8 + 32
-            # delta_f = temp_f - 65
-            # hex = 0x22 + delta_f
-            
+            # Convert C to F, then offset from 65°F base
             temp_f = temp_c * 1.8 + 32
-            delta_f = temp_f - 65
-            hex_val = 0x22 + int(round(delta_f))
-            
-            # Clamp
+            hex_val = 0x22 + int(round(temp_f - 65))
             hex_val = max(0x10, min(0x36, hex_val))
 
-        # Command structure derived from docs: 110 130 00 03 <val> ??
-        # Or standard data packet:
-        # 110 130 0F ...
-        # Example in docs: 110 130 00 03 29 (Where 29 is 72F/22C)
-        # 00 = control? 03 = length?
-        # Wait, standard AVC-LAN header has control (4-bit) and length (8-bit) separate.
-        # "110 130 00 03 29"
-        # Master=110, Slave=130, Control=0 (Direct Command?), Length=something
-        
-        # If we use strict AVC-LAN structure: 
-        # Control 0x00 might be specific type.
-        
-        # Let's assume standard structure:
-        # Control 0 is likely "Direct Command" or similar.
-        # But our `AVCLANCommand` builds the `d` object which includes `c` (control).
-        
         return AVCLANCommand(
             master=self.ADDR_EMV,      # 0x110
             slave=0x130,               # A/C Amp
-            control=0x00,              # Based on docs example "110 130 00 ..."
-            data=[0x03, hex_val]       # "03" might be opcode for Temp Set, followed by value
+            control=0x00,
+            data=[0x03, hex_val]
         )
     
     # ─────────────────────────────────────────────────────────────────────────
@@ -444,53 +390,6 @@ class AVCCommandGenerator:
             data=[0x28, 0x00, 0x10, 0x02, 0x62]  # Temp down button
         )
     
-    def set_target_temp(self, temp_c: float) -> AVCLANCommand:
-        """
-        Generate set temperature command.
-        
-        Master: 110 (MFD), Slave: 130 (A/C Amp)
-        
-        Encoding according to docs:
-        LO = 0x00
-        18°C (65°F) = 0x22
-        Increments 1 hex per 1°F step.
-        HI = 0x37 or 0xFF
-        
-        Args:
-            temp_c: Target temperature in Celsius
-        """
-        if temp_c < 18.0:
-            # LO
-            hex_val = 0x00
-        elif temp_c > 30.0:
-             # HI (approx > 85F)
-             hex_val = 0x37 # or 0xFF
-        else:
-            # Calculate offset from 18C (65F)
-            # 18C = 65F = 0x22 (34)
-            # 1F step = 0.55C step
-            
-            # Using F logic:
-            # temp_f = temp_c * 1.8 + 32
-            # delta_f = temp_f - 65
-            # hex = 0x22 + int(round(delta_f))
-            
-            temp_f = temp_c * 1.8 + 32
-            delta_f = temp_f - 65
-            hex_val = 0x22 + int(round(delta_f))
-            
-            # Clamp
-            hex_val = max(0x10, min(0x36, hex_val))
-
-        # Command structure derived from docs: 110 130 00 03 <val> ??
-        
-        return AVCLANCommand(
-            master=self.ADDR_EMV,      # 0x110
-            slave=0x130,               # A/C Amp
-            control=0x00,              # Based on docs example "110 130 00 ..."
-            data=[0x03, hex_val]       # "03" might be opcode for Temp Set, followed by value
-        )
-    
     def set_fan_speed(self, speed: int) -> AVCLANCommand:
         """
         Generate fan speed command.
@@ -547,19 +446,6 @@ class AVCCommandGenerator:
             control=self.CTRL_COMMAND,
             data=[0x23, direction]  # Air direction set
         )
-    
-    # ─────────────────────────────────────────────────────────────────────────
-    # Display Commands
-    # ─────────────────────────────────────────────────────────────────────────
-    
-    def request_status(self) -> AVCLANCommand:
-        """Request current status from vehicle."""
-        return AVCLANCommand(
-            master=self.ADDR_EMV,
-            slave=self.ADDR_STATUS,
-            control=self.CTRL_REQUEST,
-            data=[0x00]  # Status request
-        )
 
 
 class CommandQueue:
@@ -576,7 +462,7 @@ class CommandQueue:
         Args:
             min_interval_ms: Minimum interval between commands
         """
-        self._queue: List[AVCLANCommand] = []
+        self._queue: list[tuple[int, AVCLANCommand]] = []
         self._min_interval = min_interval_ms / 1000.0
         self._last_send_time = 0.0
         
@@ -591,7 +477,7 @@ class CommandQueue:
         self._queue.append((priority, command))
         self._queue.sort(key=lambda x: -x[0])  # Sort by priority descending
         
-    def get_next(self, current_time: float) -> Optional[AVCLANCommand]:
+    def get_next(self, current_time: float) -> AVCLANCommand | None:
         """
         Get next command to send if timing allows.
         

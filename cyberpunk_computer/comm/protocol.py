@@ -13,7 +13,7 @@ from dataclasses import dataclass
 DEVICE_SYSTEM = 0
 DEVICE_CAN = 1
 DEVICE_AVCLAN = 2
-DEVICE_SATELLITE_BASE = 6  # Satellites are 6-255
+DEVICE_SATELLITE_BASE = 100  # RS485 satellites start at 100 (matches io.ports)
 
 
 @dataclass

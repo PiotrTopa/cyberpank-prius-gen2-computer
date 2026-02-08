@@ -28,7 +28,6 @@ Note: Inverter temperature requires SOLICITED PID 21C3 to ECU 0x7E2
 import logging
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Optional, List, Any
 
 logger = logging.getLogger(__name__)
 
@@ -73,11 +72,11 @@ class CANMessage:
     """
     can_id: int
     is_extended: bool
-    data: List[int]
+    data: list[int]
     msg_type: CANMessageType = CANMessageType.UNKNOWN
     values: dict = field(default_factory=dict)
-    timestamp: Optional[int] = None
-    sequence: Optional[int] = None
+    timestamp: int | None = None
+    sequence: int | None = None
 
 
 # Known Prius Gen 2 CAN IDs (11-bit standard frames)
@@ -149,7 +148,7 @@ class CANDecoder:
         """Get decoder statistics."""
         return self._stats.copy()
     
-    def decode(self, raw: dict) -> Optional[CANMessage]:
+    def decode(self, raw: dict) -> CANMessage | None:
         """
         Decode a raw CAN message from gateway.
         
@@ -422,44 +421,18 @@ class CANDecoder:
             # Note: byte 2 is NOT used for RPM anymore
             # RPM comes from 0x038 byte 1 which properly shows 0 when ICE is off
         
-        # 0x4CE: Previously thought to be Ambient Temperature (Outside)
-        # Analysis shows byte 0 = constant 15, matching battery temp range (13-18°C)
-        # NOT matching user's driving conditions of -2 to -4°C ambient
-        # This is likely battery compartment intake air temperature, NOT outside ambient
-        # DISABLED as ambient source - real ambient requires OBD2 PID 0x46 query
-        # elif can_id == 0x4CE and len(data) >= 1:
-        #     msg.msg_type = CANMessageType.CLIMATE_DATA
-        #     msg.values["ambient_temp"] = float(data[0])
+        # 0x4CE: Battery compartment intake air temp (NOT outside ambient)
+        # Requires OBD-II PID 0x46 for real ambient - see docs/prius_can.md
         
-        # 0x540: Unknown Status Message (NOT Inverter Temperature)
-        # DISABLED: This CAN ID does NOT contain inverter temperature!
-        # The observed data [37, 128/16/64/0, 0, 0] shows:
-        # - Byte 0 = 37 constant throughout recording (not temp behavior)
-        # - Byte 1 = power-of-two values (0x80, 0x10, 0x40, 0x00) = status flags
-        # - Values 37 and 165 are likely status codes, not temperatures
-        # 
-        # TODO: Implement SOLICITED OBD2 query for inverter temperature
-        #       See docs/TODO_SOLICITED_OBD2.md for implementation details
-        #       Request: ECU 0x7E2, PID 21C3
-        #       Response: MG1 Inverter Temp = Byte_Y - 40
-        #                 MG2 Inverter Temp = Byte_Z - 40
-        #                 MG1 Motor Temp = Byte_AB - 40
-        #                 MG2 Motor Temp = Byte_AA - 40
-        # 
-        # See docs/prius_can.md section "Solicited (CAN) - Hybrid/Specific (ECU 07E2)"
-        # elif can_id == 0x540 and len(data) >= 4:
-        #     msg.msg_type = CANMessageType.INVERTER_TEMP
-        #     temp_raw = data[0]
-        #     msg.values["inverter_temp"] = temp_raw - 40
+        # 0x540: Status flags (NOT inverter temperature)
+        # Inverter temps require SOLICITED PID 21C3 to ECU 0x7E2
+        # See docs/TODO_SOLICITED_OBD2.md
         
         # ---------------------------------------------------
         # VEHICLE SPEED
         # ---------------------------------------------------
         
-        # 0x03A: NOT Vehicle Speed - byte 4 contains status flags (36, 52, 132)
-        # These are NOT speed values - ignoring this message for speed
-        # Speed comes from 0x0B4 instead
-        # elif can_id == 0x03A - DISABLED, not a speed source
+        # 0x03A: Status flags (NOT vehicle speed) - speed comes from 0x0B4
         
         # 0x0B4: Vehicle Speed Alternative
         # Observed: [00, 00, 00, 00, 00-01, 00-1D, 00-FF, 00-FF]
@@ -522,7 +495,7 @@ class CANDecoder:
             msg.msg_type = CANMessageType.SOLICITED_HV_BATTERY
             self._decode_hv_battery_response(msg, data)
     
-    def _decode_obd2_response(self, msg: CANMessage, data: List[int]) -> None:
+    def _decode_obd2_response(self, msg: CANMessage, data: list[int]) -> None:
         """
         Decode standard OBD-II response from Engine ECU (0x7E8).
         
@@ -581,7 +554,7 @@ class CANDecoder:
             if pid == 0xF3 and len(payload) >= 1:  # Injector Time
                 msg.values["injector_time_ms"] = 0.128 * payload[0]
     
-    def _decode_hybrid_response(self, msg: CANMessage, data: List[int]) -> None:
+    def _decode_hybrid_response(self, msg: CANMessage, data: list[int]) -> None:
         """
         Decode response from Hybrid ECU (0x7EA).
         
@@ -622,7 +595,7 @@ class CANDecoder:
             elif pid == 0xC4:  # Additional hybrid data
                 self._decode_pid_21c4(msg, payload)
     
-    def _decode_pid_21c3(self, msg: CANMessage, payload: List[int]) -> None:
+    def _decode_pid_21c3(self, msg: CANMessage, payload: list[int]) -> None:
         """
         Decode PID 21C3 - Comprehensive hybrid system data.
         
@@ -675,7 +648,7 @@ class CANDecoder:
         if len(payload) >= 31:
             msg.values["hv_current_21c3"] = 2 * payload[30] - 256
     
-    def _decode_pid_21c4(self, msg: CANMessage, payload: List[int]) -> None:
+    def _decode_pid_21c4(self, msg: CANMessage, payload: list[int]) -> None:
         """
         Decode PID 21C4 - Additional hybrid data.
         
@@ -696,7 +669,7 @@ class CANDecoder:
         if len(payload) >= 6:
             msg.values["converter_temp"] = payload[5] - 40
     
-    def _decode_hv_battery_response(self, msg: CANMessage, data: List[int]) -> None:
+    def _decode_hv_battery_response(self, msg: CANMessage, data: list[int]) -> None:
         """
         Decode response from HV Battery ECU (0x7EB).
         
@@ -738,7 +711,7 @@ class CANDecoder:
             elif pid == 0xD0:  # Internal resistance and voltage delta
                 self._decode_pid_21d0(msg, payload)
     
-    def _decode_pid_21ce(self, msg: CANMessage, payload: List[int]) -> None:
+    def _decode_pid_21ce(self, msg: CANMessage, payload: list[int]) -> None:
         """
         Decode PID 21CE - HV Battery detailed data.
         
@@ -770,7 +743,7 @@ class CANDecoder:
             msg.values["block_voltage_max"] = max(block_voltages)
             msg.values["block_voltage_delta"] = max(block_voltages) - min(block_voltages)
     
-    def _decode_pid_21cf(self, msg: CANMessage, payload: List[int]) -> None:
+    def _decode_pid_21cf(self, msg: CANMessage, payload: list[int]) -> None:
         """
         Decode PID 21CF - Battery temps and delta SOC.
         
@@ -800,7 +773,7 @@ class CANDecoder:
         if len(payload) >= 8:
             msg.values["battery_fan_speed"] = payload[7]
     
-    def _decode_pid_21d0(self, msg: CANMessage, payload: List[int]) -> None:
+    def _decode_pid_21d0(self, msg: CANMessage, payload: list[int]) -> None:
         """
         Decode PID 21D0 - Internal resistance and voltage delta.
         
@@ -834,7 +807,7 @@ class CANStateTracker:
             "ice_running": None,        # Engine on/off
         }
         self._decoder = CANDecoder()
-        self._change_callbacks: List[callable] = []
+        self._change_callbacks: list[callable] = []
     
     @property
     def state(self) -> dict:
@@ -845,7 +818,7 @@ class CANStateTracker:
         """Register a callback for state changes."""
         self._change_callbacks.append(callback)
     
-    def update(self, raw: dict) -> Optional[dict]:
+    def update(self, raw: dict) -> dict | None:
         """
         Process a CAN message and update state.
         
@@ -913,6 +886,6 @@ def parse_can_id(can_id_str: str) -> tuple[int, bool]:
     return can_id, is_extended
 
 
-def format_can_data(data: List[int]) -> str:
+def format_can_data(data: list[int]) -> str:
     """Format CAN data bytes as hex string."""
     return " ".join(f"{b:02X}" for b in data)
