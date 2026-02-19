@@ -131,7 +131,8 @@ class VehicleState:
     ev_mode: bool = False         # EV mode active
     gear: GearPosition = GearPosition.PARK
     speed_kmh: float = 0.0
-    rpm: int = 0                  # ICE RPM
+    rpm: int = 0                  # ICE RPM (unsolicited from CAN 0x038)
+    solicited_rpm: Optional[int] = None  # ICE RPM (solicited OBD-II PID 010C)
     
     # Pedals & Fuel
     throttle_position: int = 0    # 0-100% (approx) or raw 0-255
@@ -147,7 +148,16 @@ class VehicleState:
     
     # Temperatures
     ice_coolant_temp: Optional[float] = None  # Engine coolant temp (C)
-    inverter_temp: Optional[float] = None     # Inverter/motor temp (C)
+    inverter_temp: Optional[float] = None     # Inverter/motor temp (C) - MG2 primary
+    mg1_inverter_temp: Optional[float] = None # MG1 inverter temp (C)
+    mg2_inverter_temp: Optional[float] = None # MG2 inverter temp (C)
+    mg1_motor_temp: Optional[float] = None    # MG1 motor/generator temp (C)
+    mg2_motor_temp: Optional[float] = None    # MG2 motor temp (C)
+    converter_temp: Optional[float] = None    # DC-DC converter temp (C)
+    
+    # Motor/Generator RPMs
+    mg1_rpm: Optional[int] = None             # MG1 (generator) RPM
+    mg2_rpm: Optional[int] = None             # MG2 (traction motor) RPM
     
     @property
     def is_parked(self) -> bool:
@@ -176,6 +186,7 @@ class EnergyState:
     battery_delta_soc: Optional[float] = None  # Delta between min/max cell SOC
     battery_min_cell_temp: Optional[float] = None
     battery_max_cell_temp: Optional[float] = None
+    block_voltages: Optional[tuple] = None  # 14 block voltages from PID 21CE (V)
     
     # Power flow (positive = output/discharge, negative = input/charge)
     motor_power_kw: float = 0.0    # MG2 power
@@ -302,6 +313,23 @@ class InputState:
 
 
 @dataclass(frozen=True)
+class DiagnosticsState:
+    """
+    OBD-II Diagnostic Trouble Code (DTC) state.
+    
+    Stores retrieved DTCs from various ECUs.
+    DTCs are read on-demand via OBD-II Mode 03.
+    """
+    # Stored DTCs: tuple of (code_str, ecu_name) e.g. ("P0171", "ENGINE")
+    stored_dtcs: tuple = ()        # Confirmed DTCs
+    pending_dtcs: tuple = ()       # Pending DTCs (Mode 07)
+    dtc_count: int = 0             # Total DTC count from Mode 01 PID 01
+    mil_on: bool = False           # Malfunction Indicator Lamp status
+    last_scan_time: Optional[float] = None  # Timestamp of last DTC scan
+    scan_in_progress: bool = False
+
+
+@dataclass(frozen=True)
 class DisplayState:
     """
     Display settings state.
@@ -376,6 +404,7 @@ class AppState:
     connection: ConnectionState = field(default_factory=ConnectionState)
     debug: DebugState = field(default_factory=DebugState)
     input: InputState = field(default_factory=InputState)
+    diagnostics: DiagnosticsState = field(default_factory=DiagnosticsState)
     display: DisplayState = field(default_factory=DisplayState)
     vfd_satellite: VFDSatelliteState = field(default_factory=VFDSatelliteState)
     

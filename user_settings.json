@@ -1,6 +1,6 @@
 {
   "ambient": {
-    "mode": "CYBER",
+    "mode": "OFF",
     "hue": 180,
     "saturation": 100,
     "brightness": 80
@@ -12,8 +12,9 @@
     "drl_enabled": true
   },
   "audio": {
-    "volume": 35,
+    "volume": 45,
     "bass": 0,
+    "mid": 0,
     "treble": 0,
     "balance": 0,
     "fader": 0,
@@ -26,5 +27,10 @@
     "ac_on": true,
     "recirculation": false,
     "air_direction": 0
+  },
+  "display": {
+    "screen_brightness": 100,
+    "power_chart_time_base": 60,
+    "vfd_brightness": 100
   }
 }

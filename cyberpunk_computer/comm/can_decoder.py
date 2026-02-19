@@ -404,23 +404,29 @@ class CANDecoder:
         # ENGINE & INVERTER
         # ---------------------------------------------------
         
-        # 0x038: ICE Status and RPM (PRIMARY RPM SOURCE)
+        # 0x038: ICE Status and RPM
         # Observed: [C8, 0D, 08, 00, 00, 00, 1C] when running
         #           [C0, 00, 08, 00, 00, 00, 07] when ICE off (most common: 4093 occurrences)
+        #           [C0, 07, 08, 00, 00, 00, 0E] when running (solicited RPM = 1302)
         # Byte 0: Status flags - bit 6 is NOT reliable for ICE on/off detection
-        # Byte 1: RPM value (range 0-118, *64 = 0-7552 RPM)
+        # Byte 1: RPM-related value (range 0-118)
         #         When byte 1 = 0, ICE is definitely OFF
-        #         When byte 1 > 0, ICE is running with RPM = byte1 * 64
-        #         Typical idle (byte1=13) = 832 RPM, matches 1NZ-FXE warm idle
+        #         When byte 1 > 0, ICE is running
         # Byte 2: Status/flag field (mostly 12 when running, 8 when off) - NOT RPM
+        # Byte 6: Changes with RPM - possibly checksum or low bits
+        #
+        # WARNING: The *64 multiplier is INACCURATE for actual RPM display.
+        #   Observed: byte1=7, *64=448, but OBD-II PID 0x0C reports 1302 RPM.
+        #   The value is kept as a coarse indicator; use solicited RPM for accuracy.
         # Note: Coolant temperature NOT reliably found in 0x038
         elif can_id == 0x038 and len(data) >= 7:
             msg.msg_type = CANMessageType.ENGINE_STATUS
             
-            # Byte 1: RPM scaling (range 0-118, *64 = 0-7552 RPM)
+            # Byte 1: RPM scaling — *64 is INACCURATE but kept for ICE on/off detection
+            # Real RPM should come from solicited OBD-II PID 0x0C (SetSolicitedRPMAction)
             # Also serves as ICE running indicator: 0 = off, >0 = running
             rpm_byte = data[1]
-            msg.values["rpm"] = rpm_byte * 64
+            msg.values["rpm"] = rpm_byte * 64  # TODO: find correct formula (observed ratio ~186x, not 64x)
             
             # ICE running status determined by RPM byte (not byte 0 flags)
             msg.values["ice_running"] = rpm_byte > 0
@@ -603,22 +609,24 @@ class CANDecoder:
         # SOLICITED OBD-II RESPONSES (Gateway Protocol v2.8.0)
         # ---------------------------------------------------
         # These are responses from ECUs to solicited queries.
-        # Format: [Length, Mode+0x40, PID, DataBytes...]
+        # Format (single-frame): [Length, Mode+0x40, PID, DataBytes...]
+        # Format (ISO-TP reassembled): [Mode+0x40, PID/Count, DataBytes...]
+        # Minimum 2 bytes for ISO-TP 0-DTC response: [0x43, 0x00]
         
         # 0x7E8: Engine ECU Response (from 0x7E0)
-        elif can_id == 0x7E8 and len(data) >= 3:
+        elif can_id == 0x7E8 and len(data) >= 2:
             msg.msg_type = CANMessageType.SOLICITED_ENGINE
             self._decode_obd2_response(msg, data)
         
         # 0x7EA: Hybrid ECU Response (from 0x7E2)
         # Contains inverter temps, MG1/MG2 data, etc.
-        elif can_id == 0x7EA and len(data) >= 3:
+        elif can_id == 0x7EA and len(data) >= 2:
             msg.msg_type = CANMessageType.SOLICITED_HYBRID
             self._decode_hybrid_response(msg, data)
         
         # 0x7EB: HV Battery ECU Response (from 0x7E3)
         # Contains detailed battery data, cell voltages, delta SOC
-        elif can_id == 0x7EB and len(data) >= 3:
+        elif can_id == 0x7EB and len(data) >= 2:
             msg.msg_type = CANMessageType.SOLICITED_HV_BATTERY
             self._decode_hv_battery_response(msg, data)
     
@@ -630,24 +638,27 @@ class CANDecoder:
         1. Single-frame: [Length, Mode+0x40, PID, Data...] (8 bytes max)
         2. ISO-TP reassembled: [Mode+0x40, PID, Data...] (no length byte, up to 64 bytes)
         
-        Detection: If data[0] == 0x41 or 0x61 (Mode response), it's ISO-TP format.
-                   Otherwise, data[0] is the length byte.
+        Detection: If data[0] >= 0x40, it's ISO-TP format (all positive OBD-II
+                   response modes are 0x40+request_mode: 0x41, 0x43, 0x47, 0x61, etc.)
+                   If data[0] <= 0x07, it's single-frame with PCI length byte.
         """
-        if len(data) < 3:
+        if len(data) < 2:
             return
         
-        # Detect format: ISO-TP reassembled starts with mode response (0x41, 0x61),
-        # single-frame starts with length byte (typically 0x03-0x07)
-        if data[0] in (0x41, 0x61):
-            # ISO-TP format: [Mode, PID, Data...]
+        # Detect format: ISO-TP reassembled starts with mode response (>= 0x40),
+        # single-frame starts with PCI length byte (0x01-0x07)
+        if data[0] >= 0x40:
+            # ISO-TP format: [Mode, PID/Count, Data...]
             mode = data[0]
-            pid = data[1]
+            pid = data[1] if len(data) > 1 else 0
             payload = data[2:] if len(data) > 2 else []
-        else:
+        elif len(data) >= 3:
             # Single-frame format: [Length, Mode, PID, Data...]
             mode = data[1]
             pid = data[2]
             payload = data[3:] if len(data) > 3 else []
+        else:
+            return
         
         msg.values["obd2_mode"] = mode
         msg.values["obd2_pid"] = pid
@@ -680,6 +691,24 @@ class CANDecoder:
         elif mode == 0x61:
             if pid == 0xF3 and len(payload) >= 1:  # Injector Time
                 msg.values["injector_time_ms"] = 0.128 * payload[0]
+        
+        # Mode 0x43 = response to Mode 0x03 (Stored DTCs)
+        elif mode == 0x43:
+            # Format: [43, count, DTC1_hi, DTC1_lo, DTC2_hi, DTC2_lo, ...]
+            # 'pid' here is actually the DTC count byte
+            msg.values["dtc_mode"] = 0x03
+            msg.values["dtc_count"] = pid  # First byte after mode is count
+            msg.values["dtc_raw"] = [pid] + list(payload)  # Full payload for parsing
+        
+        # Mode 0x47 = response to Mode 0x07 (Pending DTCs)
+        elif mode == 0x47:
+            msg.values["dtc_mode"] = 0x07
+            msg.values["dtc_count"] = pid
+            msg.values["dtc_raw"] = [pid] + list(payload)
+        
+        # Mode 0x44 = response to Mode 0x04 (Clear DTCs confirmation)
+        elif mode == 0x44:
+            msg.values["dtc_cleared"] = True
     
     def _decode_hybrid_response(self, msg: CANMessage, data: list[int]) -> None:
         """
@@ -692,24 +721,26 @@ class CANDecoder:
         1. Single-frame: [Length, Mode, PID, Data...] (8 bytes max)
         2. ISO-TP reassembled: [Mode, PID, Data...] (no length byte, up to 64 bytes)
         
-        Detection: If data[0] == 0x61 (Mode response), it's ISO-TP format.
-                   Otherwise, data[0] is the length byte.
+        Detection: If data[0] >= 0x40, it's ISO-TP format (mode response byte).
+                   If data[0] <= 0x07, it's single-frame with PCI length byte.
         """
-        if len(data) < 3:
+        if len(data) < 2:
             return
         
-        # Detect format: ISO-TP reassembled starts with mode (0x61),
-        # single-frame starts with length byte (typically 0x03-0x07)
-        if data[0] == 0x61:
+        # Detect format: ISO-TP reassembled starts with mode (>= 0x40),
+        # single-frame starts with PCI length byte (0x01-0x07)
+        if data[0] >= 0x40:
             # ISO-TP format: [Mode, PID, Data...]
             mode = data[0]
-            pid = data[1]
+            pid = data[1] if len(data) > 1 else 0
             payload = data[2:] if len(data) > 2 else []
-        else:
+        elif len(data) >= 3:
             # Single-frame format: [Length, Mode, PID, Data...]
             mode = data[1]
             pid = data[2]
             payload = data[3:] if len(data) > 3 else []
+        else:
+            return
         
         msg.values["obd2_mode"] = mode
         msg.values["obd2_pid"] = pid
@@ -721,6 +752,17 @@ class CANDecoder:
                 self._decode_pid_21c3(msg, payload)
             elif pid == 0xC4:  # Additional hybrid data
                 self._decode_pid_21c4(msg, payload)
+        
+        # Mode 0x43 = DTC response from Hybrid ECU
+        elif mode == 0x43:
+            msg.values["dtc_mode"] = 0x03
+            msg.values["dtc_count"] = pid
+            msg.values["dtc_raw"] = [pid] + list(payload)
+        
+        elif mode == 0x47:
+            msg.values["dtc_mode"] = 0x07
+            msg.values["dtc_count"] = pid
+            msg.values["dtc_raw"] = [pid] + list(payload)
     
     def _decode_pid_21c3(self, msg: CANMessage, payload: list[int]) -> None:
         """
@@ -806,24 +848,26 @@ class CANDecoder:
         1. Single-frame: [Length, Mode, PID, Data...] (8 bytes max)
         2. ISO-TP reassembled: [Mode, PID, Data...] (no length byte, up to 64 bytes)
         
-        Detection: If data[0] == 0x61 (Mode response), it's ISO-TP format.
-                   Otherwise, data[0] is the length byte.
+        Detection: If data[0] >= 0x40, it's ISO-TP format (mode response byte).
+                   If data[0] <= 0x07, it's single-frame with PCI length byte.
         """
-        if len(data) < 3:
+        if len(data) < 2:
             return
         
-        # Detect format: ISO-TP reassembled starts with mode (0x61),
-        # single-frame starts with length byte (typically 0x03-0x07)
-        if data[0] == 0x61:
+        # Detect format: ISO-TP reassembled starts with mode (>= 0x40),
+        # single-frame starts with PCI length byte (0x01-0x07)
+        if data[0] >= 0x40:
             # ISO-TP format: [Mode, PID, Data...]
             mode = data[0]
-            pid = data[1]
+            pid = data[1] if len(data) > 1 else 0
             payload = data[2:] if len(data) > 2 else []
-        else:
+        elif len(data) >= 3:
             # Single-frame format: [Length, Mode, PID, Data...]
             mode = data[1]
             pid = data[2]
             payload = data[3:] if len(data) > 3 else []
+        else:
+            return
         
         msg.values["obd2_mode"] = mode
         msg.values["obd2_pid"] = pid
@@ -837,6 +881,17 @@ class CANDecoder:
                 self._decode_pid_21cf(msg, payload)
             elif pid == 0xD0:  # Internal resistance and voltage delta
                 self._decode_pid_21d0(msg, payload)
+        
+        # Mode 0x43 = DTC response from HV Battery ECU
+        elif mode == 0x43:
+            msg.values["dtc_mode"] = 0x03
+            msg.values["dtc_count"] = pid
+            msg.values["dtc_raw"] = [pid] + list(payload)
+        
+        elif mode == 0x47:
+            msg.values["dtc_mode"] = 0x07
+            msg.values["dtc_count"] = pid
+            msg.values["dtc_raw"] = [pid] + list(payload)
     
     def _decode_pid_21ce(self, msg: CANMessage, payload: list[int]) -> None:
         """

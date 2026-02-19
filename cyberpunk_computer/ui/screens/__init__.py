@@ -11,6 +11,9 @@ from .climate_screen import ClimateScreen
 from .lights_screen import LightsScreen
 from .ambient_screen import AmbientScreen
 from .engine_screen import EngineScreen
+from .ev_screen import EVScreen
+from .dtc_screen import DTCScreen
+from .avc_monitor_screen import AVCMonitorScreen
 
 __all__ = [
     "Screen",
@@ -20,4 +23,6 @@ __all__ = [
     "LightsScreen",
     "AmbientScreen",
     "EngineScreen",
+    "EVScreen",
+    "DTCScreen",
 ]

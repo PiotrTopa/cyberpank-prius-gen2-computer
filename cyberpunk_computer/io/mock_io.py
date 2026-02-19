@@ -260,13 +260,6 @@ class LogOutputPort(OutputPort):
         )
         logger.log(self._log_level, msg)
         
-        # Also print to stdout with clear formatting
-        print(f"\n{self._prefix} ─────────────────────────────────────────")
-        print(f"  Device:  {command.device_id}")
-        print(f"  Command: {command.command_type}")
-        print(f"  Payload: {command.payload}")
-        print(f"────────────────────────────────────────────────────────\n")
-        
         return True
     
     def is_connected(self) -> bool:

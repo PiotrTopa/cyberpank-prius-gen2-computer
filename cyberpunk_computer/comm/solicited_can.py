@@ -518,6 +518,79 @@ PID_HV_BATTERY_TEMPS = PIDDefinition(
 
 
 # =============================================================================
+# DTC Helpers
+# =============================================================================
+
+# DTC first-nibble prefix map: 0=P0, 1=P1, 2=P2, 3=P3, 4=C0, 5=C1, 6=C2, 7=C3,
+#                                8=B0, 9=B1, A=B2, B=B3, C=U0, D=U1, E=U2, F=U3
+DTC_PREFIX = {
+    0x0: "P0", 0x1: "P1", 0x2: "P2", 0x3: "P3",
+    0x4: "C0", 0x5: "C1", 0x6: "C2", 0x7: "C3",
+    0x8: "B0", 0x9: "B1", 0xA: "B2", 0xB: "B3",
+    0xC: "U0", 0xD: "U1", 0xE: "U2", 0xF: "U3",
+}
+
+# ECU names for display
+ECU_NAMES = {
+    0x7E8: "ENGINE",
+    0x7EA: "HYBRID",
+    0x7EB: "HV_BATT",
+}
+
+# ECUs to scan for DTCs
+DTC_ECUS = [
+    (ECUAddress.ENGINE.value, "ENGINE"),
+    (ECUAddress.HYBRID.value, "HYBRID"),
+    (ECUAddress.HV_BATTERY.value, "HV_BATT"),
+]
+
+
+def parse_dtc_bytes(byte_high: int, byte_low: int) -> str | None:
+    """
+    Parse a 2-byte DTC into standard OBD-II code string.
+    
+    Format: [PPPP PPPP] [PPPP PPPP]
+    First nibble of byte_high determines prefix (P/C/B/U + digit).
+    Remaining 12 bits are the code number.
+    
+    Returns: e.g. "P0171" or None if both bytes are 0x00.
+    """
+    if byte_high == 0x00 and byte_low == 0x00:
+        return None
+    
+    prefix_nibble = (byte_high >> 4) & 0x0F
+    prefix = DTC_PREFIX.get(prefix_nibble, "P0")
+    code_num = ((byte_high & 0x0F) << 8) | byte_low
+    return f"{prefix}{code_num:03X}"
+
+
+def parse_dtc_response(data: list[int], ecu_name: str) -> list[tuple[str, str]]:
+    """
+    Parse DTC response payload (after mode byte).
+    
+    Mode 03 response format:
+    - Single-frame: [count, DTC1_hi, DTC1_lo, DTC2_hi, DTC2_lo, ...]
+    - ISO-TP reassembled: same but possibly longer
+    
+    Returns: List of (dtc_code, ecu_name) tuples.
+    """
+    if not data:
+        return []
+    
+    dtcs = []
+    # First byte is DTC count (for Mode 43 response)
+    # DTCs start at byte 1, each is 2 bytes
+    i = 1
+    while i + 1 < len(data):
+        code = parse_dtc_bytes(data[i], data[i + 1])
+        if code:
+            dtcs.append((code, ecu_name))
+        i += 2
+    
+    return dtcs
+
+
+# =============================================================================
 # Subscription Manager
 # =============================================================================
 
@@ -637,6 +710,10 @@ class SolicitedCANManager:
         interval = interval_ms or pid_def.interval_ms
         
         # Build subscription message
+        # Use longer timeout + isotp flag for multi-frame PIDs (>7 bytes response)
+        needs_isotp = pid_def.byte_count > 7
+        timeout = 500 if needs_isotp else 100
+        
         msg = {
             "a": "sub",
             "slot": slot,
@@ -644,8 +721,10 @@ class SolicitedCANManager:
             "d": pid_def.request_data,
             "r": [f"0x{pid_def.response_ecu:03X}"],
             "int": interval,
-            "t": 100  # 100ms timeout
+            "t": timeout
         }
+        if needs_isotp:
+            msg["isotp"] = True
         
         self._send_callback(1, msg)
         
@@ -694,6 +773,50 @@ class SolicitedCANManager:
         
         self._send_callback(1, msg)
         logger.debug(f"Sent single query: {pid_def.name}")
+    
+    def request_dtc_scan(self, mode: int = OBD2_MODE_DTC) -> None:
+        """
+        Send DTC scan requests to all known ECUs.
+        
+        Mode 03 = stored DTCs, Mode 07 = pending DTCs.
+        Responses are handled via process_dtc_response().
+        
+        Args:
+            mode: OBD-II mode (0x03 for stored, 0x07 for pending)
+        """
+        if not self._send_callback:
+            return
+        
+        for ecu_addr, ecu_name in DTC_ECUS:
+            msg = {
+                "a": "req",
+                "i": f"0x{ecu_addr:03X}",
+                "d": [0x01, mode, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+                "r": [f"0x{ecu_addr + 8:03X}"],
+                "t": 500,
+                "isotp": True  # DTCs may need multi-frame
+            }
+            self._send_callback(1, msg)
+            logger.info(f"DTC scan (mode 0x{mode:02X}) sent to {ecu_name} (0x{ecu_addr:03X})")
+    
+    def request_clear_dtcs(self) -> None:
+        """
+        Send clear DTCs request (Mode 04) to Engine ECU.
+        
+        WARNING: This clears all stored DTCs and resets MIL lamp.
+        """
+        if not self._send_callback:
+            return
+        
+        msg = {
+            "a": "req",
+            "i": f"0x{ECUAddress.ENGINE.value:03X}",
+            "d": [0x01, OBD2_MODE_CLEAR_DTC, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+            "r": [f"0x{ECUAddress.ENGINE_RESP.value:03X}"],
+            "t": 500
+        }
+        self._send_callback(1, msg)
+        logger.info("Clear DTCs (Mode 04) sent to Engine ECU")
     
     def apply_profile(self, profile: list[tuple]) -> None:
         """

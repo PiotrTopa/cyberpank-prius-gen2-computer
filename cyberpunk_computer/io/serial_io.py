@@ -256,7 +256,9 @@ class SerialPort(BidirectionalPort):
                 
                 if self._serial and self._connected:
                     self._serial.write(line.encode('utf-8'))
+                    self._serial.flush()
                     self._stats["tx_messages"] += 1
+                    logger.debug(f"TX [{command.device_id}:{command.command_type}]: {line.strip()[:120]}")
                     
             except queue.Empty:
                 continue

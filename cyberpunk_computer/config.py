@@ -82,6 +82,7 @@ class Config:
     # Message logging
     log_incoming: bool = False
     log_outgoing: bool = False
+    log_commands: bool = False
     
     # Device filters (None = all, or set of device IDs to show)
     filter_devices: Optional[set] = None

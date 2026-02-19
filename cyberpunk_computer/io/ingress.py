@@ -12,6 +12,7 @@ This provides a clean separation between IO and state management.
 
 import logging
 import time
+import os
 from typing import Dict, List, Optional, Callable, Any
 from dataclasses import dataclass
 
@@ -31,18 +32,21 @@ from ..state.actions import (
     SetFuelFlowAction, SetEnergyFlowFlagsAction, SetBatteryMaxTempAction,
     SetBatterySOCAction, SetChargingStateAction,
     SetConnectionStateAction,
-    SetSpeedAction, SetRPMAction, SetICECoolantTempAction, SetInverterTempAction,
+    SetSpeedAction, SetRPMAction, SetSolicitedRPMAction, SetICECoolantTempAction, SetInverterTempAction,
+    SetHybridTempsAction, SetMGRPMsAction,
     SetBatteryVoltageAction, SetBatteryCurrentAction, SetBatteryTempAction,
-    SetBatteryDeltaSOCAction, SetGearAction,
+    SetBatteryDeltaSOCAction, SetBlockVoltagesAction, SetGearAction,
     SetSteeringAngleAction, SetAccelerationAction, SetYawRateAction,
     SetWheelPulsesAction, SetHeadlightStatusAction, SetSOCBarsEventAction,
     AVCButtonPressAction, AVCTouchEventAction,
+    SetStoredDTCsAction, SetPendingDTCsAction, SetDTCScanStateAction,
 )
 from ..comm.avc_decoder import (
     AVCDecoder, AVCMessage, AVCMessageType,
     parse_button_event, parse_touch_event,
 )
 from ..comm.can_decoder import CANDecoder, CANMessageType
+from ..comm.solicited_can import parse_dtc_response, ECU_NAMES
 from ..state.app_state import GearPosition
 
 logger = logging.getLogger(__name__)
@@ -112,8 +116,22 @@ class IngressController:
         # Solicited CAN debug mode
         self._solicited_debug = False
         
-        # Message logging callback
-        self._message_log_callback: Optional[Callable[[RawMessage, str], None]] = None
+        # RPM comparison logger (solicited vs unsolicited)
+        self._rpm_log_file = None
+        self._rpm_log_enabled = False
+        self._last_unsolicited_rpm: Optional[int] = None
+        self._last_unsolicited_rpm_raw: Optional[int] = None  # raw byte from CAN 0x038
+        self._last_solicited_rpm: Optional[int] = None
+        
+        # Message logging callbacks (multiple can be registered)
+        self._message_log_callbacks: list[Callable[[RawMessage, str], None]] = []
+        
+        # DTC scan accumulator: collects DTCs from multiple ECUs
+        self._dtc_scan_pending_ecus: set = set()  # ECUs we're waiting for
+        self._dtc_scan_results: list = []          # Accumulated (code, ecu) tuples
+        self._dtc_scan_mode: int = 0               # 0x03 or 0x07
+        self._dtc_scan_start_time: float = 0.0     # When scan started (for timeout)
+        self._DTC_SCAN_TIMEOUT: float = 5.0        # Max seconds to wait for all ECUs
     
     @property
     def stats(self) -> IngressStats:
@@ -133,12 +151,74 @@ class IngressController:
         """Enable/disable solicited CAN debug mode (prints 0x7E8/0x7EA/0x7EB responses)."""
         self._solicited_debug = enabled
     
+    def enable_rpm_logging(self, log_dir: str = "logs") -> None:
+        """
+        Enable RPM comparison logging.
+        
+        Logs both solicited (OBD-II PID 010C) and unsolicited (CAN 0x038)
+        RPM values to a CSV file for correlation analysis.
+        
+        Args:
+            log_dir: Directory to write RPM log files
+        """
+        os.makedirs(log_dir, exist_ok=True)
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        filepath = os.path.join(log_dir, f"rpm_comparison_{timestamp}.csv")
+        self._rpm_log_file = open(filepath, "w")
+        self._rpm_log_file.write("timestamp,source,rpm_value,raw_byte,other_source_rpm,raw_frame\n")
+        self._rpm_log_enabled = True
+        logger.info(f"RPM comparison logging enabled: {filepath}")
+    
+    def _log_rpm_event(self, source: str, rpm: int, raw_byte: Optional[int] = None, raw_frame: Optional[list] = None) -> None:
+        """
+        Log an RPM event for comparison analysis.
+        
+        Args:
+            source: "unsolicited" (CAN 0x038) or "solicited" (OBD-II 010C)
+            rpm: RPM value
+            raw_byte: Raw CAN byte (for unsolicited, byte[1] of 0x038)
+            raw_frame: Full raw CAN frame bytes (for unsolicited 0x038)
+        """
+        if not self._rpm_log_enabled or not self._rpm_log_file:
+            return
+        
+        ts = time.time()
+        
+        if source == "unsolicited":
+            self._last_unsolicited_rpm = rpm
+            self._last_unsolicited_rpm_raw = raw_byte
+            other_rpm = self._last_solicited_rpm
+        else:
+            self._last_solicited_rpm = rpm
+            other_rpm = self._last_unsolicited_rpm
+        
+        raw_str = str(raw_byte) if raw_byte is not None else ""
+        other_str = str(other_rpm) if other_rpm is not None else ""
+        frame_str = "|".join(f"{b:02X}" for b in raw_frame) if raw_frame else ""
+        
+        self._rpm_log_file.write(f"{ts:.3f},{source},{rpm},{raw_str},{other_str},{frame_str}\n")
+        self._rpm_log_file.flush()
+    
+    def stop_rpm_logging(self) -> None:
+        """Stop RPM comparison logging and close the file."""
+        if self._rpm_log_file:
+            self._rpm_log_file.close()
+            self._rpm_log_file = None
+        self._rpm_log_enabled = False
+    
     def set_message_log_callback(
         self, 
         callback: Callable[[RawMessage, str], None]
     ) -> None:
         """Set callback for message logging (called with message and "IN")."""
-        self._message_log_callback = callback
+        self._message_log_callback = callback  # Legacy single-slot (kept for compat)
+
+    def add_message_log_callback(
+        self,
+        callback: Callable[[RawMessage, str], None]
+    ) -> None:
+        """Add a message logging callback. Multiple callbacks are supported."""
+        self._message_log_callbacks.append(callback)
     
     def register_satellite_handler(
         self,
@@ -177,6 +257,7 @@ class IngressController:
     def stop(self) -> None:
         """Stop the ingress controller and input port."""
         self._input_port.stop()
+        self.stop_rpm_logging()
         logger.info("Ingress controller stopped")
     
     def update(self, max_messages: int = 100) -> int:
@@ -212,9 +293,13 @@ class IngressController:
         self._stats.messages_received += 1
         self._stats.last_message_time = time.time()
         
-        # Log if callback set
-        if self._message_log_callback:
-            self._message_log_callback(msg, "IN")
+        # Check DTC scan timeout on every message (lightweight check)
+        if self._dtc_scan_pending_ecus:
+            self._check_dtc_scan_timeout()
+        
+        # Log to all registered callbacks
+        for cb in self._message_log_callbacks:
+            cb(msg, "IN")
         
         try:
             # Route based on message category
@@ -294,6 +379,17 @@ class IngressController:
                 raw_data = msg.data.get("d", [])
                 print(f"[UNSOL] CAN {can_id_raw}: {[hex(b) if isinstance(b, int) else b for b in raw_data[:8]]}")
         
+        # Handle error responses from gateway (e.g., TIMEOUT)
+        # These have "a":"resp" and "err" field, but no valid CAN data
+        error = msg.data.get("err")
+        if error and action == "resp":
+            if self._solicited_debug:
+                print(f"[RESP_ERR] {can_id_raw}: {error}")
+            # If DTC scan is in progress, mark ECU as failed
+            if self._dtc_scan_pending_ecus:
+                self._handle_dtc_error(can_id_raw, error)
+            return
+        
         # Decode using CAN decoder
         decoded = self._can_decoder.decode(msg.data)
         if not decoded:
@@ -371,19 +467,17 @@ class IngressController:
         
         # Climate Status
         if msg.msg_type == AVCMessageType.CLIMATE_STATUS:
-            ambient = msg.values.get("ambient_temp_c")
-            if ambient is not None:
-                actions.append(SetOutsideTempAction(ambient, ActionSource.GATEWAY))
-            
             recirc = msg.values.get("recirc")
             if recirc is not None:
                 actions.append(SetRecirculationAction(recirc, ActionSource.GATEWAY))
         
-        # Climate messages (0x10C -> 0x310)
-        elif msg.master_addr == 0x10C and msg.slave_addr == 0x310:
-            if len(data) >= 8:
-                if data[6] == 0x90 and data[4] > 0:
-                    outside_temp = (data[4] - 18) / 2.0
+        # Body ECU outside temperature (0x040 -> 0x200): [28 00 C1 TT xx]
+        # Single source of truth for outside temperature
+        # Formula: data[3] * 2 - 18 = °C (e.g. 0x04=4 → -10°C, 0x08=8 → -2°C)
+        elif msg.master_addr == 0x040 and msg.slave_addr == 0x200:
+            if len(data) >= 4 and data[0] == 0x28 and data[2] == 0xC1:
+                outside_temp = data[3] * 2 - 18
+                if -50 <= outside_temp <= 60:  # Sanity check
                     actions.append(SetOutsideTempAction(outside_temp, ActionSource.GATEWAY))
         
         # Button press
@@ -516,9 +610,10 @@ class IngressController:
             # - High load: ~1100-1200 → ~7-9 L/h
             # - WOT: Can reach 20-30 L/h (off-scale for normal driving)
             #
-            # Empirical scaling factor: 0.01 gives reasonable results
-            # Adjust threshold and multiplier based on real-world testing
-            if injector_time > 50:  # Filter noise
+            # IMPORTANT: 0x520 can report non-zero injector_time even when
+            # the ICE is off (stale value in ECU). Gate on ice_running.
+            ice_running = self._store.state.vehicle.ice_running
+            if ice_running and injector_time > 50:  # Filter noise + engine must be running
                 # Linear scaling with offset adjustment
                 # Typical: 200-1200 maps to ~0.6-9 L/h
                 flow_rate = injector_time * 0.008  # 1000 * 0.008 = 8 L/h
@@ -544,6 +639,9 @@ class IngressController:
             rpm = msg.values.get("rpm")
             if rpm is not None:
                 actions.append(SetRPMAction(rpm, ActionSource.GATEWAY))
+                # Log unsolicited RPM for comparison with full raw frame
+                raw_byte = rpm // 64 if rpm > 0 else 0
+                self._log_rpm_event("unsolicited", rpm, raw_byte=raw_byte, raw_frame=msg.data)
             
             ice_running = msg.values.get("ice_running")
             if ice_running is not None:
@@ -562,11 +660,11 @@ class IngressController:
             if "fuel_level" in msg.values:
                 actions.append(SetFuelLevelAction(msg.values["fuel_level"], ActionSource.GATEWAY))
         
-        # Climate Data (Ambient Temp)
-        elif msg.msg_type == CANMessageType.CLIMATE_DATA:
-            ambient = msg.values.get("ambient_temp")
-            if ambient is not None and -50 <= ambient <= 80:
-                actions.append(SetOutsideTempAction(ambient, ActionSource.GATEWAY))
+        # Climate Data (Ambient Temp) — disabled, outside temp from AVC 0x040→0x200 only
+        # elif msg.msg_type == CANMessageType.CLIMATE_DATA:
+        #     ambient = msg.values.get("ambient_temp")
+        #     if ambient is not None and -50 <= ambient <= 80:
+        #         actions.append(SetOutsideTempAction(ambient, ActionSource.GATEWAY))
         
         # Gear Position
         elif msg.msg_type == CANMessageType.GEAR_POSITION:
@@ -684,10 +782,12 @@ class IngressController:
         if coolant_temp is not None and -40 <= coolant_temp <= 215:
             actions.append(SetICECoolantTempAction(coolant_temp, ActionSource.GATEWAY))
         
-        # Engine RPM (PID 0x0C) - solicited alternative to 0x038
+        # Engine RPM (PID 0x0C) - solicited value, stored separately from unsolicited
         rpm = values.get("rpm")
         if rpm is not None and 0 <= rpm <= 8000:
-            actions.append(SetRPMAction(int(rpm), ActionSource.GATEWAY))
+            actions.append(SetSolicitedRPMAction(int(rpm), ActionSource.GATEWAY))
+            # Log solicited RPM for comparison
+            self._log_rpm_event("solicited", int(rpm))
             # If RPM > 0, engine is running
             if rpm > 0:
                 actions.append(SetICERunningAction(True, ActionSource.GATEWAY))
@@ -708,10 +808,15 @@ class IngressController:
         if throttle is not None:
             actions.append(SetThrottlePositionAction(int(throttle), ActionSource.GATEWAY))
         
-        # Ambient temperature (PID 0x46)
-        ambient = values.get("ambient_temp")
-        if ambient is not None and -50 <= ambient <= 80:
-            actions.append(SetOutsideTempAction(ambient, ActionSource.GATEWAY))
+        # Ambient temperature (PID 0x46) — disabled, outside temp from AVC 0x040→0x200 only
+        # ambient = values.get("ambient_temp")
+        # if ambient is not None and -50 <= ambient <= 80:
+        #     actions.append(SetOutsideTempAction(ambient, ActionSource.GATEWAY))
+        
+        # DTC responses (Mode 03/07)
+        dtc_actions = self._handle_dtc_response(values, "ENGINE")
+        if dtc_actions:
+            actions.extend(dtc_actions)
         
         return actions
     
@@ -735,18 +840,35 @@ class IngressController:
         if inverter_temp is not None and -40 <= inverter_temp <= 150:
             actions.append(SetInverterTempAction(inverter_temp, ActionSource.GATEWAY))
         
-        # MG2 motor temperature could also be tracked
-        mg2_motor_temp = values.get("mg2_motor_temp")
-        # Future: SetMotorTempAction if UI is added
+        # Detailed MG temperatures (all individual values)
+        mg1_inv = values.get("mg1_inverter_temp")
+        mg2_inv = values.get("mg2_inverter_temp")
+        mg1_mot = values.get("mg1_motor_temp")
+        mg2_mot = values.get("mg2_motor_temp")
+        conv_temp = values.get("converter_temp")
+        if any(v is not None for v in (mg1_inv, mg2_inv, mg1_mot, mg2_mot, conv_temp)):
+            actions.append(SetHybridTempsAction(
+                mg1_inverter_temp=mg1_inv,
+                mg2_inverter_temp=mg2_inv,
+                mg1_motor_temp=mg1_mot,
+                mg2_motor_temp=mg2_mot,
+                converter_temp=conv_temp,
+                source=ActionSource.GATEWAY
+            ))
+        
+        # MG1/MG2 RPMs
+        mg1_rpm = values.get("mg1_rpm")
+        mg2_rpm = values.get("mg2_rpm")
+        if mg1_rpm is not None or mg2_rpm is not None:
+            actions.append(SetMGRPMsAction(
+                mg1_rpm=mg1_rpm,
+                mg2_rpm=mg2_rpm,
+                source=ActionSource.GATEWAY
+            ))
         
         # Converter temperature from PID 21C4
         converter_temp = values.get("converter_temp")
-        # Future: SetConverterTempAction if UI is added
-        
-        # MG RPMs could be tracked for energy flow visualization
-        mg1_rpm = values.get("mg1_rpm")
-        mg2_rpm = values.get("mg2_rpm")
-        # Future: SetMGRPMAction if needed
+        # Handled above in SetHybridTempsAction
         
         # HV voltage from hybrid ECU (alternative source)
         hv_voltage = values.get("hv_voltage_21c3")
@@ -762,6 +884,11 @@ class IngressController:
         accel = values.get("accelerator_percent")
         if accel is not None:
             actions.append(SetThrottlePositionAction(int(accel), ActionSource.GATEWAY))
+        
+        # DTC responses (Mode 03/07) from Hybrid ECU
+        dtc_actions = self._handle_dtc_response(values, "HYBRID")
+        if dtc_actions:
+            actions.extend(dtc_actions)
         
         return actions
     
@@ -806,8 +933,212 @@ class IngressController:
         voltage_delta = values.get("block_voltage_delta")
         # Future: Could be used for battery health monitoring
         
+        # Block voltages from 21CE - dispatch for deltaV chart
+        block_voltages = values.get("block_voltages")
+        if block_voltages is not None and len(block_voltages) == 14:
+            actions.append(SetBlockVoltagesAction(
+                voltages=tuple(block_voltages),
+                source=ActionSource.GATEWAY
+            ))
+        
         # Fan speed from 21CF
         fan_speed = values.get("battery_fan_speed")
         # Future: SetBatteryFanSpeedAction if UI is added
+        
+        # DTC responses (Mode 03/07) from HV Battery ECU
+        dtc_actions = self._handle_dtc_response(values, "HV_BATT")
+        if dtc_actions:
+            actions.extend(dtc_actions)
+        
+        return actions
+    
+    # ─────────────────────────────────────────────────────────────────────
+    # DTC (Diagnostic Trouble Code) Handling
+    # ─────────────────────────────────────────────────────────────────────
+    
+    def clear_dtcs(self, output_port=None) -> None:
+        """
+        Send OBD-II Mode 04 (Clear/Reset DTCs) to all ECUs.
+        
+        This clears stored DTCs and turns off the MIL (Check Engine Light).
+        After clearing, automatically triggers a fresh scan.
+        
+        Args:
+            output_port: OutputPort to send CAN requests through
+        """
+        from ..comm.solicited_can import DTC_ECUS
+        from .ports import OutgoingCommand, DEVICE_CAN
+        
+        if output_port:
+            for ecu_addr, ecu_name in DTC_ECUS:
+                output_port.send(OutgoingCommand(
+                    device_id=DEVICE_CAN,
+                    command_type="req",
+                    payload={
+                        "a": "req",
+                        "i": f"0x{ecu_addr:03X}",
+                        "d": [0x01, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+                        "r": [f"0x{ecu_addr + 8:03X}"],
+                        "t": 500,
+                        "isotp": True
+                    }
+                ))
+                logger.info(f"DTC clear (Mode 04) sent to {ecu_name} (0x{ecu_addr:03X})")
+        
+        # After a short delay, trigger a fresh scan to update the display
+        # The 0x44 response (clear confirmation) will be handled by the decoder
+        # Then re-scan to show updated state
+        self._store.dispatch(SetDTCScanStateAction(in_progress=True))
+        import threading
+        def _rescan():
+            time.sleep(1.5)  # Allow clear commands to complete
+            self.start_dtc_scan(output_port=output_port, mode=0x03)
+        threading.Thread(target=_rescan, daemon=True).start()
+
+    def start_dtc_scan(self, output_port=None, mode: int = 0x03) -> None:
+        """
+        Initiate a DTC scan across all ECUs.
+        
+        Args:
+            output_port: OutputPort to send CAN requests through
+            mode: 0x03 for stored DTCs, 0x07 for pending DTCs
+        """
+        from ..comm.solicited_can import DTC_ECUS
+        from .ports import OutgoingCommand, DEVICE_CAN
+        
+        self._dtc_scan_pending_ecus = {name for _, name in DTC_ECUS}
+        self._dtc_scan_results = []
+        self._dtc_scan_mode = mode
+        self._dtc_scan_start_time = time.time()
+        
+        # Dispatch scan-in-progress state
+        self._store.dispatch(SetDTCScanStateAction(in_progress=True))
+        
+        if output_port:
+            for ecu_addr, ecu_name in DTC_ECUS:
+                output_port.send(OutgoingCommand(
+                    device_id=DEVICE_CAN,
+                    command_type="req",
+                    payload={
+                        "a": "req",
+                        "i": f"0x{ecu_addr:03X}",
+                        "d": [0x01, mode, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+                        "r": [f"0x{ecu_addr + 8:03X}"],
+                        "t": 500,
+                        "isotp": True
+                    }
+                ))
+                logger.info(f"DTC scan (mode 0x{mode:02X}) sent to {ecu_name} (0x{ecu_addr:03X})")
+    
+    def _handle_dtc_error(self, can_id_raw: str | None, error: str) -> None:
+        """
+        Handle a gateway error response during a DTC scan.
+        
+        Maps the CAN ID back to an ECU name and removes it from pending set.
+        If all ECUs have responded (or errored), completes the scan.
+        """
+        from ..comm.solicited_can import ECUAddress
+        
+        # Map response CAN ID to ECU name for error tracking
+        ecu_map = {
+            f"0x{ECUAddress.ENGINE + 8:03X}": "ENGINE",
+            f"0x{ECUAddress.HYBRID + 8:03X}": "HYBRID", 
+            f"0x{ECUAddress.HV_BATTERY + 8:03X}": "HV_BATT",
+        }
+        
+        ecu_name = ecu_map.get(can_id_raw) if can_id_raw else None
+        if ecu_name:
+            logger.warning(f"DTC scan error from {ecu_name}: {error}")
+            self._dtc_scan_pending_ecus.discard(ecu_name)
+        else:
+            # Unknown ECU or no CAN ID (general timeout) — remove an arbitrary pending ECU
+            logger.warning(f"DTC scan error (unknown ECU {can_id_raw}): {error}")
+            if self._dtc_scan_pending_ecus:
+                removed = self._dtc_scan_pending_ecus.pop()
+                logger.warning(f"  Removed pending ECU: {removed}")
+        
+        # Check if scan is complete
+        if not self._dtc_scan_pending_ecus:
+            self._complete_dtc_scan()
+    
+    def _check_dtc_scan_timeout(self) -> None:
+        """
+        Check if DTC scan has timed out and complete it with partial results.
+        Called periodically from _process_message.
+        """
+        if not self._dtc_scan_pending_ecus:
+            return
+        
+        elapsed = time.time() - self._dtc_scan_start_time
+        if elapsed > self._DTC_SCAN_TIMEOUT:
+            logger.warning(
+                f"DTC scan timeout after {elapsed:.1f}s, "
+                f"still waiting for: {self._dtc_scan_pending_ecus}"
+            )
+            self._dtc_scan_pending_ecus.clear()
+            self._complete_dtc_scan()
+    
+    def _complete_dtc_scan(self) -> None:
+        """Complete the DTC scan and dispatch results."""
+        all_dtcs = tuple(self._dtc_scan_results)
+        mil_on = len(all_dtcs) > 0
+        
+        if self._dtc_scan_mode == 0x03:
+            self._store.dispatch(SetStoredDTCsAction(
+                dtcs=all_dtcs,
+                mil_on=mil_on,
+                source=ActionSource.GATEWAY
+            ))
+        elif self._dtc_scan_mode == 0x07:
+            self._store.dispatch(SetPendingDTCsAction(
+                dtcs=all_dtcs,
+                source=ActionSource.GATEWAY
+            ))
+        
+        # Always dispatch scan complete
+        self._store.dispatch(SetDTCScanStateAction(in_progress=False))
+        
+        logger.info(f"DTC scan complete: {len(all_dtcs)} codes found")
+        self._dtc_scan_results = []
+        self._dtc_scan_mode = 0
+    
+    def _handle_dtc_response(self, values: dict, ecu_name: str) -> List[Action]:
+        """
+        Handle DTC response from any ECU.
+        
+        Accumulates results and dispatches when all ECUs have responded.
+        """
+        actions = []
+        
+        dtc_mode = values.get("dtc_mode")
+        dtc_raw = values.get("dtc_raw")
+        
+        if dtc_mode is None or dtc_raw is None:
+            # Also check for DTC cleared confirmation
+            if values.get("dtc_cleared"):
+                logger.info(f"DTCs cleared by {ecu_name}")
+                # Trigger a fresh scan to update state
+                actions.append(SetStoredDTCsAction(dtcs=(), mil_on=False, source=ActionSource.GATEWAY))
+            # If DTC scan in progress but no DTC data (e.g., Mode 0x43 with 0 DTCs
+            # that still reached the decoder), mark ECU as done
+            if self._dtc_scan_pending_ecus:
+                self._dtc_scan_pending_ecus.discard(ecu_name)
+                if not self._dtc_scan_pending_ecus:
+                    self._complete_dtc_scan()
+            return actions
+        
+        # Parse the DTC bytes
+        dtcs = parse_dtc_response(dtc_raw, ecu_name)
+        
+        if self._solicited_debug:
+            print(f"[DTC] {ecu_name}: mode=0x{dtc_mode:02X}, count={values.get('dtc_count', 0)}, codes={[d[0] for d in dtcs]}")
+        
+        # Accumulate results
+        self._dtc_scan_results.extend(dtcs)
+        self._dtc_scan_pending_ecus.discard(ecu_name)
+        
+        # If all ECUs responded, complete the scan
+        if not self._dtc_scan_pending_ecus:
+            self._complete_dtc_scan()
         
         return actions

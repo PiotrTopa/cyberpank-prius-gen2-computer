@@ -100,7 +100,7 @@ class Application:
         self._store = virtual_twin.store
         
         # Set up verbose logging callback
-        virtual_twin.ingress.set_message_log_callback(self._log_gateway_message)
+        virtual_twin.ingress.add_message_log_callback(self._log_gateway_message)
         
         # Start the Virtual Twin
         virtual_twin.start()
@@ -563,6 +563,17 @@ class Application:
     
     def cleanup(self) -> None:
         """Clean up resources."""
+        # Save any pending user preferences before shutdown
+        if self._store:
+            try:
+                from ..persistence import get_settings
+                settings_mgr = get_settings()
+                settings_mgr.update_from_app_state(self._store.state)
+                settings_mgr.save()
+                logger.info("Saved user preferences on shutdown")
+            except Exception as e:
+                logger.error(f"Failed to save preferences on shutdown: {e}")
+        
         # Stop Virtual Twin
         if self._virtual_twin:
             self._virtual_twin.stop()

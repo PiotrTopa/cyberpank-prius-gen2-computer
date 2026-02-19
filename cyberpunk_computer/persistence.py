@@ -2,6 +2,11 @@
 User settings persistence.
 
 Saves and loads user preferences to/from a JSON file.
+Bridges between the Store's AppState and persistent storage.
+
+Two categories of persistent data:
+1. User preferences (ambient mode, lights, audio EQ) - managed by screens
+2. Store state subset (display time base, brightness) - auto-saved from Store
 """
 
 import json
@@ -36,6 +41,7 @@ class AudioSettings:
     """Audio settings."""
     volume: int = 35
     bass: int = 0
+    mid: int = 0
     treble: int = 0
     balance: int = 0
     fader: int = 0
@@ -54,12 +60,34 @@ class ClimateSettings:
 
 
 @dataclass
+class DisplaySettings:
+    """Display and UI preferences (persisted from Store state)."""
+    screen_brightness: int = 100
+    power_chart_time_base: int = 60  # seconds
+    vfd_brightness: int = 100  # VFD satellite brightness
+
+
+@dataclass
 class UserSettings:
     """All user-configurable settings."""
     ambient: AmbientSettings = field(default_factory=AmbientSettings)
     lights: LightsSettings = field(default_factory=LightsSettings)
     audio: AudioSettings = field(default_factory=AudioSettings)
     climate: ClimateSettings = field(default_factory=ClimateSettings)
+    display: DisplaySettings = field(default_factory=DisplaySettings)
+
+
+def _safe_load(cls, data: dict):
+    """
+    Safely construct a dataclass from a dict.
+    
+    Ignores unknown keys (forward compat) and uses defaults
+    for missing keys (backward compat with older settings files).
+    """
+    import dataclasses
+    valid_fields = {f.name for f in dataclasses.fields(cls)}
+    filtered = {k: v for k, v in data.items() if k in valid_fields}
+    return cls(**filtered)
 
 
 class SettingsManager:
@@ -104,15 +132,17 @@ class SettingsManager:
             with open(self.settings_file, 'r') as f:
                 data = json.load(f)
             
-            # Parse nested dataclasses
+            # Parse nested dataclasses (tolerant of missing/extra fields)
             if 'ambient' in data:
-                self.settings.ambient = AmbientSettings(**data['ambient'])
+                self.settings.ambient = _safe_load(AmbientSettings, data['ambient'])
             if 'lights' in data:
-                self.settings.lights = LightsSettings(**data['lights'])
+                self.settings.lights = _safe_load(LightsSettings, data['lights'])
             if 'audio' in data:
-                self.settings.audio = AudioSettings(**data['audio'])
+                self.settings.audio = _safe_load(AudioSettings, data['audio'])
             if 'climate' in data:
-                self.settings.climate = ClimateSettings(**data['climate'])
+                self.settings.climate = _safe_load(ClimateSettings, data['climate'])
+            if 'display' in data:
+                self.settings.display = _safe_load(DisplaySettings, data['display'])
             
             logger.info(f"Loaded settings from {self.settings_file}")
             return True
@@ -135,6 +165,7 @@ class SettingsManager:
                 'lights': asdict(self.settings.lights),
                 'audio': asdict(self.settings.audio),
                 'climate': asdict(self.settings.climate),
+                'display': asdict(self.settings.display),
             }
             
             with open(self.settings_file, 'w') as f:
@@ -163,6 +194,82 @@ class SettingsManager:
     @property
     def climate(self) -> ClimateSettings:
         return self.settings.climate
+    
+    @property
+    def display(self) -> DisplaySettings:
+        return self.settings.display
+
+    # --- Store state bridge ---
+
+    def build_initial_app_state(self):
+        """
+        Build an AppState pre-filled with persisted user preferences.
+        
+        Only populates fields that represent user preferences.
+        Live telemetry fields (temps, RPMs, SOC, etc.) use defaults.
+        
+        Returns:
+            AppState with persisted values applied
+        """
+        from .state.app_state import (
+            AppState, AudioState, DisplayState, VFDSatelliteState
+        )
+        
+        s = self.settings
+        
+        return AppState(
+            # Audio EQ preferences (source/muted are runtime — left as defaults)
+            audio=AudioState(
+                volume=s.audio.volume,
+                bass=s.audio.bass,
+                mid=s.audio.mid,
+                treble=s.audio.treble,
+                balance=s.audio.balance,
+                fader=s.audio.fader,
+            ),
+            # Display preferences
+            display=DisplayState(
+                power_chart_time_base=s.display.power_chart_time_base,
+            ),
+            # VFD brightness
+            vfd_satellite=VFDSatelliteState(
+                brightness=s.display.vfd_brightness,
+                time_base=s.display.power_chart_time_base,
+            ),
+            # UI preferences
+            screen_brightness=s.display.screen_brightness,
+            ambient_hue=s.ambient.hue,
+            ambient_saturation=s.ambient.saturation,
+            ambient_brightness=s.ambient.brightness,
+        )
+    
+    def update_from_app_state(self, state) -> None:
+        """
+        Extract persistable preferences from current AppState.
+        
+        Call this before save() to capture Store state changes.
+        Only updates preference fields — ignores live telemetry.
+        
+        Args:
+            state: Current AppState from Store
+        """
+        # Audio EQ 
+        self.settings.audio.volume = state.audio.volume
+        self.settings.audio.bass = state.audio.bass
+        self.settings.audio.mid = state.audio.mid
+        self.settings.audio.treble = state.audio.treble
+        self.settings.audio.balance = state.audio.balance
+        self.settings.audio.fader = state.audio.fader
+        
+        # Display preferences
+        self.settings.display.screen_brightness = state.screen_brightness
+        self.settings.display.power_chart_time_base = state.display.power_chart_time_base
+        self.settings.display.vfd_brightness = state.vfd_satellite.brightness
+        
+        # Ambient (hue/sat/brightness — mode is managed separately by screens)
+        self.settings.ambient.hue = state.ambient_hue
+        self.settings.ambient.saturation = state.ambient_saturation
+        self.settings.ambient.brightness = state.ambient_brightness
 
 
 # Global settings manager instance

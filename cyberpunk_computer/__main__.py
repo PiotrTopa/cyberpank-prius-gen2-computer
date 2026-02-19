@@ -214,6 +214,11 @@ def parse_args() -> argparse.Namespace:
         help="Replay log file (NDJSON format, supports AVC-LAN and CAN recordings)"
     )
     parser.add_argument(
+        "--log-commands",
+        action="store_true",
+        help="Log all outgoing commands to console"
+    )
+    parser.add_argument(
         "--record",
         action="store_true",
         help="Enable communication logging to file for later replay"
@@ -288,7 +293,8 @@ def main() -> int:
         gateway_enabled=not args.no_gateway and not args.test and not args.replay,
         log_incoming=args.log_in,
         log_outgoing=args.log_out,
-        filter_devices=filter_devices
+        filter_devices=filter_devices,
+        log_commands=args.log_commands
     )
     
     logger.info(f"Config: dev={config.dev_mode}, scale={config.scale_factor}, production={args.production}")

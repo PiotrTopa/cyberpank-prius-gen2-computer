@@ -46,8 +46,11 @@ class ActionType(Enum):
     SET_ICE_RUNNING = auto()
     SET_EV_MODE = auto()
     SET_RPM = auto()
+    SET_SOLICITED_RPM = auto()      # Solicited OBD-II RPM (PID 010C)
     SET_ICE_COOLANT_TEMP = auto()
     SET_INVERTER_TEMP = auto()
+    SET_HYBRID_TEMPS = auto()       # MG1/MG2 inverter + motor temps, converter temp
+    SET_MG_RPMS = auto()            # MG1/MG2 RPM values
     SET_THROTTLE_POSITION = auto()
     SET_BRAKE_PRESSED = auto()
     SET_FUEL_LEVEL = auto()
@@ -67,6 +70,7 @@ class ActionType(Enum):
     SET_BATTERY_TEMP = auto()
     SET_BATTERY_MAX_TEMP = auto() # New: Byte 5 of 0x3CB
     SET_BATTERY_DELTA_SOC = auto()  # Delta between min/max cell blocks
+    SET_BLOCK_VOLTAGES = auto()      # 14 block voltages from PID 21CE
     
     # Dynamics actions
     SET_STEERING_ANGLE = auto()
@@ -97,6 +101,12 @@ class ActionType(Enum):
     
     # Debug/Analysis actions
     UPDATE_DEBUG_INFO = auto()
+    
+    # Diagnostics actions
+    SET_STORED_DTCS = auto()       # OBD-II Mode 03 stored DTCs
+    SET_PENDING_DTCS = auto()      # OBD-II Mode 07 pending DTCs
+    SET_DTC_SCAN_STATE = auto()    # Scan in progress / complete
+    CLEAR_DTCS = auto()            # Clear all DTCs (Mode 04)
     
     # Batch action
     BATCH = auto()
@@ -495,12 +505,32 @@ class SetBatteryDeltaSOCAction(Action):
 
 
 @dataclass
+class SetBlockVoltagesAction(Action):
+    """Set 14 HV battery block voltages from PID 21CE."""
+    voltages: tuple = ()  # Tuple of 14 floats (V)
+    
+    def __init__(self, voltages: tuple, source: ActionSource = ActionSource.INTERNAL):
+        super().__init__(ActionType.SET_BLOCK_VOLTAGES, source)
+        self.voltages = voltages
+
+
+@dataclass
 class SetRPMAction(Action):
-    """Set ICE RPM."""
+    """Set ICE RPM (from unsolicited CAN 0x038)."""
     rpm: int = 0
     
     def __init__(self, rpm: int, source: ActionSource = ActionSource.INTERNAL):
         super().__init__(ActionType.SET_RPM, source)
+        self.rpm = rpm
+
+
+@dataclass
+class SetSolicitedRPMAction(Action):
+    """Set ICE RPM from solicited OBD-II PID 010C (more accurate than CAN 0x038)."""
+    rpm: int = 0
+    
+    def __init__(self, rpm: int, source: ActionSource = ActionSource.INTERNAL):
+        super().__init__(ActionType.SET_SOLICITED_RPM, source)
         self.rpm = rpm
 
 
@@ -532,6 +562,43 @@ class SetInverterTempAction(Action):
     def __init__(self, temp: float, source: ActionSource = ActionSource.INTERNAL):
         super().__init__(ActionType.SET_INVERTER_TEMP, source)
         self.temp = temp
+
+
+@dataclass
+class SetHybridTempsAction(Action):
+    """Set MG1/MG2 inverter and motor temperatures, converter temp."""
+    mg1_inverter_temp: Optional[float] = None
+    mg2_inverter_temp: Optional[float] = None
+    mg1_motor_temp: Optional[float] = None
+    mg2_motor_temp: Optional[float] = None
+    converter_temp: Optional[float] = None
+    
+    def __init__(self, mg1_inverter_temp: Optional[float] = None,
+                 mg2_inverter_temp: Optional[float] = None,
+                 mg1_motor_temp: Optional[float] = None,
+                 mg2_motor_temp: Optional[float] = None,
+                 converter_temp: Optional[float] = None,
+                 source: ActionSource = ActionSource.INTERNAL):
+        super().__init__(ActionType.SET_HYBRID_TEMPS, source)
+        self.mg1_inverter_temp = mg1_inverter_temp
+        self.mg2_inverter_temp = mg2_inverter_temp
+        self.mg1_motor_temp = mg1_motor_temp
+        self.mg2_motor_temp = mg2_motor_temp
+        self.converter_temp = converter_temp
+
+
+@dataclass
+class SetMGRPMsAction(Action):
+    """Set MG1/MG2 RPM values."""
+    mg1_rpm: Optional[int] = None
+    mg2_rpm: Optional[int] = None
+    
+    def __init__(self, mg1_rpm: Optional[int] = None,
+                 mg2_rpm: Optional[int] = None,
+                 source: ActionSource = ActionSource.INTERNAL):
+        super().__init__(ActionType.SET_MG_RPMS, source)
+        self.mg1_rpm = mg1_rpm
+        self.mg2_rpm = mg2_rpm
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -791,6 +858,42 @@ class AVCDebugBytesAction(Action):
         self.master_addr = master_addr
         self.slave_addr = slave_addr
         self.data = data or []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Diagnostics Actions
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class SetStoredDTCsAction(Action):
+    """Set stored DTCs from OBD-II Mode 03 scan."""
+    dtcs: tuple = ()       # Tuple of (code_str, ecu_name) pairs
+    mil_on: bool = False   # MIL lamp status
+    
+    def __init__(self, dtcs: tuple, mil_on: bool = False, source: ActionSource = ActionSource.GATEWAY):
+        super().__init__(ActionType.SET_STORED_DTCS, source)
+        self.dtcs = dtcs
+        self.mil_on = mil_on
+
+
+@dataclass
+class SetPendingDTCsAction(Action):
+    """Set pending DTCs from OBD-II Mode 07 scan."""
+    dtcs: tuple = ()  # Tuple of (code_str, ecu_name) pairs
+    
+    def __init__(self, dtcs: tuple, source: ActionSource = ActionSource.GATEWAY):
+        super().__init__(ActionType.SET_PENDING_DTCS, source)
+        self.dtcs = dtcs
+
+
+@dataclass
+class SetDTCScanStateAction(Action):
+    """Set DTC scan state (in progress / complete)."""
+    in_progress: bool = False
+    
+    def __init__(self, in_progress: bool, source: ActionSource = ActionSource.INTERNAL):
+        super().__init__(ActionType.SET_DTC_SCAN_STATE, source)
+        self.in_progress = in_progress
 
 
 # ─────────────────────────────────────────────────────────────────────────────

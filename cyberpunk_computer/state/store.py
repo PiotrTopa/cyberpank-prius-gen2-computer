@@ -28,7 +28,8 @@ from .actions import (
     SetConnectionStateAction,
     SetSpeedAction, SetRPMAction, SetICECoolantTempAction, SetInverterTempAction,
     SetBatteryVoltageAction, SetBatteryCurrentAction, SetBatteryTempAction,
-    SetBatteryDeltaSOCAction,
+    SetBatteryDeltaSOCAction, SetBlockVoltagesAction,
+    SetStoredDTCsAction, SetPendingDTCsAction, SetDTCScanStateAction,
     UpdateDebugInfoAction, AVCButtonPressAction, AVCTouchEventAction,
     SetPowerChartTimeBaseAction
 )
@@ -48,6 +49,7 @@ class StateSlice(Enum):
     DISPLAY = auto()  # Display settings (power chart time base, etc.)
     DYNAMICS = auto()  # Vehicle dynamics (steering, accel, wheel pulses, etc.)
     VFD_SATELLITE = auto()  # VFD satellite display state (device 110)
+    DIAGNOSTICS = auto()  # OBD-II DTC diagnostics
     ALL = auto()
 
 
@@ -341,6 +343,13 @@ class Store:
             )
             affected.add(StateSlice.VEHICLE)
         
+        elif action.type == ActionType.SET_SOLICITED_RPM:
+            self._state = replace(
+                self._state,
+                vehicle=replace(self._state.vehicle, solicited_rpm=action.rpm)
+            )
+            affected.add(StateSlice.VEHICLE)
+        
         elif action.type == ActionType.SET_ICE_RUNNING:
             self._state = replace(
                 self._state,
@@ -361,6 +370,38 @@ class Store:
                 vehicle=replace(self._state.vehicle, inverter_temp=action.temp)
             )
             affected.add(StateSlice.VEHICLE)
+
+        elif action.type == ActionType.SET_HYBRID_TEMPS:
+            updates = {}
+            if action.mg1_inverter_temp is not None:
+                updates["mg1_inverter_temp"] = action.mg1_inverter_temp
+            if action.mg2_inverter_temp is not None:
+                updates["mg2_inverter_temp"] = action.mg2_inverter_temp
+            if action.mg1_motor_temp is not None:
+                updates["mg1_motor_temp"] = action.mg1_motor_temp
+            if action.mg2_motor_temp is not None:
+                updates["mg2_motor_temp"] = action.mg2_motor_temp
+            if action.converter_temp is not None:
+                updates["converter_temp"] = action.converter_temp
+            if updates:
+                self._state = replace(
+                    self._state,
+                    vehicle=replace(self._state.vehicle, **updates)
+                )
+                affected.add(StateSlice.VEHICLE)
+
+        elif action.type == ActionType.SET_MG_RPMS:
+            updates = {}
+            if action.mg1_rpm is not None:
+                updates["mg1_rpm"] = action.mg1_rpm
+            if action.mg2_rpm is not None:
+                updates["mg2_rpm"] = action.mg2_rpm
+            if updates:
+                self._state = replace(
+                    self._state,
+                    vehicle=replace(self._state.vehicle, **updates)
+                )
+                affected.add(StateSlice.VEHICLE)
 
         elif action.type == ActionType.SET_THROTTLE_POSITION:
             self._state = replace(
@@ -474,6 +515,13 @@ class Store:
             )
             affected.add(StateSlice.ENERGY)
 
+        elif action.type == ActionType.SET_BLOCK_VOLTAGES:
+            self._state = replace(
+                self._state,
+                energy=replace(self._state.energy, block_voltages=action.voltages)
+            )
+            affected.add(StateSlice.ENERGY)
+
         elif action.type == ActionType.SET_ENERGY_FLOW_FLAGS:
             from .actions import SetEnergyFlowFlagsAction
             a = action # type: SetEnergyFlowFlagsAction
@@ -571,6 +619,42 @@ class Store:
                 display=self._state.display.with_time_base(a.time_base)
             )
             affected.add(StateSlice.DISPLAY)
+        
+        # Diagnostics reducers
+        elif action.type == ActionType.SET_STORED_DTCS:
+            import time
+            self._state = replace(
+                self._state,
+                diagnostics=replace(
+                    self._state.diagnostics,
+                    stored_dtcs=action.dtcs,
+                    dtc_count=len(action.dtcs),
+                    mil_on=action.mil_on,
+                    last_scan_time=time.time(),
+                    scan_in_progress=False
+                )
+            )
+            affected.add(StateSlice.DIAGNOSTICS)
+        
+        elif action.type == ActionType.SET_PENDING_DTCS:
+            self._state = replace(
+                self._state,
+                diagnostics=replace(
+                    self._state.diagnostics,
+                    pending_dtcs=action.dtcs
+                )
+            )
+            affected.add(StateSlice.DIAGNOSTICS)
+        
+        elif action.type == ActionType.SET_DTC_SCAN_STATE:
+            self._state = replace(
+                self._state,
+                diagnostics=replace(
+                    self._state.diagnostics,
+                    scan_in_progress=action.in_progress
+                )
+            )
+            affected.add(StateSlice.DIAGNOSTICS)
         
         # Dynamics reducers
         elif action.type == ActionType.SET_STEERING_ANGLE:

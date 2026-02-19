@@ -69,11 +69,15 @@
 * [cite_start]**Brake Pedal Position** (PID: 0030) [cite: 229]
     * Eq: `E` | Range: 0-127 | 6ms | *Note: May be 0x7F when not pressed or on startup.*
 * **ICE RPM Actual** (PID: 0038)
-    * Eq: `B * 64` | Range: 0-7552 RPM | ~40ms
+    * Eq: `B * 64` (INACCURATE — see note) | Range: 0-7552 RPM | ~40ms
     * Byte 0: Status flags (not reliable for ICE on/off detection)
-    * Byte 1 (B): RPM value. 0 = ICE off, >0 = ICE running. Typical idle = 13 (832 RPM).
+    * Byte 1 (B): RPM-related value. 0 = ICE off, >0 = ICE running.
     * Byte 2: Status/flag field (mostly 0x0C when running, 0x08 when off) — NOT RPM.
-    * *Primary RPM source. Use this instead of 0x039.*
+    * Byte 6: Changes with RPM (0x0E when running at ~1300rpm, 0x07 when off) — role unclear.
+    * **WARNING:** The `B * 64` formula is wrong. Observed byte1=7 gives 448 RPM, but
+      OBD-II PID 0x0C (solicited) simultaneously reports 1302 RPM. Use solicited RPM
+      for accurate display. The unsolicited byte 1 is useful as a coarse ICE on/off indicator.
+    * *Use solicited OBD-II PID 010C for accurate RPM. This message for ICE on/off only.*
 * **ICE Coolant Temperature** (PID: 0039)
     * Eq: `A` | Range: 0-255 °C | ~88ms
     * Byte 0 (A): Direct temperature in °C (no offset needed). Warm engine range 54-90°C.

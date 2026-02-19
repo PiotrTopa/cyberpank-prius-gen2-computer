@@ -198,6 +198,7 @@ def _build_color_dict(palette: ColorPalette) -> Dict[str, RGB]:
         # Text
         "text_primary": palette.secondary_bright,
         "text_secondary": palette.accent_dim,
+        "text_tertiary": palette.inactive,    # Tertiary text for low-emphasis info
         "text_dim": palette.inactive,         # Dimmed text for inactive/off states
         "text_highlight": palette.highlight,
         "text_accent": palette.accent_bright,
@@ -205,6 +206,7 @@ def _build_color_dict(palette: ColorPalette) -> Dict[str, RGB]:
         
         # Borders
         "border_normal": palette.accent_dark,
+        "border_dim": palette.inactive,       # Dimmed border for dividers/separators
         "border_focus": palette.accent_mid,
         "border_active": palette.warm_mid,    # Changed to warm/amber
         

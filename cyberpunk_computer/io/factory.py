@@ -103,6 +103,8 @@ class VirtualTwin:
         # Initialize solicited CAN subscriptions after connection
         if result and self._enable_solicited:
             self._init_solicited_subscriptions()
+            # Enable RPM comparison logging for correlating solicited vs unsolicited
+            self.ingress.enable_rpm_logging(log_dir="logs")
         
         return result
     
@@ -110,8 +112,8 @@ class VirtualTwin:
         """
         Initialize solicited CAN subscriptions for key PIDs.
         
-        This enables RPM, SOC from solicited queries.
-        NOTE: ISO-TP multi-frame (inverter temps) not yet supported by Gateway.
+        This enables RPM, SOC and inverter temperature from solicited queries.
+        Uses ISO-TP multi-frame reassembly for PIDs that return >7 bytes (Gateway v2.9.0+).
         """
         from .ports import OutgoingCommand, DEVICE_CAN
         
@@ -128,61 +130,118 @@ class VirtualTwin:
         import time
         time.sleep(0.1)
         
-        # Subscribe to key PIDs (single-frame only - ISO-TP not yet in Gateway):
+        # Subscribe to key PIDs:
         
-        # Slot 0: Broadcast 0x7DF, PID 010C (RPM) @ 200ms
-        # TESTED: Works! Response from 0x7E8
+        # Slot 0: Engine ECU 0x7E0, PID 010C (RPM) @ 500ms
+        # IMPORTANT: Use direct ECU address 0x7E0, NOT broadcast 0x7DF!
+        # Broadcasting to 0x7DF queries ALL ECUs which floods the bus and
+        # can trigger diagnostic sessions in ECUs, causing the master warning triangle.
+        # Also reduced polling rate from 200ms to 500ms to be less aggressive.
         self.output_port.send(OutgoingCommand(
             device_id=DEVICE_CAN,
             command_type="sub",
             payload={
                 "a": "sub",
-                "s": 0,
-                "i": "0x7DF",
+                "slot": 0,
+                "i": "0x7E0",
                 "d": [0x02, 0x01, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "p": 200,
-                "t": 100,
+                "int": 500,
+                "t": 200,
                 "r": ["0x7E8"]
             }
         ))
         
-        # Slot 1: Hybrid ECU 0x7E2, PID 21CF (delta SOC) @ 1000ms
-        # TESTED: Works! Single-frame response from 0x7EA
+        # Slot 1: Hybrid ECU 0x7E2, PID 21CF (delta SOC) @ 2000ms
+        # Single-frame response from 0x7EA
+        # Reduced rate - delta SOC doesn't change fast
         self.output_port.send(OutgoingCommand(
             device_id=DEVICE_CAN,
             command_type="sub",
             payload={
                 "a": "sub",
-                "s": 1,
+                "slot": 1,
                 "i": "0x7E2",
-                "d": [0x03, 0x21, 0xCF, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "p": 1000,
+                "d": [0x02, 0x21, 0xCF, 0x00, 0x00, 0x00, 0x00, 0x00],
+                "int": 2000,
                 "t": 200,
                 "r": ["0x7EA"]
             }
         ))
         
-        # Slot 2: DISABLED - Inverter temps (PID 21C3) needs ISO-TP multi-frame
-        # TODO: Enable when Gateway supports ISO-TP flow control
-        # self.output_port.send(OutgoingCommand(
-        #     device_id=DEVICE_CAN,
-        #     command_type="sub",
-        #     payload={
-        #         "a": "sub",
-        #         "s": 2,
-        #         "i": "0x7E2",
-        #         "d": [0x03, 0x21, 0xC3, 0x00, 0x00, 0x00, 0x00, 0x00],
-        #         "p": 1000,
-        #         "t": 500,
-        #         "r": ["0x7EA"],
-        #         "isotp": True
-        #     }
-        # ))
+        # Slot 2: Hybrid ECU 0x7E2, PID 21C3 (inverter temps, MG data) @ 1000ms
+        # ISO-TP multi-frame response (31+ bytes) from 0x7EA
+        # Reduced rate from 500ms - less bus load, still fast enough for temps
+        self.output_port.send(OutgoingCommand(
+            device_id=DEVICE_CAN,
+            command_type="sub",
+            payload={
+                "a": "sub",
+                "slot": 2,
+                "i": "0x7E2",
+                "d": [0x02, 0x21, 0xC3, 0x00, 0x00, 0x00, 0x00, 0x00],
+                "int": 1000,
+                "t": 500,
+                "r": ["0x7EA"],
+                "isotp": True
+            }
+        ))
         
-        logger.info("Solicited CAN subscriptions initialized (2 slots active: RPM, SOC)")
+        logger.info("Solicited CAN subscriptions initialized (3 slots: RPM, SOC, INV temp)")
+        
+        # Wait for writer thread to actually send the commands
+        import time
+        time.sleep(0.5)
+        
+        # Log serial stats to confirm commands were sent
+        if hasattr(self.output_port, '_ports'):
+            # MultiOutputPort
+            for p in self.output_port._ports:
+                if hasattr(p, 'stats'):
+                    logger.info(f"Serial stats after sub init: {p.stats}")
+        elif hasattr(self.output_port, 'stats'):
+            logger.info(f"Serial stats after sub init: {self.output_port.stats}")
+    
+    def _cleanup_solicited_subscriptions(self) -> None:
+        """
+        Clean up solicited CAN subscriptions and return to listen-only mode.
+        
+        CRITICAL: Must be called on shutdown to prevent the gateway from
+        continuing to send OBD-II queries after our program exits.
+        Leaving the MCP2515 in normal mode with active subscriptions will
+        keep transmitting on the CAN bus, causing potential ECU issues.
+        """
+        from .ports import OutgoingCommand, DEVICE_CAN
+        
+        logger.info("Cleaning up solicited CAN subscriptions...")
+        
+        # Unsubscribe all slots
+        self.output_port.send(OutgoingCommand(
+            device_id=DEVICE_CAN,
+            command_type="unsub",
+            payload={"a": "unsub", "slot": "all"}
+        ))
+        
+        import time
+        time.sleep(0.05)
+        
+        # Switch back to listen-only mode (passive sniffing)
+        self.output_port.send(OutgoingCommand(
+            device_id=DEVICE_CAN,
+            command_type="mode",
+            payload={"a": "mode", "m": "listen"}
+        ))
+        
+        logger.info("CAN returned to listen-only mode")
     
     def stop(self) -> None:
         """Stop all components."""
+        # Clean up solicited subscriptions FIRST (before closing serial)
+        if self._enable_solicited:
+            try:
+                self._cleanup_solicited_subscriptions()
+            except Exception as e:
+                logger.warning(f"Error cleaning up solicited subscriptions: {e}")
+        
         self.ingress.stop()
         if self.comm_logger:
             self.comm_logger.stop()
@@ -211,8 +270,12 @@ def create_virtual_twin(config: VirtualTwinConfig) -> VirtualTwin:
     """
     logger.info(f"Creating Virtual Twin in {config.mode.name} mode")
     
-    # Create store
-    store = Store(verbose=config.log_state_changes)
+    # Create store with persisted user preferences
+    from ..persistence import get_settings
+    settings_mgr = get_settings()
+    initial_state = settings_mgr.build_initial_app_state()
+    store = Store(initial_state=initial_state, verbose=config.log_state_changes)
+    logger.info("Store initialized with persisted user preferences")
     
     # Create IO ports based on mode
     if config.mode == ExecutionMode.PRODUCTION:
@@ -272,7 +335,7 @@ def create_virtual_twin(config: VirtualTwinConfig) -> VirtualTwin:
         comm_logger.start()
         
         # Wire up ingress message logging
-        ingress.set_message_log_callback(comm_logger.log_incoming)
+        ingress.add_message_log_callback(comm_logger.log_incoming)
         
         # Wire up egress command logging (in addition to console logging)
         egress.set_message_log_callback(comm_logger.log_outgoing)
@@ -285,6 +348,10 @@ def create_virtual_twin(config: VirtualTwinConfig) -> VirtualTwin:
         config.enable_solicited_can and 
         config.mode == ExecutionMode.PRODUCTION
     )
+    
+    # Add auto-save middleware for user preference changes
+    from .persistence_middleware import create_persistence_middleware
+    store.add_middleware(create_persistence_middleware(settings_mgr))
     
     return VirtualTwin(
         store=store,
@@ -359,9 +426,10 @@ def _create_development_io(config: VirtualTwinConfig):
     # Output: combine logging and UDP for satellites
     outputs: List[OutputPort] = []
     
-    # Console logging (shows what would be sent to Gateway)
-    log_output = LogOutputPort(prefix="[WOULD SEND]")
-    outputs.append(log_output)
+    # Conditionally add console logging for commands
+    if config.log_commands:
+        log_output = LogOutputPort(prefix="[WOULD SEND]")
+        outputs.append(log_output)
     
     # UDP output for VFD satellite
     if config.enable_vfd_satellite:

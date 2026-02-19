@@ -1,5 +1,0 @@
-{"meta": "comm_log", "version": "1.0", "created": "2026-02-04T14:03:37.918373", "config": {"include_system": true, "include_can": true, "include_avc": true, "include_satellite": true, "include_outgoing": true}}
-{"ts":3858,"dir":"OUT","id":110,"d":{"t":"E","mg":0.0,"fl":0.0,"br":0.0,"spd":0.0,"soc":0.6,"ptr":30,"lpg":45,"ice":false}}
-{"ts":3868,"dir":"OUT","id":110,"d":{"t":"S","fuel":"OFF","gear":"P","rdy":false}}
-{"ts":3869,"dir":"OUT","id":110,"d":{"t":"C","tb":60,"bri":100}}
-{"meta": "end", "messages": 3, "bytes": 272, "duration_s": 58.15808057785034}

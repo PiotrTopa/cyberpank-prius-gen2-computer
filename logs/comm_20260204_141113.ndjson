@@ -1,2 +1,0 @@
-{"meta": "comm_log", "version": "1.0", "created": "2026-02-04T14:11:13.893428", "config": {"include_system": true, "include_can": true, "include_avc": true, "include_satellite": true, "include_outgoing": true}}
-{"meta": "end", "messages": 0, "bytes": 0, "duration_s": 4.943079948425293}
