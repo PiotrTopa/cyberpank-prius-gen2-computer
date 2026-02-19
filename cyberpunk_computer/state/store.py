@@ -450,6 +450,13 @@ class Store:
                 )
             )
             affected.add(StateSlice.VEHICLE)
+
+        elif action.type == ActionType.SET_TRIP_FUEL_CONSUMED:
+            self._state = replace(
+                self._state,
+                vehicle=replace(self._state.vehicle, trip_fuel_consumed=action.liters)
+            )
+            affected.add(StateSlice.VEHICLE)
             
         # Energy reducers
         elif action.type == ActionType.SET_BATTERY_SOC:

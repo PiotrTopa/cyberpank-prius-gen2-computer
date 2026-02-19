@@ -29,6 +29,7 @@ from ..state.store import Store
 from ..state.rules import RulesEngine
 from ..state.rules.park_speed import ParkSpeedRule
 from ..state.rules.fuel_consumption import FuelConsumptionRule
+from ..state.rules.trip_fuel import TripFuelConsumptionRule
 from ..state.rules.active_fuel import ActiveFuelRule
 from ..state.rules.vfd_display import VFDDisplayRule
 
@@ -184,7 +185,25 @@ class VirtualTwin:
             }
         ))
         
-        logger.info("Solicited CAN subscriptions initialized (3 slots: RPM, SOC, INV temp)")
+        # Slot 3: HV Battery ECU 0x7E3, PID 21CE (block voltages) @ 2000ms
+        # ISO-TP multi-frame response (33+ bytes) from 0x7EB
+        # Contains 14 block voltages for delta-V / battery health monitoring
+        self.output_port.send(OutgoingCommand(
+            device_id=DEVICE_CAN,
+            command_type="sub",
+            payload={
+                "a": "sub",
+                "slot": 3,
+                "i": "0x7E3",
+                "d": [0x02, 0x21, 0xCE, 0x00, 0x00, 0x00, 0x00, 0x00],
+                "int": 2000,
+                "t": 500,
+                "r": ["0x7EB"],
+                "isotp": True
+            }
+        ))
+        
+        logger.info("Solicited CAN subscriptions initialized (4 slots: RPM, SOC, INV temp, block V)")
         
         # Wait for writer thread to actually send the commands
         import time
@@ -291,6 +310,7 @@ def create_virtual_twin(config: VirtualTwinConfig) -> VirtualTwin:
     rules_engine = RulesEngine(store)
     rules_engine.register(ParkSpeedRule())
     rules_engine.register(FuelConsumptionRule())
+    rules_engine.register(TripFuelConsumptionRule())
     rules_engine.register(ActiveFuelRule())
     
     # Register VFD satellite support

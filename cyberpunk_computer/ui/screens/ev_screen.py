@@ -131,28 +131,35 @@ class EVScreen(Screen):
         # EV mode from dynamics
         self._ev_mode = getattr(state.dynamics, 'ev_mode', False)
 
-    def _get_timeout(self) -> float:
-        if self.app and hasattr(self.app, 'config'):
-            return self.app.config.timeout_screen_exit
-        return 30.0
-
     def update(self, dt: float) -> None:
-        """Check inactivity timeout."""
+        """Update — no auto-timeout (diagnostic screen)."""
         super().update(dt)
-        if time.time() - self._last_activity > self._get_timeout():
-            self._exit_screen()
 
     def _exit_screen(self) -> None:
         if self.app:
             self.app.pop_screen()
 
     def handle_input(self, event) -> bool:
-        """Handle input - any press exits."""
-        self._last_activity = time.time()
-        if event in (IE.PRESS_LIGHT, IE.PRESS_STRONG, IE.BACK):
+        """Handle input — strong press opens battery detail, back exits."""
+        if event == IE.PRESS_STRONG:
+            self._open_battery_screen()
+            return True
+        if event == IE.BACK:
             self._exit_screen()
             return True
         return False
+
+    def _open_battery_screen(self) -> None:
+        """Push the detailed battery health screen."""
+        if not self.app:
+            return
+        from .battery_screen import BatteryScreen
+        battery_screen = BatteryScreen(
+            (self.width, self.height),
+            self.app,
+            store=self._store
+        )
+        self.app.push_screen(battery_screen)
 
     # ─── Rendering ────────────────────────────────────────────────────────
 
@@ -387,11 +394,9 @@ class EVScreen(Screen):
         font_tiny = get_mono_font(9)
         
         if self._block_voltages is None or len(self._block_voltages) != 14:
-            # No data — show placeholder
             label = font_tiny.render("\u0394V  NO DATA", True, COLORS["text_tertiary"])
             surface.blit(label, (chart_x, chart_y + (CHART_HEIGHT - label.get_height()) // 2))
             return
-        
         voltages = self._block_voltages
         avg_v = sum(voltages) / len(voltages)
         deviations = [v - avg_v for v in voltages]
@@ -405,6 +410,10 @@ class EVScreen(Screen):
         label_str = f"\u0394V {delta_v:.2f}V"
         label_surf = font_tiny.render(label_str, True, COLORS["cyan"])
         surface.blit(label_surf, (chart_x, chart_y))
+
+        # Hint: hold for detail screen
+        hint_surf = font_tiny.render("[HOLD] DETAIL", True, COLORS["text_tertiary"])
+        surface.blit(hint_surf, (self.width - hint_surf.get_width() - 8, chart_y))
         
         # Bar area
         label_w = label_surf.get_width() + 6

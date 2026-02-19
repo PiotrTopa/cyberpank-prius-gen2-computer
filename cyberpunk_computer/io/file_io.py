@@ -18,11 +18,12 @@ import json
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
 from typing import List, Optional, Callable
 
-from .ports import InputPort, RawMessage
+from .ports import InputPort, RawMessage, DEVICE_SATELLITE_BASE
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +153,13 @@ class FileInputPort(InputPort):
         """
         Load the log file.
         
+        Handles three timestamp domains that coexist in comm logs:
+        - System messages (device 0): UNIX epoch seconds
+        - CAN/AVC messages (device 1,2): Gateway uptime seconds
+        - OUT/satellite messages (device 100+): Milliseconds since logger start
+        
+        All timestamps are normalized to seconds-from-file-start.
+        
         Returns:
             True if file loaded successfully
         """
@@ -160,7 +168,10 @@ class FileInputPort(InputPort):
             return False
         
         self._entries = []
-        first_ts = None
+        file_start_epoch = None
+        
+        # Collect raw entries for two-pass processing
+        raw_entries = []
         
         try:
             with open(self.filepath, 'r') as f:
@@ -175,31 +186,179 @@ class FileInputPort(InputPort):
                         logger.warning(f"Line {line_num}: Invalid JSON: {e}")
                         continue
                     
-                    # Extract timestamp
+                    # Extract file start time from metadata line
+                    if "meta" in data:
+                        created = data.get("created", "")
+                        if created:
+                            try:
+                                file_start_epoch = datetime.fromisoformat(created).timestamp()
+                            except (ValueError, TypeError):
+                                pass
+                        continue
+                    
                     ts = data.get("ts", 0)
-                    if first_ts is None:
-                        first_ts = ts
+                    device_id = data.get("id", 0)
+                    direction = data.get("dir", "IN")
                     
-                    relative_time = (ts - first_ts) / 1000.0  # ms to seconds
-                    
-                    # Create RawMessage
                     raw_msg = RawMessage.from_gateway_json(data)
-                    
-                    entry = LogEntry(
-                        timestamp_ms=ts,
-                        relative_time=relative_time,
-                        raw_line=line,
-                        raw_dict=data,
-                        message=raw_msg
-                    )
-                    self._entries.append(entry)
+                    raw_entries.append((ts, device_id, direction, line, data, raw_msg))
             
-            logger.info(f"Loaded {len(self._entries)} entries from {self.filepath}")
+            if not raw_entries:
+                logger.warning(f"No entries found in {self.filepath}")
+                return True
+            
+            # Compute gateway-to-logger clock offset by finding
+            # ADJACENT system+CAN entries in file order (they were
+            # received at the same wall-clock time).
+            gateway_offset = self._compute_gateway_offset(
+                raw_entries, file_start_epoch
+            )
+            
+            # Normalize all timestamps to seconds-from-file-start.
+            # Keep original file order (it IS the correct playback
+            # sequence) and enforce monotonicity by clamping forward.
+            prev_time = 0.0
+            for ts, device_id, direction, raw_line, raw_dict, raw_msg in raw_entries:
+                relative_time = self._normalize_timestamp(
+                    ts, device_id, direction,
+                    file_start_epoch, gateway_offset
+                )
+                
+                # Enforce monotonicity: never go backward in time.
+                # Entries from different clocks may normalize slightly
+                # out of order — clamp them to the previous entry's time.
+                if relative_time < prev_time:
+                    relative_time = prev_time
+                prev_time = relative_time
+                
+                entry = LogEntry(
+                    timestamp_ms=ts,
+                    relative_time=relative_time,
+                    raw_line=raw_line,
+                    raw_dict=raw_dict,
+                    message=raw_msg
+                )
+                self._entries.append(entry)
+            
+            # Offset so first entry starts at t=0
+            if self._entries:
+                base_time = self._entries[0].relative_time
+                if base_time != 0.0:
+                    for entry in self._entries:
+                        entry.relative_time -= base_time
+            
+            # Collapse idle gaps: any gap > MAX_GAP gets squeezed
+            # down.  This removes dead time (e.g. the ~350s system-only
+            # preamble before CAN data starts, or periodic 5s diagnostic
+            # pauses) while preserving burst micro-timing.
+            MAX_GAP = 0.5  # seconds
+            self._collapse_gaps(MAX_GAP)
+            
+            logger.info(
+                f"Loaded {len(self._entries)} entries from {self.filepath}"
+                f" (duration: {self.duration:.1f}s)"
+            )
             return True
             
         except Exception as e:
             logger.error(f"Failed to load file: {e}")
             return False
+    
+    @staticmethod
+    def _compute_gateway_offset(
+        raw_entries: list,
+        file_start_epoch: Optional[float]
+    ) -> Optional[float]:
+        """
+        Compute gateway clock offset by finding adjacent system+CAN entries.
+        
+        Adjacent entries in the file were received at nearly the same
+        wall-clock time, so they provide an accurate cross-clock anchor.
+        
+        System messages carry UNIX epoch seconds, CAN messages carry
+        gateway uptime seconds. By finding a transition point where one
+        follows the other, we can compute:
+        
+          gateway_uptime_at_logger_start = can_ts - (system_ts - file_start_epoch)
+        
+        Returns:
+            Offset such that (gateway_ts - offset) = seconds from logger start,
+            or None if offset cannot be determined.
+        """
+        if file_start_epoch is None:
+            return None
+        
+        prev_ts = None
+        prev_device = None
+        
+        for ts, device_id, direction, _, _, _ in raw_entries:
+            if ts <= 0:
+                prev_ts = None
+                prev_device = None
+                continue
+            
+            if prev_ts is not None:
+                # system → CAN transition
+                if (prev_device == 0 and prev_ts > 1e9
+                        and device_id in (1, 2) and ts < 1e6):
+                    system_relative = prev_ts - file_start_epoch
+                    offset = ts - system_relative
+                    logger.debug(
+                        f"Gateway clock offset: {offset:.1f}s "
+                        f"(anchor: system@{system_relative:.1f}s, "
+                        f"gateway@{ts:.1f}s)"
+                    )
+                    return offset
+                
+                # CAN → system transition
+                if (prev_device in (1, 2) and prev_ts < 1e6
+                        and device_id == 0 and ts > 1e9):
+                    system_relative = ts - file_start_epoch
+                    offset = prev_ts - system_relative
+                    logger.debug(
+                        f"Gateway clock offset: {offset:.1f}s "
+                        f"(anchor: system@{system_relative:.1f}s, "
+                        f"gateway@{prev_ts:.1f}s)"
+                    )
+                    return offset
+            
+            prev_ts = ts
+            prev_device = device_id
+        
+        return None
+    
+    @staticmethod
+    def _normalize_timestamp(
+        ts: float,
+        device_id: int,
+        direction: str,
+        file_start_epoch: Optional[float],
+        gateway_offset: Optional[float]
+    ) -> float:
+        """
+        Normalize a timestamp to seconds from file start.
+        
+        Detects the timestamp domain and converts:
+        - ts > 1e9: UNIX epoch seconds (system messages)
+        - device_id >= 100 or direction == "OUT": ms since logger start
+        - Otherwise: gateway uptime seconds (CAN/AVC)
+        """
+        if ts > 1e9:
+            # UNIX epoch seconds (system messages)
+            if file_start_epoch:
+                return ts - file_start_epoch
+            return 0.0
+        
+        if device_id >= DEVICE_SATELLITE_BASE or direction == "OUT":
+            # Milliseconds since logger start (outgoing/satellite)
+            return ts / 1000.0
+        
+        # Gateway uptime seconds (CAN/AVC bus messages)
+        if gateway_offset is not None:
+            return ts - gateway_offset
+        
+        # Fallback: treat as seconds from start
+        return ts
     
     def start(self) -> bool:
         """Start playback."""

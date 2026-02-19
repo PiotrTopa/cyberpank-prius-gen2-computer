@@ -144,6 +144,7 @@ class VehicleState:
     # Consumption
     instant_consumption: float = 0.0
     consumption_unit: str = "L/h" # "L/h" or "L/100km"
+    trip_fuel_consumed: float = 0.0  # Cumulative fuel consumed since app start (L)
     
     # Temperatures
     ice_coolant_temp: Optional[float] = None  # Engine coolant temp (C)

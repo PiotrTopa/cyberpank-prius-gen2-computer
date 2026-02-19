@@ -21,7 +21,7 @@ from ..widgets.vehicle_status import ConnectionIndicator
 from ..widgets.pagination import PaginationControl
 # VFD widget removed - now runs as separate satellite app (device 110)
 # See vfd_satellite/ and docs/VFD_SATELLITE_PROTOCOL.md
-from ..colors import COLORS, dim_color
+from ..colors import COLORS
 from ..fonts import get_font
 from ...persistence import get_settings, save_settings
 from ...state.actions import (
@@ -104,7 +104,7 @@ class MainScreen(Screen):
         
         # Pagination
         self._current_page = 0
-        self._num_pages = 4
+        self._num_pages = 2
         
         # Focus visibility tracking
         self._last_activity_time = time.time()
@@ -121,18 +121,6 @@ class MainScreen(Screen):
         # AVC-LAN byte debug display (for flow arrow correlation)
         self._avc_110_490_bytes = [0] * 8  # Last 0x110→0x490 message bytes
         self._avc_a00_258_bytes = [0] * 32  # Last 0xA00→0x258 message bytes (SOC/flow data)
-        
-        # Engine page history buffers (1 hour @ 1 sample/sec = 3600 entries)
-        self._engine_history_max = 3600
-        self._fuel_consumption_history = []   # (timestamp, avg L/h over period)
-        self._ice_temp_history = []            # (timestamp, °C value)
-        self._rpm_history = []                 # (timestamp, RPM value) for smoothing
-        self._last_engine_sample_time = 0.0
-        
-        # Fuel flow averaging accumulator (collects all updates between 1s snapshots)
-        self._fuel_flow_accumulator = []       # raw fuel_flow_rate samples within current 1s window
-        self._fuel_consumed_liters = 0.0       # cumulative fuel consumed (L) via integration
-        self._fuel_last_integrate_time = 0.0   # last integration timestamp
         
         # Create frames (order of creation doesn't affect focus order)
         self._create_left_panels()
@@ -200,25 +188,21 @@ class MainScreen(Screen):
         self.add_widget(self._audio_frame)
         
         # Ambient frame
+        # Create compact toggle for title bar
+        ambient_title_rect = Rect(
+            x + self.SIDE_PANEL_WIDTH - 46, self.FRAME_HEIGHT + 4, 40, 14
+        )
+        self._ambient_toggle = ToggleSwitch(
+            ambient_title_rect,
+            state=self._ambient_on
+        )
         self._ambient_frame = Frame(
             Rect(x, self.FRAME_HEIGHT, self.SIDE_PANEL_WIDTH, self.FRAME_HEIGHT),
             title="AMBIENT",
             on_select=self._on_ambient_select,
-            on_action=self._on_ambient_action
+            on_action=self._on_ambient_action,
+            title_widget=self._ambient_toggle
         )
-        
-        # ON/OFF toggle inside ambient frame
-        content = self._ambient_frame.content_rect
-        self._ambient_toggle = ToggleSwitch(
-            Rect(
-                content.x + (content.width - 80) // 2,
-                content.y + (content.height - 20) // 2,
-                80,
-                20
-            ),
-            state=self._ambient_on
-        )
-        self._ambient_frame.add_child(self._ambient_toggle)
         
         self.add_widget(self._ambient_frame)
         
@@ -228,7 +212,7 @@ class MainScreen(Screen):
             title="ENGINE",
             focusable=True,
             on_action=self._on_engine_action,
-            on_select=self._on_diag_action
+            on_select=self._on_engine_menu_select
         )
         
         content = self._vehicle_frame.content_rect
@@ -348,33 +332,29 @@ class MainScreen(Screen):
         self.add_widget(self._climate_frame)
         
         # Lights frame
-        self._lights_frame = Frame(
-            Rect(x, self.FRAME_HEIGHT, self.SIDE_PANEL_WIDTH, self.FRAME_HEIGHT),
-            title="LIGHTS",
-            on_select=self._on_lights_select,
-            on_action=self._on_lights_action
+        lights_title_rect = Rect(
+            x + self.SIDE_PANEL_WIDTH - 46, self.FRAME_HEIGHT + 4, 40, 14
         )
-        
-        content = self._lights_frame.content_rect
-        
-        # Top: MODE toggle (AUTO/MANUAL/OFF) - same as AMBIENT
         self._lights_toggle = ToggleSwitch(
-            Rect(
-                content.x + (content.width - 80) // 2,
-                content.y + 2,
-                80,
-                20
-            ),
+            lights_title_rect,
             state=self._lights_mode != "OFF",
             on_text=self._lights_mode if self._lights_mode != "OFF" else "AUTO",
             off_text="OFF"
         )
-        self._lights_frame.add_child(self._lights_toggle)
+        self._lights_frame = Frame(
+            Rect(x, self.FRAME_HEIGHT, self.SIDE_PANEL_WIDTH, self.FRAME_HEIGHT),
+            title="LIGHTS",
+            on_select=self._on_lights_select,
+            on_action=self._on_lights_action,
+            title_widget=self._lights_toggle
+        )
         
-        # Below: Status indicators in a row
+        content = self._lights_frame.content_rect
+        
+        # Status indicators in a row (full content area now available)
         third_width = content.width // 3
-        status_y = content.y + 20
-        status_height = content.height - 24
+        status_y = content.y
+        status_height = content.height
         
         # DRL status
         self._drl_status = StatusIcon(
@@ -403,12 +383,22 @@ class MainScreen(Screen):
         self.add_widget(self._lights_frame)
         
         # Battery frame (bottom right)
+        batt_title_rect = Rect(
+            x + self.SIDE_PANEL_WIDTH - 46, self.FRAME_HEIGHT * 2 + 4, 40, 14
+        )
+        self._batt_toggle = ToggleSwitch(
+            batt_title_rect,
+            state=False,
+            on_text="HV",
+            off_text="OFF"
+        )
         self._battery_frame = Frame(
             Rect(x, self.FRAME_HEIGHT * 2, self.SIDE_PANEL_WIDTH, self.FRAME_HEIGHT),
             title="BATTERY",
             focusable=True,
             on_action=self._on_battery_action,
-            on_select=self._on_avc_monitor_action
+            on_select=self._on_battery_select,
+            title_widget=self._batt_toggle
         )
         
         content = self._battery_frame.content_rect
@@ -682,40 +672,6 @@ class MainScreen(Screen):
                 self._last_button_name = state.input.last_button_name
                 self._last_button_time = state.input.last_button_time
         
-        # Accumulate fuel flow rate for averaging (runs on every store update)
-        # Only count fuel flow when engine is actually running
-        now = time.time()
-        raw_flow = state.vehicle.fuel_flow_rate if state.vehicle.fuel_flow_rate is not None else 0.0
-        flow_rate = raw_flow if state.vehicle.ice_running else 0.0
-        self._fuel_flow_accumulator.append(flow_rate)
-        
-        # Integrate fuel consumed (cumulative liters)
-        if self._fuel_last_integrate_time > 0.0:
-            dt_hours = (now - self._fuel_last_integrate_time) / 3600.0
-            self._fuel_consumed_liters += flow_rate * dt_hours
-        self._fuel_last_integrate_time = now
-        
-        # Snapshot engine history data (1 sample per second)
-        if now - self._last_engine_sample_time >= 1.0:
-            self._last_engine_sample_time = now
-            
-            # Fuel consumption: average of all samples in this 1s window
-            if self._fuel_flow_accumulator:
-                avg_flow = sum(self._fuel_flow_accumulator) / len(self._fuel_flow_accumulator)
-            else:
-                avg_flow = 0.0
-            self._fuel_flow_accumulator.clear()
-            self._fuel_consumption_history.append((now, avg_flow))
-            if len(self._fuel_consumption_history) > self._engine_history_max:
-                self._fuel_consumption_history.pop(0)
-            
-            # ICE coolant temperature history
-            ice_temp = state.vehicle.ice_coolant_temp
-            if ice_temp is not None:
-                self._ice_temp_history.append((now, ice_temp))
-                if len(self._ice_temp_history) > self._engine_history_max:
-                    self._ice_temp_history.pop(0)
-        
         self._dirty = True
         
     def _on_avc_audio_update(self, state) -> None:
@@ -830,14 +786,8 @@ class MainScreen(Screen):
         elif self._current_page == 1:
             # Page 2: Vehicle Dynamics
             self._render_dynamics_page(surface, center_x, center_width)
-        elif self._current_page == 2:
-            # Page 3: Engine Status
-            self._render_engine_page(surface, center_x, center_width)
-        elif self._current_page == 3:
-            # Page 4: EV / Battery
-            self._render_ev_page(surface, center_x, center_width)
         else:
-            # Page 5+: Default placeholder
+            # Fallback
             self._render_default_page(surface, center_x, center_width)
         
         # Render AVC Input visualization (touch and button events)
@@ -1239,455 +1189,6 @@ class MainScreen(Screen):
         surface.blit(range_surf, (right_x + col_width - range_surf.get_width(), ry))
         ry += row_h
     
-    def _render_engine_page(self, surface: pygame.Surface, center_x: int, center_width: int) -> None:
-        """Render Page 3: Engine Status dashboard.
-        
-        Shows:
-        - ENGINE section data (RPM, Consumption, ICE temp, Inverter temp)
-        - RPM arc gauge
-        - Fuel consumption line graph (1 hour)
-        - ICE temperature line graph (1 hour)
-        """
-        import math
-        
-        if not self._store:
-            self._render_default_page(surface, center_x, center_width)
-            return
-        
-        state = self._store.state
-        font_label = get_font(8)
-        font_value = get_font(11, "mono")
-        font_title = get_font(10, "title")
-        font_small = get_font(7)
-        font_large = get_font(14, "mono")
-        
-        cr = self._content_rect
-        pad = 6
-        
-        # ─── TOP ROW: RPM Gauge (left) + Value Readouts (right) ───
-        gauge_size = min(cr.height // 2 - pad, center_width // 2 - pad * 2)
-        gauge_cx = center_x + pad + gauge_size // 2 + 10
-        gauge_cy = cr.y + 4 + gauge_size // 2
-        gauge_radius = gauge_size // 2 - 4
-        
-        rpm = state.vehicle.rpm or 0
-        max_rpm = 5000  # Prius Gen2 ICE max RPM
-        rpm_ratio = min(1.0, rpm / max_rpm)
-        
-        self._render_rpm_gauge(
-            surface, gauge_cx, gauge_cy, gauge_radius,
-            rpm, max_rpm, rpm_ratio
-        )
-        
-        # ─── RIGHT SIDE: Engine data readouts ───
-        readout_x = center_x + center_width // 2 + pad
-        readout_w = center_width // 2 - pad * 2
-        ry = cr.y + 4
-        row_h = 14
-        
-        # Title
-        title_surf = font_title.render("ENGINE", True, COLORS["cyan_bright"])
-        surface.blit(title_surf, (readout_x, ry))
-        ry += row_h + 2
-        
-        # RPM
-        lbl = font_label.render("RPM", True, COLORS["text_secondary"])
-        surface.blit(lbl, (readout_x, ry))
-        rpm_text = str(int(rpm)) if rpm > 0 else "0"
-        color = COLORS["green_bright"]
-        if rpm > 3500:
-            color = COLORS["red_bright"]
-        elif rpm > 2000:
-            color = COLORS["yellow"]
-        val_surf = font_value.render(rpm_text, True, color)
-        surface.blit(val_surf, (readout_x + readout_w - val_surf.get_width(), ry))
-        ry += row_h
-        
-        # Fuel Flow Rate (raw L/h)
-        lbl = font_label.render("FLOW", True, COLORS["text_secondary"])
-        surface.blit(lbl, (readout_x, ry))
-        flow_rate = state.vehicle.fuel_flow_rate
-        if flow_rate is not None and flow_rate > 0.05:
-            flow_text = f"{flow_rate:.1f} L/h"
-            color = COLORS["green_bright"]
-            if flow_rate > 5.0:
-                color = COLORS["yellow"]
-            if flow_rate > 10.0:
-                color = COLORS["red_bright"]
-        else:
-            flow_text = "--.- L/h"
-            color = COLORS["text_dim"]
-        val_surf = font_value.render(flow_text, True, color)
-        surface.blit(val_surf, (readout_x + readout_w - val_surf.get_width(), ry))
-        ry += row_h
-        
-        # Instant consumption (L/100km or L/h)
-        lbl = font_label.render("CONS", True, COLORS["text_secondary"])
-        surface.blit(lbl, (readout_x, ry))
-        consumption = state.vehicle.instant_consumption
-        unit = state.vehicle.consumption_unit
-        if consumption > 0.0:
-            cons_text = f"{consumption:.1f} {unit}"
-            color = COLORS["green_bright"]
-            if consumption > 5.0:
-                color = COLORS["yellow"]
-            if consumption > 10.0:
-                color = COLORS["red_bright"]
-        else:
-            cons_text = f"--.- {unit}"
-            color = COLORS["text_dim"]
-        val_surf = font_value.render(cons_text, True, color)
-        surface.blit(val_surf, (readout_x + readout_w - val_surf.get_width(), ry))
-        ry += row_h
-        
-        # Cumulative fuel consumed
-        lbl = font_label.render("USED", True, COLORS["text_secondary"])
-        surface.blit(lbl, (readout_x, ry))
-        if self._fuel_consumed_liters > 0.001:
-            used_text = f"{self._fuel_consumed_liters:.2f} L"
-            color = COLORS["yellow"]
-        else:
-            used_text = "0.00 L"
-            color = COLORS["text_dim"]
-        val_surf = font_value.render(used_text, True, color)
-        surface.blit(val_surf, (readout_x + readout_w - val_surf.get_width(), ry))
-        ry += row_h
-        
-        # ICE Coolant Temperature
-        lbl = font_label.render("ICE TEMP", True, COLORS["text_secondary"])
-        surface.blit(lbl, (readout_x, ry))
-        ice_temp = state.vehicle.ice_coolant_temp
-        if ice_temp is not None:
-            temp_text = f"{int(ice_temp)}°C"
-            if ice_temp < 60:
-                color = COLORS["blue_bright"]
-            elif ice_temp < 100:
-                color = COLORS["green_bright"]
-            else:
-                color = COLORS["red_bright"]
-        else:
-            temp_text = "--°C"
-            color = COLORS["text_dim"]
-        val_surf = font_value.render(temp_text, True, color)
-        surface.blit(val_surf, (readout_x + readout_w - val_surf.get_width(), ry))
-        ry += row_h
-        
-        # Inverter Temperature
-        lbl = font_label.render("INV TEMP", True, COLORS["text_secondary"])
-        surface.blit(lbl, (readout_x, ry))
-        inv_temp = state.vehicle.inverter_temp
-        if inv_temp is not None:
-            temp_text = f"{int(inv_temp)}°C"
-            if inv_temp < 60:
-                color = COLORS["green_bright"]
-            elif inv_temp < 80:
-                color = COLORS["yellow"]
-            else:
-                color = COLORS["red_bright"]
-        else:
-            temp_text = "--°C"
-            color = COLORS["text_dim"]
-        val_surf = font_value.render(temp_text, True, color)
-        surface.blit(val_surf, (readout_x + readout_w - val_surf.get_width(), ry))
-        ry += row_h
-        
-        # ICE Running status
-        lbl = font_label.render("ICE", True, COLORS["text_secondary"])
-        surface.blit(lbl, (readout_x, ry))
-        if state.vehicle.ice_running:
-            val_surf = font_value.render("RUNNING", True, COLORS["orange"])
-        else:
-            val_surf = font_value.render("OFF", True, COLORS["text_dim"])
-        surface.blit(val_surf, (readout_x + readout_w - val_surf.get_width(), ry))
-        ry += row_h
-        
-        # Active Fuel
-        lbl = font_label.render("FUEL TYPE", True, COLORS["text_secondary"])
-        surface.blit(lbl, (readout_x, ry))
-        from ...state.app_state import FuelType
-        fuel = state.vehicle.active_fuel
-        if fuel == FuelType.PETROL:
-            val_surf = font_value.render("PETROL", True, COLORS["yellow"])
-        elif fuel == FuelType.LPG:
-            val_surf = font_value.render("LPG", True, COLORS["green_bright"])
-        else:
-            val_surf = font_value.render("OFF", True, COLORS["text_dim"])
-        surface.blit(val_surf, (readout_x + readout_w - val_surf.get_width(), ry))
-        
-        # ─── BOTTOM ROW: Graphs ───
-        graph_y = cr.y + cr.height // 2 + 20
-        graph_h = cr.height // 2 - pad - 20  # Full height, no bottom pagination
-        half_w = (center_width - pad * 3) // 2
-        
-        # Fuel Consumption Graph (left)
-        self._render_time_graph(
-            surface,
-            x=center_x + pad,
-            y=graph_y,
-            w=half_w,
-            h=graph_h,
-            title="FUEL FLOW (1h)",
-            data=self._fuel_consumption_history,
-            time_window=3600,
-            min_val=0.0,
-            max_val=15.0,
-            unit="L/h",
-            color=COLORS["yellow"],
-            warn_threshold=5.0,
-            crit_threshold=10.0
-        )
-        
-        # ICE Temperature Graph (right)
-        self._render_time_graph(
-            surface,
-            x=center_x + pad * 2 + half_w,
-            y=graph_y,
-            w=half_w,
-            h=graph_h,
-            title="ICE TEMPERATURE (1h)",
-            data=self._ice_temp_history,
-            time_window=3600,
-            min_val=0.0,
-            max_val=120.0,
-            unit="°C",
-            color=COLORS["cyan_bright"],
-            warn_threshold=95.0,
-            crit_threshold=105.0
-        )
-    
-    def _render_rpm_gauge(
-        self,
-        surface: pygame.Surface,
-        cx: int, cy: int, radius: int,
-        rpm: int, max_rpm: int, rpm_ratio: float
-    ) -> None:
-        """Render an arc-style RPM gauge."""
-        import math
-        
-        font_small = get_font(7)
-        font_value = get_font(14, "mono")
-        font_label = get_font(8)
-        
-        # Gauge arc: 225° to -45° (270° sweep, opens at bottom)
-        start_angle = math.radians(225)
-        end_angle = math.radians(-45)
-        sweep = math.radians(270)
-        
-        # Draw background arc (dark)
-        num_segments = 60
-        for i in range(num_segments):
-            t = i / num_segments
-            angle = start_angle - t * sweep
-            x1 = cx + int((radius - 2) * math.cos(angle))
-            y1 = cy - int((radius - 2) * math.sin(angle))
-            x2 = cx + int(radius * math.cos(angle))
-            y2 = cy - int(radius * math.sin(angle))
-            pygame.draw.line(surface, COLORS["border_normal"], (x1, y1), (x2, y2), 1)
-        
-        # Draw tick marks and labels
-        tick_values = [0, 1000, 2000, 3000, 4000, 5000]
-        for val in tick_values:
-            t = val / max_rpm
-            angle = start_angle - t * sweep
-            # Outer tick
-            ox = cx + int((radius + 1) * math.cos(angle))
-            oy = cy - int((radius + 1) * math.sin(angle))
-            ix = cx + int((radius - 5) * math.cos(angle))
-            iy = cy - int((radius - 5) * math.sin(angle))
-            pygame.draw.line(surface, COLORS["text_secondary"], (ix, iy), (ox, oy), 1)
-            
-            # Label (outside)
-            lbl_text = str(val // 1000)
-            lbl_surf = font_small.render(lbl_text, True, COLORS["text_secondary"])
-            lx = cx + int((radius + 8) * math.cos(angle)) - lbl_surf.get_width() // 2
-            ly = cy - int((radius + 8) * math.sin(angle)) - lbl_surf.get_height() // 2
-            surface.blit(lbl_surf, (lx, ly))
-        
-        # Draw active arc (colored based on RPM)
-        if rpm > 0:
-            active_segments = int(num_segments * rpm_ratio)
-            for i in range(active_segments):
-                t = i / num_segments
-                # Color gradient: green -> yellow -> red
-                if t < 0.5:
-                    seg_color = COLORS["green_bright"]
-                elif t < 0.75:
-                    seg_color = COLORS["yellow"]
-                else:
-                    seg_color = COLORS["red_bright"]
-                
-                angle = start_angle - t * sweep
-                for r_off in range(-1, 3):
-                    x1 = cx + int((radius - 2 + r_off) * math.cos(angle))
-                    y1 = cy - int((radius - 2 + r_off) * math.sin(angle))
-                    angle2 = start_angle - (i + 1) / num_segments * sweep
-                    x2 = cx + int((radius - 2 + r_off) * math.cos(angle2))
-                    y2 = cy - int((radius - 2 + r_off) * math.sin(angle2))
-                    pygame.draw.line(surface, seg_color, (x1, y1), (x2, y2), 1)
-        
-        # Needle
-        needle_angle = start_angle - rpm_ratio * sweep
-        nx = cx + int((radius - 8) * math.cos(needle_angle))
-        ny = cy - int((radius - 8) * math.sin(needle_angle))
-        needle_color = COLORS["red_bright"] if rpm > 4000 else COLORS["text_highlight"]
-        pygame.draw.line(surface, needle_color, (cx, cy), (nx, ny), 2)
-        
-        # Center dot
-        pygame.draw.circle(surface, COLORS["cyan_dim"], (cx, cy), 3)
-        
-        # RPM value text in center
-        rpm_text = str(int(rpm))
-        rpm_surf = font_value.render(rpm_text, True, COLORS["text_highlight"])
-        surface.blit(rpm_surf, (cx - rpm_surf.get_width() // 2, cy + 6))
-        
-        # RPM label below value
-        lbl_surf = font_label.render("RPM", True, COLORS["text_secondary"])
-        surface.blit(lbl_surf, (cx - lbl_surf.get_width() // 2, cy + 20))
-    
-    def _render_time_graph(
-        self,
-        surface: pygame.Surface,
-        x: int, y: int, w: int, h: int,
-        title: str,
-        data: list,
-        time_window: int,
-        min_val: float, max_val: float,
-        unit: str,
-        color: tuple,
-        warn_threshold: float = None,
-        crit_threshold: float = None
-    ) -> None:
-        """Render a time-series line graph with cyberpunk styling.
-        
-        Args:
-            x, y, w, h: Graph area bounds
-            title: Graph title
-            data: List of (timestamp, value) tuples
-            time_window: Time window in seconds
-            min_val, max_val: Y-axis range
-            unit: Value unit label
-            color: Primary line color
-            warn_threshold: Yellow warning threshold
-            crit_threshold: Red critical threshold
-        """
-        font_title = get_font(8, "title")
-        font_label = get_font(7)
-        font_value_sm = get_font(7, "mono")
-        
-        # Title
-        title_surf = font_title.render(title, True, COLORS["cyan_bright"])
-        surface.blit(title_surf, (x, y))
-        
-        # Graph area (below title)
-        gy = y + 12
-        gh = h - 12
-        gw = w - 24  # Leave room for Y-axis labels
-        gx = x + 24
-        
-        # Background
-        bg_rect = pygame.Rect(gx, gy, gw, gh)
-        pygame.draw.rect(surface, COLORS["bg_panel"], bg_rect)
-        pygame.draw.rect(surface, COLORS["border_normal"], bg_rect, 1)
-        
-        # Y-axis grid lines and labels
-        num_y_lines = 4
-        val_range = max_val - min_val
-        for i in range(num_y_lines + 1):
-            t = i / num_y_lines
-            line_y = gy + gh - int(t * gh)
-            val = min_val + t * val_range
-            
-            # Grid line (dotted effect)
-            for gx_dot in range(gx, gx + gw, 4):
-                pygame.draw.rect(surface, COLORS["border_normal"], (gx_dot, line_y, 1, 1))
-            
-            # Label
-            lbl_text = f"{val:.0f}"
-            lbl_surf = font_value_sm.render(lbl_text, True, COLORS["text_dim"])
-            surface.blit(lbl_surf, (x, line_y - lbl_surf.get_height() // 2))
-        
-        # Threshold lines
-        if warn_threshold is not None and val_range > 0:
-            warn_y = gy + gh - int(((warn_threshold - min_val) / val_range) * gh)
-            if gy <= warn_y <= gy + gh:
-                for gx_dot in range(gx, gx + gw, 6):
-                    pygame.draw.rect(surface, COLORS["yellow"], (gx_dot, warn_y, 3, 1))
-        
-        if crit_threshold is not None and val_range > 0:
-            crit_y = gy + gh - int(((crit_threshold - min_val) / val_range) * gh)
-            if gy <= crit_y <= gy + gh:
-                for gx_dot in range(gx, gx + gw, 6):
-                    pygame.draw.rect(surface, COLORS["red_bright"], (gx_dot, crit_y, 3, 1))
-        
-        # Plot data - bucket-average per pixel column for accurate representation
-        if len(data) >= 2:
-            now = time.time()
-            
-            # Bucket data: each pixel column = time_window/gw seconds
-            # Collect values per pixel column, then average
-            buckets = {}  # px -> list of values
-            
-            for ts, val in data:
-                age = now - ts
-                if age > time_window or age < 0:
-                    continue
-                
-                # X position: right = now, left = oldest
-                px = gx + gw - int((age / time_window) * gw)
-                px = max(gx, min(gx + gw, px))
-                
-                if px not in buckets:
-                    buckets[px] = []
-                buckets[px].append(val)
-            
-            if buckets:
-                # Average each bucket and build points
-                points = []
-                for px in sorted(buckets.keys()):
-                    vals = buckets[px]
-                    avg_val = sum(vals) / len(vals)
-                    
-                    # Y position: bottom = min, top = max
-                    clamped = max(min_val, min(max_val, avg_val))
-                    py = gy + gh - int(((clamped - min_val) / val_range) * gh)
-                    points.append((px, py))
-                
-                if len(points) >= 2:
-                    # Draw glow effect (thicker, dimmer line behind)
-                    glow_color = dim_color(color, 0.3)
-                    pygame.draw.lines(surface, glow_color, False, points, 3)
-                    
-                    # Draw main line
-                    pygame.draw.lines(surface, color, False, points, 1)
-                
-                # Draw current value at the top-right
-                if data:
-                    last_val = data[-1][1]
-                    val_color = color
-                    if crit_threshold is not None and last_val >= crit_threshold:
-                        val_color = COLORS["red_bright"]
-                    elif warn_threshold is not None and last_val >= warn_threshold:
-                        val_color = COLORS["yellow"]
-                    
-                    val_text = f"{last_val:.1f}{unit}"
-                    val_surf = font_label.render(val_text, True, val_color)
-                    surface.blit(val_surf, (gx + gw - val_surf.get_width(), gy - 1))
-        else:
-            # No data - show placeholder
-            no_data = font_label.render("NO DATA", True, COLORS["text_dim"])
-            surface.blit(no_data, (gx + (gw - no_data.get_width()) // 2, gy + gh // 2 - 5))
-        
-        # X-axis time labels
-        time_labels = [(0, "now"), (time_window // 4, f"-{time_window // 240}m"),
-                       (time_window // 2, f"-{time_window // 120}m"),
-                       (time_window * 3 // 4, f"-{time_window * 3 // 240}m"),
-                       (time_window, f"-{time_window // 60}m")]
-        for offset, label in time_labels:
-            lx = gx + gw - int((offset / time_window) * gw)
-            if gx <= lx <= gx + gw:
-                lbl_surf = font_value_sm.render(label, True, COLORS["text_dim"])
-                surface.blit(lbl_surf, (lx - lbl_surf.get_width() // 2, gy + gh + 2))
-
     def _render_avc_lan_debug(
         self,
         surface: pygame.Surface,
@@ -2125,60 +1626,54 @@ class MainScreen(Screen):
             self.app.push_screen(lights_screen)
     
     def _on_engine_action(self) -> None:
-        """Handle engine frame action (open engine settings screen)."""
+        """Handle engine frame strong press (open engine detail diagnostic)."""
         if not self.app:
             return
-        
-        # Get current time base from state (default to 60s)
+
+        from .engine_detail_screen import EngineDetailScreen
+
+        engine_detail = EngineDetailScreen(
+            (self.width, self.height),
+            self.app,
+            store=self._store
+        )
+        self.app.push_screen(engine_detail)
+
+    def _on_engine_menu_select(self) -> None:
+        """Handle engine frame light press (open engine settings menu)."""
+        if not self.app:
+            return
+
+        from .engine_menu_screen import EngineMenuScreen
+
         current_timebase = 60
         if self._store:
             current_timebase = self._store.state.display.power_chart_time_base
-        
-        engine_screen = EngineScreen(
-            (self.width, self.height),
-            self.app,
-            initial_timebase=current_timebase
-        )
-        self.app.push_screen(engine_screen)
 
-    def _on_battery_action(self) -> None:
-        """Handle battery frame action (open EV/Battery detail screen)."""
-        if not self.app:
-            return
-
-        from .ev_screen import EVScreen
-
-        ev_screen = EVScreen(
-            (self.width, self.height),
-            self.app,
-            store=self._store
-        )
-        self.app.push_screen(ev_screen)
-
-    def _on_avc_monitor_action(self) -> None:
-        """Handle AVC monitor action (open AVC-LAN bus monitor)."""
-        if not self.app:
-            return
-
-        from .avc_monitor_screen import AVCMonitorScreen
-
-        avc_screen = AVCMonitorScreen(
+        engine_menu = EngineMenuScreen(
             (self.width, self.height),
             self.app,
             store=self._store,
+            initial_timebase=current_timebase,
         )
-        self.app.push_screen(avc_screen)
+        self.app.push_screen(engine_menu)
 
-    def _on_diag_action(self) -> None:
-        """Handle diagnostics action (open DTC screen)."""
+    def _on_battery_action(self) -> None:
+        """Handle battery frame strong press (open battery diagnostic)."""
         if not self.app:
             return
 
-        from .dtc_screen import DTCScreen
+        from .battery_screen import BatteryScreen
 
-        dtc_screen = DTCScreen(
+        battery_screen = BatteryScreen(
             (self.width, self.height),
             self.app,
             store=self._store
         )
-        self.app.push_screen(dtc_screen)
+        self.app.push_screen(battery_screen)
+
+    def _on_battery_select(self) -> None:
+        """Handle battery frame light press (disabled switch — no-op)."""
+        # Placeholder: battery switch is always disabled.
+        # Visual toggle is shown in the frame but cannot be changed.
+        pass

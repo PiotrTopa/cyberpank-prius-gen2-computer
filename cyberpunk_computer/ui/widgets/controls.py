@@ -261,8 +261,9 @@ class ToggleSwitch(Widget):
         else:
             display_text = text
         
-        # Text (use mono font for toggle labels)
-        font = get_mono_font(11)
+        # Text (use mono font for toggle labels, scale with widget height)
+        font_size = min(11, max(8, self.rect.height - 4))
+        font = get_mono_font(font_size)
         text_surf = font.render(display_text, True, text_color)
         text_x = self.rect.x + (self.rect.width - text_surf.get_width()) // 2
         text_y = self.rect.y + (self.rect.height - text_surf.get_height()) // 2

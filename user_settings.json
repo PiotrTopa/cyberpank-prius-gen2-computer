@@ -6,13 +6,13 @@
     "brightness": 80
   },
   "lights": {
-    "mode": "AUTO",
+    "mode": "MANUAL",
     "biled_mode": "OFF",
     "biled_brightness": 100,
     "drl_enabled": true
   },
   "audio": {
-    "volume": 45,
+    "volume": 60,
     "bass": 0,
     "mid": 0,
     "treble": 0,

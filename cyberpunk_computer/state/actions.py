@@ -58,6 +58,7 @@ class ActionType(Enum):
     SET_ACTIVE_FUEL = auto()
     SET_FUEL_FLOW = auto() # Instant fuel flow rate (L/h)
     SET_INSTANT_CONSUMPTION = auto() # Calculated instant consumption
+    SET_TRIP_FUEL_CONSUMED = auto() # Cumulative trip fuel consumed (L)
     
     # Energy actions
     SET_BATTERY_SOC = auto()
@@ -407,6 +408,16 @@ class SetInstantConsumptionAction(Action):
         super().__init__(ActionType.SET_INSTANT_CONSUMPTION, source)
         self.value = value
         self.unit = unit
+
+
+@dataclass
+class SetTripFuelConsumedAction(Action):
+    """Set cumulative trip fuel consumed (liters)."""
+    liters: float = 0.0
+    
+    def __init__(self, liters: float, source: ActionSource = ActionSource.INTERNAL):
+        super().__init__(ActionType.SET_TRIP_FUEL_CONSUMED, source)
+        self.liters = liters
 
 
 @dataclass

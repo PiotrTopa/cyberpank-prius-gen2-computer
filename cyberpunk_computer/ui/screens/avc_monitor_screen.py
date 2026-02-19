@@ -235,10 +235,7 @@ class AVCMonitorScreen(Screen):
 
     def update(self, dt: float) -> None:
         super().update(dt)
-        # Timeout exit
-        timeout = 120.0  # 2 minutes for monitor
-        if time.time() - self._last_activity > timeout:
-            self._exit_screen()
+        # No auto-timeout — diagnostic screen stays until strong-press exit
 
     # ─────────────────────────────────────────────────────────────────────
     # Filtering

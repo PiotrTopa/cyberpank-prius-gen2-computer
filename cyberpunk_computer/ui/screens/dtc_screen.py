@@ -174,16 +174,9 @@ class DTCScreen(Screen):
         self._scan_in_progress = d.scan_in_progress
         self._last_scan_time = d.last_scan_time
 
-    def _get_timeout(self) -> float:
-        if self.app and hasattr(self.app, 'config'):
-            return self.app.config.timeout_screen_exit
-        return 60.0  # Longer timeout for diagnostics
-
     def update(self, dt: float) -> None:
-        """Check inactivity timeout."""
+        """Update — no auto-timeout (diagnostic screen)."""
         super().update(dt)
-        if time.time() - self._last_activity > self._get_timeout():
-            self._exit_screen()
 
     def _exit_screen(self) -> None:
         if self.app:

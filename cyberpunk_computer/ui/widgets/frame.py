@@ -41,7 +41,8 @@ class Frame(Widget):
         title: str = "",
         focusable: bool = True,
         on_select: Optional[Callable] = None,
-        on_action: Optional[Callable] = None
+        on_action: Optional[Callable] = None,
+        title_widget: Optional[Widget] = None
     ):
         """
         Initialize the frame.
@@ -52,12 +53,16 @@ class Frame(Widget):
             focusable: Whether frame can receive focus
             on_select: Callback for light press (enter)
             on_action: Callback for strong press (space)
+            title_widget: Optional small widget rendered in the title bar (right side)
         """
         super().__init__(rect, focusable)
         
         self.title = title
         self.on_select = on_select
         self.on_action = on_action
+        self._title_widget = title_widget
+        if self._title_widget:
+            self._title_widget.parent = self
         
         # Content area (inside padding and title)
         self._content_rect = self._calculate_content_rect()
@@ -91,6 +96,8 @@ class Frame(Widget):
         """Update frame and children."""
         super().update(dt)
         Frame._global_time += dt  # Shared animation timer
+        if self._title_widget:
+            self._title_widget.update(dt)
         for child in self._children:
             child.update(dt)
     
@@ -183,8 +190,12 @@ class Frame(Widget):
             title_y = self.rect.y + (self.TITLE_HEIGHT - title_surface.get_height()) // 2
             surface.blit(title_surface, (title_x, title_y))
         
-        # Draw focus indicator (small triangle or dot)
-        if focus_t > 0.5:
+        # Draw title widget (right side of title bar)
+        if self._title_widget:
+            self._title_widget.render(surface)
+        
+        # Draw focus indicator (small triangle or dot) — skip if title widget occupies that space
+        if focus_t > 0.5 and not self._title_widget:
             self._draw_focus_indicator(surface, focus_t)
         
         # Render children
