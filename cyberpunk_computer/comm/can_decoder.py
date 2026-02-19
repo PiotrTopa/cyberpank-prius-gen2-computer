@@ -404,31 +404,28 @@ class CANDecoder:
         # ENGINE & INVERTER
         # ---------------------------------------------------
         
-        # 0x038: ICE Status and RPM
+        # 0x038: ICE Running Status
         # Observed: [C8, 0D, 08, 00, 00, 00, 1C] when running
         #           [C0, 00, 08, 00, 00, 00, 07] when ICE off (most common: 4093 occurrences)
         #           [C0, 07, 08, 00, 00, 00, 0E] when running (solicited RPM = 1302)
         # Byte 0: Status flags - bit 6 is NOT reliable for ICE on/off detection
-        # Byte 1: RPM-related value (range 0-118)
-        #         When byte 1 = 0, ICE is definitely OFF
-        #         When byte 1 > 0, ICE is running
-        # Byte 2: Status/flag field (mostly 12 when running, 8 when off) - NOT RPM
+        # Byte 1: RPM-correlated value (range 0-118), but NOT a reliable RPM source:
+        #         - byte1*64 formula is entirely wrong (r=0.49 correlation only)
+        #         - byte1=0 when engine IS running 27% of the time
+        #         - However, byte1 > 0 reliably indicates ICE is running
+        #         RPM is obtained from solicited OBD-II PID 010C instead.
+        # Byte 2: Status/flag field (mostly 12 when running, 8 when off)
         # Byte 6: Changes with RPM - possibly checksum or low bits
         #
-        # WARNING: The *64 multiplier is INACCURATE for actual RPM display.
-        #   Observed: byte1=7, *64=448, but OBD-II PID 0x0C reports 1302 RPM.
-        #   The value is kept as a coarse indicator; use solicited RPM for accuracy.
-        # Note: Coolant temperature NOT reliably found in 0x038
+        # Alternative unsolicited RPM sources identified but not yet implemented:
+        #   - CAN 0x348 byte2 * 25: r=0.986, MAE=53 RPM
+        #   - CAN 0x3C8 byte2 * 32: r=0.977, MAE=38 RPM
         elif can_id == 0x038 and len(data) >= 7:
             msg.msg_type = CANMessageType.ENGINE_STATUS
             
-            # Byte 1: RPM scaling — *64 is INACCURATE but kept for ICE on/off detection
-            # Real RPM should come from solicited OBD-II PID 0x0C (SetSolicitedRPMAction)
-            # Also serves as ICE running indicator: 0 = off, >0 = running
+            # Byte 1: ICE running indicator only (0 = off, >0 = running)
+            # RPM value is NOT extracted — use solicited OBD-II PID 010C
             rpm_byte = data[1]
-            msg.values["rpm"] = rpm_byte * 64  # TODO: find correct formula (observed ratio ~186x, not 64x)
-            
-            # ICE running status determined by RPM byte (not byte 0 flags)
             msg.values["ice_running"] = rpm_byte > 0
             
         # 0x039: Coolant Temperature (RPM from this message is NOT reliable)

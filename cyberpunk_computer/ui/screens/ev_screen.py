@@ -67,8 +67,7 @@ class EVScreen(Screen):
         # Motor/Generator RPMs
         self._mg1_rpm: Optional[int] = None
         self._mg2_rpm: Optional[int] = None
-        self._ice_rpm: int = 0
-        self._ice_solicited_rpm: Optional[int] = None
+        self._ice_rpm: Optional[int] = None
 
         # Battery
         self._batt_soc: float = 0.0
@@ -118,7 +117,6 @@ class EVScreen(Screen):
         self._mg1_rpm = v.mg1_rpm
         self._mg2_rpm = v.mg2_rpm
         self._ice_rpm = v.rpm
-        self._ice_solicited_rpm = v.solicited_rpm
 
         # Battery / Energy
         self._batt_soc = e.battery_soc
@@ -270,30 +268,20 @@ class EVScreen(Screen):
             surface.blit(val_surf, (value_x, y + 1))
             y += self.LINE_HEIGHT
 
-        # ICE RPM with solicited/unsolicited comparison
+        # ICE RPM
         label_surf = font_label.render("ICE", True, COLORS["text_secondary"])
         surface.blit(label_surf, (x0 + 4, y + 2))
-        sol = self._ice_solicited_rpm
-        unsol = self._ice_rpm
-        if sol is not None and sol > 0:
-            val_str = f"{int(sol)} rpm"
+        ice_rpm = self._ice_rpm
+        if ice_rpm is not None and ice_rpm > 0:
+            val_str = f"{int(ice_rpm)} rpm"
             color = COLORS["text_value"]
-        elif unsol is not None and unsol > 0:
-            val_str = f"{int(unsol)} rpm"
-            color = COLORS["text_tertiary"]  # unsolicited only - less accurate
         else:
             val_str = "-- rpm"
             color = COLORS["text_tertiary"]
         val_surf = font_value.render(val_str, True, color)
         surface.blit(val_surf, (value_x, y + 1))
         y += self.LINE_HEIGHT
-
-        # Show comparison when both available
-        if sol is not None and unsol is not None and (sol > 0 or unsol > 0):
-            cmp_str = f"sol:{int(sol)} bus:{int(unsol)}"
-            cmp_surf = font_small.render(cmp_str, True, COLORS["text_tertiary"])
-            surface.blit(cmp_surf, (x0 + 4, y + 2))
-        y += self.LINE_HEIGHT - 6
+        y += self.LINE_HEIGHT - 6  # Keep spacing consistent
 
         # ── BATTERY section ──
         s = font_section.render("HV BATTERY", True, COLORS["cyan"])

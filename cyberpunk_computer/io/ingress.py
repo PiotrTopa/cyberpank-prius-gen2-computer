@@ -12,7 +12,6 @@ This provides a clean separation between IO and state management.
 
 import logging
 import time
-import os
 from typing import Dict, List, Optional, Callable, Any
 from dataclasses import dataclass
 
@@ -32,7 +31,7 @@ from ..state.actions import (
     SetFuelFlowAction, SetEnergyFlowFlagsAction, SetBatteryMaxTempAction,
     SetBatterySOCAction, SetChargingStateAction,
     SetConnectionStateAction,
-    SetSpeedAction, SetRPMAction, SetSolicitedRPMAction, SetICECoolantTempAction, SetInverterTempAction,
+    SetSpeedAction, SetRPMAction, SetICECoolantTempAction, SetInverterTempAction,
     SetHybridTempsAction, SetMGRPMsAction,
     SetBatteryVoltageAction, SetBatteryCurrentAction, SetBatteryTempAction,
     SetBatteryDeltaSOCAction, SetBlockVoltagesAction, SetGearAction,
@@ -116,13 +115,6 @@ class IngressController:
         # Solicited CAN debug mode
         self._solicited_debug = False
         
-        # RPM comparison logger (solicited vs unsolicited)
-        self._rpm_log_file = None
-        self._rpm_log_enabled = False
-        self._last_unsolicited_rpm: Optional[int] = None
-        self._last_unsolicited_rpm_raw: Optional[int] = None  # raw byte from CAN 0x038
-        self._last_solicited_rpm: Optional[int] = None
-        
         # Message logging callbacks (multiple can be registered)
         self._message_log_callbacks: list[Callable[[RawMessage, str], None]] = []
         
@@ -150,61 +142,6 @@ class IngressController:
     def set_solicited_debug(self, enabled: bool) -> None:
         """Enable/disable solicited CAN debug mode (prints 0x7E8/0x7EA/0x7EB responses)."""
         self._solicited_debug = enabled
-    
-    def enable_rpm_logging(self, log_dir: str = "logs") -> None:
-        """
-        Enable RPM comparison logging.
-        
-        Logs both solicited (OBD-II PID 010C) and unsolicited (CAN 0x038)
-        RPM values to a CSV file for correlation analysis.
-        
-        Args:
-            log_dir: Directory to write RPM log files
-        """
-        os.makedirs(log_dir, exist_ok=True)
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        filepath = os.path.join(log_dir, f"rpm_comparison_{timestamp}.csv")
-        self._rpm_log_file = open(filepath, "w")
-        self._rpm_log_file.write("timestamp,source,rpm_value,raw_byte,other_source_rpm,raw_frame\n")
-        self._rpm_log_enabled = True
-        logger.info(f"RPM comparison logging enabled: {filepath}")
-    
-    def _log_rpm_event(self, source: str, rpm: int, raw_byte: Optional[int] = None, raw_frame: Optional[list] = None) -> None:
-        """
-        Log an RPM event for comparison analysis.
-        
-        Args:
-            source: "unsolicited" (CAN 0x038) or "solicited" (OBD-II 010C)
-            rpm: RPM value
-            raw_byte: Raw CAN byte (for unsolicited, byte[1] of 0x038)
-            raw_frame: Full raw CAN frame bytes (for unsolicited 0x038)
-        """
-        if not self._rpm_log_enabled or not self._rpm_log_file:
-            return
-        
-        ts = time.time()
-        
-        if source == "unsolicited":
-            self._last_unsolicited_rpm = rpm
-            self._last_unsolicited_rpm_raw = raw_byte
-            other_rpm = self._last_solicited_rpm
-        else:
-            self._last_solicited_rpm = rpm
-            other_rpm = self._last_unsolicited_rpm
-        
-        raw_str = str(raw_byte) if raw_byte is not None else ""
-        other_str = str(other_rpm) if other_rpm is not None else ""
-        frame_str = "|".join(f"{b:02X}" for b in raw_frame) if raw_frame else ""
-        
-        self._rpm_log_file.write(f"{ts:.3f},{source},{rpm},{raw_str},{other_str},{frame_str}\n")
-        self._rpm_log_file.flush()
-    
-    def stop_rpm_logging(self) -> None:
-        """Stop RPM comparison logging and close the file."""
-        if self._rpm_log_file:
-            self._rpm_log_file.close()
-            self._rpm_log_file = None
-        self._rpm_log_enabled = False
     
     def set_message_log_callback(
         self, 
@@ -257,7 +194,6 @@ class IngressController:
     def stop(self) -> None:
         """Stop the ingress controller and input port."""
         self._input_port.stop()
-        self.stop_rpm_logging()
         logger.info("Ingress controller stopped")
     
     def update(self, max_messages: int = 100) -> int:
@@ -634,15 +570,10 @@ class IngressController:
             if coolant_temp is not None and 40 <= coolant_temp <= 120:
                 actions.append(SetICECoolantTempAction(coolant_temp, ActionSource.GATEWAY))
         
-        # Engine Status (0x038 - RPM and running state)
+        # Engine Status (0x038 - ICE running state only, no RPM)
+        # RPM removed: CAN 0x038 byte1*64 formula was entirely wrong (r=0.49 correlation).
+        # Accurate RPM comes from solicited OBD-II PID 010C (SetRPMAction).
         elif msg.msg_type == CANMessageType.ENGINE_STATUS:
-            rpm = msg.values.get("rpm")
-            if rpm is not None:
-                actions.append(SetRPMAction(rpm, ActionSource.GATEWAY))
-                # Log unsolicited RPM for comparison with full raw frame
-                raw_byte = rpm // 64 if rpm > 0 else 0
-                self._log_rpm_event("unsolicited", rpm, raw_byte=raw_byte, raw_frame=msg.data)
-            
             ice_running = msg.values.get("ice_running")
             if ice_running is not None:
                 actions.append(SetICERunningAction(ice_running, ActionSource.GATEWAY))
@@ -782,12 +713,10 @@ class IngressController:
         if coolant_temp is not None and -40 <= coolant_temp <= 215:
             actions.append(SetICECoolantTempAction(coolant_temp, ActionSource.GATEWAY))
         
-        # Engine RPM (PID 0x0C) - solicited value, stored separately from unsolicited
+        # Engine RPM (PID 0x0C)
         rpm = values.get("rpm")
         if rpm is not None and 0 <= rpm <= 8000:
-            actions.append(SetSolicitedRPMAction(int(rpm), ActionSource.GATEWAY))
-            # Log solicited RPM for comparison
-            self._log_rpm_event("solicited", int(rpm))
+            actions.append(SetRPMAction(int(rpm), ActionSource.GATEWAY))
             # If RPM > 0, engine is running
             if rpm > 0:
                 actions.append(SetICERunningAction(True, ActionSource.GATEWAY))

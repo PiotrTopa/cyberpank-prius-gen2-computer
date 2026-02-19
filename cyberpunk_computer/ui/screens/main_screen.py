@@ -616,8 +616,7 @@ class MainScreen(Screen):
 
         # Update Engine Telemetry
         if hasattr(self, '_rpm_display') and self._rpm_display:
-             # Prefer solicited RPM (accurate OBD-II) over unsolicited (broken *64 formula)
-             rpm_val = state.vehicle.solicited_rpm if state.vehicle.solicited_rpm is not None else state.vehicle.rpm
+             rpm_val = state.vehicle.rpm
              val = str(int(rpm_val)) if rpm_val is not None else "0"
              self._rpm_display.set_value(val)
         if hasattr(self, '_ice_temp_display') and self._ice_temp_display:
@@ -1164,23 +1163,18 @@ class MainScreen(Screen):
             surface.blit(val_surf, (right_x + col_width - val_surf.get_width(), ry))
             ry += row_h
         
-        # ICE RPM - show both solicited and unsolicited
+        # ICE RPM
         lbl = font_label.render("ICE RPM", True, COLORS["text_secondary"])
         surface.blit(lbl, (right_x, ry))
-        unsol_rpm = v.rpm
-        sol_rpm = v.solicited_rpm
+        ice_rpm = v.rpm
         
-        if sol_rpm is not None and sol_rpm > 0:
-            # Show solicited as primary, unsolicited in parentheses
-            val_str = f"{int(sol_rpm)}"
+        if ice_rpm is not None and ice_rpm > 0:
+            val_str = f"{int(ice_rpm)}"
             color = COLORS["green_bright"]
-            if sol_rpm > 3500:
+            if ice_rpm > 3500:
                 color = COLORS["red_bright"]
-            elif sol_rpm > 2000:
+            elif ice_rpm > 2000:
                 color = COLORS["yellow"]
-        elif unsol_rpm > 0:
-            val_str = f"{int(unsol_rpm)}"
-            color = COLORS["yellow"]  # unsolicited only - less accurate
         else:
             val_str = "0"
             color = COLORS["text_dim"]
@@ -1188,13 +1182,7 @@ class MainScreen(Screen):
         val_surf = font_value.render(val_str, True, color)
         surface.blit(val_surf, (right_x + col_width - val_surf.get_width(), ry))
         ry += row_h
-        
-        # Show comparison if both available
-        if sol_rpm is not None and unsol_rpm > 0 and sol_rpm > 0:
-            cmp_str = f"sol:{int(sol_rpm)} bus:{int(unsol_rpm)}"
-            cmp_surf = font_small.render(cmp_str, True, COLORS["text_dim"])
-            surface.blit(cmp_surf, (right_x, ry))
-        ry += row_h
+        ry += row_h  # Keep spacing consistent
         
         # ─── HV BATTERY section ───
         
@@ -1282,8 +1270,7 @@ class MainScreen(Screen):
         gauge_cy = cr.y + 4 + gauge_size // 2
         gauge_radius = gauge_size // 2 - 4
         
-        # RPM value - prefer solicited (accurate OBD-II) over unsolicited (broken *64 formula)
-        rpm = state.vehicle.solicited_rpm if state.vehicle.solicited_rpm is not None else (state.vehicle.rpm or 0)
+        rpm = state.vehicle.rpm or 0
         max_rpm = 5000  # Prius Gen2 ICE max RPM
         rpm_ratio = min(1.0, rpm / max_rpm)
         

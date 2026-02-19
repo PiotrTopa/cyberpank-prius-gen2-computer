@@ -131,8 +131,7 @@ class VehicleState:
     ev_mode: bool = False         # EV mode active
     gear: GearPosition = GearPosition.PARK
     speed_kmh: float = 0.0
-    rpm: int = 0                  # ICE RPM (unsolicited from CAN 0x038)
-    solicited_rpm: Optional[int] = None  # ICE RPM (solicited OBD-II PID 010C)
+    rpm: Optional[int] = None    # ICE RPM (populated by solicited OBD-II PID 010C)
     
     # Pedals & Fuel
     throttle_position: int = 0    # 0-100% (approx) or raw 0-255

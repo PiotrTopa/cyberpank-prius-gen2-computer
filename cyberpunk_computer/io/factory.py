@@ -103,8 +103,6 @@ class VirtualTwin:
         # Initialize solicited CAN subscriptions after connection
         if result and self._enable_solicited:
             self._init_solicited_subscriptions()
-            # Enable RPM comparison logging for correlating solicited vs unsolicited
-            self.ingress.enable_rpm_logging(log_dir="logs")
         
         return result
     

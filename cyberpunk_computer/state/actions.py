@@ -45,8 +45,8 @@ class ActionType(Enum):
     SET_SPEED = auto()
     SET_ICE_RUNNING = auto()
     SET_EV_MODE = auto()
-    SET_RPM = auto()
-    SET_SOLICITED_RPM = auto()      # Solicited OBD-II RPM (PID 010C)
+    SET_RPM = auto()                # ICE RPM (source-agnostic: solicited OBD-II, unsolicited CAN, etc.)
+    # Note: SET_SOLICITED_RPM removed — use SET_RPM regardless of data source
     SET_ICE_COOLANT_TEMP = auto()
     SET_INVERTER_TEMP = auto()
     SET_HYBRID_TEMPS = auto()       # MG1/MG2 inverter + motor temps, converter temp
@@ -516,21 +516,16 @@ class SetBlockVoltagesAction(Action):
 
 @dataclass
 class SetRPMAction(Action):
-    """Set ICE RPM (from unsolicited CAN 0x038)."""
+    """Set ICE RPM.
+    
+    Source-agnostic: can be populated by solicited OBD-II PID 010C,
+    unsolicited CAN frames, or any other source. The Virtual Twin model
+    only cares about the value, not the communication protocol.
+    """
     rpm: int = 0
     
     def __init__(self, rpm: int, source: ActionSource = ActionSource.INTERNAL):
         super().__init__(ActionType.SET_RPM, source)
-        self.rpm = rpm
-
-
-@dataclass
-class SetSolicitedRPMAction(Action):
-    """Set ICE RPM from solicited OBD-II PID 010C (more accurate than CAN 0x038)."""
-    rpm: int = 0
-    
-    def __init__(self, rpm: int, source: ActionSource = ActionSource.INTERNAL):
-        super().__init__(ActionType.SET_SOLICITED_RPM, source)
         self.rpm = rpm
 
 

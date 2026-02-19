@@ -26,7 +26,7 @@ from .actions import (
     SetReadyModeAction, SetParkModeAction,
     SetBatterySOCAction, SetChargingStateAction,
     SetConnectionStateAction,
-    SetSpeedAction, SetRPMAction, SetICECoolantTempAction, SetInverterTempAction,
+    SetSpeedAction, SetICECoolantTempAction, SetInverterTempAction,
     SetBatteryVoltageAction, SetBatteryCurrentAction, SetBatteryTempAction,
     SetBatteryDeltaSOCAction, SetBlockVoltagesAction,
     SetStoredDTCsAction, SetPendingDTCsAction, SetDTCScanStateAction,
@@ -340,13 +340,6 @@ class Store:
             self._state = replace(
                 self._state,
                 vehicle=replace(self._state.vehicle, rpm=action.rpm)
-            )
-            affected.add(StateSlice.VEHICLE)
-        
-        elif action.type == ActionType.SET_SOLICITED_RPM:
-            self._state = replace(
-                self._state,
-                vehicle=replace(self._state.vehicle, solicited_rpm=action.rpm)
             )
             affected.add(StateSlice.VEHICLE)
         
