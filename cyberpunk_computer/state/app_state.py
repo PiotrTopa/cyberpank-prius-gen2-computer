@@ -181,9 +181,9 @@ class VehicleState:
     aux_battery_voltage: Optional[float] = None   # Aux battery voltage, V (PID 0142)
     ambient_air_temp: Optional[float] = None      # Ambient air temp, °C (PID 0146)
     
-    # Drive condition / state (from PID 21C3)
-    drive_condition: Optional[int] = None     # 0-6: hybrid drive mode
-    drive_state: Optional[int] = None         # 0/1/2/8: drive state code
+    # Drive condition / shift sensors (from PID 21C3)
+    drive_condition: Optional[int] = None     # 0-6: hybrid drive mode (byte X)
+    shift_sensor_position: Optional[float] = None  # Shift sensor position, 0-5V (byte AJ)
     
     # Hybrid ECU additional data (PID 21C4)
     aircon_power_kw: Optional[float] = None       # A/C consumption power, kW

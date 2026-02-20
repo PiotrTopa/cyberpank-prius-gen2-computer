@@ -686,7 +686,7 @@ class SetDrivetrainTorquesAction(Action):
     ice_rpm_target: Optional[int] = None
     ice_rpm_actual: Optional[int] = None
     drive_condition: Optional[int] = None       # 0-6
-    drive_state: Optional[int] = None           # 0/1/2/8
+    shift_sensor_position: Optional[float] = None  # 0-5V
 
     def __init__(
         self,
@@ -699,7 +699,7 @@ class SetDrivetrainTorquesAction(Action):
         ice_rpm_target: Optional[int] = None,
         ice_rpm_actual: Optional[int] = None,
         drive_condition: Optional[int] = None,
-        drive_state: Optional[int] = None,
+        shift_sensor_position: Optional[float] = None,
         source: ActionSource = ActionSource.INTERNAL,
     ):
         super().__init__(ActionType.SET_DRIVETRAIN_TORQUES, source)
@@ -712,7 +712,7 @@ class SetDrivetrainTorquesAction(Action):
         self.ice_rpm_target = ice_rpm_target
         self.ice_rpm_actual = ice_rpm_actual
         self.drive_condition = drive_condition
-        self.drive_state = drive_state
+        self.shift_sensor_position = shift_sensor_position
 
 
 @dataclass

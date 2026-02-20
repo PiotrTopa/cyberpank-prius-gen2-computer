@@ -713,8 +713,9 @@ class CANDecoder:
         
         # Mode 0x61 = response to Mode 0x21 (Toyota Extended)
         elif mode == 0x61:
-            if pid == 0xF3 and len(payload) >= 1:  # Injector Time
-                msg.values["injector_time_ms"] = 0.128 * payload[0]
+            if pid == 0xF3 and len(payload) >= 3:  # Injector Time
+                # Spec: 0.128 * C where C = byte 2 (payload index 2)
+                msg.values["injector_time_ms"] = 0.128 * payload[2]
         
         # Mode 0x43 = response to Mode 0x03 (Stored DTCs)
         elif mode == 0x43:
@@ -801,24 +802,25 @@ class CANDecoder:
         - Byte 5: Regen Brake Torque Request = 4 * F (Nm)
         - Bytes 6-7: MG1 RPM = ((G*256)+H)-16383
         - Bytes 8-9: MG1 Torque = (I*256+J)/8 - 500
-        - Bytes 10-11: (reserved/unknown)
-        - Bytes 12-13: Engine Speed Target = (M*256)+N RPM
-        - Bytes 14-15: Engine Speed Actual = (O*256)+P RPM
-        - Byte 16: (reserved)
-        - Byte 17: Master Cylinder Torque = (4 * R) - 512 Nm
-        - Byte 18: SOC = (100 * S) / 255 %
-        - Byte 19: WOUT HV Batt to Converter = 0.32 * T kW
-        - Byte 20: WIN HV Batt to Converter = (U - 128) * 0.32 kW
-        - Byte 21: Drive Condition ID = X (0-6)
-        - Byte 24: MG1 Inverter Temp = Y - 40
-        - Byte 25: MG2 Inverter Temp = Z - 40
-        - Byte 26: MG2 Motor Temp = AA - 40
-        - Byte 27: MG1 Motor Temp = AB - 40
-        - Byte 28: HV Voltage = 2 * AC (V)
-        - Byte 30: HV Current = 2 * AE - 256 (A)
-        - Byte 35: Drive State (0=transitional, 1=parked, 2=creeping, 8=driving)
+        - Bytes 10-11 (K,L): ICE Power Request = ((256*K)+L)/100 kW
+        - Bytes 12-13 (M,N): Engine Speed Target = (M*256)+N RPM
+        - Bytes 14-15 (O,P): Engine Speed Actual = (O*256)+P RPM
+        - Byte 16 (Q): (not documented)
+        - Byte 17 (R): Master Cylinder Torque = (4 * R) - 512 Nm
+        - Byte 18 (S): SOC = (100 * S) / 255 %
+        - Byte 19 (T): WOUT HV Batt to Converter = 320 * T Watts = 0.32 * T kW
+        - Byte 20 (U): WIN HV Batt to Converter = (320*U - 40800) / 1000 kW
+        - Bytes 21-22 (V,W): Discharge Request = (256*V+W) - 20480 Watts
+        - Byte 23 (X): Drive Condition ID (0-6)
+        - Byte 24 (Y): MG1 Inverter Temp = Y - 40
+        - Byte 25 (Z): MG2 Inverter Temp = Z - 40
+        - Byte 26 (AA): MG2 Motor Temp = AA - 40
+        - Byte 27 (AB): MG1 Motor Temp = AB - 40
+        - Byte 28 (AC): HV Voltage = 2 * AC (V)
+        - Byte 30 (AE): HV Current = 2 * AE - 256 (A)
+        - Bytes 31-35 (AF-AJ): Shift Sensors (0.019608 * byte = 0-5V)
         
-        Note: Bytes 31-32 contain stale cruise memory values — use PID 21D3 instead.
+        Note: Cruise control data — use PID 21D3 instead.
         """
         # Store payload length for debugging
         msg.values["pid_21c3_payload_len"] = len(payload)
@@ -842,6 +844,10 @@ class CANDecoder:
         if len(payload) >= 10:
             msg.values["mg1_torque"] = ((payload[8] * 256) + payload[9]) / 8 - 500
         
+        # ICE Power Request (bytes 10-11, K,L): ((256*K)+L)/100 kW
+        if len(payload) >= 12:
+            msg.values["ice_power_request_kw"] = ((payload[10] * 256) + payload[11]) / 100
+        
         # Engine speed target/actual (bytes 12-15)
         if len(payload) >= 14:
             msg.values["ice_rpm_target"] = (payload[12] * 256) + payload[13]
@@ -862,11 +868,17 @@ class CANDecoder:
             msg.values["wout_kw"] = 0.32 * payload[19]
         
         if len(payload) >= 21:
-            msg.values["win_kw"] = (payload[20] - 128) * 0.32
+            # WIN: spec says "U - 40800" (Watts). Interpreting as (320*U - 40800)/1000 kW
+            # to match WOUT's 320 scale factor. Gives 0.32*U - 40.8 kW.
+            msg.values["win_kw"] = 0.32 * payload[20] - 40.8
         
-        # Drive condition ID (byte 21)
-        if len(payload) >= 22:
-            msg.values["drive_condition"] = payload[21]
+        # Discharge Request to Adjust SOC (bytes 21-22, V,W): (256*V+W) - 20480 Watts
+        if len(payload) >= 23:
+            msg.values["discharge_request_w"] = (payload[21] * 256 + payload[22]) - 20480
+        
+        # Drive condition ID (byte 23, X)
+        if len(payload) >= 24:
+            msg.values["drive_condition"] = payload[23]
         
         # Inverter and motor temperatures
         if len(payload) >= 25:
@@ -892,17 +904,20 @@ class CANDecoder:
         if len(payload) >= 31:
             msg.values["hv_current_21c3"] = 2 * payload[30] - 256
         
-        # Note: Cruise control speeds (bytes 31-32) are NOT decoded here.
-        # They contain stale ECU memory values from a previous ignition cycle.
-        # Use PID 21D3 for proper cruise control data with active/switch flags.
+        # Note: Cruise control data — use PID 21D3 for proper cruise control
+        # with active/switch flags.
         
-        # Drive state indicator (byte 35)
-        # 0 = transitional (clutch engaging)
-        # 1 = stationary / parked (ICE off)
-        # 2 = low-speed creeping
-        # 8 = driving (ICE engaged, moving)
+        # Shift Sensors (bytes 31-35, AF-AJ): 0.019608 * byte = 0-5V
+        if len(payload) >= 32:
+            msg.values["shift_sensor_main"] = 0.019608 * payload[31]
+        if len(payload) >= 33:
+            msg.values["shift_sensor_sub"] = 0.019608 * payload[32]
+        if len(payload) >= 34:
+            msg.values["shift_sensor_select_main"] = 0.019608 * payload[33]
+        if len(payload) >= 35:
+            msg.values["shift_sensor_select_sub"] = 0.019608 * payload[34]
         if len(payload) >= 36:
-            msg.values["drive_state"] = payload[35]
+            msg.values["shift_sensor_position"] = 0.019608 * payload[35]
     
     def _decode_pid_21c4(self, msg: CANMessage, payload: list[int]) -> None:
         """
@@ -1074,17 +1089,26 @@ class CANDecoder:
     
     def _decode_pid_21cf(self, msg: CANMessage, payload: list[int]) -> None:
         """
-        Decode PID 21CF - Battery temps and delta SOC.
+        Decode PID 21CF - Battery temps, fan, and delta SOC.
         
-        - Bytes 0-1: Battery Air Intake Temp = (256*A+B)/100 - 327.68
-        - Byte 3: Aux Battery Voltage = (0.2*D) - 25.6
-        - Byte 4: Charge Limit = E - 64 kW
-        - Byte 5: Discharge Limit = F - 64 kW
-        - Byte 6: Delta SOC = 0.01 * G (%)
-        - Byte 7: Fan Speed (0-6)
+        Per prius_can.md spec:
+        - Bytes 0-1 (A,B): Battery Air Intake Temp = (256*A+B)/100 - 327.68
+        - Byte 2 (C): VMF Fan Motor Voltage = (0.2*C) - 25.6 V
+        - Byte 3 (D): Aux Battery Voltage = (0.2*D) - 25.6 V
+        - Byte 4 (E): HV Battery Charge = E - 64 kW
+        - Byte 5 (F): HV Battery Discharge = F - 64 kW
+        - Byte 6 (G): Delta SOC = 0.01 * G (%)
+        - Byte 8 (I): Fan Speed (0-6)
+        - Bytes 10-11 (K,L): Battery Temp 1 = (256*K+L)/100 - 327.68
+        - Bytes 12-13 (M,N): Battery Temp 2 = (256*M+N)/100 - 327.68
+        - Bytes 14-15 (O,P): Battery Temp 3 = (256*O+P)/100 - 327.68
         """
         if len(payload) >= 2:
             msg.values["battery_air_intake_temp"] = ((payload[0] * 256) + payload[1]) / 100 - 327.68
+        
+        # VMF Fan Motor Voltage (byte 2)
+        if len(payload) >= 3:
+            msg.values["fan_motor_voltage"] = (0.2 * payload[2]) - 25.6
         
         if len(payload) >= 4:
             msg.values["aux_battery_voltage_21cf"] = (0.2 * payload[3]) - 25.6
@@ -1099,20 +1123,70 @@ class CANDecoder:
             # This is the REAL delta SOC (not from unsolicited 0x3CB)
             msg.values["delta_soc"] = 0.01 * payload[6]
         
-        if len(payload) >= 8:
-            msg.values["battery_fan_speed"] = payload[7]
+        # Fan Speed — byte I (index 8), NOT byte 7 (H)
+        if len(payload) >= 9:
+            msg.values["battery_fan_speed"] = payload[8]
+        
+        # Battery temperatures 1-3 (bytes 10-15)
+        if len(payload) >= 12:
+            msg.values["battery_temp_1"] = ((payload[10] * 256) + payload[11]) / 100 - 327.68
+        if len(payload) >= 14:
+            msg.values["battery_temp_2"] = ((payload[12] * 256) + payload[13]) / 100 - 327.68
+        if len(payload) >= 16:
+            msg.values["battery_temp_3"] = ((payload[14] * 256) + payload[15]) / 100 - 327.68
     
     def _decode_pid_21d0(self, msg: CANMessage, payload: list[int]) -> None:
         """
-        Decode PID 21D0 - Internal resistance and voltage delta.
+        Decode PID 21D0 - Internal resistance, accumulated times, voltage delta.
         
-        Contains internal resistance for blocks 1-14 and NiMH voltage delta.
+        Per prius_can.md spec:
+        - Byte 0 (A): Block Count (0-14)
+        - Bytes 1-2 (B,C): Accumulated Time of Battery LOW (sec)
+        - Bytes 3-4 (D,E): Accumulated Time of DC Inhibit (sec)
+        - Bytes 5-6 (F,G): Accumulated Time of Battery Too High (sec)
+        - Bytes 7-8 (H,I): Accumulated Time of Hot Temperature (sec)
+        - Bytes 9-10 (J,K): Block Lowest Volt = (2.56*J + 0.01*K) - 327.68
+        - Byte 11 (L): Block # with Min V
+        - Bytes 12-13 (M,N): Block Highest Volt = (2.56*M + 0.01*N) - 327.68
+        - Byte 14 (O): Block # with Max V
+        - Bytes 15-28 (P-AC): Internal Resistance R01-R14 = 0.001 * byte
         """
-        # Internal resistance values (14 blocks, 1 byte each)
+        # Block count (byte 0)
+        if len(payload) >= 1:
+            msg.values["block_count"] = payload[0]
+        
+        # Accumulated times (bytes 1-8, 2 bytes each)
+        if len(payload) >= 3:
+            msg.values["accum_time_battery_low"] = (payload[1] * 256) + payload[2]
+        if len(payload) >= 5:
+            msg.values["accum_time_dc_inhibit"] = (payload[3] * 256) + payload[4]
+        if len(payload) >= 7:
+            msg.values["accum_time_battery_high"] = (payload[5] * 256) + payload[6]
+        if len(payload) >= 9:
+            msg.values["accum_time_hot_temp"] = (payload[7] * 256) + payload[8]
+        
+        # Voltage delta data (bytes 9-14)
+        if len(payload) >= 11:
+            msg.values["block_voltage_lowest"] = (2.56 * payload[9]) + (0.01 * payload[10]) - 327.68
+        if len(payload) >= 12:
+            msg.values["block_min_v_index"] = payload[11]
+        if len(payload) >= 14:
+            msg.values["block_voltage_highest"] = (2.56 * payload[12]) + (0.01 * payload[13]) - 327.68
+        if len(payload) >= 15:
+            msg.values["block_max_v_index"] = payload[14]
+        
+        # NiMH Volt Delta (derived)
+        if len(payload) >= 14:
+            lowest = (2.56 * payload[9]) + (0.01 * payload[10]) - 327.68
+            highest = (2.56 * payload[12]) + (0.01 * payload[13]) - 327.68
+            msg.values["nimh_volt_delta"] = highest - lowest
+        
+        # Internal resistance values R01-R14 (bytes 15-28, 1 byte each)
         resistances = []
-        for i in range(min(14, len(payload))):
-            resistance_ohm = 0.001 * payload[i]  # 0-10 Ohm
-            resistances.append(resistance_ohm)
+        for i in range(14):
+            offset = 15 + i
+            if len(payload) > offset:
+                resistances.append(0.001 * payload[offset])
         
         if resistances:
             msg.values["block_resistances"] = resistances

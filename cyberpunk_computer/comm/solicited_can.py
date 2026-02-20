@@ -313,6 +313,10 @@ def _hybrid_21c3_parser(d: list[int]) -> dict[str, Any]:
     # MG1 Torque (bytes 8-9): (256*I+J)/8 - 500
     result["mg1_torque"] = ((d[8] * 256) + d[9]) / 8 - 500
     
+    # ICE Power Request (bytes 10-11, K,L): ((256*K)+L)/100 kW
+    if len(d) > 11:
+        result["ice_power_request_kw"] = ((d[10] * 256) + d[11]) / 100
+    
     # Engine Speed Target (bytes 12-13): (256*M)+N
     if len(d) > 13:
         result["ice_rpm_target"] = (d[12] * 256) + d[13]
@@ -333,10 +337,18 @@ def _hybrid_21c3_parser(d: list[int]) -> dict[str, Any]:
     if len(d) > 19:
         result["wout_kw"] = 0.32 * d[19]  # 320W = 0.32kW per unit
     
-    # WIN HV Batt to Converter (byte 20): U - 40800 (in Watts, as kW offset)
-    # Actually: (U - 128) * 0.32 kW (approximate based on similar fields)
+    # WIN HV Batt to Converter (byte 20): spec says U - 40800 (Watts)
+    # Interpreted as (320*U - 40800)/1000 kW to match WOUT's 320 scale factor
     if len(d) > 20:
-        result["win_kw"] = (d[20] - 128) * 0.32
+        result["win_kw"] = 0.32 * d[20] - 40.8
+    
+    # Discharge Request to Adjust SOC (bytes 21-22, V,W): (256*V+W) - 20480 Watts
+    if len(d) > 22:
+        result["discharge_request_w"] = (d[21] * 256 + d[22]) - 20480
+    
+    # Drive Condition ID (byte 23, X): 0-6
+    if len(d) > 23:
+        result["drive_condition"] = d[23]
     
     # MG1 Inverter Temp (byte 24): Y - 40
     if len(d) > 24:
@@ -362,14 +374,19 @@ def _hybrid_21c3_parser(d: list[int]) -> dict[str, Any]:
     if len(d) > 30:
         result["hv_current"] = 2 * d[30] - 256
     
-    # Note: Cruise control speeds (bytes 31-32) are NOT decoded here.
-    # They contain stale ECU memory values and don't update live.
-    # Use PID 21D3 instead for proper cruise control data with active flags.
+    # Note: Cruise control data — use PID 21D3 for proper cruise control.
     
-    # Drive state indicator (byte 35)
-    # 0 = transitional, 1 = stationary, 2 = creeping, 8 = driving
+    # Shift Sensors (bytes 31-35, AF-AJ): 0.019608 * byte = 0-5V
+    if len(d) > 31:
+        result["shift_sensor_main"] = 0.019608 * d[31]
+    if len(d) > 32:
+        result["shift_sensor_sub"] = 0.019608 * d[32]
+    if len(d) > 33:
+        result["shift_sensor_select_main"] = 0.019608 * d[33]
+    if len(d) > 34:
+        result["shift_sensor_select_sub"] = 0.019608 * d[34]
     if len(d) > 35:
-        result["drive_state"] = d[35]
+        result["shift_sensor_position"] = 0.019608 * d[35]
     
     return result
 
@@ -538,9 +555,17 @@ def _battery_21ce_parser(d: list[int]) -> dict[str, Any]:
 
 def _battery_21cf_parser(d: list[int]) -> dict[str, Any]:
     """
-    Parse PID 21CF response (HV Battery temps and delta SOC).
+    Parse PID 21CF response (HV Battery temps, fan, and delta SOC).
     
-    Reference: docs/prius_can.md Section 7
+    Per prius_can.md spec:
+    - Bytes 0-1 (A,B): Battery Air Intake Temp
+    - Byte 2 (C): VMF Fan Motor Voltage
+    - Byte 3 (D): Aux Battery Voltage
+    - Byte 4 (E): HV Battery Charge
+    - Byte 5 (F): HV Battery Discharge
+    - Byte 6 (G): Delta SOC
+    - Byte 8 (I): Fan Speed (0-6)
+    - Bytes 10-15 (K-P): Battery Temps 1-3
     """
     result = {}
     
@@ -549,6 +574,10 @@ def _battery_21cf_parser(d: list[int]) -> dict[str, Any]:
     
     # Battery Air Intake Temp (bytes 0-1): (256*A+B)/100 - 327.68
     result["battery_air_intake_temp"] = ((d[0] * 256) + d[1]) / 100 - 327.68
+    
+    # VMF Fan Motor Voltage (byte 2): (0.2*C) - 25.6
+    if len(d) > 2:
+        result["fan_motor_voltage"] = (0.2 * d[2]) - 25.6
     
     # Auxiliary Battery Voltage (byte 3): (0.2*D) - 25.6
     result["aux_battery_voltage"] = (0.2 * d[3]) - 25.6
@@ -562,11 +591,17 @@ def _battery_21cf_parser(d: list[int]) -> dict[str, Any]:
     # Delta SOC (byte 6): 0.01 * G (%)
     result["delta_soc"] = 0.01 * d[6]
     
-    # Fan Speed (byte 7 if present)
-    if len(d) > 7:
-        result["battery_fan_speed"] = d[7]
+    # Fan Speed — byte I (index 8), NOT byte 7 (H)
+    if len(d) > 8:
+        result["battery_fan_speed"] = d[8]
     
-    return result
+    # Battery temperatures 1-3 (bytes 10-15)
+    if len(d) > 11:
+        result["battery_temp_1"] = ((d[10] * 256) + d[11]) / 100 - 327.68
+    if len(d) > 13:
+        result["battery_temp_2"] = ((d[12] * 256) + d[13]) / 100 - 327.68
+    if len(d) > 15:
+        result["battery_temp_3"] = ((d[14] * 256) + d[15]) / 100 - 327.68
 
 
 PID_HV_BATTERY_DETAIL = PIDDefinition(
@@ -596,18 +631,52 @@ PID_HV_BATTERY_TEMPS = PIDDefinition(
 
 def _battery_21d0_parser(d: list[int]) -> dict[str, Any]:
     """
-    Parse PID 21D0 response (Internal resistance and voltage delta).
+    Parse PID 21D0 response (Internal resistance, accumulated times, voltage delta).
 
-    Reference: docs/prius_can.md Section 7
-    Layout: 14 block resistances (1 byte each) + voltage delta data
+    Per prius_can.md spec:
+    - Byte 0 (A): Block Count
+    - Bytes 1-8: Accumulated times (4x 16-bit)
+    - Bytes 9-14: Voltage delta data (min/max block volts + indices)
+    - Bytes 15-28 (P-AC): Internal Resistance R01-R14
     """
     result = {}
 
-    # Internal resistance values (14 blocks, 1 byte each)
+    # Block count (byte 0)
+    if len(d) >= 1:
+        result["block_count"] = d[0]
+
+    # Accumulated times (bytes 1-8, 2 bytes each)
+    if len(d) >= 3:
+        result["accum_time_battery_low"] = (d[1] * 256) + d[2]
+    if len(d) >= 5:
+        result["accum_time_dc_inhibit"] = (d[3] * 256) + d[4]
+    if len(d) >= 7:
+        result["accum_time_battery_high"] = (d[5] * 256) + d[6]
+    if len(d) >= 9:
+        result["accum_time_hot_temp"] = (d[7] * 256) + d[8]
+
+    # Voltage delta data (bytes 9-14)
+    if len(d) >= 11:
+        result["block_voltage_lowest"] = (2.56 * d[9]) + (0.01 * d[10]) - 327.68
+    if len(d) >= 12:
+        result["block_min_v_index"] = d[11]
+    if len(d) >= 14:
+        result["block_voltage_highest"] = (2.56 * d[12]) + (0.01 * d[13]) - 327.68
+    if len(d) >= 15:
+        result["block_max_v_index"] = d[14]
+
+    # NiMH Volt Delta (derived)
+    if len(d) >= 14:
+        lowest = (2.56 * d[9]) + (0.01 * d[10]) - 327.68
+        highest = (2.56 * d[12]) + (0.01 * d[13]) - 327.68
+        result["nimh_volt_delta"] = highest - lowest
+
+    # Internal resistance values R01-R14 (bytes 15-28, 1 byte each)
     resistances = []
-    for i in range(min(14, len(d))):
-        resistance_ohm = 0.001 * d[i]  # 0-10 Ohm
-        resistances.append(resistance_ohm)
+    for i in range(14):
+        offset = 15 + i
+        if len(d) > offset:
+            resistances.append(0.001 * d[offset])
 
     if resistances:
         result["block_resistances"] = resistances

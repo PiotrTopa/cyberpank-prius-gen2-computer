@@ -956,11 +956,11 @@ class IngressController:
             "ice_rpm_target": values.get("ice_rpm_target"),
             "ice_rpm_actual": values.get("ice_rpm_actual"),
             "drive_condition": values.get("drive_condition"),
-            "drive_state": values.get("drive_state"),
+            "shift_sensor_position": values.get("shift_sensor_position"),
         }
         if any(v is not None for v in torque_fields.values()):
             actions.append(SetDrivetrainTorquesAction(
-                **{k: int(v) if k in ("ice_rpm_target", "ice_rpm_actual", "drive_condition", "drive_state") and v is not None else v
+                **{k: int(v) if k in ("ice_rpm_target", "ice_rpm_actual", "drive_condition") and v is not None else v
                    for k, v in torque_fields.items()},
                 source=ActionSource.GATEWAY
             ))

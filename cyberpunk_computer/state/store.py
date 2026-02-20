@@ -420,7 +420,7 @@ class Store:
                 "regen_torque_actual", "regen_torque_request",
                 "master_cylinder_torque",
                 "ice_rpm_target", "ice_rpm_actual",
-                "drive_condition", "drive_state",
+                "drive_condition", "shift_sensor_position",
             ):
                 val = getattr(action, field_name, None)
                 if val is not None:
