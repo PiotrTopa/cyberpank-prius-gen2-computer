@@ -388,6 +388,15 @@ class Application:
                         input_port.seek(input_port.position + 10)
                         print(f"[PLAY] {input_port.get_status()}")
                         continue
+                    elif event.key == pygame.K_f:
+                        # F = toggle playback speed 1x / 10x
+                        new_speed = 1.0 if input_port.speed >= 10.0 else 10.0
+                        input_port.set_speed(new_speed)
+                        if self._store:
+                            self._store.replay_speed = new_speed
+                            self._store.chart_data.set_replay_speed(new_speed)
+                        print(f"[PLAY] Speed: {new_speed:.0f}x")
+                        continue
             
             # Verbose logging toggle keys (dev mode only)
             if self.config.dev_mode and event.type == pygame.KEYDOWN:

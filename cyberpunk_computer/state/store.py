@@ -18,6 +18,7 @@ from .app_state import (
     EnergyState, ConnectionState, GearPosition, InputState, DisplayState,
     DynamicsState
 )
+from .chart_data import ChartDataStore
 from .actions import (
     Action, ActionType, ActionSource, BatchAction,
     SetVolumeAction, SetBassAction, SetMidAction, SetTrebleAction,
@@ -94,6 +95,10 @@ class Store:
         self._dispatching = False
         self._pending_actions: List[Action] = []
         self._verbose = verbose
+        self._replay_speed: float = 1.0
+        
+        # Mutable time-series store for chart data (fed by ChartDataRule)
+        self.chart_data = ChartDataStore()
     
     @property
     def verbose(self) -> bool:
@@ -104,7 +109,17 @@ class Store:
     def verbose(self, value: bool) -> None:
         """Set verbose logging mode."""
         self._verbose = value
-        
+
+    @property
+    def replay_speed(self) -> float:
+        """Playback speed multiplier (1.0 = realtime, 10.0 = fast-forward)."""
+        return self._replay_speed
+
+    @replay_speed.setter
+    def replay_speed(self, value: float) -> None:
+        """Set playback speed multiplier."""
+        self._replay_speed = max(0.1, value)
+
     @property
     def state(self) -> AppState:
         """Get current state (read-only)."""

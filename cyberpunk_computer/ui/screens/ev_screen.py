@@ -393,7 +393,7 @@ class EVScreen(Screen):
         
         font_tiny = get_mono_font(9)
         
-        if self._block_voltages is None or len(self._block_voltages) != 14:
+        if self._block_voltages is None or len(self._block_voltages) < 2:
             label = font_tiny.render("\u0394V  NO DATA", True, COLORS["text_tertiary"])
             surface.blit(label, (chart_x, chart_y + (CHART_HEIGHT - label.get_height()) // 2))
             return

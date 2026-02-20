@@ -11,7 +11,6 @@ This is a diagnostic screen — stays on until strong-press exit (no auto-timeou
 
 import pygame
 import time
-from collections import deque
 from typing import Tuple, Optional, List
 
 from .base import Screen
@@ -19,6 +18,9 @@ from ..colors import COLORS
 from ..fonts import get_title_font, get_mono_font
 from ...input.manager import InputEvent as IE
 from ...state.store import Store, StateSlice
+from ...state.chart_data import (
+    ChartDataStore, DELTA_V_GREEN_MAX, DELTA_V_AMBER_MAX,
+)
 
 
 class BatteryScreen(Screen):
@@ -27,7 +29,10 @@ class BatteryScreen(Screen):
     HEADER_HEIGHT = 22
     NUM_PAGES = 3
     PAGE_LABELS = ["OVERVIEW", "BLOCK VOLTAGES", "DELTA-V HISTORY"]
-    HISTORY_MAX = 120  # samples for delta-V history
+
+    # Fixed absolute Y-axis ranges
+    BLOCK_VOLTAGE_SCALE = 1.0   # ±1V  (2V total range)
+    DELTA_V_Y_MAX = 2.0         # 0 .. 2V absolute range
 
     def __init__(self, size: Tuple[int, int], app=None, store: Optional[Store] = None):
         super().__init__(size, app)
@@ -48,10 +53,7 @@ class BatteryScreen(Screen):
         self._block_voltages: Optional[tuple] = None
         self._ev_mode: bool = False
 
-        # Delta-V history
-        self._delta_v_history: deque = deque(maxlen=self.HISTORY_MAX)
-        self._last_sample_time: float = 0.0
-        self._sample_interval: float = 1.0  # seconds
+        self._time_base: int = 60  # from store: power_chart_time_base
 
         self._unsub_fns: list = []
 
@@ -83,6 +85,7 @@ class BatteryScreen(Screen):
         self._max_temp = e.battery_max_cell_temp
         self._block_voltages = e.block_voltages
         self._ev_mode = getattr(state.dynamics, "ev_mode", False)
+        self._time_base = getattr(state.display, "power_chart_time_base", 60)
 
     # ─── Input ────────────────────────────────────────────────────────
 
@@ -111,25 +114,13 @@ class BatteryScreen(Screen):
     def update(self, dt: float) -> None:
         super().update(dt)
         # No auto-timeout — diagnostic screen stays until dismissed
-        self._record_delta_v_sample()
-
-    def _record_delta_v_sample(self) -> None:
-        """Record delta-V sample for history graph."""
-        now = time.time()
-        if now - self._last_sample_time < self._sample_interval:
-            return
-        self._last_sample_time = now
-
-        voltages = self._get_block_voltages()
-        if voltages and len(voltages) >= 2:
-            delta = max(voltages) - min(voltages)
-            self._delta_v_history.append(delta)
+        # Delta-V history is collected by ChartDataRule (screen-independent)
 
     # ─── Block voltage helpers ────────────────────────────────────────
 
     def _get_block_voltages(self) -> Optional[tuple]:
         """Return real block voltages or None if unavailable."""
-        if self._block_voltages and len(self._block_voltages) == 14:
+        if self._block_voltages and len(self._block_voltages) >= 1:
             return self._block_voltages
         return None
 
@@ -328,8 +319,7 @@ class BatteryScreen(Screen):
 
         avg_v = sum(voltages) / len(voltages)
         deviations = [v - avg_v for v in voltages]
-        max_dev = max(abs(d) for d in deviations)
-        scale = max(max_dev, 0.05)
+        scale = self.BLOCK_VOLTAGE_SCALE  # Fixed ±1V scale (2V total)
         delta_v = max(voltages) - min(voltages)
 
         # Stats line
@@ -373,10 +363,15 @@ class BatteryScreen(Screen):
             bar_h = int(abs(dev) / scale * max_bar_h)
             bar_h = max(bar_h, 1)
 
+            # Color-coded by absolute deviation:
+            #   Green  <= 0.2V
+            #   Amber  > 0.2V and <= 0.8V
+            #   Red    > 0.8V
             abs_dev = abs(dev)
-            if abs_dev < 0.02:
+            severity = ChartDataStore.severity_color_key(abs_dev)
+            if severity == "green":
                 color = COLORS.get("green_bright", (0, 230, 118))
-            elif abs_dev < 0.05:
+            elif severity == "amber":
                 color = COLORS.get("warm_bright", COLORS["active"])
             else:
                 color = COLORS.get("alert_bright", (255, 60, 60))
@@ -419,10 +414,28 @@ class BatteryScreen(Screen):
     # ─── Page 2: Delta-V History ──────────────────────────────────────
 
     def _render_delta_v_history(self, surface: pygame.Surface, y0: int, h: int) -> None:
-        """Time-series line graph of max block voltage deviation."""
+        """Time-series line graph of max block voltage deviation.
+
+        Uses absolute Y range (0 V .. 2.0 V).
+        Color-coded thresholds:
+          - Green  <= 0.2 V
+          - Amber  > 0.2 V and <= 0.8 V
+          - Red    > 0.8 V
+        Time window follows the global power_chart_time_base setting.
+        """
         font_label = get_mono_font(10)
         font_tiny = get_mono_font(9)
         font_value = get_mono_font(14)
+
+        # Absolute Y scale for delta-V (Volts)
+        Y_MIN = 0.0
+        Y_MAX = self.DELTA_V_Y_MAX  # 2.0V fixed range
+        Y_RANGE = Y_MAX - Y_MIN
+        WARN_THRESHOLD = DELTA_V_GREEN_MAX   # 0.2V — green/amber boundary
+        CRIT_THRESHOLD = DELTA_V_AMBER_MAX   # 0.8V — amber/red boundary
+
+        replay_speed = self._store.replay_speed if self._store else 1.0
+        time_window = max(10, int(self._time_base / replay_speed))
 
         # Current delta-V value
         voltages = self._get_block_voltages()
@@ -434,10 +447,12 @@ class BatteryScreen(Screen):
         val_y = y0 + 6
         if current_dv is not None:
             dv_str = f"{current_dv:.3f} V"
-            dv_color = COLORS.get("green_bright", (0, 230, 118))
-            if current_dv > 0.05:
+            severity = ChartDataStore.severity_color_key(current_dv)
+            if severity == "green":
+                dv_color = COLORS.get("green_bright", (0, 230, 118))
+            elif severity == "amber":
                 dv_color = COLORS.get("warm_bright", COLORS["active"])
-            if current_dv > 0.10:
+            else:
                 dv_color = COLORS.get("alert_bright", (255, 60, 60))
         else:
             dv_str = "--- V"
@@ -448,16 +463,30 @@ class BatteryScreen(Screen):
         val_surf = font_value.render(dv_str, True, dv_color)
         surface.blit(val_surf, (8, val_y + 14))
 
-        # Stats  
-        if self._delta_v_history:
-            avg_dv = sum(self._delta_v_history) / len(self._delta_v_history)
-            max_dv = max(self._delta_v_history)
-            min_dv = min(self._delta_v_history)
-            stats = f"AVG {avg_dv:.3f}  MIN {min_dv:.3f}  MAX {max_dv:.3f}"
+        # Stats from chart_data (model), not local buffer
+        # Snap to integer second so bucket boundaries are stable between frames
+        now = float(int(time.time()))
+        chart = self._store.chart_data if self._store else None
+        if chart:
+            dv_stats = chart.get_delta_v_stats(time_window)
+            if dv_stats.count > 0:
+                stats = f"AVG {dv_stats.avg:.3f}  MIN {dv_stats.min_val:.3f}  MAX {dv_stats.max_val:.3f}"
+            else:
+                stats = "COLLECTING DATA..."
         else:
-            stats = "COLLECTING DATA..."
+            stats = "NO STORE"
         st_surf = font_tiny.render(stats, True, COLORS["text_secondary"])
         surface.blit(st_surf, (self.width - st_surf.get_width() - 8, val_y + 2))
+
+        # Time range label
+        if time_window >= 3600:
+            tw_str = f"{time_window // 3600}h"
+        elif time_window >= 60:
+            tw_str = f"{time_window // 60}m"
+        else:
+            tw_str = f"{time_window}s"
+        tw_surf = font_tiny.render(tw_str, True, COLORS["text_dim"])
+        surface.blit(tw_surf, (self.width - tw_surf.get_width() - 8, val_y + 14))
 
         # Graph area
         graph_x = 40
@@ -469,69 +498,92 @@ class BatteryScreen(Screen):
         if graph_h < 20 or graph_w < 40:
             return
 
-        # Graph border
-        pygame.draw.rect(
-            surface,
-            COLORS["border_dim"],
-            (graph_x, graph_top, graph_w, graph_h),
-            1,
-        )
+        # Graph background + border
+        pygame.draw.rect(surface, COLORS["bg_panel"],
+                         (graph_x, graph_top, graph_w, graph_h))
+        pygame.draw.rect(surface, COLORS["border_dim"],
+                         (graph_x, graph_top, graph_w, graph_h), 1)
 
-        if len(self._delta_v_history) < 2:
+        # Threshold lines
+        for thresh, col in ((WARN_THRESHOLD, COLORS["yellow"]),
+                            (CRIT_THRESHOLD, COLORS.get("red_bright", (255, 60, 60)))):
+            if Y_MIN <= thresh <= Y_MAX:
+                ty = graph_bottom - int(((thresh - Y_MIN) / Y_RANGE) * graph_h)
+                for dx in range(graph_x + 1, graph_x + graph_w - 1, 6):
+                    pygame.draw.rect(surface, col, (dx, ty, 3, 1))
+
+        # Y-axis grid lines and labels (5 ticks: 0.00, 0.10, 0.20, 0.30, 0.40, 0.50)
+        num_ticks = 5
+        for i in range(num_ticks + 1):
+            frac = i / num_ticks
+            val = Y_MIN + frac * Y_RANGE
+            py = graph_bottom - int(frac * graph_h)
+            lbl_str = f"{val:.2f}"
+            lbl_surf = font_tiny.render(lbl_str, True, COLORS["text_tertiary"])
+            surface.blit(lbl_surf, (graph_x - lbl_surf.get_width() - 3,
+                                    py - lbl_surf.get_height() // 2))
+            # Grid line (dotted)
+            for dx in range(graph_x + 1, graph_x + graph_w - 1, 4):
+                pygame.draw.rect(surface, COLORS["border_normal"], (dx, py, 1, 1))
+
+        # Collect data points within time window from model
+        delta_v_history = chart.delta_v_history if chart else []
+        if len(delta_v_history) < 2:
             msg = font_label.render("COLLECTING...", True, COLORS["text_tertiary"])
             surface.blit(
                 msg,
                 (graph_x + (graph_w - msg.get_width()) // 2,
                  graph_top + (graph_h - msg.get_height()) // 2),
             )
-            return
+        else:
+            # Bucket data into pixel columns by timestamp
+            buckets = {}
+            for ts, val in delta_v_history:
+                age = now - ts
+                if age > time_window or age < 0:
+                    continue
+                px = graph_x + graph_w - 1 - int((age / time_window) * (graph_w - 2))
+                px = max(graph_x + 1, min(graph_x + graph_w - 1, px))
+                if px not in buckets:
+                    buckets[px] = []
+                buckets[px].append(val)
 
-        # Y-axis scale
-        data = list(self._delta_v_history)
-        y_min = max(0, min(data) - 0.01)
-        y_max = max(data) + 0.01
-        if y_max - y_min < 0.02:
-            y_max = y_min + 0.02
-        y_range = y_max - y_min
+            if buckets:
+                points = []
+                for px in sorted(buckets.keys()):
+                    avg_val = sum(buckets[px]) / len(buckets[px])
+                    clamped = max(Y_MIN, min(Y_MAX, avg_val))
+                    py = graph_bottom - int(((clamped - Y_MIN) / Y_RANGE) * (graph_h - 2)) - 1
+                    points.append((px, py))
 
-        # Y-axis labels
-        for frac in (0.0, 0.5, 1.0):
-            val = y_min + y_range * (1.0 - frac)
-            py = graph_top + int(frac * graph_h)
-            lbl_str = f"{val:.2f}"
-            lbl_surf = font_tiny.render(lbl_str, True, COLORS["text_tertiary"])
-            surface.blit(lbl_surf, (graph_x - lbl_surf.get_width() - 3, py - lbl_surf.get_height() // 2))
-            # Grid line
-            pygame.draw.line(
-                surface,
-                COLORS["bg_panel"],
-                (graph_x + 1, py),
-                (graph_x + graph_w - 2, py),
-                1,
-            )
+                if len(points) >= 2:
+                    # Filled area under curve
+                    fill_points = list(points) + [
+                        (points[-1][0], graph_bottom - 1),
+                        (points[0][0], graph_bottom - 1),
+                    ]
+                    fill_color = (*COLORS["cyan"][:3], 30)
+                    fill_surf = pygame.Surface((graph_w, graph_h), pygame.SRCALPHA)
+                    shifted = [(p[0] - graph_x, p[1] - graph_top) for p in fill_points]
+                    try:
+                        pygame.draw.polygon(fill_surf, fill_color, shifted)
+                        surface.blit(fill_surf, (graph_x, graph_top))
+                    except (ValueError, TypeError):
+                        pass
+                    pygame.draw.lines(surface, COLORS["cyan"], False, points, 2)
 
-        # Plot line
-        n = len(data)
-        points = []
-        for i, val in enumerate(data):
-            px = graph_x + int(i / (n - 1) * (graph_w - 2)) + 1
-            frac = (val - y_min) / y_range
-            py = graph_bottom - 1 - int(frac * (graph_h - 2))
-            points.append((px, py))
-
-        if len(points) >= 2:
-            # Filled area under curve
-            fill_points = list(points) + [(points[-1][0], graph_bottom - 1), (points[0][0], graph_bottom - 1)]
-            fill_color = (*COLORS["cyan"][:3], 30) if len(COLORS["cyan"]) >= 3 else (0, 255, 255, 30)
-            fill_surf = pygame.Surface((graph_w, graph_h), pygame.SRCALPHA)
-            shifted = [(p[0] - graph_x, p[1] - graph_top) for p in fill_points]
-            try:
-                pygame.draw.polygon(fill_surf, fill_color, shifted)
-                surface.blit(fill_surf, (graph_x, graph_top))
-            except (ValueError, TypeError):
-                pass
-
-            pygame.draw.lines(surface, COLORS["cyan"], False, points, 2)
+        # X-axis time labels
+        time_labels = [
+            (0, "now"),
+            (time_window // 4, f"-{time_window // 240}m" if time_window >= 240 else f"-{time_window // 4}s"),
+            (time_window // 2, f"-{time_window // 120}m" if time_window >= 120 else f"-{time_window // 2}s"),
+            (time_window, f"-{time_window // 60}m" if time_window >= 60 else f"-{time_window}s"),
+        ]
+        for offset, label in time_labels:
+            lx = graph_x + graph_w - 1 - int((offset / time_window) * (graph_w - 2))
+            if graph_x <= lx <= graph_x + graph_w:
+                lbl_surf = font_tiny.render(label, True, COLORS["text_dim"])
+                surface.blit(lbl_surf, (lx - lbl_surf.get_width() // 2, graph_bottom + 2))
 
         # Footer hint
         hint_surf = font_tiny.render("[SCROLL] PAGE   [HOLD] EXIT", True, COLORS["text_tertiary"])

@@ -426,10 +426,11 @@ def _battery_21ce_parser(d: list[int]) -> dict[str, Any]:
     Parse PID 21CE response (HV Battery detailed data).
     
     Reference: docs/prius_can.md Section 7
+    Layout: SOC(1) + Current(2) + 14 Block Voltages(28) = 31 bytes
     """
     result = {}
     
-    if len(d) < 5:
+    if len(d) < 3:
         return result
     
     # SOC (byte 0): 0.5 * A
@@ -438,14 +439,11 @@ def _battery_21ce_parser(d: list[int]) -> dict[str, Any]:
     # HV Battery Current (bytes 1-2): (256*B+C)/100 - 327.68
     result["battery_current"] = ((d[1] * 256) + d[2]) / 100 - 327.68
     
-    # Battery Power (bytes 3-4): (256*D+E)/100 - 327.68
-    result["battery_power_kw"] = ((d[3] * 256) + d[4]) / 100 - 327.68
-    
-    # Block voltages follow in pairs (bytes 5+)
-    # Block 1: (256*F+G)/100 - 327.68, etc.
+    # Block voltages follow in pairs (bytes 3+)
+    # Block 1: (256*D+E)/100 - 327.68, etc.
     block_voltages = []
     for i in range(14):
-        offset = 5 + (i * 2)
+        offset = 3 + (i * 2)
         if len(d) > offset + 1:
             voltage = ((d[offset] * 256) + d[offset + 1]) / 100 - 327.68
             block_voltages.append(voltage)

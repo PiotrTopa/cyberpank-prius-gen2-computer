@@ -321,6 +321,7 @@ def main() -> int:
     ===================================================================
     P         Play/Pause playback
     R         Restart from beginning
+    F         Toggle playback speed (1x / 10x)
     S         Print message statistics
     
     J         Jump to row (enter row number)

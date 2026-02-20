@@ -492,6 +492,26 @@ class FileInputPort(InputPort):
     def is_connected(self) -> bool:
         """File input is 'connected' when file is loaded."""
         return len(self._entries) > 0
+
+    def set_speed(self, speed: float) -> None:
+        """Change playback speed without disrupting position.
+
+        Recalculates internal timing so the current position stays
+        consistent when switching between speeds.
+        """
+        if speed == self.speed:
+            return
+
+        if self._state == PlaybackState.PLAYING and self._entries:
+            # Recalculate start_time so that elapsed*new_speed equals
+            # the current entry's relative_time.
+            now = time.time()
+            elapsed_real = now - self._start_time - self._pause_offset
+            played_time = elapsed_real * self.speed  # virtual seconds played
+            # new start_time: played_time = (now - new_start - pause_offset) * new_speed
+            self._start_time = now - self._pause_offset - (played_time / speed)
+
+        self.speed = speed
     
     @property
     def name(self) -> str:

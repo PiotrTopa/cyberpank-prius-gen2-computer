@@ -71,6 +71,8 @@ class IngressStats:
     system_messages: int = 0
     errors: int = 0
     last_message_time: float = 0.0
+    last_can_time: float = 0.0       # Any CAN message (unsolicited or solicited)
+    last_solicited_time: float = 0.0  # Last successful solicited response
 
 
 class IngressController:
@@ -281,9 +283,14 @@ class IngressController:
     def _handle_can_message(self, msg: RawMessage) -> None:
         """Handle CAN bus messages."""
         self._stats.can_messages += 1
+        self._stats.last_can_time = time.time()
         
         can_id_raw = msg.data.get("i")
         action = msg.data.get("a")  # Check if it's a subscription response
+
+        # Track solicited response timestamps for watchdog
+        if action == "sub":
+            self._stats.last_solicited_time = time.time()
         
         # Normalize CAN ID for comparison (handle both string and int)
         can_id_int = None
@@ -864,7 +871,7 @@ class IngressController:
         
         # Block voltages from 21CE - dispatch for deltaV chart
         block_voltages = values.get("block_voltages")
-        if block_voltages is not None and len(block_voltages) == 14:
+        if block_voltages is not None and len(block_voltages) >= 1:
             actions.append(SetBlockVoltagesAction(
                 voltages=tuple(block_voltages),
                 source=ActionSource.GATEWAY

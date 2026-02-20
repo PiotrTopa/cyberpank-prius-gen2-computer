@@ -11,7 +11,6 @@ This is a diagnostic screen — stays on until strong-press exit (no auto-timeou
 
 import pygame
 import time
-from collections import deque
 from typing import Tuple, Optional
 
 from .base import Screen
@@ -28,7 +27,6 @@ class EngineDetailScreen(Screen):
     RPM_BAR_HEIGHT = 28
     NUM_PAGES = 3
     PAGE_LABELS = ["OVERVIEW", "FUEL CHARTS", "TEMPERATURE"]
-    HISTORY_MAX = 3600  # 1 hour @ 1 sample/sec
 
     def __init__(self, size: Tuple[int, int], app=None, store: Optional[Store] = None):
         super().__init__(size, app)
@@ -60,12 +58,7 @@ class EngineDetailScreen(Screen):
         # Fuel type
         self._active_fuel = None
 
-        # History buffers (collected while screen is open)
-        self._fuel_flow_history: deque = deque(maxlen=self.HISTORY_MAX)
-        self._ice_temp_history: deque = deque(maxlen=self.HISTORY_MAX)
-        self._inverter_temp_history: deque = deque(maxlen=self.HISTORY_MAX)
-        self._last_sample_time: float = 0.0
-        self._fuel_flow_accumulator: list = []
+        # History data is in store.chart_data (collected by ChartDataRule)
 
         self._unsub_fns: list = []
 
@@ -107,31 +100,7 @@ class EngineDetailScreen(Screen):
         self._mg2_mot_temp = v.mg2_motor_temp
         self._converter_temp = v.converter_temp
 
-        # Accumulate fuel flow samples
-        raw_flow = v.fuel_flow_rate if v.fuel_flow_rate is not None else 0.0
-        flow = raw_flow if v.ice_running else 0.0
-        self._fuel_flow_accumulator.append(flow)
-
-        # Snapshot history every 1 second
-        now = time.time()
-        if now - self._last_sample_time >= 1.0:
-            self._last_sample_time = now
-
-            # Fuel flow: average of accumulated samples
-            if self._fuel_flow_accumulator:
-                avg_flow = sum(self._fuel_flow_accumulator) / len(self._fuel_flow_accumulator)
-            else:
-                avg_flow = 0.0
-            self._fuel_flow_accumulator.clear()
-            self._fuel_flow_history.append((now, avg_flow))
-
-            # ICE coolant temperature
-            if v.ice_coolant_temp is not None:
-                self._ice_temp_history.append((now, v.ice_coolant_temp))
-
-            # Inverter temperature
-            if v.inverter_temp is not None:
-                self._inverter_temp_history.append((now, v.inverter_temp))
+        # History data is collected by ChartDataRule continuously
 
     def handle_input(self, event) -> bool:
         if event == IE.ROTATE_RIGHT:
@@ -445,9 +414,14 @@ class EngineDetailScreen(Screen):
         stat_h = 20
         self._render_trip_stat(surface, pad, y_top, self.width - pad * 2, stat_h)
 
-        # Fuel flow chart below
+        # Fuel flow chart below — data from model
         chart_y = y_top + stat_h + pad
         chart_h = available_h - stat_h - pad
+
+        chart = self._store.chart_data if self._store else None
+        data = chart.fuel_flow_history if chart else []
+        replay_speed = self._store.replay_speed if self._store else 1.0
+        tw = max(10, int(3600 / replay_speed))
 
         self._render_time_graph(
             surface,
@@ -456,8 +430,8 @@ class EngineDetailScreen(Screen):
             w=self.width - pad * 2,
             h=chart_h,
             title="FUEL FLOW (1h)",
-            data=self._fuel_flow_history,
-            time_window=3600,
+            data=data,
+            time_window=tw,
             min_val=0.0,
             max_val=15.0,
             unit="L/h",
@@ -496,7 +470,12 @@ class EngineDetailScreen(Screen):
         available_h = self.height - y_top - footer_h - pad
         half_w = (self.width - pad * 3) // 2
 
-        # ICE Temperature (left)
+        chart = self._store.chart_data if self._store else None
+        replay_speed = self._store.replay_speed if self._store else 1.0
+        tw = max(10, int(3600 / replay_speed))
+
+        # ICE Temperature (left) — data from model
+        ice_data = chart.ice_temp_history if chart else []
         self._render_time_graph(
             surface,
             x=pad,
@@ -504,8 +483,8 @@ class EngineDetailScreen(Screen):
             w=half_w,
             h=available_h,
             title="ICE COOLANT (1h)",
-            data=self._ice_temp_history,
-            time_window=3600,
+            data=ice_data,
+            time_window=tw,
             min_val=0.0,
             max_val=120.0,
             unit="\u00b0C",
@@ -514,7 +493,8 @@ class EngineDetailScreen(Screen):
             crit_threshold=105.0,
         )
 
-        # Inverter Temperature (right)
+        # Inverter Temperature (right) — data from model
+        inv_data = chart.inverter_temp_history if chart else []
         self._render_time_graph(
             surface,
             x=pad * 2 + half_w,
@@ -522,8 +502,8 @@ class EngineDetailScreen(Screen):
             w=half_w,
             h=available_h,
             title="INVERTER (1h)",
-            data=self._inverter_temp_history,
-            time_window=3600,
+            data=inv_data,
+            time_window=tw,
             min_val=0.0,
             max_val=100.0,
             unit="\u00b0C",
@@ -605,7 +585,8 @@ class EngineDetailScreen(Screen):
 
         # Plot data
         if len(data) >= 2:
-            now = time.time()
+            # Snap to integer second so bucket boundaries are stable between frames
+            now = float(int(time.time()))
 
             # Bucket data per pixel column
             buckets = {}

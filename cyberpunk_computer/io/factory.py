@@ -96,6 +96,17 @@ class VirtualTwin:
     mode: ExecutionMode
     comm_logger: Optional[CommLogger] = None  # Communication logger for replay
     _enable_solicited: bool = False  # Whether to send solicited CAN subscriptions
+
+    # Solicited subscription watchdog
+    _SOLICITED_TIMEOUT: float = 15.0   # Seconds without solicited responses before re-init
+    _RESUB_COOLDOWN: float = 30.0      # Minimum seconds between re-init attempts
+    _CAN_ALIVE_WINDOW: float = 5.0     # CAN must be active within this window to trigger resub
+
+    def __post_init__(self) -> None:
+        """Initialize mutable watchdog state."""
+        self._last_resub_time: float = 0.0
+        self._resub_count: int = 0
+        self._solicited_was_active: bool = False  # Track if we ever received solicited data
     
     def start(self) -> bool:
         """Start all components."""
@@ -272,7 +283,70 @@ class VirtualTwin:
         Returns:
             Number of messages processed
         """
-        return self.ingress.update()
+        count = self.ingress.update()
+
+        # Solicited subscription watchdog
+        if self._enable_solicited:
+            self._check_solicited_watchdog()
+
+        return count
+
+    def _check_solicited_watchdog(self) -> None:
+        """
+        Detect lost solicited subscriptions and re-initialize.
+
+        Triggers when:
+        1. CAN bus is alive (unsolicited messages flowing) — car is ON
+        2. No solicited response received for _SOLICITED_TIMEOUT seconds
+        3. Cooldown period has elapsed since last re-init
+
+        This handles the case where the car was turned OFF (ECUs lost
+        diagnostic session state) while the board computer stayed on,
+        and the car was turned back ON.
+        """
+        import time as _time
+        now = _time.time()
+        stats = self.ingress.stats
+
+        # Track that solicited data was ever active
+        if stats.last_solicited_time > 0:
+            self._solicited_was_active = True
+
+        # Only run watchdog if solicited was previously active
+        if not self._solicited_was_active:
+            return
+
+        # Is the CAN bus alive? (unsolicited messages arriving recently)
+        can_alive = (now - stats.last_can_time) < self._CAN_ALIVE_WINDOW
+        if not can_alive:
+            return  # Car is probably OFF, don't try to resub
+
+        # Are solicited responses stale?
+        solicited_age = now - stats.last_solicited_time
+        if solicited_age < self._SOLICITED_TIMEOUT:
+            return  # Subscriptions are working fine
+
+        # Cooldown check
+        if (now - self._last_resub_time) < self._RESUB_COOLDOWN:
+            return
+
+        # ─── Re-initialize subscriptions ──────────────────────────
+        self._last_resub_time = now
+        self._resub_count += 1
+        logger.warning(
+            f"Solicited watchdog: no response for {solicited_age:.0f}s, "
+            f"re-initializing subscriptions (attempt #{self._resub_count})"
+        )
+        print(f"[WATCHDOG] Solicited responses lost for {solicited_age:.0f}s — re-subscribing (#{self._resub_count})")
+
+        try:
+            self._cleanup_solicited_subscriptions()
+            import time as _t2
+            _t2.sleep(0.2)
+            self._init_solicited_subscriptions()
+        except Exception as e:
+            logger.error(f"Solicited watchdog re-init failed: {e}")
+            print(f"[WATCHDOG] Re-subscribe failed: {e}")
 
 
 def create_virtual_twin(config: VirtualTwinConfig) -> VirtualTwin:
@@ -312,6 +386,10 @@ def create_virtual_twin(config: VirtualTwinConfig) -> VirtualTwin:
     rules_engine.register(FuelConsumptionRule())
     rules_engine.register(TripFuelConsumptionRule())
     rules_engine.register(ActiveFuelRule())
+    
+    # Chart data collection (continuous, screen-independent)
+    from ..state.rules.chart_data import ChartDataRule
+    rules_engine.register(ChartDataRule())
     
     # Register VFD satellite support
     if config.enable_vfd_satellite:

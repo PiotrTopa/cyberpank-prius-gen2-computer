@@ -254,12 +254,11 @@
     * Eq: `0.5 * A` | Range: 40-80%
 * [cite_start]**HV Battery Current** (PID: 21CE) [cite: 233]
     * Eq: `(256*B+C)/100 - 327.68` | Range: -100 to 100 Amp
-* [cite_start]**Battery Power** (PID: 21CE) [cite: 233]
-    * Eq: `(256*D+E)/100 - 327.68` | Range: -27 to 27 kW
 * [cite_start]**Block Voltages (Blocks 01-14)** (PID: 21CE) [cite: 233]
     * Equation Pattern: `(256*HighByte + LowByte)/100 - 327.68`
     * Range: 0-18 V
-    * Note: Bytes pairs follow sequentially (F+G, H+I, etc.) through PID 21CE data.
+    * Note: Bytes pairs follow sequentially (D+E, F+G, etc.) through PID 21CE data.
+    * Note: Actual response is 31 payload bytes: SOC(1) + Current(2) + 14 blocks(28).
 * [cite_start]**HV Battery Air Intake Temp** (PID: 21CF) [cite: 233]
     * Eq: `(256*A+B)/100 - 327.68`
 * [cite_start]**Auxiliary Battery Voltage** (PID: 21CF) [cite: 233]

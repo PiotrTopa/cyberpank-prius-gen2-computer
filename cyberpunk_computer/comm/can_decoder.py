@@ -896,8 +896,7 @@ class CANDecoder:
         
         - Byte 0: SOC = 0.5 * A
         - Bytes 1-2: Battery Current = (256*B+C)/100 - 327.68
-        - Bytes 3-4: Battery Power = (256*D+E)/100 - 327.68 kW
-        - Bytes 5+: Block voltages in pairs
+        - Bytes 3+: Block voltages in pairs (14 blocks, 2 bytes each)
         """
         if len(payload) >= 1:
             msg.values["battery_soc_21ce"] = 0.5 * payload[0]
@@ -905,13 +904,10 @@ class CANDecoder:
         if len(payload) >= 3:
             msg.values["battery_current_21ce"] = ((payload[1] * 256) + payload[2]) / 100 - 327.68
         
-        if len(payload) >= 5:
-            msg.values["battery_power_kw_21ce"] = ((payload[3] * 256) + payload[4]) / 100 - 327.68
-        
-        # Decode block voltages (14 blocks, 2 bytes each starting at byte 5)
+        # Decode block voltages (14 blocks, 2 bytes each starting at byte 3)
         block_voltages = []
         for i in range(14):
-            offset = 5 + (i * 2)
+            offset = 3 + (i * 2)
             if len(payload) > offset + 1:
                 voltage = ((payload[offset] * 256) + payload[offset + 1]) / 100 - 327.68
                 block_voltages.append(voltage)

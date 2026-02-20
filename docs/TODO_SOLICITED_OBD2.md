@@ -107,8 +107,7 @@ Send OBD2 query to **ECU 0x7E3** with **PID 21CE**
 |-------|-------------------|---------|
 | SOC | `battery_soc_21ce` | `0.5 * A` |
 | Battery Current | `battery_current_21ce` | `(256*B+C)/100 - 327.68` A |
-| Battery Power | `battery_power_kw_21ce` | `(256*D+E)/100 - 327.68` kW |
-| Block Voltages | `block_voltages` | Array of 14 values |
+| Block Voltages | `block_voltages` | Array of 14 values, starting at byte 3 |
 | Min Block Voltage | `block_voltage_min` | V |
 | Max Block Voltage | `block_voltage_max` | V |
 | Voltage Delta | `block_voltage_delta` | V |

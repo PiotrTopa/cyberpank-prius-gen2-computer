@@ -1,12 +1,12 @@
 {
   "ambient": {
-    "mode": "OFF",
+    "mode": "CYBER",
     "hue": 180,
     "saturation": 100,
     "brightness": 80
   },
   "lights": {
-    "mode": "MANUAL",
+    "mode": "AUTO",
     "biled_mode": "OFF",
     "biled_brightness": 100,
     "drl_enabled": true
@@ -30,7 +30,7 @@
   },
   "display": {
     "screen_brightness": 100,
-    "power_chart_time_base": 60,
+    "power_chart_time_base": 3600,
     "vfd_brightness": 100
   }
 }
