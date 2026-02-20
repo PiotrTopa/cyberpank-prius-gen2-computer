@@ -159,6 +159,53 @@ class VehicleState:
     mg1_rpm: Optional[int] = None             # MG1 (generator) RPM
     mg2_rpm: Optional[int] = None             # MG2 (traction motor) RPM
     
+    # Torque values (from solicited PIDs)
+    engine_load_percent: Optional[float] = None  # Engine load 0-100% (PID 0104, peak 115Nm@4200)
+    mg2_torque: Optional[float] = None        # MG2 traction motor torque (Nm)
+    mg1_torque: Optional[float] = None        # MG1 generator torque (Nm)
+    regen_torque_actual: Optional[float] = None   # Actual regen braking torque (Nm)
+    regen_torque_request: Optional[float] = None  # Requested regen braking torque (Nm)
+    master_cylinder_torque: Optional[float] = None  # Brake master cylinder torque (Nm)
+    
+    # ICE RPM from hybrid ECU (21C3) - more granular than OBD-II
+    ice_rpm_target: Optional[int] = None      # ICE target RPM (hybrid ECU command)
+    ice_rpm_actual: Optional[int] = None      # ICE actual RPM (from hybrid ECU)
+    
+    # Engine data (solicited PIDs from ECU 07E0)
+    intake_air_temp: Optional[float] = None       # Intake air temp, °C (PID 010F)
+    maf_air_flow: Optional[float] = None          # MAF air flow, g/sec (PID 0110)
+    lambda_ratio: Optional[float] = None          # Lambda ratio (PID 0124)
+    o2_sensor_voltage: Optional[float] = None     # O2 sensor output, V (PID 0124)
+    odometer_dtc_clear: Optional[int] = None      # Odometer since DTC clear, km (PID 0131)
+    barometric_pressure: Optional[int] = None     # Barometric pressure, kPa (PID 0133)
+    aux_battery_voltage: Optional[float] = None   # Aux battery voltage, V (PID 0142)
+    ambient_air_temp: Optional[float] = None      # Ambient air temp, °C (PID 0146)
+    
+    # Drive condition / state (from PID 21C3)
+    drive_condition: Optional[int] = None     # 0-6: hybrid drive mode
+    drive_state: Optional[int] = None         # 0/1/2/8: drive state code
+    
+    # Hybrid ECU additional data (PID 21C4)
+    aircon_power_kw: Optional[float] = None       # A/C consumption power, kW
+    crank_position: Optional[float] = None        # Crank position, 0-100
+    system_relay_1: Optional[bool] = None         # Main relay status 1 (H:0)
+    system_relay_2: Optional[bool] = None         # Main relay status 2 (H:1)
+    system_relay_3: Optional[bool] = None         # Main relay status 3 (H:2)
+    engine_requests_a: Optional[int] = None       # Engine request bitmask byte A (PID 21C4)
+    engine_requests_b: Optional[int] = None       # Engine request bitmask byte B (PID 21C4)
+    
+    # Cruise Control (from PID 21D3 - Hybrid ECU 0x7E2)
+    cruise_active: bool = False               # Cruise control currently engaged (D:6)
+    cruise_set_speed: Optional[int] = None    # Cruise set/resume speed (km/h)
+    cruise_memory_speed: Optional[int] = None # Cruise memory vehicle speed (km/h)
+    cruise_main_switch: Optional[bool] = None     # Cruise main switch on (C:0)
+    cruise_main_ready: Optional[bool] = None      # Cruise main switch ready (C:2)
+    cruise_indicator: Optional[bool] = None       # Cruise indicator lamp (C:5)
+    cruise_cancel_switch: Optional[bool] = None   # Cancel switch pressed (D:5)
+    cruise_res_acc_switch: Optional[bool] = None  # RES/ACC switch pressed (D:3)
+    cruise_set_coast_switch: Optional[bool] = None  # SET/COAST switch pressed (D:4)
+    cruise_5c8_debug: Optional[str] = None    # Raw 0x5C8 debug: hex bytes + data[2] bits
+    
     @property
     def is_parked(self) -> bool:
         """Check if vehicle is in PARK."""
@@ -187,6 +234,8 @@ class EnergyState:
     battery_min_cell_temp: Optional[float] = None
     battery_max_cell_temp: Optional[float] = None
     block_voltages: Optional[tuple] = None  # 14 block voltages from PID 21CE (V)
+    block_resistances: Optional[tuple] = None # 14 block internal resistances from PID 21D0 (Ohm)
+    battery_fan_speed: Optional[int] = None   # HV battery fan speed 0-6 (PID 21CF)
     
     # Power flow (positive = output/discharge, negative = input/charge)
     motor_power_kw: float = 0.0    # MG2 power
@@ -237,11 +286,11 @@ class DynamicsState:
     # Yaw Rate (0x03A)
     yaw_rate_raw: Optional[int] = None           # Raw offset value (uncalibrated)
     
-    # Wheel Pulses (0x0B1 / 0x0B3, 185 pulses/rev)
-    front_right_pulses: int = 0
-    front_left_pulses: int = 0
-    rear_right_pulses: int = 0
-    rear_left_pulses: int = 0
+    # Wheel Speed (0x0B1 / 0x0B3, km/h per wheel)
+    front_right_speed: float = 0.0
+    front_left_speed: float = 0.0
+    rear_right_speed: float = 0.0
+    rear_left_speed: float = 0.0
     
     # Headlights (0x57F)
     headlight_state: str = "OFF"   # "OFF", "PARK", "LOW", "HIGH"

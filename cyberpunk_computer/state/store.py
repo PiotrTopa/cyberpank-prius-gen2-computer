@@ -345,9 +345,10 @@ class Store:
             affected.add(StateSlice.VEHICLE)
         
         elif action.type == ActionType.SET_SPEED:
+            speed = action.speed_kmh
             self._state = replace(
                 self._state,
-                vehicle=replace(self._state.vehicle, speed_kmh=action.speed_kmh)
+                vehicle=replace(self._state.vehicle, speed_kmh=speed)
             )
             affected.add(StateSlice.VEHICLE)
         
@@ -404,6 +405,92 @@ class Store:
                 updates["mg1_rpm"] = action.mg1_rpm
             if action.mg2_rpm is not None:
                 updates["mg2_rpm"] = action.mg2_rpm
+            if updates:
+                self._state = replace(
+                    self._state,
+                    vehicle=replace(self._state.vehicle, **updates)
+                )
+                affected.add(StateSlice.VEHICLE)
+
+        elif action.type == ActionType.SET_DRIVETRAIN_TORQUES:
+            updates = {}
+            for field_name in (
+                "engine_load_percent",
+                "mg2_torque", "mg1_torque",
+                "regen_torque_actual", "regen_torque_request",
+                "master_cylinder_torque",
+                "ice_rpm_target", "ice_rpm_actual",
+                "drive_condition", "drive_state",
+            ):
+                val = getattr(action, field_name, None)
+                if val is not None:
+                    updates[field_name] = val
+            if updates:
+                self._state = replace(
+                    self._state,
+                    vehicle=replace(self._state.vehicle, **updates)
+                )
+                affected.add(StateSlice.VEHICLE)
+
+        elif action.type == ActionType.SET_ENGINE_DATA:
+            updates = {}
+            for field_name in (
+                "intake_air_temp", "maf_air_flow",
+                "lambda_ratio", "o2_sensor_voltage",
+                "odometer_dtc_clear", "barometric_pressure",
+                "aux_battery_voltage", "ambient_air_temp",
+            ):
+                val = getattr(action, field_name, None)
+                if val is not None:
+                    updates[field_name] = val
+            if updates:
+                self._state = replace(
+                    self._state,
+                    vehicle=replace(self._state.vehicle, **updates)
+                )
+                affected.add(StateSlice.VEHICLE)
+
+        elif action.type == ActionType.SET_HYBRID_EXTRAS:
+            updates = {}
+            for field_name in (
+                "aircon_power_kw", "crank_position",
+                "system_relay_1", "system_relay_2", "system_relay_3",
+                "engine_requests_a", "engine_requests_b",
+            ):
+                val = getattr(action, field_name, None)
+                if val is not None:
+                    updates[field_name] = val
+            if updates:
+                self._state = replace(
+                    self._state,
+                    vehicle=replace(self._state.vehicle, **updates)
+                )
+                affected.add(StateSlice.VEHICLE)
+
+        elif action.type == ActionType.SET_CRUISE_CONTROL:
+            updates = {}
+            if action.cruise_active is not None:
+                updates["cruise_active"] = action.cruise_active
+                if not action.cruise_active:
+                    updates["cruise_set_speed"] = None
+            if action.cruise_set_speed is not None:
+                updates["cruise_set_speed"] = action.cruise_set_speed
+            if action.cruise_memory_speed is not None:
+                updates["cruise_memory_speed"] = action.cruise_memory_speed
+            if action.cruise_main_switch is not None:
+                updates["cruise_main_switch"] = action.cruise_main_switch
+            if action.cruise_main_ready is not None:
+                updates["cruise_main_ready"] = action.cruise_main_ready
+            if action.cruise_indicator is not None:
+                updates["cruise_indicator"] = action.cruise_indicator
+            if action.cruise_cancel_switch is not None:
+                updates["cruise_cancel_switch"] = action.cruise_cancel_switch
+            if action.cruise_res_acc_switch is not None:
+                updates["cruise_res_acc_switch"] = action.cruise_res_acc_switch
+            if action.cruise_set_coast_switch is not None:
+                updates["cruise_set_coast_switch"] = action.cruise_set_coast_switch
+            if action.cruise_5c8_debug is not None:
+                updates["cruise_5c8_debug"] = action.cruise_5c8_debug
             if updates:
                 self._state = replace(
                     self._state,
@@ -534,6 +621,20 @@ class Store:
             self._state = replace(
                 self._state,
                 energy=replace(self._state.energy, block_voltages=action.voltages)
+            )
+            affected.add(StateSlice.ENERGY)
+
+        elif action.type == ActionType.SET_BLOCK_RESISTANCES:
+            self._state = replace(
+                self._state,
+                energy=replace(self._state.energy, block_resistances=action.resistances)
+            )
+            affected.add(StateSlice.ENERGY)
+
+        elif action.type == ActionType.SET_BATTERY_FAN_SPEED:
+            self._state = replace(
+                self._state,
+                energy=replace(self._state.energy, battery_fan_speed=action.fan_speed)
             )
             affected.add(StateSlice.ENERGY)
 
@@ -706,16 +807,16 @@ class Store:
             )
             affected.add(StateSlice.DYNAMICS)
         
-        elif action.type == ActionType.SET_WHEEL_PULSES:
+        elif action.type == ActionType.SET_WHEEL_SPEED:
             kwargs = {}
             if action.front_right is not None:
-                kwargs["front_right_pulses"] = action.front_right
+                kwargs["front_right_speed"] = action.front_right
             if action.front_left is not None:
-                kwargs["front_left_pulses"] = action.front_left
+                kwargs["front_left_speed"] = action.front_left
             if action.rear_right is not None:
-                kwargs["rear_right_pulses"] = action.rear_right
+                kwargs["rear_right_speed"] = action.rear_right
             if action.rear_left is not None:
-                kwargs["rear_left_pulses"] = action.rear_left
+                kwargs["rear_left_speed"] = action.rear_left
             if kwargs:
                 self._state = replace(
                     self._state,

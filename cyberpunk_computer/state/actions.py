@@ -51,6 +51,10 @@ class ActionType(Enum):
     SET_INVERTER_TEMP = auto()
     SET_HYBRID_TEMPS = auto()       # MG1/MG2 inverter + motor temps, converter temp
     SET_MG_RPMS = auto()            # MG1/MG2 RPM values
+    SET_DRIVETRAIN_TORQUES = auto()  # MG1/MG2/regen/master cylinder torques + ICE RPM + drive state
+    SET_ENGINE_DATA = auto()          # Engine PIDs: intake temp, MAF, lambda, O2, barometric, aux volt, ambient
+    SET_HYBRID_EXTRAS = auto()        # PID 21C4: aircon power, crank, relays, request bitmasks
+    SET_CRUISE_CONTROL = auto()      # Cruise control state (active, set speed)
     SET_THROTTLE_POSITION = auto()
     SET_BRAKE_PRESSED = auto()
     SET_FUEL_LEVEL = auto()
@@ -72,12 +76,14 @@ class ActionType(Enum):
     SET_BATTERY_MAX_TEMP = auto() # New: Byte 5 of 0x3CB
     SET_BATTERY_DELTA_SOC = auto()  # Delta between min/max cell blocks
     SET_BLOCK_VOLTAGES = auto()      # 14 block voltages from PID 21CE
+    SET_BLOCK_RESISTANCES = auto()   # 14 block internal resistances from PID 21D0
+    SET_BATTERY_FAN_SPEED = auto()   # HV battery fan speed 0-6 (PID 21CF)
     
     # Dynamics actions
     SET_STEERING_ANGLE = auto()
     SET_ACCELERATION = auto()
     SET_YAW_RATE = auto()
-    SET_WHEEL_PULSES = auto()
+    SET_WHEEL_SPEED = auto()
     SET_HEADLIGHT_STATUS = auto()
     SET_SOC_BARS_EVENT = auto()
     
@@ -347,6 +353,47 @@ class SetThrottlePositionAction(Action):
 
 
 @dataclass
+class SetCruiseControlAction(Action):
+    """Set cruise control state (from PID 21D3 and 0x5C8)."""
+    cruise_active: Optional[bool] = None
+    cruise_set_speed: Optional[int] = None
+    cruise_memory_speed: Optional[int] = None
+    cruise_main_switch: Optional[bool] = None
+    cruise_main_ready: Optional[bool] = None
+    cruise_indicator: Optional[bool] = None
+    cruise_cancel_switch: Optional[bool] = None
+    cruise_res_acc_switch: Optional[bool] = None
+    cruise_set_coast_switch: Optional[bool] = None
+    cruise_5c8_debug: Optional[str] = None
+    
+    def __init__(
+        self,
+        cruise_active: Optional[bool] = None,
+        cruise_set_speed: Optional[int] = None,
+        cruise_memory_speed: Optional[int] = None,
+        cruise_main_switch: Optional[bool] = None,
+        cruise_main_ready: Optional[bool] = None,
+        cruise_indicator: Optional[bool] = None,
+        cruise_cancel_switch: Optional[bool] = None,
+        cruise_res_acc_switch: Optional[bool] = None,
+        cruise_set_coast_switch: Optional[bool] = None,
+        cruise_5c8_debug: Optional[str] = None,
+        source: ActionSource = ActionSource.INTERNAL,
+    ):
+        super().__init__(ActionType.SET_CRUISE_CONTROL, source)
+        self.cruise_active = cruise_active
+        self.cruise_set_speed = cruise_set_speed
+        self.cruise_memory_speed = cruise_memory_speed
+        self.cruise_main_switch = cruise_main_switch
+        self.cruise_main_ready = cruise_main_ready
+        self.cruise_indicator = cruise_indicator
+        self.cruise_cancel_switch = cruise_cancel_switch
+        self.cruise_res_acc_switch = cruise_res_acc_switch
+        self.cruise_set_coast_switch = cruise_set_coast_switch
+        self.cruise_5c8_debug = cruise_5c8_debug
+
+
+@dataclass
 class SetBrakePressedAction(Action):
     """Set brake pedal pressure (0-127)."""
     pressure: int = 0
@@ -526,6 +573,26 @@ class SetBlockVoltagesAction(Action):
 
 
 @dataclass
+class SetBlockResistancesAction(Action):
+    """Set 14 HV battery block internal resistances from PID 21D0."""
+    resistances: tuple = ()  # Tuple of 14 floats (Ohm)
+
+    def __init__(self, resistances: tuple, source: ActionSource = ActionSource.INTERNAL):
+        super().__init__(ActionType.SET_BLOCK_RESISTANCES, source)
+        self.resistances = resistances
+
+
+@dataclass
+class SetBatteryFanSpeedAction(Action):
+    """Set HV battery fan speed (0-6) from PID 21CF."""
+    fan_speed: int = 0
+
+    def __init__(self, fan_speed: int, source: ActionSource = ActionSource.INTERNAL):
+        super().__init__(ActionType.SET_BATTERY_FAN_SPEED, source)
+        self.fan_speed = fan_speed
+
+
+@dataclass
 class SetRPMAction(Action):
     """Set ICE RPM.
     
@@ -607,6 +674,114 @@ class SetMGRPMsAction(Action):
         self.mg2_rpm = mg2_rpm
 
 
+@dataclass
+class SetDrivetrainTorquesAction(Action):
+    """Set drivetrain torques, ICE RPM, engine load, and drive condition."""
+    engine_load_percent: Optional[float] = None  # Engine load 0-100% (PID 0104)
+    mg2_torque: Optional[float] = None          # MG2 traction motor torque (Nm)
+    mg1_torque: Optional[float] = None          # MG1 generator torque (Nm)
+    regen_torque_actual: Optional[float] = None
+    regen_torque_request: Optional[float] = None
+    master_cylinder_torque: Optional[float] = None
+    ice_rpm_target: Optional[int] = None
+    ice_rpm_actual: Optional[int] = None
+    drive_condition: Optional[int] = None       # 0-6
+    drive_state: Optional[int] = None           # 0/1/2/8
+
+    def __init__(
+        self,
+        engine_load_percent: Optional[float] = None,
+        mg2_torque: Optional[float] = None,
+        mg1_torque: Optional[float] = None,
+        regen_torque_actual: Optional[float] = None,
+        regen_torque_request: Optional[float] = None,
+        master_cylinder_torque: Optional[float] = None,
+        ice_rpm_target: Optional[int] = None,
+        ice_rpm_actual: Optional[int] = None,
+        drive_condition: Optional[int] = None,
+        drive_state: Optional[int] = None,
+        source: ActionSource = ActionSource.INTERNAL,
+    ):
+        super().__init__(ActionType.SET_DRIVETRAIN_TORQUES, source)
+        self.engine_load_percent = engine_load_percent
+        self.mg2_torque = mg2_torque
+        self.mg1_torque = mg1_torque
+        self.regen_torque_actual = regen_torque_actual
+        self.regen_torque_request = regen_torque_request
+        self.master_cylinder_torque = master_cylinder_torque
+        self.ice_rpm_target = ice_rpm_target
+        self.ice_rpm_actual = ice_rpm_actual
+        self.drive_condition = drive_condition
+        self.drive_state = drive_state
+
+
+@dataclass
+class SetEngineDataAction(Action):
+    """Set engine ECU telemetry from solicited OBD-II PIDs."""
+    intake_air_temp: Optional[float] = None       # PID 010F, °C
+    maf_air_flow: Optional[float] = None          # PID 0110, g/sec
+    lambda_ratio: Optional[float] = None          # PID 0124
+    o2_sensor_voltage: Optional[float] = None     # PID 0124, V
+    odometer_dtc_clear: Optional[int] = None      # PID 0131, km
+    barometric_pressure: Optional[int] = None     # PID 0133, kPa
+    aux_battery_voltage: Optional[float] = None   # PID 0142, V
+    ambient_air_temp: Optional[float] = None      # PID 0146, °C
+
+    def __init__(
+        self,
+        intake_air_temp: Optional[float] = None,
+        maf_air_flow: Optional[float] = None,
+        lambda_ratio: Optional[float] = None,
+        o2_sensor_voltage: Optional[float] = None,
+        odometer_dtc_clear: Optional[int] = None,
+        barometric_pressure: Optional[int] = None,
+        aux_battery_voltage: Optional[float] = None,
+        ambient_air_temp: Optional[float] = None,
+        source: ActionSource = ActionSource.INTERNAL,
+    ):
+        super().__init__(ActionType.SET_ENGINE_DATA, source)
+        self.intake_air_temp = intake_air_temp
+        self.maf_air_flow = maf_air_flow
+        self.lambda_ratio = lambda_ratio
+        self.o2_sensor_voltage = o2_sensor_voltage
+        self.odometer_dtc_clear = odometer_dtc_clear
+        self.barometric_pressure = barometric_pressure
+        self.aux_battery_voltage = aux_battery_voltage
+        self.ambient_air_temp = ambient_air_temp
+
+
+@dataclass
+class SetHybridExtrasAction(Action):
+    """Set hybrid ECU PID 21C4 extra fields."""
+    aircon_power_kw: Optional[float] = None       # 0-5 kW
+    crank_position: Optional[float] = None        # 0-100
+    system_relay_1: Optional[bool] = None         # H:0
+    system_relay_2: Optional[bool] = None         # H:1
+    system_relay_3: Optional[bool] = None         # H:2
+    engine_requests_a: Optional[int] = None       # Byte A bitmask
+    engine_requests_b: Optional[int] = None       # Byte B bitmask
+
+    def __init__(
+        self,
+        aircon_power_kw: Optional[float] = None,
+        crank_position: Optional[float] = None,
+        system_relay_1: Optional[bool] = None,
+        system_relay_2: Optional[bool] = None,
+        system_relay_3: Optional[bool] = None,
+        engine_requests_a: Optional[int] = None,
+        engine_requests_b: Optional[int] = None,
+        source: ActionSource = ActionSource.INTERNAL,
+    ):
+        super().__init__(ActionType.SET_HYBRID_EXTRAS, source)
+        self.aircon_power_kw = aircon_power_kw
+        self.crank_position = crank_position
+        self.system_relay_1 = system_relay_1
+        self.system_relay_2 = system_relay_2
+        self.system_relay_3 = system_relay_3
+        self.engine_requests_a = engine_requests_a
+        self.engine_requests_b = engine_requests_b
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Dynamics Actions
 # ─────────────────────────────────────────────────────────────────────────────
@@ -650,19 +825,19 @@ class SetYawRateAction(Action):
 
 
 @dataclass
-class SetWheelPulsesAction(Action):
-    """Set wheel pulse counter values (185 pulses/rev)."""
-    front_right: Optional[int] = None
-    front_left: Optional[int] = None
-    rear_right: Optional[int] = None
-    rear_left: Optional[int] = None
+class SetWheelSpeedAction(Action):
+    """Set individual wheel speed values (km/h) from CAN 0xB1/0xB3."""
+    front_right: Optional[float] = None
+    front_left: Optional[float] = None
+    rear_right: Optional[float] = None
+    rear_left: Optional[float] = None
     
-    def __init__(self, front_right: Optional[int] = None,
-                 front_left: Optional[int] = None,
-                 rear_right: Optional[int] = None,
-                 rear_left: Optional[int] = None,
+    def __init__(self, front_right: Optional[float] = None,
+                 front_left: Optional[float] = None,
+                 rear_right: Optional[float] = None,
+                 rear_left: Optional[float] = None,
                  source: ActionSource = ActionSource.INTERNAL):
-        super().__init__(ActionType.SET_WHEEL_PULSES, source)
+        super().__init__(ActionType.SET_WHEEL_SPEED, source)
         self.front_right = front_right
         self.front_left = front_left
         self.rear_right = rear_right

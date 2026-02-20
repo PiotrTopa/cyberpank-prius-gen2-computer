@@ -465,18 +465,21 @@ class MainScreen(Screen):
              connected = self._avc_bridge.is_connected
              self._connection_indicator.set_connected(connected)
     
+    # Bottom bar height for cruise + pagination
+    BOTTOM_BAR_HEIGHT = 16
+    
     def _create_center_area(self) -> None:
         """Create center area with connection indicator and status bar."""
         center_x = self.SIDE_PANEL_WIDTH
         center_width = self.width - 2 * self.SIDE_PANEL_WIDTH
         
-        # Connection indicator (moved slightly)
+        # Connection indicator (top-right)
         self._connection_indicator = ConnectionIndicator(
             Rect(center_x + center_width - 16, 6, 12, 12)
         )
         self.add_widget(self._connection_indicator)
         
-        # Status Bar: Gear | Speed | Pagination | Connection
+        # Top Status Bar: Gear | Speed | Connection
         
         # Gear Display (left of status bar)
         self._gear_display = ValueDisplay(
@@ -500,17 +503,20 @@ class MainScreen(Screen):
         )
         self.add_widget(self._speed_display)
         
-        # Pagination Control (moved to right side)
+        # Pagination Control (bottom bar, right side)
+        bottom_y = self.height - self.BOTTOM_BAR_HEIGHT
         self._pagination_control = PaginationControl(
-            Rect(center_x + center_width - 100, 3, 100, 20),
+            Rect(center_x + center_width - 60, bottom_y, 60, self.BOTTOM_BAR_HEIGHT),
             num_pages=self._num_pages,
             current_page=self._current_page,
             on_change=self._on_page_change
         )
         self.add_widget(self._pagination_control)
         
-        # Center Content Area (Pages) - full height below status bar
-        self._content_rect = Rect(center_x, 30, center_width, self.height - 30)
+        # Center Content Area (Pages) - between top bar and bottom bar
+        self._content_rect = Rect(
+            center_x, 30, center_width, self.height - 30 - self.BOTTOM_BAR_HEIGHT
+        )
         
         # VFD Display has been moved to separate satellite app (device 110)
         # Page 1 now shows placeholder indicating VFD is on external display
@@ -618,6 +624,9 @@ class MainScreen(Screen):
         if hasattr(self, '_speed_display') and self._speed_display:
              val = str(int(state.vehicle.speed_kmh)) if state.vehicle.speed_kmh is not None else "0"
              self._speed_display.set_value(val)
+        
+
+
         if hasattr(self, '_fuel_display') and self._fuel_display:
              consumption = state.vehicle.instant_consumption
              unit = state.vehicle.consumption_unit
@@ -790,8 +799,79 @@ class MainScreen(Screen):
             # Fallback
             self._render_default_page(surface, center_x, center_width)
         
+        # Render bottom status bar (cruise control + pagination)
+        self._render_bottom_bar(surface, center_x, center_width)
+        
         # Render AVC Input visualization (touch and button events)
         self._render_avc_input_visualization(surface, center_x, center_width)
+    
+    def _render_bottom_bar(
+        self, surface: pygame.Surface, center_x: int, center_width: int
+    ) -> None:
+        """Render bottom status bar with cruise control info.
+        
+        Layout: [CRU SET:80 MEM:80 ENGAGED] .............. [● ○]
+        """
+        bar_y = self.height - self.BOTTOM_BAR_HEIGHT
+        
+        # Separator line
+        pygame.draw.line(
+            surface,
+            COLORS["border_normal"],
+            (center_x + 1, bar_y),
+            (center_x + center_width - 2, bar_y),
+            1
+        )
+        
+        if not self._store:
+            return
+        
+        v = self._store.state.vehicle
+        font = get_font(8, "mono")
+        text_y = bar_y + 3
+        x = center_x + 6
+        
+        # Cruise active indicator
+        if v.cruise_active:
+            indicator = "CRU"
+            ind_color = COLORS["green_bright"]
+        elif v.cruise_main_switch:
+            indicator = "CRU"
+            ind_color = COLORS["yellow"]
+        else:
+            indicator = "CRU"
+            ind_color = COLORS["text_dim"]
+        
+        ind_surf = font.render(indicator, True, ind_color)
+        surface.blit(ind_surf, (x, text_y))
+        x += ind_surf.get_width() + 3
+        
+        # Set speed
+        if v.cruise_set_speed is not None and v.cruise_set_speed > 0:
+            set_str = f"SET:{v.cruise_set_speed}"
+            set_color = COLORS["green_bright"] if v.cruise_active else COLORS["text_secondary"]
+        else:
+            set_str = "SET:--"
+            set_color = COLORS["text_dim"]
+        set_surf = font.render(set_str, True, set_color)
+        surface.blit(set_surf, (x, text_y))
+        x += set_surf.get_width() + 4
+        
+        # Memory speed
+        if v.cruise_memory_speed is not None and v.cruise_memory_speed > 0:
+            mem_str = f"MEM:{v.cruise_memory_speed}"
+            mem_color = COLORS["cyan_bright"] if v.cruise_active else COLORS["text_secondary"]
+        else:
+            mem_str = "MEM:--"
+            mem_color = COLORS["text_dim"]
+        mem_surf = font.render(mem_str, True, mem_color)
+        surface.blit(mem_surf, (x, text_y))
+        x += mem_surf.get_width() + 4
+        
+        # Engaged/Off status text
+        if v.cruise_active:
+            status_surf = font.render("ON", True, COLORS["green_bright"])
+            surface.blit(status_surf, (x, text_y))
     
     def _render_vfd_page(self, surface: pygame.Surface, center_x: int, center_width: int) -> None:
         """Render Page 1: VFD moved to satellite - show default page."""
@@ -912,16 +992,16 @@ class MainScreen(Screen):
         title_surf = font_title.render("WHEELS", True, COLORS["cyan_bright"])
         surface.blit(title_surf, (left_x, y))
         
-        # "185 p/rev" label
-        unit_surf = font_small.render("185p/rev", True, COLORS["text_dim"])
+        # "km/h" unit label
+        unit_surf = font_small.render("km/h", True, COLORS["text_dim"])
         surface.blit(unit_surf, (left_x + col_width - unit_surf.get_width(), y + 2))
         y += row_h + 2
         
         # Front wheels
         lbl = font_label.render("FR", True, COLORS["text_secondary"])
         surface.blit(lbl, (left_x, y))
-        fr_text = f"{dyn.front_right_pulses:5d}"
-        fl_text = f"{dyn.front_left_pulses:5d}"
+        fr_text = f"{dyn.front_right_speed:5.1f}"
+        fl_text = f"{dyn.front_left_speed:5.1f}"
         val_surf = font_value.render(f"R{fr_text} L{fl_text}", True, COLORS["green_bright"])
         surface.blit(val_surf, (left_x + col_width - val_surf.get_width(), y))
         y += row_h
@@ -929,8 +1009,8 @@ class MainScreen(Screen):
         # Rear wheels
         lbl = font_label.render("RR", True, COLORS["text_secondary"])
         surface.blit(lbl, (left_x, y))
-        rr_text = f"{dyn.rear_right_pulses:5d}"
-        rl_text = f"{dyn.rear_left_pulses:5d}"
+        rr_text = f"{dyn.rear_right_speed:5.1f}"
+        rl_text = f"{dyn.rear_left_speed:5.1f}"
         val_surf = font_value.render(f"R{rr_text} L{rl_text}", True, COLORS["green_bright"])
         surface.blit(val_surf, (left_x + col_width - val_surf.get_width(), y))
         y += row_h
@@ -1188,6 +1268,65 @@ class MainScreen(Screen):
         range_surf = font_small.render(f"({min_t}/{max_t})", True, COLORS["text_dim"])
         surface.blit(range_surf, (right_x + col_width - range_surf.get_width(), ry))
         ry += row_h
+        
+        # Fan speed (0-6)
+        lbl = font_label.render("FAN", True, COLORS["text_secondary"])
+        surface.blit(lbl, (right_x, ry))
+        if e.battery_fan_speed is not None:
+            fan_spd = e.battery_fan_speed
+            fan_str = f"{fan_spd}"
+            if fan_spd == 0:
+                fan_color = COLORS["text_dim"]
+            elif fan_spd <= 2:
+                fan_color = COLORS["green_bright"]
+            elif fan_spd <= 4:
+                fan_color = COLORS["yellow"]
+            else:
+                fan_color = COLORS["red_bright"]
+            # Draw bar indicator
+            bar_x = right_x + 50
+            for i in range(6):
+                bar_color = fan_color if i < fan_spd else COLORS["text_dim"]
+                bar_rect = pygame.Rect(bar_x + i * 10, ry + 3, 7, 8)
+                pygame.draw.rect(surface, bar_color, bar_rect)
+        else:
+            fan_str = "--"
+            fan_color = COLORS["text_dim"]
+        val_surf = font_value.render(fan_str, True, fan_color)
+        surface.blit(val_surf, (right_x + col_width - val_surf.get_width(), ry))
+        ry += row_h
+        
+        # ─── BLOCK RESISTANCES (below both columns) ───
+        
+        if e.block_resistances is not None:
+            res_y = max(y, ry) + 4
+            title_surf = font_title.render("BLOCK RESISTANCE (m\u03A9)", True, COLORS["cyan_bright"])
+            surface.blit(title_surf, (left_x, res_y))
+            res_y += row_h + 2
+            
+            resistances = e.block_resistances
+            # Show R01-R14 in two rows of 7
+            for row_idx in range(2):
+                rx = left_x
+                for col_idx in range(7):
+                    idx = row_idx * 7 + col_idx
+                    if idx < len(resistances):
+                        r_val = resistances[idx]
+                        r_label = f"R{idx+1:02d}"
+                        lbl_surf = font_small.render(r_label, True, COLORS["text_dim"])
+                        surface.blit(lbl_surf, (rx, res_y))
+                        
+                        val_str = f"{r_val}"
+                        if r_val > 30:
+                            r_color = COLORS["red_bright"]
+                        elif r_val > 25:
+                            r_color = COLORS["yellow"]
+                        else:
+                            r_color = COLORS["green_bright"]
+                        val_surf = font_small.render(val_str, True, r_color)
+                        surface.blit(val_surf, (rx + 22, res_y))
+                    rx += (col_width * 2 + pad) // 7
+                res_y += row_h
     
     def _render_avc_lan_debug(
         self,

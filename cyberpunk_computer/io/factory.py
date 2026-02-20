@@ -161,20 +161,22 @@ class VirtualTwin:
             }
         ))
         
-        # Slot 1: Hybrid ECU 0x7E2, PID 21CF (delta SOC) @ 2000ms
-        # Single-frame response from 0x7EA
-        # Reduced rate - delta SOC doesn't change fast
+        # Slot 1: Engine ECU 0x7E0, PID 0104 (Engine Load %) @ 2000ms
+        # Single-frame response from 0x7E8
+        # NOTE: Was previously 21CF from Hybrid ECU 0x7E2 — but the hybrid
+        # decoder has no handler for PID CF, so responses were silently dropped.
+        # Delta SOC is correctly handled via Battery ECU Slot 4 (21CF @ 0x7E3).
         self.output_port.send(OutgoingCommand(
             device_id=DEVICE_CAN,
             command_type="sub",
             payload={
                 "a": "sub",
                 "slot": 1,
-                "i": "0x7E2",
-                "d": [0x02, 0x21, 0xCF, 0x00, 0x00, 0x00, 0x00, 0x00],
+                "i": "0x7E0",
+                "d": [0x02, 0x01, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00],
                 "int": 2000,
                 "t": 200,
-                "r": ["0x7EA"]
+                "r": ["0x7E8"]
             }
         ))
         
@@ -214,7 +216,189 @@ class VirtualTwin:
             }
         ))
         
-        logger.info("Solicited CAN subscriptions initialized (4 slots: RPM, SOC, INV temp, block V)")
+        # Slot 4: HV Battery ECU 0x7E3, PID 21CF (fan speed, air temp, delta SOC) @ 2000ms
+        # Single-frame response from 0x7EB (8 bytes)
+        self.output_port.send(OutgoingCommand(
+            device_id=DEVICE_CAN,
+            command_type="sub",
+            payload={
+                "a": "sub",
+                "slot": 4,
+                "i": "0x7E3",
+                "d": [0x02, 0x21, 0xCF, 0x00, 0x00, 0x00, 0x00, 0x00],
+                "int": 2000,
+                "t": 200,
+                "r": ["0x7EB"]
+            }
+        ))
+        
+        # Slot 5: HV Battery ECU 0x7E3, PID 21D0 (internal resistance) @ 5000ms
+        # ISO-TP multi-frame response from 0x7EB
+        # 14 block resistances for battery health monitoring
+        self.output_port.send(OutgoingCommand(
+            device_id=DEVICE_CAN,
+            command_type="sub",
+            payload={
+                "a": "sub",
+                "slot": 5,
+                "i": "0x7E3",
+                "d": [0x02, 0x21, 0xD0, 0x00, 0x00, 0x00, 0x00, 0x00],
+                "int": 5000,
+                "t": 500,
+                "r": ["0x7EB"],
+                "isotp": True
+            }
+        ))
+        
+        # Slot 6: Hybrid ECU 0x7E2, PID 21D3 (cruise control) @ 1000ms
+        # Single-frame response from 0x7EA (4 bytes)
+        # Cruise set/memory speed, main switch, active flag, cancel/set switches
+        self.output_port.send(OutgoingCommand(
+            device_id=DEVICE_CAN,
+            command_type="sub",
+            payload={
+                "a": "sub",
+                "slot": 6,
+                "i": "0x7E2",
+                "d": [0x02, 0x21, 0xD3, 0x00, 0x00, 0x00, 0x00, 0x00],
+                "int": 1000,
+                "t": 200,
+                "r": ["0x7EA"]
+            }
+        ))
+        
+        # --- Engine ECU 0x7E0 Mode 01 PIDs (single-frame responses from 0x7E8) ---
+        
+        # Slot 7: PID 0142 (Aux/12V battery voltage) @ 5000ms
+        # Control module voltage — monitors 12V battery health
+        self.output_port.send(OutgoingCommand(
+            device_id=DEVICE_CAN,
+            command_type="sub",
+            payload={
+                "a": "sub",
+                "slot": 7,
+                "i": "0x7E0",
+                "d": [0x02, 0x01, 0x42, 0x00, 0x00, 0x00, 0x00, 0x00],
+                "int": 5000,
+                "t": 200,
+                "r": ["0x7E8"]
+            }
+        ))
+        
+        # Slot 8: Hybrid ECU 0x7E2, PID 21C4 (hybrid additional) @ 2000ms
+        # ISO-TP multi-frame response from 0x7EA (16+ bytes)
+        # A/C compressor power, crank position, relay states, engine requests
+        self.output_port.send(OutgoingCommand(
+            device_id=DEVICE_CAN,
+            command_type="sub",
+            payload={
+                "a": "sub",
+                "slot": 8,
+                "i": "0x7E2",
+                "d": [0x02, 0x21, 0xC4, 0x00, 0x00, 0x00, 0x00, 0x00],
+                "int": 2000,
+                "t": 500,
+                "r": ["0x7EA"],
+                "isotp": True
+            }
+        ))
+        
+        # Slot 9: PID 010F (Intake air temperature) @ 5000ms
+        self.output_port.send(OutgoingCommand(
+            device_id=DEVICE_CAN,
+            command_type="sub",
+            payload={
+                "a": "sub",
+                "slot": 9,
+                "i": "0x7E0",
+                "d": [0x02, 0x01, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00],
+                "int": 5000,
+                "t": 200,
+                "r": ["0x7E8"]
+            }
+        ))
+        
+        # Slot 10: PID 0110 (MAF air flow rate) @ 2000ms
+        self.output_port.send(OutgoingCommand(
+            device_id=DEVICE_CAN,
+            command_type="sub",
+            payload={
+                "a": "sub",
+                "slot": 10,
+                "i": "0x7E0",
+                "d": [0x02, 0x01, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00],
+                "int": 2000,
+                "t": 200,
+                "r": ["0x7E8"]
+            }
+        ))
+        
+        # Slot 11: PID 0124 (Lambda ratio + O2 sensor voltage) @ 2000ms
+        # Returns 4 bytes: equiv ratio (A,B) + O2 voltage (C,D)
+        self.output_port.send(OutgoingCommand(
+            device_id=DEVICE_CAN,
+            command_type="sub",
+            payload={
+                "a": "sub",
+                "slot": 11,
+                "i": "0x7E0",
+                "d": [0x02, 0x01, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00],
+                "int": 2000,
+                "t": 200,
+                "r": ["0x7E8"]
+            }
+        ))
+        
+        # Slot 12: PID 0131 (Distance since DTC clear / odometer proxy) @ 10000ms
+        self.output_port.send(OutgoingCommand(
+            device_id=DEVICE_CAN,
+            command_type="sub",
+            payload={
+                "a": "sub",
+                "slot": 12,
+                "i": "0x7E0",
+                "d": [0x02, 0x01, 0x31, 0x00, 0x00, 0x00, 0x00, 0x00],
+                "int": 10000,
+                "t": 200,
+                "r": ["0x7E8"]
+            }
+        ))
+        
+        # Slot 13: PID 0133 (Barometric pressure) @ 10000ms
+        self.output_port.send(OutgoingCommand(
+            device_id=DEVICE_CAN,
+            command_type="sub",
+            payload={
+                "a": "sub",
+                "slot": 13,
+                "i": "0x7E0",
+                "d": [0x02, 0x01, 0x33, 0x00, 0x00, 0x00, 0x00, 0x00],
+                "int": 10000,
+                "t": 200,
+                "r": ["0x7E8"]
+            }
+        ))
+        
+        # Slot 14: PID 0146 (Ambient air temperature) @ 10000ms
+        self.output_port.send(OutgoingCommand(
+            device_id=DEVICE_CAN,
+            command_type="sub",
+            payload={
+                "a": "sub",
+                "slot": 14,
+                "i": "0x7E0",
+                "d": [0x02, 0x01, 0x46, 0x00, 0x00, 0x00, 0x00, 0x00],
+                "int": 10000,
+                "t": 200,
+                "r": ["0x7E8"]
+            }
+        ))
+        
+        logger.info(
+            "Solicited CAN subscriptions initialized (15 slots: "
+            "RPM, eng load, INV temp, block V, fan/temp, resistance, cruise, "
+            "aux V, hybrid add, intake T, MAF, lambda, odo, baro, ambient T)"
+        )
         
         # Wait for writer thread to actually send the commands
         import time

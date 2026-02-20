@@ -51,10 +51,11 @@ class CANMessageType(Enum):
     FUEL_CONSUMPTION = auto()   # Fuel consumption (0x520)
     STEERING_ANGLE = auto()     # Steering angle (0x025)
     ACCELERATION = auto()       # Lateral/longitudinal acceleration (0x022, 0x023)
-    WHEEL_PULSES = auto()       # Wheel pulse counters (0x0B1, 0x0B3)
+    WHEEL_SPEED = auto()        # Individual wheel speed (0x0B1, 0x0B3)
     HEADLIGHT_STATUS = auto()   # Headlight state (0x57F)
     SOC_BARS_EVENT = auto()     # MFD SOC bars & events (0x529)
     YAW_RATE = auto()           # Yaw rate / vehicle dynamics (0x03A)
+    CRUISE_CONTROL = auto()     # Cruise control state (0x5C8)
     # Solicited response types (OBD-II style)
     SOLICITED_RESPONSE = auto()        # Generic solicited response
     SOLICITED_ENGINE = auto()          # Response from Engine ECU (0x7E8)
@@ -109,8 +110,8 @@ KNOWN_CAN_IDS = {
     0x022: "LATERAL_ACCEL",        # Lateral + longitudinal acceleration
     0x023: "LONGITUDINAL_ACCEL",   # Longitudinal acceleration (alt)
     0x025: "STEERING_ANGLE",       # Steering wheel angle
-    0x0B1: "FRONT_WHEEL_PULSES",   # Front wheel pulse counters
-    0x0B3: "REAR_WHEEL_PULSES",    # Rear wheel pulse counters
+    0x0B1: "FRONT_WHEEL_SPEED",    # Front individual wheel speed
+    0x0B3: "REAR_WHEEL_SPEED",     # Rear individual wheel speed
     
     # Status & events
     0x529: "SOC_BARS_EVENT",       # MFD SOC bars, EV mode, warnings
@@ -122,6 +123,9 @@ KNOWN_CAN_IDS = {
     # Fuel
     0x520: "FUEL_INJECTOR",        # Fuel injector time
     0x5A4: "FUEL_TANK",            # Fuel level
+
+    # Cruise Control
+    0x5C8: "CRUISE_CONTROL",        # Cruise control active flag
 
     # Temperatures
     0x348: "BATTERY_PACK_TEMP",    # Battery pack temperature/status
@@ -458,6 +462,18 @@ class CANDecoder:
             msg.msg_type = CANMessageType.CLIMATE_DATA
             msg.values["ambient_temp"] = data[0] - 40
         
+        # 0x5C8: Cruise Control Cancel Event (~1050ms period, sparse)
+        # This message is event-based (only ~18 msgs in 37 min recording).
+        # Byte C (data[2]) bit 4: cruise control CANCEL flag
+        #   - bit=1 means cruise was just CANCELED (brake/cancel pressed)
+        #   - bit=0 is a system heartbeat/check-in (NOT "cruise active")
+        # NOTE: This bus has no "cruise engaged" flag. Cruise activation
+        # is inferred from speed stability in the store.
+        elif can_id == 0x5C8 and len(data) >= 3:
+            msg.msg_type = CANMessageType.CRUISE_CONTROL
+            msg.values["cruise_cancel"] = bool(data[2] & 0x10)
+            msg.values["cruise_status_byte"] = data[0]
+        
         # ---------------------------------------------------
         # VEHICLE DYNAMICS
         # ---------------------------------------------------
@@ -491,18 +507,22 @@ class CANDecoder:
             lon_raw = (data[0] << 8) | data[1]
             msg.values["longitudinal_accel_alt_raw"] = lon_raw - 0x200
         
-        # 0x0B1: Front Wheel Pulses (13ms period, 185 pulses/rev)
+        # 0x0B1: Front Wheel Speed (13ms period)
+        # Bytes 0-1: front right wheel speed * 100 (km/h)
+        # Bytes 2-3: front left wheel speed * 100 (km/h)
         elif can_id == 0x0B1 and len(data) >= 4:
-            msg.msg_type = CANMessageType.WHEEL_PULSES
-            msg.values["front_right_pulses"] = (data[0] << 8) | data[1]
-            msg.values["front_left_pulses"] = (data[2] << 8) | data[3]
+            msg.msg_type = CANMessageType.WHEEL_SPEED
+            msg.values["right_speed_kph"] = ((data[0] << 8) | data[1]) * 0.01
+            msg.values["left_speed_kph"] = ((data[2] << 8) | data[3]) * 0.01
             msg.values["wheel_position"] = "front"
         
-        # 0x0B3: Rear Wheel Pulses (13ms period, 185 pulses/rev)
+        # 0x0B3: Rear Wheel Speed (13ms period)
+        # Bytes 0-1: rear right wheel speed * 100 (km/h)
+        # Bytes 2-3: rear left wheel speed * 100 (km/h)
         elif can_id == 0x0B3 and len(data) >= 4:
-            msg.msg_type = CANMessageType.WHEEL_PULSES
-            msg.values["rear_right_pulses"] = (data[0] << 8) | data[1]
-            msg.values["rear_left_pulses"] = (data[2] << 8) | data[3]
+            msg.msg_type = CANMessageType.WHEEL_SPEED
+            msg.values["right_speed_kph"] = ((data[0] << 8) | data[1]) * 0.01
+            msg.values["left_speed_kph"] = ((data[2] << 8) | data[3]) * 0.01
             msg.values["wheel_position"] = "rear"
         
         # 0x03A: Yaw Rate / Vehicle Dynamics (13ms period, highest-volume undecoded)
@@ -683,6 +703,13 @@ class CANDecoder:
                 msg.values["timing_advance"] = (payload[0] / 2) - 64
             elif pid == 0x10 and len(payload) >= 2:  # MAF Flow
                 msg.values["maf_flow"] = ((payload[0] * 256) + payload[1]) / 100
+            elif pid == 0x24 and len(payload) >= 4:  # Lambda + O2 Sensor
+                msg.values["lambda_ratio"] = 0.0000305 * ((payload[0] * 256) + payload[1])
+                msg.values["o2_sensor_voltage"] = 0.000122 * ((payload[2] * 256) + payload[3])
+            elif pid == 0x31 and len(payload) >= 2:  # Odometer since DTC Clear
+                msg.values["odometer_dtc_clear"] = (payload[0] * 256) + payload[1]
+            elif pid == 0x33 and payload:  # Barometric Pressure
+                msg.values["barometric_pressure"] = payload[0]
         
         # Mode 0x61 = response to Mode 0x21 (Toyota Extended)
         elif mode == 0x61:
@@ -749,6 +776,8 @@ class CANDecoder:
                 self._decode_pid_21c3(msg, payload)
             elif pid == 0xC4:  # Additional hybrid data
                 self._decode_pid_21c4(msg, payload)
+            elif pid == 0xD3:  # Cruise control data
+                self._decode_pid_21d3(msg, payload)
         
         # Mode 0x43 = DTC response from Hybrid ECU
         elif mode == 0x43:
@@ -768,12 +797,28 @@ class CANDecoder:
         This is a multi-frame response. Key data positions:
         - Bytes 0-1: MG2 RPM = ((A*256)+B)-16383
         - Bytes 2-3: MG2 Torque = (C*256+D)/8 - 500
+        - Byte 4: Regen Brake Torque Actual = 4 * E (Nm)
+        - Byte 5: Regen Brake Torque Request = 4 * F (Nm)
         - Bytes 6-7: MG1 RPM = ((G*256)+H)-16383
         - Bytes 8-9: MG1 Torque = (I*256+J)/8 - 500
+        - Bytes 10-11: (reserved/unknown)
+        - Bytes 12-13: Engine Speed Target = (M*256)+N RPM
+        - Bytes 14-15: Engine Speed Actual = (O*256)+P RPM
+        - Byte 16: (reserved)
+        - Byte 17: Master Cylinder Torque = (4 * R) - 512 Nm
+        - Byte 18: SOC = (100 * S) / 255 %
+        - Byte 19: WOUT HV Batt to Converter = 0.32 * T kW
+        - Byte 20: WIN HV Batt to Converter = (U - 128) * 0.32 kW
+        - Byte 21: Drive Condition ID = X (0-6)
         - Byte 24: MG1 Inverter Temp = Y - 40
         - Byte 25: MG2 Inverter Temp = Z - 40
         - Byte 26: MG2 Motor Temp = AA - 40
         - Byte 27: MG1 Motor Temp = AB - 40
+        - Byte 28: HV Voltage = 2 * AC (V)
+        - Byte 30: HV Current = 2 * AE - 256 (A)
+        - Byte 35: Drive State (0=transitional, 1=parked, 2=creeping, 8=driving)
+        
+        Note: Bytes 31-32 contain stale cruise memory values — use PID 21D3 instead.
         """
         # Store payload length for debugging
         msg.values["pid_21c3_payload_len"] = len(payload)
@@ -784,11 +829,44 @@ class CANDecoder:
         if len(payload) >= 4:
             msg.values["mg2_torque"] = ((payload[2] * 256) + payload[3]) / 8 - 500
         
+        # Regen brake torque (bytes 4-5)
+        if len(payload) >= 5:
+            msg.values["regen_torque_actual"] = 4 * payload[4]
+        
+        if len(payload) >= 6:
+            msg.values["regen_torque_request"] = 4 * payload[5]
+        
         if len(payload) >= 8:
             msg.values["mg1_rpm"] = ((payload[6] * 256) + payload[7]) - 16383
         
         if len(payload) >= 10:
             msg.values["mg1_torque"] = ((payload[8] * 256) + payload[9]) / 8 - 500
+        
+        # Engine speed target/actual (bytes 12-15)
+        if len(payload) >= 14:
+            msg.values["ice_rpm_target"] = (payload[12] * 256) + payload[13]
+        
+        if len(payload) >= 16:
+            msg.values["ice_rpm_actual"] = (payload[14] * 256) + payload[15]
+        
+        # Master cylinder torque (byte 17)
+        if len(payload) >= 18:
+            msg.values["master_cylinder_torque"] = (4 * payload[17]) - 512
+        
+        # SOC (byte 18)
+        if len(payload) >= 19:
+            msg.values["soc_percent"] = (100 * payload[18]) / 255
+        
+        # Battery power flow (bytes 19-20)
+        if len(payload) >= 20:
+            msg.values["wout_kw"] = 0.32 * payload[19]
+        
+        if len(payload) >= 21:
+            msg.values["win_kw"] = (payload[20] - 128) * 0.32
+        
+        # Drive condition ID (byte 21)
+        if len(payload) >= 22:
+            msg.values["drive_condition"] = payload[21]
         
         # Inverter and motor temperatures
         if len(payload) >= 25:
@@ -813,6 +891,18 @@ class CANDecoder:
         # HV Battery current (byte 30): 2 * AE - 256
         if len(payload) >= 31:
             msg.values["hv_current_21c3"] = 2 * payload[30] - 256
+        
+        # Note: Cruise control speeds (bytes 31-32) are NOT decoded here.
+        # They contain stale ECU memory values from a previous ignition cycle.
+        # Use PID 21D3 for proper cruise control data with active/switch flags.
+        
+        # Drive state indicator (byte 35)
+        # 0 = transitional (clutch engaging)
+        # 1 = stationary / parked (ICE off)
+        # 2 = low-speed creeping
+        # 8 = driving (ICE engaged, moving)
+        if len(payload) >= 36:
+            msg.values["drive_state"] = payload[35]
     
     def _decode_pid_21c4(self, msg: CANMessage, payload: list[int]) -> None:
         """
@@ -834,6 +924,70 @@ class CANDecoder:
         
         if len(payload) >= 6:
             msg.values["converter_temp"] = payload[5] - 40
+        
+        # Bytes A,B (payload[0:2]): Engine request bitmasks
+        if len(payload) >= 2:
+            msg.values["engine_requests_a"] = payload[0]
+            msg.values["engine_requests_b"] = payload[1]
+        
+        # Byte G (payload[6]): Crank Position = 0.706 * G
+        if len(payload) >= 7:
+            msg.values["crank_position"] = 0.706 * payload[6]
+        
+        # Byte H (payload[7]): System Main Relay Status bits 0,1,2
+        if len(payload) >= 8:
+            msg.values["system_relay_1"] = bool(payload[7] & 0x01)
+            msg.values["system_relay_2"] = bool(payload[7] & 0x02)
+            msg.values["system_relay_3"] = bool(payload[7] & 0x04)
+        
+        # Byte P (payload[15]): Aircon Consumption Power = 0.019608 * P
+        if len(payload) >= 16:
+            msg.values["aircon_power_kw"] = 0.019608 * payload[15]
+    
+    def _decode_pid_21d3(self, msg: CANMessage, payload: list[int]) -> None:
+        """
+        Decode PID 21D3 - Cruise Control data.
+        
+        - Byte 0 (A): Cruise Memory Vehicle Speed (km/h)
+        - Byte 1 (B): Cruise Set/Resume Speed (km/h), resets to 0 < 40 km/h
+        - Byte 2 (C): Cruise status bitmask
+            - Bit 0: Main Switch
+            - Bit 2: Main Switch Ready
+            - Bit 5: Indicator
+            - Bit 6: Cruise Control
+            - Bit 7: Shift D Position
+        - Byte 3 (D): Cruise switch/active bitmask
+            - Bit 0: Stop Light Switch 1 (Sub CPU)
+            - Bit 1: Stop Light Switch 2 (Sub CPU)
+            - Bit 2: Stop Light Switch 1 (Main CPU)
+            - Bit 3: RES / ACC Switch
+            - Bit 4: SET / COAST Switch
+            - Bit 5: Cancel Switch
+            - Bit 6: Cruise Control Active (Set)
+            - Bit 7: D drive mode selected
+        """
+        if len(payload) >= 2:
+            msg.values["cruise_memory_speed"] = payload[0]
+            msg.values["cruise_set_speed"] = payload[1]
+        
+        if len(payload) >= 3:
+            c = payload[2]
+            msg.values["cruise_main_switch"] = bool(c & 0x01)
+            msg.values["cruise_main_ready"] = bool(c & 0x04)
+            msg.values["cruise_indicator"] = bool(c & 0x20)
+            msg.values["cruise_control"] = bool(c & 0x40)
+            msg.values["shift_d_position"] = bool(c & 0x80)
+        
+        if len(payload) >= 4:
+            dd = payload[3]
+            msg.values["stop_light_1_sub"] = bool(dd & 0x01)
+            msg.values["stop_light_2_sub"] = bool(dd & 0x02)
+            msg.values["stop_light_1_main"] = bool(dd & 0x04)
+            msg.values["cruise_res_acc_switch"] = bool(dd & 0x08)
+            msg.values["cruise_set_coast_switch"] = bool(dd & 0x10)
+            msg.values["cruise_cancel_switch"] = bool(dd & 0x20)
+            msg.values["cruise_active"] = bool(dd & 0x40)
+            msg.values["d_drive_selected"] = bool(dd & 0x80)
     
     def _decode_hv_battery_response(self, msg: CANMessage, data: list[int]) -> None:
         """

@@ -17,6 +17,7 @@ from .ev_screen import EVScreen
 from .battery_screen import BatteryScreen
 from .dtc_screen import DTCScreen
 from .avc_monitor_screen import AVCMonitorScreen
+from .solicited_monitor_screen import SolicitedMonitorScreen
 
 __all__ = [
     "Screen",
@@ -32,4 +33,5 @@ __all__ = [
     "BatteryScreen",
     "DTCScreen",
     "AVCMonitorScreen",
+    "SolicitedMonitorScreen",
 ]

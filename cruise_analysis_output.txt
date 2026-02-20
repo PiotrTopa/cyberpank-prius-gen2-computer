@@ -1,0 +1,562 @@
+
+################################################################################
+# ANALYZING: comm_20260219_144720.ndjson
+################################################################################
+
+Parsing D:\Projects\CyberPunk\cyberpank-prius-gen2-computer\logs\comm_20260219_144720.ndjson...
+  Decoded events: 10570
+  CAN IDs with raw data: 57
+    0x20: 731 messages
+    0x22: 1273 messages
+    0x23: 4032 messages
+    0x25: 1127 messages
+    0x30: 2560 messages
+    0x38: 5878 messages
+    0x39: 5862 messages
+    0x3A: 7733 messages
+    0x3B: 6442 messages
+    0x3E: 7751 messages
+    0xB1: 915 messages
+    0xB3: 5335 messages
+    0xB4: 1715 messages
+    0x120: 4796 messages
+    0x230: 837 messages
+    0x244: 2079 messages
+    0x262: 2552 messages
+    0x348: 1931 messages
+    0x3C8: 785 messages
+    0x3C9: 611 messages
+    0x3CA: 712 messages
+    0x3CB: 642 messages
+    0x3CD: 593 messages
+    0x3CF: 487 messages
+    0x423: 49 messages
+    0x484: 56 messages
+    0x4C1: 68 messages
+    0x4C3: 53 messages
+    0x4C6: 56 messages
+    0x4C7: 53 messages
+    0x4C8: 33 messages
+    0x4CE: 43 messages
+    0x4D0: 82 messages
+    0x4D1: 64 messages
+    0x520: 39 messages
+    0x521: 82 messages
+    0x526: 75 messages
+    0x527: 83 messages
+    0x528: 145 messages
+    0x529: 76 messages
+    0x52C: 49 messages
+    0x540: 66 messages
+    0x553: 59 messages
+    0x554: 35 messages
+    0x56D: 67 messages
+    0x57F: 52 messages
+    0x591: 196 messages
+    0x5A4: 16 messages
+    0x5B2: 12 messages
+    0x5B6: 43 messages
+    0x5C8: 58 messages
+    0x5CC: 215 messages
+    0x5D4: 49 messages
+    0x5EC: 94 messages
+    0x5ED: 58 messages
+    0x5F8: 48 messages
+    0x602: 2 messages
+
+Building timeline...
+  Timeline: 3146 seconds (34s - 3179s)
+
+Classifying cruise windows...
+  Cruise: 0s (0.0%)
+  Non-cruise: 3146s (100.0%)
+
+  WARNING: Very few cruise seconds detected. Lowering speed threshold to 40...
+  Cruise: 11s (0.3%)
+
+================================================================================
+TORQUE / PEDAL ANALYSIS DURING CLASSIFIED WINDOWS
+================================================================================
+
+  [CRUISE (likely)] — 11 seconds
+    throttle            : min=     0.0  avg=     0.0  max=     0.0  (n=11)
+    brake               : min=     0.0  avg=     0.0  max=     0.0  (n=11)
+    speed               : min=    42.6  avg=    49.1  max=    55.2  (n=11)
+    mg2_torque          : min=   -43.5  avg=   -19.7  max=    14.9  (n=7)
+    mg1_torque          : min=   -15.0  avg=    -8.6  max=     0.0  (n=7)
+    regen_torque        : min=     0.0  avg=     0.0  max=     0.0  (n=7)
+    master_cyl          : min=     0.0  avg=     0.0  max=     0.0  (n=7)
+    engine_load         : no data
+    ice_rpm_actual      : min=     0.0  avg=   402.3  max=   800.0  (n=7)
+
+  [NON-CRUISE (speed>30)] — 491 seconds
+    throttle            : min=     0.0  avg=    47.4  max=   125.0  (n=491)
+    brake               : min=     0.0  avg=     0.6  max=    66.0  (n=491)
+    speed               : min=    30.1  avg=    44.1  max=    68.4  (n=491)
+    mg2_torque          : min=  -149.2  avg=     3.5  max=   158.6  (n=306)
+    mg1_torque          : min=   -28.5  avg=   -10.7  max=     0.0  (n=306)
+    regen_torque        : min=     0.0  avg=     0.4  max=   124.0  (n=306)
+    master_cyl          : min=  -176.0  avg=    -3.5  max=     0.0  (n=306)
+    engine_load         : no data
+    ice_rpm_actual      : min=     0.0  avg=   976.9  max=  4160.0  (n=306)
+
+================================================================================
+DRIVE CONDITION / STATE ANALYSIS (from PID 21C3)
+================================================================================
+
+  drive_condition distribution:
+    condition=0: cruise=7 (0%), non-cruise=2096 (100%)
+
+  drive_state distribution:
+    state=1: cruise=0 (0%), non-cruise=1080 (100%)
+    state=2: cruise=0 (0%), non-cruise=32 (100%)
+    state=8: cruise=7 (1%), non-cruise=984 (99%)
+
+================================================================================
+0x5C8 MESSAGES + CRUISE CLASSIFICATION
+================================================================================
+  ts=  1171.5s  [24 00 00]  byte2=00000000  cancel=False  spd=7  thr=75  brk=0  mg2T=0.0  [not-cruise]
+  ts=  1278.5s  [24 00 00]  byte2=00000000  cancel=False  spd=0  thr=0  brk=0  mg2T=0.0  [not-cruise]
+  ts=  1650.2s  [24 00 00]  byte2=00000000  cancel=False  spd=0  thr=0  brk=0  mg2T=0.0  [not-cruise]
+  ts=  1714.3s  [24 00 00]  byte2=00000000  cancel=False  spd=0  thr=0  brk=30  mg2T=0.0  [not-cruise]
+  ts=  1722.2s  [24 00 00]  byte2=00000000  cancel=False  spd=0  thr=0  brk=30  mg2T=0.0  [not-cruise]
+  ts=  1825.4s  [24 00 10]  byte2=00010000  cancel=True  spd=0  thr=7  brk=0  mg2T=70.375  [not-cruise]
+  ts=  2156.2s  [24 00 10]  byte2=00010000  cancel=True  spd=0  thr=0  brk=0  mg2T=-14.875  [not-cruise]
+  ts=  2166.2s  [24 00 10]  byte2=00010000  cancel=True  spd=0  thr=0  brk=0  mg2T=-14.625  [not-cruise]
+  ts=  2431.1s  [24 00 10]  byte2=00010000  cancel=True  spd=0  thr=0  brk=28  mg2T=120.375  [not-cruise]
+  ts=  2769.9s  [24 00 10]  byte2=00010000  cancel=True  spd=29  thr=80  brk=0  mg2T=34.25  [not-cruise]
+  ts=  2817.8s  [24 00 10]  byte2=00010000  cancel=True  spd=0  thr=0  brk=48  mg2T=0.0  [not-cruise]
+  ts=  2821.8s  [24 00 10]  byte2=00010000  cancel=True  spd=0  thr=0  brk=48  mg2T=0.0  [not-cruise]
+  ts=  2824.8s  [24 00 10]  byte2=00010000  cancel=True  spd=0  thr=0  brk=47  mg2T=0.0  [not-cruise]
+  ts=  2988.7s  [24 00 10]  byte2=00010000  cancel=True  spd=4  thr=41  brk=0  mg2T=172.125  [not-cruise]
+  ts=  3037.7s  [24 00 10]  byte2=00010000  cancel=True  spd=35  thr=0  brk=0  mg2T=-27.125  [not-cruise]
+  ts=  3077.7s  [24 00 10]  byte2=00010000  cancel=True  spd=7  thr=56  brk=0  mg2T=118.625  [not-cruise]
+  ts=  3080.7s  [24 00 10]  byte2=00010000  cancel=True  spd=19  thr=73  brk=0  mg2T=108.5  [not-cruise]
+  ts=    96.2s  [24 00 00]  byte2=00000000  cancel=False  spd=0  thr=0  brk=0  mg2T=None  [not-cruise]
+  ts=   112.9s  [24 00 00]  byte2=00000000  cancel=False  spd=0  thr=0  brk=63  mg2T=None  [not-cruise]
+  ts=   160.8s  [24 00 00]  byte2=00000000  cancel=False  spd=23  thr=59  brk=0  mg2T=None  [not-cruise]
+  ts=   262.8s  [24 00 00]  byte2=00000000  cancel=False  spd=11  thr=33  brk=0  mg2T=None  [not-cruise]
+  ts=   503.6s  [24 00 00]  byte2=00000000  cancel=False  spd=0  thr=0  brk=38  mg2T=None  [not-cruise]
+  ts=   674.5s  [24 00 00]  byte2=00000000  cancel=False  spd=11  thr=35  brk=0  mg2T=None  [not-cruise]
+  ts=   742.5s  [24 00 00]  byte2=00000000  cancel=False  spd=0  thr=0  brk=0  mg2T=None  [not-cruise]
+  ts=   808.4s  [24 00 00]  byte2=00000000  cancel=False  spd=40  thr=89  brk=0  mg2T=None  [not-cruise]
+  ts=   822.4s  [24 00 10]  byte2=00010000  cancel=True  spd=51  thr=82  brk=0  mg2T=None  [not-cruise]
+  ts=   828.4s  [24 00 10]  byte2=00010000  cancel=True  spd=51  thr=61  brk=0  mg2T=None  [not-cruise]
+  ts=   830.4s  [24 00 10]  byte2=00010000  cancel=True  spd=51  thr=61  brk=0  mg2T=None  [not-cruise]
+  ts=   862.4s  [24 00 10]  byte2=00010000  cancel=True  spd=51  thr=64  brk=0  mg2T=None  [not-cruise]
+  ts=   881.3s  [24 00 10]  byte2=00010000  cancel=True  spd=51  thr=62  brk=0  mg2T=None  [not-cruise]
+  ts=   884.4s  [24 00 10]  byte2=00010000  cancel=True  spd=51  thr=62  brk=0  mg2T=None  [not-cruise]
+  ts=   895.4s  [24 00 10]  byte2=00010000  cancel=True  spd=60  thr=100  brk=0  mg2T=None  [not-cruise]
+  ts=   906.4s  [24 00 10]  byte2=00010000  cancel=True  spd=66  thr=95  brk=0  mg2T=None  [not-cruise]
+  ts=   923.3s  [24 00 10]  byte2=00010000  cancel=True  spd=16  thr=0  brk=0  mg2T=None  [not-cruise]
+  ts=   931.3s  [24 00 10]  byte2=00010000  cancel=True  spd=15  thr=60  brk=0  mg2T=None  [not-cruise]
+  ts=   954.3s  [24 00 10]  byte2=00010000  cancel=True  spd=11  thr=45  brk=0  mg2T=None  [not-cruise]
+  ts=   981.3s  [24 00 10]  byte2=00010000  cancel=True  spd=15  thr=38  brk=0  mg2T=None  [not-cruise]
+  ts=  1017.3s  [24 00 10]  byte2=00010000  cancel=True  spd=16  thr=46  brk=0  mg2T=None  [not-cruise]
+  ts=  1027.3s  [24 00 10]  byte2=00010000  cancel=True  spd=16  thr=64  brk=0  mg2T=None  [not-cruise]
+  ts=  1047.3s  [24 00 10]  byte2=00010000  cancel=True  spd=19  thr=54  brk=0  mg2T=None  [not-cruise]
+  ts=  1077.2s  [24 00 10]  byte2=00010000  cancel=True  spd=20  thr=0  brk=0  mg2T=0.0  [not-cruise]
+  ts=  1085.2s  [24 00 10]  byte2=00010000  cancel=True  spd=23  thr=66  brk=0  mg2T=0.0  [not-cruise]
+  ts=  1122.2s  [24 00 10]  byte2=00010000  cancel=True  spd=0  thr=78  brk=0  mg2T=0.0  [not-cruise]
+  ts=  1128.2s  [24 00 10]  byte2=00010000  cancel=True  spd=30  thr=85  brk=0  mg2T=0.0  [not-cruise]
+  ts=  1134.2s  [24 00 10]  byte2=00010000  cancel=True  spd=19  thr=0  brk=0  mg2T=0.0  [not-cruise]
+  ts=  1169.2s  [24 00 10]  byte2=00010000  cancel=True  spd=0  thr=52  brk=0  mg2T=0.0  [not-cruise]
+  ts=  1212.2s  [24 00 10]  byte2=00010000  cancel=True  spd=0  thr=0  brk=0  mg2T=-3.875  [not-cruise]
+  ts=  1227.1s  [24 00 10]  byte2=00010000  cancel=True  spd=0  thr=0  brk=30  mg2T=47.75  [not-cruise]
+  ts=  1280.1s  [24 00 10]  byte2=00010000  cancel=True  spd=0  thr=0  brk=23  mg2T=0.0  [not-cruise]
+  ts=  1295.1s  [24 00 10]  byte2=00010000  cancel=True  spd=31  thr=90  brk=0  mg2T=0.0  [not-cruise]
+  ts=  1332.1s  [24 00 10]  byte2=00010000  cancel=True  spd=0  thr=0  brk=37  mg2T=0.0  [not-cruise]
+  ts=  1355.1s  [24 00 10]  byte2=00010000  cancel=True  spd=0  thr=0  brk=40  mg2T=0.0  [not-cruise]
+  ts=  1359.1s  [24 00 10]  byte2=00010000  cancel=True  spd=0  thr=0  brk=0  mg2T=0.0  [not-cruise]
+  ts=  1410.0s  [24 00 10]  byte2=00010000  cancel=True  spd=0  thr=0  brk=0  mg2T=-27.375  [not-cruise]
+  ts=  1427.0s  [24 00 10]  byte2=00010000  cancel=True  spd=12  thr=0  brk=0  mg2T=-27.375  [not-cruise]
+  ts=  1484.0s  [24 00 10]  byte2=00010000  cancel=True  spd=24  thr=0  brk=0  mg2T=-20.25  [not-cruise]
+  ts=  1523.0s  [24 00 10]  byte2=00010000  cancel=True  spd=11  thr=33  brk=0  mg2T=0.0  [not-cruise]
+  ts=  1590.9s  [24 00 10]  byte2=00010000  cancel=True  spd=0  thr=0  brk=0  mg2T=0.0  [not-cruise]
+
+================================================================================
+BRAKING / CRUISE TRANSITION EVENTS
+================================================================================
+
+  CRUISE entry at ts=770s:
+    ts=    767  spd=   55  thr= 55  brk=  0  mg2T=None  dc=None     
+    ts=    768  spd=   56  thr= 55  brk=  0  mg2T=None  dc=None     
+    ts=    769  spd=   56  thr= 55  brk=  0  mg2T=None  dc=None     
+    ts=    770  spd=   55  thr=  0  brk=  0  mg2T=None  dc=None  CRS ***
+    ts=    771  spd=   55  thr=  0  brk=  0  mg2T=None  dc=None  CRS
+    ts=    772  spd=   51  thr=  0  brk=  0  mg2T=None  dc=None  CRS
+
+  CRUISE entry at ts=2451s:
+    ts=   2448  spd=   50  thr= 70  brk=  0  mg2T=20.5  dc=0     
+    ts=   2449  spd=   49  thr= 70  brk=  0  mg2T=-43.5  dc=0     
+    ts=   2450  spd=   49  thr= 70  brk=  0  mg2T=-43.5  dc=0     
+    ts=   2451  spd=   45  thr=  0  brk=  0  mg2T=-43.5  dc=0  CRS ***
+    ts=   2452  spd=   44  thr=  0  brk=  0  mg2T=14.875  dc=0  CRS
+    ts=   2453  spd=   43  thr=  0  brk=  0  mg2T=14.875  dc=0  CRS
+
+  CRUISE entry at ts=2865s:
+    ts=   2862  spd=   42  thr= 75  brk=  0  mg2T=14.0  dc=0     
+    ts=   2863  spd=   42  thr= 75  brk=  0  mg2T=14.0  dc=0     
+    ts=   2864  spd=   42  thr= 75  brk=  0  mg2T=14.0  dc=0     
+    ts=   2865  spd=   51  thr=  0  brk=  0  mg2T=-43.5  dc=0  CRS ***
+    ts=   2866  spd=   51  thr=  0  brk=  0  mg2T=-43.5  dc=0  CRS
+    ts=   2867  spd=   51  thr=  0  brk=  0  mg2T=-43.5  dc=0  CRS
+
+  CRUISE entry at ts=2874s:
+    ts=   2871  spd=   46  thr= 37  brk=  0  mg2T=17.5  dc=0     
+    ts=   2872  spd=   46  thr= 35  brk=  0  mg2T=-26.75  dc=0     
+    ts=   2873  spd=   45  thr= 35  brk=  0  mg2T=-26.75  dc=0     
+    ts=   2874  spd=   45  thr=  0  brk=  0  mg2T=6.625  dc=0  CRS ***
+    ts=   2875  spd=   45  thr= 25  brk=  0  mg2T=7.25  dc=0     
+    ts=   2876  spd=   45  thr= 25  brk=  0  mg2T=7.375  dc=0     
+
+================================================================================
+BIT CORRELATION ANALYSIS (top 40 by |differential|)
+================================================================================
+    CAN_ID  byte  bit   cruise%    other%      diff   n_crs   n_oth
+  ────────  ────  ───  ────────  ────────  ────────  ──────  ──────
+      0xB3  [ 0]  b4    100.0%      7.4%    +92.6%      16    5319 ★★★ STRONG cruise=ON
+      0xB3  [ 2]  b4    100.0%      7.4%    +92.6%      16    5319 ★★★ STRONG cruise=ON
+      0x38  [ 2]  b1     95.0%     17.8%    +77.2%      20    5858 ★★ moderate cruise=ON
+      0x38  [ 2]  b0     85.0%     13.9%    +71.1%      20    5858 ★★ moderate cruise=ON
+      0x38  [ 3]  b7     85.0%     13.9%    +71.1%      20    5858 ★★ moderate cruise=ON
+      0x38  [ 3]  b6     85.0%     13.9%    +71.1%      20    5858 ★★ moderate cruise=ON
+     0x244  [ 4]  b2     90.9%     24.5%    +66.4%      11    2068 ★★ moderate cruise=ON
+      0x38  [ 3]  b5     85.0%     20.5%    +64.5%      20    5858 ★★ moderate cruise=ON
+      0x39  [ 0]  b4      0.0%     62.5%    -62.5%      31    5831 ★★ moderate cruise=OFF
+      0x3B  [ 4]  b7     83.3%     21.1%    +62.2%      12    6430 ★★ moderate cruise=ON
+      0x38  [ 3]  b4     85.0%     28.5%    +56.5%      20    5858 ★★ moderate cruise=ON
+      0x23  [ 3]  b5      0.0%     56.4%    -56.4%      13    4019 ★★ moderate cruise=OFF
+      0x23  [ 3]  b6      0.0%     55.2%    -55.2%      13    4019 ★★ moderate cruise=OFF
+      0x23  [ 2]  b0      0.0%     55.0%    -55.0%      13    4019 ★★ moderate cruise=OFF
+      0x23  [ 2]  b1    100.0%     45.0%    +55.0%      13    4019 ★★ moderate cruise=ON
+      0x23  [ 3]  b7      0.0%     55.0%    -55.0%      13    4019 ★★ moderate cruise=OFF
+      0x39  [ 0]  b1      0.0%     52.7%    -52.7%      31    5831 ★★ moderate cruise=OFF
+     0x244  [ 4]  b1     90.9%     38.7%    +52.2%      11    2068 ★★ moderate cruise=ON
+      0x39  [ 0]  b2    100.0%     49.6%    +50.4%      31    5831 ★★ moderate cruise=ON
+      0x3A  [ 0]  b0     64.3%     14.1%    +50.2%      14    7719 ★★ moderate cruise=ON
+      0x3A  [ 1]  b7     64.3%     14.1%    +50.2%      14    7719 ★★ moderate cruise=ON
+      0x3A  [ 1]  b6     64.3%     14.3%    +50.0%      14    7719 ★★ moderate cruise=ON
+      0x38  [ 3]  b3     85.0%     37.1%    +47.9%      20    5858
+      0x39  [ 3]  b5      0.0%     47.2%    -47.2%      31    5831
+      0x38  [ 2]  b2    100.0%     54.0%    +46.0%      20    5858
+      0x23  [ 0]  b0     61.5%     16.3%    +45.3%      13    4019
+      0x23  [ 0]  b1     38.5%     83.7%    -45.3%      13    4019
+      0x23  [ 1]  b6     61.5%     16.3%    +45.3%      13    4019
+      0x23  [ 1]  b7     61.5%     16.3%    +45.3%      13    4019
+      0x38  [ 3]  b0     80.0%     35.5%    +44.5%      20    5858
+      0x3A  [ 1]  b5     64.3%     21.2%    +43.1%      14    7719
+      0x3A  [ 6]  b3      7.1%     50.0%    -42.9%      14    7719
+      0x3B  [ 0]  b3     83.3%     40.8%    +42.6%      12    6430
+      0x3B  [ 0]  b2     83.3%     40.8%    +42.5%      12    6430
+      0x39  [ 3]  b2     90.3%     47.8%    +42.5%      31    5831
+      0x23  [ 1]  b5     61.5%     19.1%    +42.4%      13    4019
+      0x3B  [ 0]  b1     83.3%     40.9%    +42.4%      12    6430
+      0xB3  [ 1]  b2     68.8%     26.7%    +42.0%      16    5319
+      0x3B  [ 1]  b7     83.3%     41.4%    +41.9%      12    6430
+      0xB3  [ 3]  b1     68.8%     27.1%    +41.7%      16    5319
+
+================================================================================
+BYTE VALUE CORRELATION (top 20 by |mean difference|)
+================================================================================
+    CAN_ID  byte  crs_mean  oth_mean      diff  crs_uniq  oth_uniq
+  ────────  ────  ────────  ────────  ────────  ────────  ────────
+      0x38  [ 3]     212.0      43.4    +168.6         5       108
+      0x23  [ 3]      12.2     139.8    -127.6        10       118
+      0x3A  [ 1]     161.6      44.6    +116.9         4        90
+      0x23  [ 1]     154.5      48.8    +105.7        11        97
+      0x3B  [ 4]     174.2      90.3     +83.8        11       256
+      0xB3  [ 3]     137.7      65.0     +72.6        15       256
+      0xB3  [ 1]     132.1      67.5     +64.6        16       256
+      0x3B  [ 1]     156.8     107.6     +49.2        12       256
+     0x244  [ 7]     163.6     118.2     +45.5        11       253
+      0x38  [ 6]       8.2      39.0     -30.9         5       185
+      0xB3  [ 4]     145.0     118.7     +26.3         1         3
+      0x3E  [ 2]     108.3     130.1     -21.8        37       256
+      0x3E  [ 1]     141.1     120.4     +20.7        30       128
+     0x244  [ 6]       0.0      20.6     -20.6         1       107
+     0x244  [ 4]       6.9      26.8     -19.9         3        11
+     0x244  [ 5]     109.3      93.9     +15.4        11       254
+      0xB3  [ 0]      19.1       4.4     +14.7         5        27
+      0xB3  [ 2]      19.1       4.4     +14.7         5        27
+      0x38  [ 1]       0.0      14.5     -14.5         1       117
+      0x3A  [ 6]      77.0      85.4      -8.4         8       120
+
+################################################################################
+# ANALYZING: comm_20260219_202855.ndjson
+################################################################################
+
+Parsing D:\Projects\CyberPunk\cyberpank-prius-gen2-computer\logs\comm_20260219_202855.ndjson...
+  Decoded events: 3352
+  CAN IDs with raw data: 56
+    0x20: 270 messages
+    0x22: 312 messages
+    0x23: 951 messages
+    0x25: 371 messages
+    0x30: 777 messages
+    0x38: 1697 messages
+    0x39: 1886 messages
+    0x3A: 2083 messages
+    0x3B: 1707 messages
+    0x3E: 2243 messages
+    0xB1: 270 messages
+    0xB3: 1327 messages
+    0xB4: 477 messages
+    0x120: 1225 messages
+    0x230: 210 messages
+    0x244: 663 messages
+    0x262: 670 messages
+    0x348: 469 messages
+    0x3C8: 225 messages
+    0x3C9: 157 messages
+    0x3CA: 185 messages
+    0x3CB: 192 messages
+    0x3CD: 159 messages
+    0x3CF: 113 messages
+    0x423: 14 messages
+    0x484: 8 messages
+    0x4C1: 17 messages
+    0x4C3: 11 messages
+    0x4C6: 12 messages
+    0x4C7: 22 messages
+    0x4C8: 9 messages
+    0x4CE: 14 messages
+    0x4D0: 23 messages
+    0x4D1: 18 messages
+    0x520: 11 messages
+    0x521: 21 messages
+    0x526: 34 messages
+    0x527: 20 messages
+    0x528: 41 messages
+    0x529: 15 messages
+    0x52C: 19 messages
+    0x540: 18 messages
+    0x553: 8 messages
+    0x554: 12 messages
+    0x56D: 9 messages
+    0x57F: 16 messages
+    0x591: 21 messages
+    0x5A4: 3 messages
+    0x5B2: 3 messages
+    0x5B6: 14 messages
+    0x5C8: 18 messages
+    0x5CC: 42 messages
+    0x5D4: 14 messages
+    0x5EC: 37 messages
+    0x5ED: 17 messages
+    0x5F8: 12 messages
+
+Building timeline...
+  Timeline: 2329 seconds (28s - 2356s)
+
+Classifying cruise windows...
+  Cruise: 42s (1.8%)
+  Non-cruise: 2287s (98.2%)
+
+================================================================================
+TORQUE / PEDAL ANALYSIS DURING CLASSIFIED WINDOWS
+================================================================================
+
+  [CRUISE (likely)] — 42 seconds
+    throttle            : min=     0.0  avg=     0.0  max=     0.0  (n=42)
+    brake               : min=     0.0  avg=     0.0  max=     0.0  (n=42)
+    speed               : min=    79.9  avg=    87.7  max=   102.9  (n=42)
+    mg2_torque          : min=   -23.5  avg=   -12.3  max=    10.4  (n=42)
+    mg1_torque          : min=   -22.8  avg=     0.9  max=     4.1  (n=42)
+    regen_torque        : min=     0.0  avg=     0.0  max=     0.0  (n=42)
+    master_cyl          : min=     0.0  avg=     0.0  max=     0.0  (n=42)
+    engine_load         : no data
+    ice_rpm_actual      : min=   960.0  avg=  1160.4  max=  3168.0  (n=42)
+
+  [NON-CRUISE (speed>30)] — 680 seconds
+    throttle            : min=     0.0  avg=    48.6  max=   110.0  (n=680)
+    brake               : min=     0.0  avg=     1.0  max=    38.0  (n=680)
+    speed               : min=    30.8  avg=    74.6  max=   118.2  (n=680)
+    mg2_torque          : min=  -119.0  avg=    -5.9  max=   103.1  (n=680)
+    mg1_torque          : min=   -30.2  avg=   -14.9  max=     5.0  (n=680)
+    regen_torque        : min=     0.0  avg=     0.6  max=    92.0  (n=680)
+    master_cyl          : min=  -148.0  avg=    -4.0  max=     0.0  (n=680)
+    engine_load         : no data
+    ice_rpm_actual      : min=     0.0  avg=  1788.6  max=  4032.0  (n=680)
+
+================================================================================
+DRIVE CONDITION / STATE ANALYSIS (from PID 21C3)
+================================================================================
+
+  drive_condition distribution:
+    condition=0: cruise=42 (2%), non-cruise=2284 (98%)
+
+  drive_state distribution:
+    state=0: cruise=0 (0%), non-cruise=3 (100%)
+    state=1: cruise=0 (0%), non-cruise=698 (100%)
+    state=2: cruise=0 (0%), non-cruise=87 (100%)
+    state=8: cruise=42 (3%), non-cruise=1496 (97%)
+
+================================================================================
+0x5C8 MESSAGES + CRUISE CLASSIFICATION
+================================================================================
+  ts=    64.5s  [24 00 00]  byte2=00000000  cancel=False  spd=17  thr=0  brk=0  mg2T=-24.75  [not-cruise]
+  ts=    65.5s  [24 00 00]  byte2=00000000  cancel=False  spd=16  thr=0  brk=0  mg2T=-21.375  [not-cruise]
+  ts=   154.4s  [24 00 00]  byte2=00000000  cancel=False  spd=36  thr=39  brk=0  mg2T=-10.625  [not-cruise]
+  ts=   155.5s  [24 00 00]  byte2=00000000  cancel=False  spd=35  thr=57  brk=0  mg2T=21.625  [not-cruise]
+  ts=   512.2s  [24 00 10]  byte2=00010000  cancel=True  spd=113  thr=69  brk=0  mg2T=-16.125  [not-cruise]
+  ts=   577.2s  [24 00 10]  byte2=00010000  cancel=True  spd=81  thr=81  brk=0  mg2T=12.625  [not-cruise]
+  ts=   586.2s  [24 00 10]  byte2=00010000  cancel=True  spd=81  thr=77  brk=0  mg2T=9.5  [not-cruise]
+  ts=   606.0s  [24 00 00]  byte2=00000000  cancel=False  spd=65  thr=35  brk=0  mg2T=-12.75  [not-cruise]
+  ts=   613.9s  [24 00 00]  byte2=00000000  cancel=False  spd=56  thr=0  brk=0  mg2T=-15.125  [not-cruise]
+  ts=   930.8s  [24 00 00]  byte2=00000000  cancel=False  spd=6  thr=22  brk=0  mg2T=38.375  [not-cruise]
+  ts=   962.7s  [24 00 00]  byte2=00000000  cancel=False  spd=0  thr=0  brk=0  mg2T=45.5  [not-cruise]
+  ts=  1355.5s  [24 00 00]  byte2=00000000  cancel=False  spd=0  thr=0  brk=0  mg2T=0.0  [not-cruise]
+  ts=  1583.4s  [24 00 00]  byte2=00000000  cancel=False  spd=23  thr=0  brk=0  mg2T=70.875  [not-cruise]
+  ts=  1707.3s  [24 00 00]  byte2=00000000  cancel=False  spd=0  thr=0  brk=0  mg2T=20.0  [not-cruise]
+  ts=  1708.3s  [24 00 00]  byte2=00000000  cancel=False  spd=0  thr=0  brk=0  mg2T=20.0  [not-cruise]
+  ts=  1889.2s  [24 00 00]  byte2=00000000  cancel=False  spd=0  thr=0  brk=0  mg2T=0.0  [not-cruise]
+  ts=  2064.1s  [24 00 00]  byte2=00000000  cancel=False  spd=16  thr=28  brk=0  mg2T=29.5  [not-cruise]
+  ts=  2199.0s  [24 00 00]  byte2=00000000  cancel=False  spd=9  thr=38  brk=0  mg2T=8.875  [not-cruise]
+
+================================================================================
+BRAKING / CRUISE TRANSITION EVENTS
+================================================================================
+
+  CRUISE entry at ts=279s:
+    ts=    276  spd=   83  thr= 39  brk=  0  mg2T=-17.875  dc=0     
+    ts=    277  spd=   83  thr= 39  brk=  0  mg2T=-17.875  dc=0     
+    ts=    278  spd=   81  thr= 39  brk=  0  mg2T=-23.5  dc=0     
+    ts=    279  spd=   80  thr=  0  brk=  0  mg2T=-23.5  dc=0  CRS ***
+    ts=    280  spd=   80  thr=  0  brk=  0  mg2T=-23.5  dc=0  CRS
+    ts=    281  spd=   80  thr=  0  brk=  0  mg2T=-23.5  dc=0  CRS
+
+  CRUISE entry at ts=363s:
+    ts=    360  spd=  108  thr= 53  brk=  0  mg2T=-23.5  dc=0     
+    ts=    361  spd=  107  thr= 39  brk=  0  mg2T=-23.5  dc=0     
+    ts=    362  spd=  107  thr= 39  brk=  0  mg2T=-23.5  dc=0     
+    ts=    363  spd=  103  thr=  0  brk=  0  mg2T=-10.0  dc=0  CRS ***
+    ts=    364  spd=  102  thr=  0  brk=  0  mg2T=-10.0  dc=0  CRS
+    ts=    365  spd=  102  thr=  0  brk=  0  mg2T=-10.0  dc=0  CRS
+
+  CRUISE entry at ts=546s:
+    ts=    543  spd=   88  thr=  0  brk=  0  mg2T=-13.5  dc=0     
+    ts=    544  spd=   88  thr=  0  brk=  0  mg2T=-13.5  dc=0     
+    ts=    545  spd=   85  thr=  0  brk= 11  mg2T=-13.75  dc=0     
+    ts=    546  spd=   84  thr=  0  brk=  0  mg2T=-13.75  dc=0  CRS ***
+    ts=    547  spd=   84  thr=  0  brk=  0  mg2T=-13.75  dc=0  CRS
+    ts=    548  spd=   84  thr=  0  brk=  0  mg2T=-13.75  dc=0  CRS
+
+  CRUISE entry at ts=588s:
+    ts=    585  spd=   81  thr= 79  brk=  0  mg2T=10.875  dc=0     
+    ts=    586  spd=   81  thr= 77  brk=  0  mg2T=9.5  dc=0     
+    ts=    587  spd=   81  thr= 77  brk=  0  mg2T=9.5  dc=0     
+    ts=    588  spd=   81  thr=  0  brk=  0  mg2T=-3.375  dc=0  CRS ***
+    ts=    589  spd=   80  thr=  0  brk=  0  mg2T=-3.375  dc=0  CRS
+    ts=    590  spd=   80  thr=  0  brk=  0  mg2T=-3.375  dc=0  CRS
+
+================================================================================
+BIT CORRELATION ANALYSIS (top 40 by |differential|)
+================================================================================
+    CAN_ID  byte  bit   cruise%    other%      diff   n_crs   n_oth
+  ────────  ────  ───  ────────  ────────  ────────  ──────  ──────
+      0xB3  [ 3]  b5     92.9%     25.4%    +67.5%      14    1313 ★★ moderate cruise=ON
+      0xB3  [ 5]  b0     78.6%     26.2%    +52.4%      14    1313 ★★ moderate cruise=ON
+      0xB3  [ 1]  b4     78.6%     26.3%    +52.3%      14    1313 ★★ moderate cruise=ON
+      0xB3  [ 5]  b5     78.6%     27.0%    +51.5%      14    1313 ★★ moderate cruise=ON
+      0x38  [ 2]  b2    100.0%     52.3%    +47.7%      13    1684
+      0xB3  [ 2]  b2     64.3%     17.9%    +46.4%      14    1313
+      0xB3  [ 0]  b2     64.3%     18.1%    +46.2%      14    1313
+      0xB3  [ 1]  b2     71.4%     26.1%    +45.3%      14    1313
+      0x39  [ 3]  b1      6.7%     51.0%    -44.3%      15    1871
+      0x39  [ 3]  b4     86.7%     43.1%    +43.6%      15    1871
+      0x38  [ 3]  b4     69.2%     26.6%    +42.6%      13    1684
+      0x39  [ 3]  b5     73.3%     31.2%    +42.1%      15    1871
+      0xB3  [ 0]  b0     71.4%     29.6%    +41.9%      14    1313
+      0x39  [ 2]  b5     60.0%     19.2%    +40.8%      15    1871
+      0xB3  [ 1]  b5     64.3%     24.2%    +40.1%      14    1313
+      0xB3  [ 3]  b0     64.3%     24.8%    +39.5%      14    1313
+      0xB3  [ 0]  b3     57.1%     18.1%    +39.0%      14    1313
+      0xB3  [ 2]  b3     57.1%     18.4%    +38.8%      14    1313
+      0x38  [ 2]  b0     53.8%     15.3%    +38.5%      13    1684
+      0x38  [ 3]  b6     53.8%     15.3%    +38.5%      13    1684
+      0x38  [ 3]  b7     53.8%     15.3%    +38.5%      13    1684
+      0xB3  [ 5]  b4     64.3%     25.9%    +38.4%      14    1313
+      0xB3  [ 3]  b1     64.3%     26.0%    +38.3%      14    1313
+      0x38  [ 3]  b5     53.8%     16.3%    +37.6%      13    1684
+      0xB3  [ 2]  b1     64.3%     26.8%    +37.5%      14    1313
+      0xB3  [ 0]  b1     64.3%     27.5%    +36.8%      14    1313
+      0xB3  [ 2]  b5     50.0%     13.4%    +36.6%      14    1313
+      0xB3  [ 0]  b5     50.0%     13.6%    +36.4%      14    1313
+      0xB3  [ 0]  b4     50.0%     13.6%    +36.4%      14    1313
+      0xB3  [ 2]  b4     50.0%     13.8%    +36.2%      14    1313
+      0x23  [ 1]  b3     84.6%     49.6%    +35.0%      13     938
+      0xB3  [ 2]  b0     64.3%     29.4%    +34.9%      14    1313
+      0x38  [ 6]  b2     30.8%     65.0%    -34.2%      13    1684
+      0x3B  [ 0]  b0     84.0%     50.1%    +33.9%      25    1682
+      0x23  [ 3]  b4     61.5%     29.2%    +32.3%      13     938
+      0xB3  [ 3]  b4     57.1%     25.9%    +31.2%      14    1313
+      0x3E  [ 1]  b4     78.3%     47.6%    +30.6%      23    2220
+      0xB3  [ 1]  b1     57.1%     27.6%    +29.6%      14    1313
+      0xB3  [ 5]  b1     42.9%     72.2%    -29.3%      14    1313
+      0x39  [ 2]  b1      6.7%     35.4%    -28.7%      15    1871
+
+================================================================================
+BYTE VALUE CORRELATION (top 20 by |mean difference|)
+================================================================================
+    CAN_ID  byte  crs_mean  oth_mean      diff  crs_uniq  oth_uniq
+  ────────  ────  ────────  ────────  ────────  ────────  ────────
+      0x38  [ 3]     139.5      43.6     +95.9         9        73
+      0xB3  [ 3]     122.5      63.5     +59.0        13       242
+      0xB3  [ 1]     114.6      61.2     +53.5        14       231
+      0xB3  [ 5]     157.9     108.9     +49.0        13       239
+      0x23  [ 1]     121.4      72.9     +48.5        11        84
+      0x23  [ 3]      33.5      75.1     -41.5        10        87
+      0x3B  [ 3]     199.2     226.4     -27.2        13        73
+      0xB3  [ 0]      33.1       9.5     +23.6         5        45
+      0xB3  [ 2]      33.1       9.5     +23.6         4        45
+      0x39  [ 3]     163.5     145.8     +17.7         8        85
+      0x3B  [ 1]     131.1     114.3     +16.7        24       254
+      0x3E  [ 1]     126.6     109.9     +16.7        20       128
+      0x39  [ 0]      78.3      68.0     +10.3         6        57
+      0x38  [ 6]      33.8      42.2      -8.4         9       167
+      0x39  [ 2]      23.9      16.1      +7.8         7        47
+      0xB3  [ 4]     145.0     139.7      +5.3         1         2
+      0x23  [ 6]      62.5      57.6      +5.0        11       103
+      0x3B  [ 0]      10.9       7.0      +3.9         3         7
+      0x38  [ 2]      13.2      10.9      +2.3         3         8
+      0x38  [ 1]      20.0      21.1      -1.1         3       117
+
+################################################################################
+# CROSS-FILE CONSISTENCY CHECK
+################################################################################
+
+  Bits consistently correlated across 2 files:
+    CAN_ID  byte  bit  avg_diff  diffs_per_file
+  ────────  ────  ───  ────────  ──────────────────────────────
+      0xB3  [ 0]  b4    +64.5%  [+92.6%, +36.4%] ← possible cruise indicator
+      0xB3  [ 2]  b4    +64.4%  [+92.6%, +36.2%] ← possible cruise indicator
+      0x38  [ 2]  b0    +54.8%  [+71.1%, +38.5%] ← possible cruise indicator
+      0x38  [ 3]  b7    +54.8%  [+71.1%, +38.5%] ← possible cruise indicator
+      0x38  [ 3]  b6    +54.8%  [+71.1%, +38.5%] ← possible cruise indicator
+      0x38  [ 3]  b5    +51.1%  [+64.5%, +37.6%] ← possible cruise indicator
+      0x38  [ 3]  b4    +49.6%  [+56.5%, +42.6%] ← possible cruise indicator
+      0x38  [ 2]  b2    +46.9%  [+46.0%, +47.7%] ← possible cruise indicator
+      0xB3  [ 1]  b4    +44.0%  [+35.7%, +52.3%] ← possible cruise indicator
+      0xB3  [ 1]  b2    +43.7%  [+42.0%, +45.3%] ← possible cruise indicator
+      0xB3  [ 3]  b1    +40.0%  [+41.7%, +38.3%] ← possible cruise indicator
+      0x23  [ 3]  b5    -39.5%  [-56.4%, -22.7%]
+      0x38  [ 3]  b3    +37.9%  [+47.9%, +27.9%]
+      0xB3  [ 5]  b0    +37.8%  [+23.2%, +52.4%]
+      0x23  [ 3]  b6    -37.7%  [-55.2%, -20.2%]
+      0xB3  [ 0]  b0    +37.7%  [+33.6%, +41.9%]
+      0xB3  [ 0]  b2    +37.0%  [+27.9%, +46.2%]
+      0xB3  [ 2]  b2    +36.6%  [+26.8%, +46.4%]
+      0x39  [ 3]  b1    -35.8%  [-27.2%, -44.3%]
+      0xB3  [ 2]  b0    +35.2%  [+35.5%, +34.9%]
+      0xB3  [ 3]  b0    +34.9%  [+30.3%, +39.5%]
+      0x3B  [ 0]  b3    +34.1%  [+42.6%, +25.6%]
+      0x3B  [ 0]  b2    +34.0%  [+42.5%, +25.6%]
+      0x3B  [ 0]  b1    +34.0%  [+42.4%, +25.6%]
+      0x38  [ 3]  b0    +32.9%  [+44.5%, +21.4%]
+      0x39  [ 2]  b1    -29.1%  [-29.4%, -28.7%]
+      0xB3  [ 5]  b1    -26.2%  [-23.0%, -29.3%]
+      0x38  [ 1]  b3    -26.0%  [-23.5%, -28.4%]
+
+
+Done.

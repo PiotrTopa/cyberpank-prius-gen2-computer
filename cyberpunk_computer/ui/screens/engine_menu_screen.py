@@ -59,6 +59,7 @@ class EngineMenuScreen(Screen):
         self._items: List[_MenuEntry] = [
             _MenuEntry("CHART SETTINGS", "Graph time base configuration", "chart_settings"),
             _MenuEntry("ERROR CODES", "OBD-II diagnostic trouble codes", "dtc"),
+            _MenuEntry("SOLICITED MONITOR", "Live solicited CAN PID values", "solicited"),
             _MenuEntry("AVC-LAN MONITOR", "Live AVC-LAN bus sniffer", "avc"),
         ]
 
@@ -125,6 +126,15 @@ class EngineMenuScreen(Screen):
         elif item.action_key == "avc":
             from .avc_monitor_screen import AVCMonitorScreen
             screen = AVCMonitorScreen(
+                (self.width, self.height),
+                self.app,
+                store=self._store,
+            )
+            self.app.push_screen(screen)
+
+        elif item.action_key == "solicited":
+            from .solicited_monitor_screen import SolicitedMonitorScreen
+            screen = SolicitedMonitorScreen(
                 (self.width, self.height),
                 self.app,
                 store=self._store,

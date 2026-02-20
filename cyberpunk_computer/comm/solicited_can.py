@@ -362,6 +362,15 @@ def _hybrid_21c3_parser(d: list[int]) -> dict[str, Any]:
     if len(d) > 30:
         result["hv_current"] = 2 * d[30] - 256
     
+    # Note: Cruise control speeds (bytes 31-32) are NOT decoded here.
+    # They contain stale ECU memory values and don't update live.
+    # Use PID 21D3 instead for proper cruise control data with active flags.
+    
+    # Drive state indicator (byte 35)
+    # 0 = transitional, 1 = stationary, 2 = creeping, 8 = driving
+    if len(d) > 35:
+        result["drive_state"] = d[35]
+    
     return result
 
 
@@ -414,6 +423,76 @@ PID_HYBRID_ADDITIONAL = PIDDefinition(
     byte_count=16,
     interval_ms=500,
     description="Additional hybrid data (pedal, voltages, converter temp)"
+)
+
+
+def _hybrid_21d3_parser(d: list[int]) -> dict[str, Any]:
+    """
+    Parse PID 21D3 response (Cruise Control data).
+    
+    Reference: docs/prius_can.md Section 6
+    Layout (4 bytes):
+    - Byte A (0): Cruise Control Memory Vehicle Speed (0-150 km/h)
+    - Byte B (1): Cruise Set/Resume Speed (0-255 km/h, resets to 0 < 40 km/h)
+    - Byte C (2): Cruise status bitmask
+        - Bit 0: Cruise Control Main Switch
+        - Bit 2: Cruise Control Main Switch Ready
+        - Bit 5: Cruise Control Main Switch Indicator
+        - Bit 6: Cruise Control
+        - Bit 7: Shift D Position
+    - Byte D (3): Cruise switch/active bitmask
+        - Bit 0: Stop Light Switch 1 (Sub CPU)
+        - Bit 1: Stop Light Switch 2 (Sub CPU)
+        - Bit 2: Stop Light Switch 1 (Main CPU)
+        - Bit 3: RES / ACC Switch
+        - Bit 4: SET / COAST Switch
+        - Bit 5: Cancel Switch
+        - Bit 6: Cruise Control Active (Set)
+        - Bit 7: D drive mode selected
+    """
+    result = {}
+    
+    if len(d) < 2:
+        return result
+    
+    # Byte A: Memory vehicle speed (km/h)
+    result["cruise_memory_speed"] = d[0]
+    
+    # Byte B: Set/Resume speed (km/h)
+    result["cruise_set_speed"] = d[1]
+    
+    if len(d) >= 3:
+        c = d[2]
+        result["cruise_main_switch"] = bool(c & 0x01)
+        result["cruise_main_ready"] = bool(c & 0x04)
+        result["cruise_indicator"] = bool(c & 0x20)
+        result["cruise_control"] = bool(c & 0x40)
+        result["shift_d_position"] = bool(c & 0x80)
+    
+    if len(d) >= 4:
+        dd = d[3]
+        result["stop_light_1_sub"] = bool(dd & 0x01)
+        result["stop_light_2_sub"] = bool(dd & 0x02)
+        result["stop_light_1_main"] = bool(dd & 0x04)
+        result["cruise_res_acc_switch"] = bool(dd & 0x08)
+        result["cruise_set_coast_switch"] = bool(dd & 0x10)
+        result["cruise_cancel_switch"] = bool(dd & 0x20)
+        result["cruise_active"] = bool(dd & 0x40)
+        result["d_drive_selected"] = bool(dd & 0x80)
+    
+    return result
+
+
+PID_HYBRID_CRUISE = PIDDefinition(
+    ecu=ECUAddress.HYBRID.value,
+    mode=TOYOTA_EXTENDED_MODE,
+    pid=0xD3,
+    name="cruise_control",
+    unit="multi",
+    formula=_hybrid_21d3_parser,
+    byte_count=4,  # Single-frame response
+    interval_ms=1000,
+    description="Cruise control speeds, switches, and active status"
 )
 
 
@@ -485,7 +564,7 @@ def _battery_21cf_parser(d: list[int]) -> dict[str, Any]:
     
     # Fan Speed (byte 7 if present)
     if len(d) > 7:
-        result["fan_speed"] = d[7]
+        result["battery_fan_speed"] = d[7]
     
     return result
 
@@ -512,6 +591,40 @@ PID_HV_BATTERY_TEMPS = PIDDefinition(
     byte_count=12,
     interval_ms=2000,
     description="HV Battery temperatures and delta SOC"
+)
+
+
+def _battery_21d0_parser(d: list[int]) -> dict[str, Any]:
+    """
+    Parse PID 21D0 response (Internal resistance and voltage delta).
+
+    Reference: docs/prius_can.md Section 7
+    Layout: 14 block resistances (1 byte each) + voltage delta data
+    """
+    result = {}
+
+    # Internal resistance values (14 blocks, 1 byte each)
+    resistances = []
+    for i in range(min(14, len(d))):
+        resistance_ohm = 0.001 * d[i]  # 0-10 Ohm
+        resistances.append(resistance_ohm)
+
+    if resistances:
+        result["block_resistances"] = resistances
+
+    return result
+
+
+PID_HV_BATTERY_RESISTANCE = PIDDefinition(
+    ecu=ECUAddress.HV_BATTERY.value,
+    mode=TOYOTA_EXTENDED_MODE,
+    pid=0xD0,
+    name="hv_battery_resistance",
+    unit="multi",
+    formula=_battery_21d0_parser,
+    byte_count=16,
+    interval_ms=5000,
+    description="HV Battery internal resistance (blocks 1-14)"
 )
 
 
@@ -634,6 +747,7 @@ class SolicitedCANManager:
         # Detailed battery health data
         (PID_HV_BATTERY_DETAIL, 2000),
         (PID_HV_BATTERY_TEMPS, 2000),
+        (PID_HV_BATTERY_RESISTANCE, 5000),
     ]
     
     def __init__(self):

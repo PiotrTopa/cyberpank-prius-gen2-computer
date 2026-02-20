@@ -33,10 +33,15 @@ from ..state.actions import (
     SetConnectionStateAction,
     SetSpeedAction, SetRPMAction, SetICECoolantTempAction, SetInverterTempAction,
     SetHybridTempsAction, SetMGRPMsAction,
+    SetDrivetrainTorquesAction,
+    SetEngineDataAction, SetHybridExtrasAction,
     SetBatteryVoltageAction, SetBatteryCurrentAction, SetBatteryTempAction,
-    SetBatteryDeltaSOCAction, SetBlockVoltagesAction, SetGearAction,
+    SetBatteryDeltaSOCAction, SetBlockVoltagesAction,
+    SetBlockResistancesAction, SetBatteryFanSpeedAction,
+    SetGearAction,
     SetSteeringAngleAction, SetAccelerationAction, SetYawRateAction,
-    SetWheelPulsesAction, SetHeadlightStatusAction, SetSOCBarsEventAction,
+    SetWheelSpeedAction, SetHeadlightStatusAction, SetSOCBarsEventAction,
+    SetCruiseControlAction,
     AVCButtonPressAction, AVCTouchEventAction,
     SetStoredDTCsAction, SetPendingDTCsAction, SetDTCScanStateAction,
 )
@@ -415,13 +420,14 @@ class IngressController:
                 actions.append(SetRecirculationAction(recirc, ActionSource.GATEWAY))
         
         # Body ECU outside temperature (0x040 -> 0x200): [28 00 C1 TT xx]
-        # Single source of truth for outside temperature
-        # Formula: data[3] * 2 - 18 = °C (e.g. 0x04=4 → -10°C, 0x08=8 → -2°C)
-        elif msg.master_addr == 0x040 and msg.slave_addr == 0x200:
-            if len(data) >= 4 and data[0] == 0x28 and data[2] == 0xC1:
-                outside_temp = data[3] * 2 - 18
-                if -50 <= outside_temp <= 60:  # Sanity check
-                    actions.append(SetOutsideTempAction(outside_temp, ActionSource.GATEWAY))
+        # Disabled — solicited PID 0146 from Engine ECU is the single source of truth
+        # for ambient/outside temperature. Both climate.outside_temp and
+        # vehicle.ambient_air_temp are fed from _handle_solicited_engine().
+        # elif msg.master_addr == 0x040 and msg.slave_addr == 0x200:
+        #     if len(data) >= 4 and data[0] == 0x28 and data[2] == 0xC1:
+        #         outside_temp = data[3] * 2 - 18
+        #         if -50 <= outside_temp <= 60:  # Sanity check
+        #             actions.append(SetOutsideTempAction(outside_temp, ActionSource.GATEWAY))
         
         # Button press
         elif classification == "button_press":
@@ -642,21 +648,30 @@ class IngressController:
             if yaw is not None:
                 actions.append(SetYawRateAction(yaw, ActionSource.GATEWAY))
         
-        # Wheel Pulses (0x0B1 front, 0x0B3 rear)
-        elif msg.msg_type == CANMessageType.WHEEL_PULSES:
+        # Wheel Speed (0x0B1 front, 0x0B3 rear) — also updates vehicle speed
+        elif msg.msg_type == CANMessageType.WHEEL_SPEED:
             pos = msg.values.get("wheel_position")
+            right_kph = msg.values.get("right_speed_kph")
+            left_kph = msg.values.get("left_speed_kph")
+
             if pos == "front":
-                actions.append(SetWheelPulsesAction(
-                    front_right=msg.values.get("front_right_pulses"),
-                    front_left=msg.values.get("front_left_pulses"),
+                actions.append(SetWheelSpeedAction(
+                    front_right=right_kph,
+                    front_left=left_kph,
                     source=ActionSource.GATEWAY
                 ))
             elif pos == "rear":
-                actions.append(SetWheelPulsesAction(
-                    rear_right=msg.values.get("rear_right_pulses"),
-                    rear_left=msg.values.get("rear_left_pulses"),
+                actions.append(SetWheelSpeedAction(
+                    rear_right=right_kph,
+                    rear_left=left_kph,
                     source=ActionSource.GATEWAY
                 ))
+
+            # Use average wheel speed as vehicle speed (more frequent than 0xB4)
+            if right_kph is not None and left_kph is not None:
+                avg_speed = (right_kph + left_kph) / 2
+                if avg_speed < 300:
+                    actions.append(SetSpeedAction(avg_speed, ActionSource.GATEWAY))
         
         # Headlight Status (0x57F)
         elif msg.msg_type == CANMessageType.HEADLIGHT_STATUS:
@@ -681,6 +696,22 @@ class IngressController:
             ev_active = msg.values.get("ev_mode_active", False)
             if ev_active:
                 actions.append(SetReadyModeAction(True, ActionSource.GATEWAY))
+        
+        # Cruise Control Event (0x5C8) — always dispatch raw debug data
+        elif msg.msg_type == CANMessageType.CRUISE_CONTROL:
+            cruise_cancel = msg.values.get("cruise_cancel", False)
+            # Format raw bytes as hex
+            raw_data = msg.data
+            debug_str = " ".join(f"{b:02X}" for b in raw_data)
+            
+            action_kwargs = {
+                "cruise_5c8_debug": debug_str,
+                "source": ActionSource.GATEWAY,
+            }
+            if cruise_cancel:
+                # Cruise was just canceled — force cruise_active off
+                action_kwargs["cruise_active"] = False
+            actions.append(SetCruiseControlAction(**action_kwargs))
         
         # ─────────────────────────────────────────────────────────────────────
         # SOLICITED CAN RESPONSES (OBD-II style)
@@ -736,18 +767,72 @@ class IngressController:
         # Intake air temperature (PID 0x0F)
         intake_temp = values.get("intake_air_temp")
         if intake_temp is not None:
-            # Could be used for climate or engine monitoring
-            pass  # No action defined yet
+            actions.append(SetEngineDataAction(
+                intake_air_temp=float(intake_temp),
+                source=ActionSource.GATEWAY
+            ))
         
         # Throttle position (PID 0x11)
         throttle = values.get("throttle_position")
         if throttle is not None:
             actions.append(SetThrottlePositionAction(int(throttle), ActionSource.GATEWAY))
         
-        # Ambient temperature (PID 0x46) — disabled, outside temp from AVC 0x040→0x200 only
-        # ambient = values.get("ambient_temp")
-        # if ambient is not None and -50 <= ambient <= 80:
-        #     actions.append(SetOutsideTempAction(ambient, ActionSource.GATEWAY))
+        # Engine load / torque (PID 0x04) — 0-100%, peak 115Nm @ 4200 RPM
+        engine_load = values.get("engine_load")
+        if engine_load is not None:
+            actions.append(SetDrivetrainTorquesAction(
+                engine_load_percent=float(engine_load),
+                source=ActionSource.GATEWAY
+            ))
+        
+        # MAF air flow (PID 0x10)
+        maf = values.get("maf_flow")
+        if maf is not None:
+            actions.append(SetEngineDataAction(
+                maf_air_flow=float(maf), source=ActionSource.GATEWAY
+            ))
+        
+        # Lambda + O2 sensor (PID 0x24)
+        lam = values.get("lambda_ratio")
+        o2v = values.get("o2_sensor_voltage")
+        if lam is not None or o2v is not None:
+            actions.append(SetEngineDataAction(
+                lambda_ratio=float(lam) if lam is not None else None,
+                o2_sensor_voltage=float(o2v) if o2v is not None else None,
+                source=ActionSource.GATEWAY
+            ))
+        
+        # Odometer since DTC clear (PID 0x31)
+        odo = values.get("odometer_dtc_clear")
+        if odo is not None:
+            actions.append(SetEngineDataAction(
+                odometer_dtc_clear=int(odo), source=ActionSource.GATEWAY
+            ))
+        
+        # Barometric pressure (PID 0x33)
+        baro = values.get("barometric_pressure")
+        if baro is not None:
+            actions.append(SetEngineDataAction(
+                barometric_pressure=int(baro), source=ActionSource.GATEWAY
+            ))
+        
+        # Aux battery voltage (PID 0x42)
+        aux_v = values.get("aux_battery_voltage")
+        if aux_v is not None:
+            actions.append(SetEngineDataAction(
+                aux_battery_voltage=float(aux_v), source=ActionSource.GATEWAY
+            ))
+        
+        # Ambient temperature (PID 0x46) — single source of truth
+        # Feeds both VehicleState.ambient_air_temp AND ClimateState.outside_temp
+        # so the CLIMATE UI on main screen shows the same value as the solicited monitor.
+        # AVC-LAN Body ECU 0x040→0x200 outside temp is disabled in favour of this.
+        ambient = values.get("ambient_temp")
+        if ambient is not None and -50 <= ambient <= 80:
+            actions.append(SetEngineDataAction(
+                ambient_air_temp=float(ambient), source=ActionSource.GATEWAY
+            ))
+            actions.append(SetOutsideTempAction(float(ambient), ActionSource.GATEWAY))
         
         # DTC responses (Mode 03/07)
         dtc_actions = self._handle_dtc_response(values, "ENGINE")
@@ -816,10 +901,69 @@ class IngressController:
         if hv_current is not None:
             actions.append(SetBatteryCurrentAction(hv_current, ActionSource.GATEWAY))
         
+        # PID 21D3 cruise control data (proper source with active flag and switches)
+        cruise_set = values.get("cruise_set_speed")
+        cruise_mem = values.get("cruise_memory_speed")
+        cruise_active_flag = values.get("cruise_active")
+        cruise_main_switch = values.get("cruise_main_switch")
+        cruise_main_ready = values.get("cruise_main_ready")
+        cruise_indicator = values.get("cruise_indicator")
+        cruise_cancel = values.get("cruise_cancel_switch")
+        cruise_res_acc = values.get("cruise_res_acc_switch")
+        cruise_set_coast = values.get("cruise_set_coast_switch")
+        if any(v is not None for v in (cruise_set, cruise_mem, cruise_active_flag,
+                                        cruise_main_switch, cruise_cancel)):
+            actions.append(SetCruiseControlAction(
+                cruise_set_speed=cruise_set,
+                cruise_memory_speed=cruise_mem,
+                cruise_active=cruise_active_flag,
+                cruise_main_switch=cruise_main_switch,
+                cruise_main_ready=cruise_main_ready,
+                cruise_indicator=cruise_indicator,
+                cruise_cancel_switch=cruise_cancel,
+                cruise_res_acc_switch=cruise_res_acc,
+                cruise_set_coast_switch=cruise_set_coast,
+                source=ActionSource.GATEWAY
+            ))
+        
         # Accelerator pedal from PID 21C4
         accel = values.get("accelerator_percent")
         if accel is not None:
             actions.append(SetThrottlePositionAction(int(accel), ActionSource.GATEWAY))
+        
+        # PID 21C4 extra fields: aircon power, crank, relays, request bitmasks
+        hybrid_extras = {
+            "aircon_power_kw": values.get("aircon_power_kw"),
+            "crank_position": values.get("crank_position"),
+            "system_relay_1": values.get("system_relay_1"),
+            "system_relay_2": values.get("system_relay_2"),
+            "system_relay_3": values.get("system_relay_3"),
+            "engine_requests_a": values.get("engine_requests_a"),
+            "engine_requests_b": values.get("engine_requests_b"),
+        }
+        if any(v is not None for v in hybrid_extras.values()):
+            actions.append(SetHybridExtrasAction(
+                **hybrid_extras, source=ActionSource.GATEWAY
+            ))
+        
+        # Drivetrain torques and drive condition from PID 21C3
+        torque_fields = {
+            "mg2_torque": values.get("mg2_torque"),
+            "mg1_torque": values.get("mg1_torque"),
+            "regen_torque_actual": values.get("regen_torque_actual"),
+            "regen_torque_request": values.get("regen_torque_request"),
+            "master_cylinder_torque": values.get("master_cylinder_torque"),
+            "ice_rpm_target": values.get("ice_rpm_target"),
+            "ice_rpm_actual": values.get("ice_rpm_actual"),
+            "drive_condition": values.get("drive_condition"),
+            "drive_state": values.get("drive_state"),
+        }
+        if any(v is not None for v in torque_fields.values()):
+            actions.append(SetDrivetrainTorquesAction(
+                **{k: int(v) if k in ("ice_rpm_target", "ice_rpm_actual", "drive_condition", "drive_state") and v is not None else v
+                   for k, v in torque_fields.items()},
+                source=ActionSource.GATEWAY
+            ))
         
         # DTC responses (Mode 03/07) from Hybrid ECU
         dtc_actions = self._handle_dtc_response(values, "HYBRID")
@@ -879,7 +1023,17 @@ class IngressController:
         
         # Fan speed from 21CF
         fan_speed = values.get("battery_fan_speed")
-        # Future: SetBatteryFanSpeedAction if UI is added
+        if fan_speed is not None:
+            actions.append(SetBatteryFanSpeedAction(
+                fan_speed=int(fan_speed), source=ActionSource.GATEWAY
+            ))
+        
+        # Block internal resistances from 21D0
+        resistances = values.get("block_resistances")
+        if resistances is not None and len(resistances) >= 1:
+            actions.append(SetBlockResistancesAction(
+                resistances=tuple(resistances), source=ActionSource.GATEWAY
+            ))
         
         # DTC responses (Mode 03/07) from HV Battery ECU
         dtc_actions = self._handle_dtc_response(values, "HV_BATT")

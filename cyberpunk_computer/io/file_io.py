@@ -360,6 +360,41 @@ class FileInputPort(InputPort):
         # Fallback: treat as seconds from start
         return ts
     
+    def _collapse_gaps(self, max_gap: float) -> None:
+        """
+        Collapse idle gaps in the timeline.
+        
+        Any gap between consecutive entries that exceeds *max_gap*
+        is squeezed down to *max_gap*.  This removes dead time
+        (e.g. the system-only preamble before CAN data starts, or
+        periodic solicited OBD-II request pauses) while preserving
+        the micro-timing within message bursts.
+        
+        Args:
+            max_gap: Maximum allowed gap in seconds.
+        """
+        if len(self._entries) < 2:
+            return
+        
+        accumulated_shift = 0.0
+        prev_original = self._entries[0].relative_time
+        
+        for i in range(1, len(self._entries)):
+            current_original = self._entries[i].relative_time
+            gap = current_original - prev_original
+            if gap > max_gap:
+                accumulated_shift += gap - max_gap
+            prev_original = current_original
+            
+            if accumulated_shift > 0:
+                self._entries[i].relative_time -= accumulated_shift
+        
+        if accumulated_shift > 0:
+            logger.debug(
+                f"Collapsed {accumulated_shift:.1f}s of idle time "
+                f"(max_gap={max_gap}s)"
+            )
+    
     def start(self) -> bool:
         """Start playback."""
         if not self._entries:
