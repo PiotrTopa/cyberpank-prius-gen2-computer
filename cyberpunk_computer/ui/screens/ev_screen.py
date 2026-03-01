@@ -39,7 +39,9 @@ class EVScreen(Screen):
     │  CONV:     -- °C     │   SOC:  --%   ΔSOC: --.--     │
     │  ICE:      -- °C     │   V: ---V  A: --A  P: --kW    │
     │  BATT:     -- °C     │   TEMP: --°C (--/-- min/max)  │
-    └──────────────────────┴────────────────────────────────┘
+    ├──────────────────────┴────────────────────────────────┤
+    │        [ BACK ]    [ BATTERY ]                        │
+    └───────────────────────────────────────────────────────┘
     """
 
     HEADER_HEIGHT = 24
@@ -47,11 +49,18 @@ class EVScreen(Screen):
     LINE_HEIGHT = 22
     COL_DIVIDER_X = 220  # Left column width
 
+    # Bottom button bar
+    _BTN_BACK = 0
+    _BTN_BATTERY = 1
+    _BTN_LABELS = ("BACK", "BATTERY")
+    _BTN_COUNT = 2
+
     def __init__(self, size: Tuple[int, int], app=None, store: Optional[Store] = None):
         """Initialize EV screen."""
         super().__init__(size, app)
         self._store = store
         self._last_activity = time.time()
+        self._focused_btn: int = self._BTN_BACK
 
         # Temperature values
         self._mg1_inv_temp: Optional[float] = None
@@ -140,14 +149,27 @@ class EVScreen(Screen):
             self.app.pop_screen()
 
     def handle_input(self, event) -> bool:
-        """Handle input — strong press opens battery detail, back exits."""
-        if event == IE.PRESS_STRONG:
-            self._open_battery_screen()
-            return True
+        """Handle input — bottom button bar navigation."""
         if event == IE.BACK:
             self._exit_screen()
             return True
+        if event == IE.ROTATE_LEFT:
+            self._focused_btn = (self._focused_btn - 1) % self._BTN_COUNT
+            return True
+        if event == IE.ROTATE_RIGHT:
+            self._focused_btn = (self._focused_btn + 1) % self._BTN_COUNT
+            return True
+        if event in (IE.PRESS_LIGHT, IE.PRESS_STRONG):
+            self._activate_focused_button()
+            return True
         return False
+
+    def _activate_focused_button(self) -> None:
+        """Activate the currently focused button."""
+        if self._focused_btn == self._BTN_BACK:
+            self._exit_screen()
+        elif self._focused_btn == self._BTN_BATTERY:
+            self._open_battery_screen()
 
     def _open_battery_screen(self) -> None:
         """Push the detailed battery health screen."""
@@ -171,10 +193,43 @@ class EVScreen(Screen):
         self._render_right_column(surface)
         self._render_divider(surface)
         self._render_delta_v_chart(surface)
+        self._render_footer(surface)
 
     def _render_header(self, surface: pygame.Surface) -> None:
         """Render title bar."""
         pygame.draw.rect(surface, COLORS["bg_panel"], (0, 0, self.width, self.HEADER_HEIGHT))
+
+    def _render_footer(self, surface: pygame.Surface) -> None:
+        """Render bottom button bar with [BACK] [BATTERY]."""
+        font = get_mono_font(10)
+        bar_h = 22
+        bar_y = self.height - bar_h
+
+        # Dark bar background
+        pygame.draw.rect(surface, COLORS["bg_panel"], (0, bar_y, self.width, bar_h))
+        pygame.draw.line(surface, COLORS["border_dim"], (0, bar_y), (self.width, bar_y))
+
+        # Draw buttons evenly spaced
+        btn_width = 80
+        total_btns_width = btn_width * self._BTN_COUNT + 16 * (self._BTN_COUNT - 1)
+        start_x = (self.width - total_btns_width) // 2
+
+        for i, label in enumerate(self._BTN_LABELS):
+            bx = start_x + i * (btn_width + 16)
+            by = bar_y + 3
+            bw = btn_width
+            bh = bar_h - 6
+            is_focused = (i == self._focused_btn)
+
+            if is_focused:
+                pygame.draw.rect(surface, COLORS["cyan"], (bx, by, bw, bh))
+                text_color = COLORS["bg_dark"]
+            else:
+                pygame.draw.rect(surface, COLORS["border_dim"], (bx, by, bw, bh), 1)
+                text_color = COLORS["text_tertiary"]
+
+            s = font.render(label, True, text_color)
+            surface.blit(s, (bx + (bw - s.get_width()) // 2, by + (bh - s.get_height()) // 2))
 
         font = get_title_font(14)
         title = "EV / BATTERY"

@@ -45,12 +45,11 @@ class BatteryScreen(Screen):
         self._voltage: Optional[float] = None
         self._current: Optional[float] = None
         self._power_kw: Optional[float] = None
-        self._charging: bool = False
-        self._discharging: bool = False
         self._temp: Optional[float] = None
         self._min_temp: Optional[float] = None
         self._max_temp: Optional[float] = None
         self._block_voltages: Optional[tuple] = None
+        self._block_resistances: Optional[tuple] = None
         self._ev_mode: bool = False
 
         self._time_base: int = 60  # from store: power_chart_time_base
@@ -78,22 +77,18 @@ class BatteryScreen(Screen):
         self._voltage = e.hv_battery_voltage
         self._current = e.hv_battery_current
         self._power_kw = e.battery_power_kw
-        self._charging = e.charging
-        self._discharging = e.discharging
         self._temp = e.battery_temp
         self._min_temp = e.battery_min_cell_temp
         self._max_temp = e.battery_max_cell_temp
         self._block_voltages = e.block_voltages
+        self._block_resistances = e.block_resistances
         self._ev_mode = getattr(state.dynamics, "ev_mode", False)
         self._time_base = getattr(state.display, "power_chart_time_base", 60)
 
     # ─── Input ────────────────────────────────────────────────────────
 
     def handle_input(self, event) -> bool:
-        if event == IE.PRESS_STRONG:
-            self._exit_screen()
-            return True
-        if event == IE.BACK:
+        if event in (IE.PRESS_LIGHT, IE.PRESS_STRONG, IE.BACK):
             self._exit_screen()
             return True
         if event == IE.ROTATE_RIGHT:
@@ -102,7 +97,6 @@ class BatteryScreen(Screen):
         if event == IE.ROTATE_LEFT:
             self._page = (self._page - 1) % self.NUM_PAGES
             return True
-        # Light press — no action (diagnostic screen)
         return False
 
     def _exit_screen(self) -> None:
@@ -139,6 +133,8 @@ class BatteryScreen(Screen):
             self._render_block_voltages(surface, body_y, body_h)
         elif self._page == 2:
             self._render_delta_v_history(surface, body_y, body_h)
+
+        self._render_footer(surface)
 
     # ─── Header ───────────────────────────────────────────────────────
 
@@ -243,10 +239,11 @@ class BatteryScreen(Screen):
             surface.blit(vs, (col1_x + 90, y))
             y += 22
 
-        # ── Right column: Temperatures + state ──
+        # ── Right column: Temperatures ──
+        rx = self.width // 2 + 30  # shifted right to avoid SOC% overlap
         ry = y0 + 6
         s = font_section.render("TEMPERATURES", True, COLORS["cyan"])
-        surface.blit(s, (col2_x, ry))
+        surface.blit(s, (rx, ry))
         ry += 18
 
         temp_rows = [
@@ -256,12 +253,12 @@ class BatteryScreen(Screen):
         ]
         for lbl, tv in temp_rows:
             ls = font_label.render(lbl, True, COLORS["text_secondary"])
-            surface.blit(ls, (col2_x + 4, ry + 2))
+            surface.blit(ls, (rx + 4, ry + 2))
             if tv is not None:
                 vs = font_value.render(f"{int(tv)}°C", True, self._temp_color(tv))
             else:
                 vs = font_value.render("--°C", True, COLORS["text_tertiary"])
-            surface.blit(vs, (col2_x + 100, ry))
+            surface.blit(vs, (rx + 100, ry))
             ry += 22
 
         # Temp spread
@@ -274,31 +271,7 @@ class BatteryScreen(Screen):
             if spread > 5:
                 sp_color = COLORS.get("alert_bright", (255, 60, 60))
             sp_surf = font_small.render(sp_str, True, sp_color)
-            surface.blit(sp_surf, (col2_x + 4, ry))
-        ry += 20
-
-        # Charge state
-        s = font_section.render("STATUS", True, COLORS["cyan"])
-        surface.blit(s, (col2_x, ry))
-        ry += 16
-
-        if self._charging:
-            state_str, state_color = "CHARGING", COLORS.get("green_bright", COLORS["cyan"])
-        elif self._discharging:
-            state_str, state_color = "DISCHARGING", COLORS["active"]
-        else:
-            state_str, state_color = "IDLE", COLORS["text_tertiary"]
-        st_surf = font_value.render(state_str, True, state_color)
-        surface.blit(st_surf, (col2_x + 4, ry))
-
-        # Footer hint
-        hint_font = get_mono_font(9)
-        hint = "[SCROLL] PAGE   [HOLD] EXIT"
-        hint_surf = hint_font.render(hint, True, COLORS["text_tertiary"])
-        surface.blit(
-            hint_surf,
-            ((self.width - hint_surf.get_width()) // 2, self.height - hint_surf.get_height() - 3),
-        )
+            surface.blit(sp_surf, (rx + 4, ry))
 
     # ─── Page 1: Block Voltages ───────────────────────────────────────
 
@@ -328,11 +301,18 @@ class BatteryScreen(Screen):
         st_surf = font_label.render(stats_str, True, COLORS["text_secondary"])
         surface.blit(st_surf, (8, stats_y))
 
+        # Resistance row (fixed position below stats)
+        res_row_y = stats_y + 14
+        has_resistances = self._block_resistances and len(self._block_resistances) >= 1
+        if has_resistances:
+            r_hdr = font_tiny.render("R(m\u03A9)", True, COLORS["text_dim"])
+            surface.blit(r_hdr, (8, res_row_y))
+
         # Bar chart area
         chart_x = 8
         chart_w = self.width - 16
-        chart_top = stats_y + 18
-        chart_bottom = self.height - 28  # room for block numbers
+        chart_top = res_row_y + (14 if has_resistances else 4)
+        chart_bottom = self.height - 36  # room for block numbers + footer bar
         chart_h = chart_bottom - chart_top
 
         num_blocks = len(voltages)
@@ -340,6 +320,22 @@ class BatteryScreen(Screen):
         bar_w = (chart_w - (num_blocks - 1) * gap) // num_blocks
         mid_y = chart_top + chart_h // 2
         max_bar_h = chart_h // 2 - 4
+
+        # Render resistance values in a fixed row (aligned with bar columns)
+        if has_resistances and self._block_resistances is not None:
+            resistances = self._block_resistances
+            for i in range(num_blocks):
+                if i < len(resistances):
+                    r_val = resistances[i]
+                    if r_val > 30:
+                        r_color = COLORS.get("red_bright", (255, 60, 60))
+                    elif r_val > 25:
+                        r_color = COLORS.get("yellow", (255, 235, 59))
+                    else:
+                        r_color = COLORS.get("green_bright", (0, 230, 118))
+                    r_surf = font_tiny.render(str(r_val), True, r_color)
+                    r_x = chart_x + i * (bar_w + gap) + (bar_w - r_surf.get_width()) // 2
+                    surface.blit(r_surf, (r_x, res_row_y))
 
         # Zero line
         pygame.draw.line(
@@ -403,13 +399,6 @@ class BatteryScreen(Screen):
                 num_surf,
                 (x + (bar_w - num_surf.get_width()) // 2, chart_bottom + 2),
             )
-
-        # Footer hint
-        hint_surf = font_tiny.render("[SCROLL] PAGE   [HOLD] EXIT", True, COLORS["text_tertiary"])
-        surface.blit(
-            hint_surf,
-            ((self.width - hint_surf.get_width()) // 2, self.height - hint_surf.get_height() - 3),
-        )
 
     # ─── Page 2: Delta-V History ──────────────────────────────────────
 
@@ -585,12 +574,33 @@ class BatteryScreen(Screen):
                 lbl_surf = font_tiny.render(label, True, COLORS["text_dim"])
                 surface.blit(lbl_surf, (lx - lbl_surf.get_width() // 2, graph_bottom + 2))
 
-        # Footer hint
-        hint_surf = font_tiny.render("[SCROLL] PAGE   [HOLD] EXIT", True, COLORS["text_tertiary"])
-        surface.blit(
-            hint_surf,
-            ((self.width - hint_surf.get_width()) // 2, self.height - hint_surf.get_height() - 3),
-        )
+    # ─── Footer ──────────────────────────────────────────────────────
+
+    def _render_footer(self, surface: pygame.Surface) -> None:
+        """Render bottom bar with [BACK] button and page navigation hint."""
+        font = get_mono_font(10)
+        bar_h = 22
+        bar_y = self.height - bar_h
+
+        # Dark bar background
+        pygame.draw.rect(surface, COLORS["bg_panel"], (0, bar_y, self.width, bar_h))
+        pygame.draw.line(surface, COLORS["border_dim"], (0, bar_y), (self.width, bar_y))
+
+        # BACK button
+        btn_width = 80
+        bx = 8
+        by = bar_y + 3
+        bh = bar_h - 6
+        pygame.draw.rect(surface, COLORS["cyan"], (bx, by, btn_width, bh))
+        s = font.render("BACK", True, COLORS["bg_dark"])
+        surface.blit(s, (bx + (btn_width - s.get_width()) // 2, by + (bh - s.get_height()) // 2))
+
+        # Page navigation hint
+        dot_font = get_mono_font(9)
+        page_hint = "\u25C0 ROTATE \u25B6"
+        hint_surf = dot_font.render(page_hint, True, COLORS["text_tertiary"])
+        surface.blit(hint_surf, (self.width - hint_surf.get_width() - 8,
+                                 bar_y + (bar_h - hint_surf.get_height()) // 2))
 
     # ─── Utilities ────────────────────────────────────────────────────
 

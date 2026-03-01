@@ -1,8 +1,0 @@
-timestamp,source,rpm_value,raw_byte,other_source_rpm,raw_frame
-1771318326.317,solicited,0,,,
-1771318326.454,unsolicited,320,5,0,C0|05|08|00|00|00|0C
-1771318326.487,unsolicited,320,5,0,C0|05|08|00|00|00|0C
-1771318326.489,unsolicited,320,5,0,C0|05|08|00|00|00|0C
-1771318326.930,unsolicited,320,5,0,C0|05|08|00|00|00|0C
-1771318326.997,unsolicited,320,5,0,C0|05|08|00|00|00|0C
-1771318327.035,unsolicited,0,0,0,C0|00|08|00|00|00|07

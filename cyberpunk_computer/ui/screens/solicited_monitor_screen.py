@@ -49,7 +49,7 @@ class SolicitedMonitorScreen(Screen):
     """
 
     HEADER_H = 22
-    FOOTER_H = 14
+    FOOTER_H = 22
 
     def __init__(
         self,
@@ -81,7 +81,7 @@ class SolicitedMonitorScreen(Screen):
     def handle_input(self, event) -> bool:
         self._last_activity = time.time()
 
-        if event in (IE.PRESS_STRONG, IE.BACK, IE.PRESS_LIGHT):
+        if event in (IE.PRESS_LIGHT, IE.PRESS_STRONG, IE.BACK):
             self._exit()
             return True
 
@@ -110,11 +110,22 @@ class SolicitedMonitorScreen(Screen):
         )
 
     def _render_footer(self, surface: pygame.Surface) -> None:
-        font = get_mono_font(8)
-        hint = "[PRESS/HOLD] BACK"
-        s = font.render(hint, True, COLORS["text_tertiary"])
-        surface.blit(s, ((self.width - s.get_width()) // 2,
-                         self.height - s.get_height() - 2))
+        """Render bottom button bar with [BACK]."""
+        font = get_mono_font(10)
+        bar_y = self.height - self.FOOTER_H
+
+        # Dark bar background
+        pygame.draw.rect(surface, COLORS["bg_panel"], (0, bar_y, self.width, self.FOOTER_H))
+        pygame.draw.line(surface, COLORS["border_dim"], (0, bar_y), (self.width, bar_y))
+
+        # Single focused BACK button
+        btn_width = 80
+        bx = (self.width - btn_width) // 2
+        by = bar_y + 3
+        bh = self.FOOTER_H - 6
+        pygame.draw.rect(surface, COLORS["cyan"], (bx, by, btn_width, bh))
+        s = font.render("BACK", True, COLORS["bg_dark"])
+        surface.blit(s, (bx + (btn_width - s.get_width()) // 2, by + (bh - s.get_height()) // 2))
 
     def _render_content(self, surface: pygame.Surface) -> None:
         """Render all solicited PID values grouped by ECU."""

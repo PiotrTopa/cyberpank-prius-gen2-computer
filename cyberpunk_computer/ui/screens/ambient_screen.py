@@ -298,16 +298,21 @@ class AmbientScreen(Screen):
         if self._mode == "MANUAL":
             self._render_color_preview(surface, preview_x, start_y, preview_width - 10, 100)
         
-        # Footer hint
-        hint_font = get_mono_font(9)
+        # Footer bar
+        bar_h = 22
+        bar_y = self.height - bar_h
+        pygame.draw.rect(surface, COLORS["bg_panel"], (0, bar_y, self.width, bar_h))
+        pygame.draw.line(surface, COLORS["border_dim"], (0, bar_y), (self.width, bar_y))
+
+        hint_font = get_mono_font(10)
         if self._editing:
-            hint = "[</>] Adjust  [OK] Confirm"
+            hint = "[TURN] ADJUST   [OK] DONE   [BACK] EXIT"
         else:
-            hint = "[OK] Edit  [HOLD] Back"
+            hint = "[TURN] SELECT   [OK] EDIT   [BACK] EXIT"
         
-        hint_surf = hint_font.render(hint, True, COLORS["text_secondary"])
+        hint_surf = hint_font.render(hint, True, COLORS["text_tertiary"])
         hint_x = (self.width - hint_surf.get_width()) // 2
-        surface.blit(hint_surf, (hint_x, self.height - 16))
+        surface.blit(hint_surf, (hint_x, bar_y + (bar_h - hint_surf.get_height()) // 2))
     
     def _render_color_preview(
         self, 
@@ -368,6 +373,12 @@ class AmbientScreen(Screen):
         from ...input.manager import InputEvent as IE
         
         self._last_activity_time = time.time()
+
+        # BACK always exits
+        if event == IE.BACK:
+            self._editing = False
+            self._exit_screen()
+            return True
         
         if self._editing:
             # Editing mode

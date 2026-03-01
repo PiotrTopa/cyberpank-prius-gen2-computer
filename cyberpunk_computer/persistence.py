@@ -68,6 +68,35 @@ class DisplaySettings:
 
 
 @dataclass
+class DataSourceSettings:
+    """Which CAN subscription groups are enabled.
+    
+    Each field corresponds to a toggleable group key in
+    comm.subscription_groups.TOGGLEABLE_GROUPS.
+    """
+    battery_cells: bool = True
+    hybrid_extended: bool = True
+    engine_sensors: bool = True
+    aux_battery: bool = True
+    environment: bool = True
+    odometer: bool = True
+
+    def is_group_enabled(self, key: str) -> bool:
+        """Check if a group is enabled by its key."""
+        return getattr(self, key, True)
+
+    def set_group_enabled(self, key: str, enabled: bool) -> None:
+        """Enable or disable a group by its key."""
+        if hasattr(self, key):
+            setattr(self, key, enabled)
+
+    def as_dict(self) -> dict:
+        """Return enabled state as {key: bool} dict."""
+        import dataclasses
+        return {f.name: getattr(self, f.name) for f in dataclasses.fields(self)}
+
+
+@dataclass
 class UserSettings:
     """All user-configurable settings."""
     ambient: AmbientSettings = field(default_factory=AmbientSettings)
@@ -75,6 +104,7 @@ class UserSettings:
     audio: AudioSettings = field(default_factory=AudioSettings)
     climate: ClimateSettings = field(default_factory=ClimateSettings)
     display: DisplaySettings = field(default_factory=DisplaySettings)
+    data_sources: DataSourceSettings = field(default_factory=DataSourceSettings)
 
 
 def _safe_load(cls, data: dict):
@@ -143,6 +173,8 @@ class SettingsManager:
                 self.settings.climate = _safe_load(ClimateSettings, data['climate'])
             if 'display' in data:
                 self.settings.display = _safe_load(DisplaySettings, data['display'])
+            if 'data_sources' in data:
+                self.settings.data_sources = _safe_load(DataSourceSettings, data['data_sources'])
             
             logger.info(f"Loaded settings from {self.settings_file}")
             return True
@@ -166,6 +198,7 @@ class SettingsManager:
                 'audio': asdict(self.settings.audio),
                 'climate': asdict(self.settings.climate),
                 'display': asdict(self.settings.display),
+                'data_sources': asdict(self.settings.data_sources),
             }
             
             with open(self.settings_file, 'w') as f:
@@ -198,6 +231,10 @@ class SettingsManager:
     @property
     def display(self) -> DisplaySettings:
         return self.settings.display
+
+    @property
+    def data_sources(self) -> DataSourceSettings:
+        return self.settings.data_sources
 
     # --- Store state bridge ---
 

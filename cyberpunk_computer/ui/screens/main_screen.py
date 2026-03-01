@@ -619,7 +619,12 @@ class MainScreen(Screen):
              val = str(int(state.vehicle.ice_coolant_temp)) if state.vehicle.ice_coolant_temp is not None else "--"
              self._ice_temp_display.set_value(val)
         if hasattr(self, '_inverter_temp_display') and self._inverter_temp_display:
-             val = str(int(state.vehicle.inverter_temp)) if state.vehicle.inverter_temp is not None else "--"
+             v = state.vehicle
+             hybrid_temps = [t for t in (
+                 v.converter_temp, v.mg1_inverter_temp, v.mg2_inverter_temp,
+                 v.mg1_motor_temp, v.mg2_motor_temp,
+             ) if t is not None]
+             val = str(int(max(hybrid_temps))) if hybrid_temps else "--"
              self._inverter_temp_display.set_value(val)
         if hasattr(self, '_speed_display') and self._speed_display:
              val = str(int(state.vehicle.speed_kmh)) if state.vehicle.speed_kmh is not None else "0"
@@ -1295,38 +1300,6 @@ class MainScreen(Screen):
         val_surf = font_value.render(fan_str, True, fan_color)
         surface.blit(val_surf, (right_x + col_width - val_surf.get_width(), ry))
         ry += row_h
-        
-        # ─── BLOCK RESISTANCES (below both columns) ───
-        
-        if e.block_resistances is not None:
-            res_y = max(y, ry) + 4
-            title_surf = font_title.render("BLOCK RESISTANCE (m\u03A9)", True, COLORS["cyan_bright"])
-            surface.blit(title_surf, (left_x, res_y))
-            res_y += row_h + 2
-            
-            resistances = e.block_resistances
-            # Show R01-R14 in two rows of 7
-            for row_idx in range(2):
-                rx = left_x
-                for col_idx in range(7):
-                    idx = row_idx * 7 + col_idx
-                    if idx < len(resistances):
-                        r_val = resistances[idx]
-                        r_label = f"R{idx+1:02d}"
-                        lbl_surf = font_small.render(r_label, True, COLORS["text_dim"])
-                        surface.blit(lbl_surf, (rx, res_y))
-                        
-                        val_str = f"{r_val}"
-                        if r_val > 30:
-                            r_color = COLORS["red_bright"]
-                        elif r_val > 25:
-                            r_color = COLORS["yellow"]
-                        else:
-                            r_color = COLORS["green_bright"]
-                        val_surf = font_small.render(val_str, True, r_color)
-                        surface.blit(val_surf, (rx + 22, res_y))
-                    rx += (col_width * 2 + pad) // 7
-                res_y += row_h
     
     def _render_avc_lan_debug(
         self,

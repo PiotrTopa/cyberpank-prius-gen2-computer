@@ -61,6 +61,7 @@ class CANMessageType(Enum):
     SOLICITED_ENGINE = auto()          # Response from Engine ECU (0x7E8)
     SOLICITED_HYBRID = auto()          # Response from Hybrid ECU (0x7EA)
     SOLICITED_HV_BATTERY = auto()      # Response from HV Battery ECU (0x7EB)
+    SOLICITED_AIRBAG = auto()          # Response from Airbag ECU (0x788)
 
 
 @dataclass
@@ -137,6 +138,7 @@ KNOWN_CAN_IDS = {
     
     # Solicited OBD-II/CAN Responses (Protocol v2.8.0)
     # These are responses to queries sent in Normal CAN mode
+    0x788: "OBD2_RESP_AIRBAG",     # Response from Airbag ECU (0x780)
     0x7E8: "OBD2_RESP_ENGINE",     # Response from Engine ECU (0x7E0)
     0x7E9: "OBD2_RESP_TRANS",      # Response from Transmission ECU
     0x7EA: "OBD2_RESP_HYBRID",     # Response from Hybrid ECU (0x7E2)
@@ -433,8 +435,9 @@ class CANDecoder:
             msg.values["ice_running"] = rpm_byte > 0
             
         # 0x039: Coolant Temperature (RPM from this message is NOT reliable)
-        # Observed: [36-5A, 00-02, 00-27, 76-BC]
-        # Byte 0: Range 54-90 decimal = direct °C (warm engine, no offset needed)
+        # Observed cold start: [254/255 → 1 → 2 → ... → 38 → 39 → ... → 90]
+        # Observed warm engine: [54-90 decimal]
+        # Byte 0: Direct °C (no offset). 254/255 = ECU sentinel (sensor not ready).
         # Byte 2: Previously thought to be RPM, but shows non-zero values (8-12)
         #         even when ICE is confirmed OFF by 0x038 byte1=0
         #         DO NOT USE byte 2 for RPM - use 0x038 instead
@@ -629,6 +632,11 @@ class CANDecoder:
         # Format (single-frame): [Length, Mode+0x40, PID, DataBytes...]
         # Format (ISO-TP reassembled): [Mode+0x40, PID/Count, DataBytes...]
         # Minimum 2 bytes for ISO-TP 0-DTC response: [0x43, 0x00]
+        
+        # 0x788: Airbag ECU Response (from 0x780) — DTC-only
+        elif can_id == 0x788 and len(data) >= 2:
+            msg.msg_type = CANMessageType.SOLICITED_AIRBAG
+            self._decode_obd2_response(msg, data)
         
         # 0x7E8: Engine ECU Response (from 0x7E0)
         elif can_id == 0x7E8 and len(data) >= 2:

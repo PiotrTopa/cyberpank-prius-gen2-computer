@@ -57,6 +57,7 @@ class EngineMenuScreen(Screen):
         self._last_activity = time.time()
 
         self._items: List[_MenuEntry] = [
+            _MenuEntry("DATA SOURCES", "Select which CAN PIDs to fetch", "data_sources"),
             _MenuEntry("CHART SETTINGS", "Graph time base configuration", "chart_settings"),
             _MenuEntry("ERROR CODES", "OBD-II diagnostic trouble codes", "dtc"),
             _MenuEntry("SOLICITED MONITOR", "Live solicited CAN PID values", "solicited"),
@@ -105,7 +106,15 @@ class EngineMenuScreen(Screen):
         if not self.app:
             return
 
-        if item.action_key == "chart_settings":
+        if item.action_key == "data_sources":
+            from .data_sources_screen import DataSourcesScreen
+            screen = DataSourcesScreen(
+                (self.width, self.height),
+                self.app,
+            )
+            self.app.push_screen(screen)
+
+        elif item.action_key == "chart_settings":
             from .engine_screen import EngineScreen
             screen = EngineScreen(
                 (self.width, self.height),
@@ -200,8 +209,16 @@ class EngineMenuScreen(Screen):
             y += self.ITEM_HEIGHT + 4
 
     def _render_footer(self, surface: pygame.Surface) -> None:
-        font = get_mono_font(9)
-        hint = "[OK] OPEN   [HOLD] BACK"
+        font = get_mono_font(10)
+        bar_h = 22
+        bar_y = self.height - bar_h
+
+        # Dark bar background
+        pygame.draw.rect(surface, COLORS["bg_panel"], (0, bar_y, self.width, bar_h))
+        pygame.draw.line(surface, COLORS["border_dim"], (0, bar_y), (self.width, bar_y))
+
+        # Hint text (menu screen — no button bar, uses inline select)
+        hint = "[OK] OPEN   [BACK] EXIT"
         s = font.render(hint, True, COLORS["text_tertiary"])
         surface.blit(s, ((self.width - s.get_width()) // 2,
-                         self.height - s.get_height() - 4))
+                         bar_y + (bar_h - s.get_height()) // 2))

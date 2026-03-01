@@ -4,11 +4,14 @@ Diagnostics / DTC (Diagnostic Trouble Code) screen.
 Shows OBD-II stored and pending DTCs read from vehicle ECUs.
 Allows triggering a DTC scan and displays results.
 
+Bottom button bar with [BACK] [SCAN] [CLEAR] — navigable by encoder.
+Short press activates the focused button. BACK always exits.
+
 Layout (480x240):
 ┌───────────────────────────────────────────────────────┐
 │              DIAGNOSTICS / DTC                        │
 ├───────────────────────────────────────────────────────┤
-│  MIL: OFF / ON        SCAN: [PRESS TO SCAN]          │
+│  MIL: OFF / ON        SCAN: [timestamp]               │
 │  ─────────────────────────────────────────────────    │
 │  STORED DTCs (N)                                      │
 │   P0171  ENGINE    Fuel System Lean                   │
@@ -18,7 +21,7 @@ Layout (480x240):
 │  PENDING DTCs (N)                                     │
 │   P0301  ENGINE    Cylinder 1 Misfire                 │
 ├───────────────────────────────────────────────────────┤
-│            [PRESS] SCAN   [HOLD] BACK                 │
+│        [ BACK ]    [ SCAN ]    [ CLEAR ]              │
 └───────────────────────────────────────────────────────┘
 """
 
@@ -95,6 +98,22 @@ DTC_DESCRIPTIONS = {
     "C1241": "Low Battery Positive Voltage",
     "C1249": "Stop Light Switch Open",
     "C1256": "Speed Sensor Malfunction",
+    # Airbag / SRS codes (B-prefix body codes)
+    "B1601": "SRS Airbag Short (Driver)",
+    "B1602": "SRS Airbag Open (Driver)",
+    "B1611": "SRS Airbag Short (Passenger)",
+    "B1612": "SRS Airbag Open (Passenger)",
+    "B1620": "Side Airbag Short (Driver)",
+    "B1625": "Side Airbag Short (Passenger)",
+    "B1630": "Curtain Shield Airbag Short (LH)",
+    "B1635": "Curtain Shield Airbag Short (RH)",
+    "B1650": "Seat Belt Pretensioner Short (Driver)",
+    "B1655": "Seat Belt Pretensioner Short (Pass)",
+    "B1660": "SRS ECU Malfunction",
+    "B1670": "Crash Sensor Malfunction",
+    "B1680": "Satellite Sensor Short (LH)",
+    "B1685": "Satellite Sensor Short (RH)",
+    "B1780": "SRS Warning Light Circuit",
 }
 
 
@@ -115,12 +134,20 @@ class DTCScreen(Screen):
     Diagnostics / DTC display screen.
     
     Shows stored and pending DTCs with descriptions.
-    Press triggers a new DTC scan. Hold/Back exits.
+    Bottom bar has [BACK] [SCAN] [CLEAR] buttons navigable by encoder.
+    Short press activates focused button. BACK always exits.
     """
 
     HEADER_HEIGHT = 24
     LINE_HEIGHT = 18
     MAX_VISIBLE_DTCS = 9  # Max DTCs visible at once (scrollable)
+
+    # Bottom button bar
+    _BTN_BACK = 0
+    _BTN_SCAN = 1
+    _BTN_CLEAR = 2
+    _BTN_LABELS = ("BACK", "SCAN", "CLEAR")
+    _BTN_COUNT = 3
 
     def __init__(
         self,
@@ -141,6 +168,9 @@ class DTCScreen(Screen):
         self._last_scan_time: Optional[float] = None
         self._scroll_offset: int = 0
         self._unsub_fns: list = []
+
+        # Button bar focus state
+        self._focused_btn: int = self._BTN_SCAN  # Default focus on SCAN
 
         # Clear confirmation state
         self._clear_confirm: bool = False
@@ -200,7 +230,7 @@ class DTCScreen(Screen):
             self._clear_confirm = False
 
     def handle_input(self, event) -> bool:
-        """Handle input."""
+        """Handle input — bottom button bar navigation."""
         self._last_activity = time.time()
 
         # If in clear confirmation mode, handle confirm/cancel
@@ -217,30 +247,35 @@ class DTCScreen(Screen):
                 return True
             return True  # Swallow all input during confirmation
 
-        if event == IE.PRESS_LIGHT:
-            # Light press = scan or scroll
-            if self._total_dtc_count() > self.MAX_VISIBLE_DTCS:
-                self._scroll_offset += 1
-                max_scroll = max(0, self._total_dtc_count() - self.MAX_VISIBLE_DTCS)
-                self._scroll_offset = min(self._scroll_offset, max_scroll)
-            else:
-                self._trigger_scan()
-            return True
-        elif event == IE.PRESS_STRONG:
-            # Strong press = trigger scan (even if scrollable)
-            self._trigger_scan()
-            self._scroll_offset = 0
+        if event == IE.ROTATE_LEFT:
+            self._focused_btn = (self._focused_btn - 1) % self._BTN_COUNT
             return True
         elif event == IE.ROTATE_RIGHT:
-            # Rotate right = initiate clear DTCs confirmation
-            if self._total_dtc_count() > 0 and not self._scan_in_progress:
-                self._clear_confirm = True
-                self._clear_confirm_time = time.time()
+            self._focused_btn = (self._focused_btn + 1) % self._BTN_COUNT
+            return True
+        elif event == IE.PRESS_LIGHT:
+            self._activate_focused_button()
+            return True
+        elif event == IE.PRESS_STRONG:
+            # Strong press also activates (for convenience)
+            self._activate_focused_button()
             return True
         elif event == IE.BACK:
             self._exit_screen()
             return True
         return False
+
+    def _activate_focused_button(self) -> None:
+        """Activate the currently focused button."""
+        if self._focused_btn == self._BTN_BACK:
+            self._exit_screen()
+        elif self._focused_btn == self._BTN_SCAN:
+            self._trigger_scan()
+            self._scroll_offset = 0
+        elif self._focused_btn == self._BTN_CLEAR:
+            if self._total_dtc_count() > 0 and not self._scan_in_progress:
+                self._clear_confirm = True
+                self._clear_confirm_time = time.time()
 
     def _total_dtc_count(self) -> int:
         return len(self._stored_dtcs) + len(self._pending_dtcs)
@@ -406,35 +441,55 @@ class DTCScreen(Screen):
                 y += self.LINE_HEIGHT
 
     def _render_footer(self, surface: pygame.Surface) -> None:
-        """Render footer with controls hint."""
+        """Render bottom button bar with [BACK] [SCAN] [CLEAR]."""
         font = get_mono_font(10)
-        footer_y = self.height - 3
+        bar_h = 22
+        bar_y = self.height - bar_h
 
         if self._clear_confirm:
-            # Confirmation overlay
+            # Confirmation overlay — flashing warning bar
             elapsed = time.time() - self._clear_confirm_time
             if elapsed > self._CLEAR_CONFIRM_TIMEOUT:
                 self._clear_confirm = False
             else:
-                # Flashing warning bar
                 flash = int(elapsed * 4) % 2 == 0
                 bar_color = COLORS.get("alert_bright", (255, 60, 60)) if flash else COLORS["bg_panel"]
-                bar_h = 28
-                bar_y = self.height - bar_h
                 pygame.draw.rect(surface, bar_color, (0, bar_y, self.width, bar_h))
 
-                confirm_text = "CLEAR ALL DTCs?  [HOLD] YES  [PRESS/BACK] NO"
+                confirm_text = "CLEAR ALL DTCs?  [PRESS] YES  [BACK] NO"
                 text_color = (0, 0, 0) if flash else COLORS.get("alert_bright", (255, 60, 60))
                 s = font.render(confirm_text, True, text_color)
                 surface.blit(s, ((self.width - s.get_width()) // 2, bar_y + (bar_h - s.get_height()) // 2))
                 return
 
-        if self._total_dtc_count() > 0:
-            hint = "[PRESS] SCAN  [ROTATE\u2192] CLEAR  [BACK] EXIT"
-        elif self._total_dtc_count() > self.MAX_VISIBLE_DTCS:
-            hint = "[PRESS] SCROLL  [HOLD] SCAN  [BACK] EXIT"
-        else:
-            hint = "[PRESS] SCAN  [BACK] EXIT"
+        # Dark bar background
+        pygame.draw.rect(surface, COLORS["bg_panel"], (0, bar_y, self.width, bar_h))
+        pygame.draw.line(surface, COLORS["border_dim"], (0, bar_y), (self.width, bar_y))
 
-        s = font.render(hint, True, COLORS["text_secondary"])
-        surface.blit(s, ((self.width - s.get_width()) // 2, footer_y - s.get_height()))
+        # Draw buttons evenly spaced
+        btn_width = 80
+        total_btns_width = btn_width * self._BTN_COUNT + 16 * (self._BTN_COUNT - 1)
+        start_x = (self.width - total_btns_width) // 2
+
+        for i, label in enumerate(self._BTN_LABELS):
+            bx = start_x + i * (btn_width + 16)
+            by = bar_y + 3
+            bw = btn_width
+            bh = bar_h - 6
+            is_focused = (i == self._focused_btn)
+
+            if is_focused:
+                # Focused button — highlighted box
+                pygame.draw.rect(surface, COLORS["cyan"], (bx, by, bw, bh))
+                text_color = COLORS["bg_dark"]
+            else:
+                # Unfocused button — dim outline
+                pygame.draw.rect(surface, COLORS["border_dim"], (bx, by, bw, bh), 1)
+                text_color = COLORS["text_tertiary"]
+
+            # Special styling for CLEAR when no DTCs
+            if i == self._BTN_CLEAR and self._total_dtc_count() == 0:
+                text_color = COLORS.get("inactive", (80, 80, 80)) if not is_focused else COLORS["bg_dark"]
+
+            s = font.render(label, True, text_color)
+            surface.blit(s, (bx + (bw - s.get_width()) // 2, by + (bh - s.get_height()) // 2))

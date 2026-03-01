@@ -64,31 +64,62 @@ class LogicDeviceID(IntEnum):
 class ButtonCode(IntEnum):
     """
     Known button codes from AVC-LAN button press messages.
-    
+
     Button codes are 16-bit values from bytes 2-3 of 040→200 messages.
     The suffix byte (byte 4) typically indicates the device context:
     - 0x62: CD/Audio mode
     - 0x60: Tuner/Radio mode
+    - 0xE2: Extended audio (CD changer?)
     - 0x22: Menu/System
     - 0x02: General button release
-    
-    These codes are observed patterns and may need refinement
-    as more button presses are analyzed.
+
+    These codes are observed patterns from log analysis.
     """
-    # Status/Heartbeat (most frequent - may not be actual button)
-    STATUS_6044 = 0x6044       # 60 44 - Status update (CD mode)
-    STATUS_6024 = 0x6024       # 60 24 - Status update variant
-    
-    # Audio buttons
-    AUDIO_6184 = 0x6184        # 61 84 - Possibly Track/Disc
-    AUDIO_C104 = 0xC104        # C1 04 - Audio mode button
-    AUDIO_30A4 = 0x30A4        # 30 A4 - Possibly seek/scan
-    
-    # Menu/Info buttons
+    # ── Heartbeat / periodic status (0x60xx) ── NOT real button presses ──
+    STATUS_6044 = 0x6044       # 60 44 - Status heartbeat (CD mode)
+    STATUS_6024 = 0x6024       # 60 24 - Status heartbeat (radio mode)
+    STATUS_6084 = 0x6084       # 60 84 - Status heartbeat (AUX/other)
+
+    # ── Audio commands (0xC0xx / 0xC1xx) ──
+    AUDIO_C004 = 0xC004        # C0 04 - Audio button (power/mode?)
+    AUDIO_C024 = 0xC024        # C0 24 - Audio button
+    AUDIO_C104 = 0xC104        # C1 04 - Audio mode / disc select
+    AUDIO_C100 = 0xC100        # C1 00 - Audio variant
+    AUDIO_C108 = 0xC108        # C1 08 - Audio button
+    AUDIO_C148 = 0xC148        # C1 48 - Audio button (suffix 0xE2)
+    AUDIO_C14C = 0xC14C        # C1 4C - Audio button (suffix 0xE2)
+    AUDIO_C188 = 0xC188        # C1 88 - Audio button (suffix 0xE2)
+
+    # ── Seek / navigation (0xA0xx) ──
+    SEEK_A024 = 0xA024         # A0 24 - Seek / track change
+    SEEK_A044 = 0xA044         # A0 44 - Seek / track change
+
+    # ── Other buttons ──
+    BTN_2044 = 0x2044          # 20 44 - Unknown button
+    BTN_0008 = 0x0008          # 00 08 - Unknown button (suffix 0xA2)
+    BTN_4188 = 0x4188          # 41 88 - Unknown button (suffix 0xE2)
+
+    # ── Special (modifier 0x82) ──
+    MOD82_1084 = 0x1084        # 10 84 - With modifier 0x82
+    MOD82_9084 = 0x9084        # 90 84 - With modifier 0x82
+    MOD82_08C2 = 0x08C2        # 08 C2 - With modifier 0x82
+
+    # ── Menu / Info ──
     MENU_0005 = 0x0005         # 00 05 - Menu/Info button
-    
-    # Unknown (need more analysis)
-    UNKNOWN = 0x0000
+
+    # ── Release / null ──
+    RELEASE = 0x0000           # 00 00 - Button release code
+
+
+# ── Heartbeat codes to filter from button events ─────────────────────────────
+# These 0x60xx codes are periodic status messages from the steering wheel ECU,
+# NOT physical button presses.  They appear at ~5s intervals and produce
+# noise in the button event stream.
+HEARTBEAT_BUTTON_CODES: frozenset[int] = frozenset({
+    ButtonCode.STATUS_6044,    # CD mode heartbeat
+    ButtonCode.STATUS_6024,    # Radio mode heartbeat
+    ButtonCode.STATUS_6084,    # AUX mode heartbeat
+})
 
 
 # Button suffix device contexts
@@ -96,6 +127,7 @@ class ButtonContext(IntEnum):
     """Button context suffix byte values."""
     CD_AUDIO = 0x62            # CD/Audio context
     TUNER_RADIO = 0x60         # Tuner/Radio context
+    EXTENDED = 0xE2            # Extended audio (CD changer?)
     MENU_SYSTEM = 0x22         # Menu/System context
     RELEASE = 0x02             # Button release / general
 
@@ -104,16 +136,40 @@ class ButtonContext(IntEnum):
 class ButtonCommandType(IntEnum):
     """Button command type prefix byte."""
     PRESS = 0x28               # Button press
+    PRESS_ALT = 0x38           # Alternate press (seen in logs)
     RELEASE = 0x2A             # Button release
 
 
 # Known button name mappings
 BUTTON_NAMES: dict[int, str] = {
-    0x6044: "STATUS",          # Status heartbeat
-    0x6024: "STATUS_ALT",
-    0x6184: "AUDIO_1",
-    0xC104: "AUDIO_2", 
-    0x30A4: "SEEK",
+    # Heartbeat / status (filtered by default)
+    0x6044: "HB_CD",           # Heartbeat - CD mode
+    0x6024: "HB_RADIO",        # Heartbeat - radio mode
+    0x6084: "HB_AUX",          # Heartbeat - AUX mode
+
+    # Audio commands
+    0xC004: "AUDIO_PWR",       # Audio power / mode
+    0xC024: "AUDIO_C024",
+    0xC104: "DISC",            # Disc select / audio mode
+    0xC100: "AUDIO_C100",
+    0xC108: "AUDIO_C108",
+    0xC148: "AUDIO_C148",
+    0xC14C: "AUDIO_C14C",
+    0xC188: "AUDIO_C188",
+
+    # Seek / navigation
+    0xA024: "SEEK_A024",
+    0xA044: "SEEK_A044",
+
+    # Other
+    0x2044: "BTN_2044",
+    0x0008: "BTN_0008",
+    0x4188: "BTN_4188",
+    0x1084: "MOD82_1084",
+    0x9084: "MOD82_9084",
+    0x08C2: "MOD82_08C2",
+
+    # Menu / Info
     0x0005: "MENU",
 }
 
@@ -567,11 +623,11 @@ def parse_button_event(data: list[int]) -> Optional[ButtonEvent]:
     Parse a button press/release event from 040 → 200 message data.
     
     Message format (5 bytes):
-    - byte[0]: Command type (0x28 = press, 0x2A = release)
-    - byte[1]: Modifier (usually 0x00)
+    - byte[0]: Command type (0x28/0x38 = press, 0x2A = release)
+    - byte[1]: Modifier (usually 0x00, sometimes 0x82)
     - byte[2]: Button code high byte
     - byte[3]: Button code low byte
-    - byte[4]: Context suffix (0x62=CD, 0x60=Radio, etc.)
+    - byte[4]: Context suffix (0x62=CD, 0x60=Radio, 0xE2=extended, etc.)
     
     Args:
         data: Data bytes from the message
@@ -584,11 +640,15 @@ def parse_button_event(data: list[int]) -> Optional[ButtonEvent]:
     
     cmd_type = data[0]
     
-    # Check for valid command type
-    if cmd_type not in (ButtonCommandType.PRESS, ButtonCommandType.RELEASE):
+    # Check for valid command type (0x28 and 0x38 are both press variants)
+    if cmd_type not in (
+        ButtonCommandType.PRESS,
+        ButtonCommandType.PRESS_ALT,
+        ButtonCommandType.RELEASE,
+    ):
         return None
     
-    is_press = (cmd_type == ButtonCommandType.PRESS)
+    is_press = (cmd_type != ButtonCommandType.RELEASE)
     modifier = data[1]
     button_code = (data[2] << 8) | data[3]
     suffix = data[4]

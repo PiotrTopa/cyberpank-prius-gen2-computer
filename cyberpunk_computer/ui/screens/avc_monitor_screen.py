@@ -76,11 +76,18 @@ class AVCMonitorScreen(Screen):
     HEADER_H = 22
     TABLE_HEADER_H = 14
     ROW_H = 16
-    FOOTER_H = 16
+    FOOTER_H = 22
     ADDR_COL_W = 76
     CNT_COL_W = 36
     AGE_COL_W = 40
     DATA_COL_X = 156  # Start of data column
+
+    # Bottom button bar
+    _BTN_BACK = 0
+    _BTN_FREEZE = 1
+    _BTN_LABELS_LIVE = ("BACK", "FREEZE")
+    _BTN_LABELS_FROZEN = ("BACK", "LIVE")
+    _BTN_COUNT = 2
 
     def __init__(
         self,
@@ -100,6 +107,7 @@ class AVCMonitorScreen(Screen):
         self._frozen: bool = False
         self._scroll_offset: int = 0
         self._dirty: bool = True
+        self._focused_btn: int = self._BTN_BACK
 
         # Decoder for device name lookup
         self._avc_decoder = AVCDecoder()
@@ -202,28 +210,47 @@ class AVCMonitorScreen(Screen):
     def handle_input(self, event) -> bool:
         self._last_activity = time.time()
 
-        if event == IE.PRESS_STRONG or event == IE.BACK:
+        if event == IE.BACK:
             self._exit_screen()
             return True
 
         if event == IE.PRESS_LIGHT:
-            self._frozen = not self._frozen
-            self._dirty = True
+            self._activate_focused_button()
+            return True
+
+        if event == IE.PRESS_STRONG:
+            self._activate_focused_button()
             return True
 
         if event == IE.ROTATE_RIGHT:
-            filtered = self._get_filtered_records()
-            max_scroll = max(0, len(filtered) - self._visible_rows)
-            self._scroll_offset = min(self._scroll_offset + 1, max_scroll)
-            self._dirty = True
+            if self._frozen:
+                # When frozen, rotate scrolls the list
+                filtered = self._get_filtered_records()
+                max_scroll = max(0, len(filtered) - self._visible_rows)
+                self._scroll_offset = min(self._scroll_offset + 1, max_scroll)
+                self._dirty = True
+            else:
+                # When live, rotate cycles buttons
+                self._focused_btn = (self._focused_btn + 1) % self._BTN_COUNT
             return True
 
         if event == IE.ROTATE_LEFT:
-            self._scroll_offset = max(0, self._scroll_offset - 1)
-            self._dirty = True
+            if self._frozen:
+                self._scroll_offset = max(0, self._scroll_offset - 1)
+                self._dirty = True
+            else:
+                self._focused_btn = (self._focused_btn - 1) % self._BTN_COUNT
             return True
 
         return False
+
+    def _activate_focused_button(self) -> None:
+        """Activate the currently focused button."""
+        if self._focused_btn == self._BTN_BACK:
+            self._exit_screen()
+        elif self._focused_btn == self._BTN_FREEZE:
+            self._frozen = not self._frozen
+            self._dirty = True
 
     def _exit_screen(self) -> None:
         if self.app:
@@ -417,17 +444,43 @@ class AVCMonitorScreen(Screen):
                 break
 
     def _render_footer(self, surface: pygame.Surface) -> None:
-        """Draw footer with controls."""
-        y = self.height - self.FOOTER_H
-        pygame.draw.line(surface, COLORS["border_dim"], (0, y), (self.width, y))
+        """Draw bottom button bar with [BACK] [FREEZE/LIVE]."""
+        font = get_mono_font(10)
+        bar_y = self.height - self.FOOTER_H
 
-        font = get_mono_font(8)
+        # Dark bar background
+        pygame.draw.rect(surface, COLORS["bg_panel"], (0, bar_y, self.width, self.FOOTER_H))
+        pygame.draw.line(surface, COLORS["border_dim"], (0, bar_y), (self.width, bar_y))
 
-        mode_label = "LIVE" if self._frozen else "FREEZE"
-        hint = f"[PRESS] {mode_label}   [HOLD] BACK   [TURN] SCROLL"
-        hint_surf = font.render(hint, True, COLORS["text_dim"])
-        hint_x = (self.width - hint_surf.get_width()) // 2
-        surface.blit(hint_surf, (hint_x, y + 4))
+        labels = self._BTN_LABELS_FROZEN if self._frozen else self._BTN_LABELS_LIVE
+        btn_width = 80
+        total_btns_width = btn_width * self._BTN_COUNT + 16 * (self._BTN_COUNT - 1)
+        start_x = (self.width - total_btns_width) // 2
+
+        for i, label in enumerate(labels):
+            bx = start_x + i * (btn_width + 16)
+            by = bar_y + 3
+            bw = btn_width
+            bh = self.FOOTER_H - 6
+            is_focused = (i == self._focused_btn)
+
+            if is_focused:
+                pygame.draw.rect(surface, COLORS["cyan"], (bx, by, bw, bh))
+                text_color = COLORS["bg_dark"]
+            else:
+                pygame.draw.rect(surface, COLORS["border_dim"], (bx, by, bw, bh), 1)
+                text_color = COLORS["text_tertiary"]
+
+            s = font.render(label, True, text_color)
+            surface.blit(s, (bx + (bw - s.get_width()) // 2, by + (bh - s.get_height()) // 2))
+
+        # Scroll hint when frozen
+        if self._frozen:
+            hint_font = get_mono_font(8)
+            hint = "[TURN] SCROLL"
+            hint_surf = hint_font.render(hint, True, COLORS["text_dim"])
+            surface.blit(hint_surf, (self.width - hint_surf.get_width() - 6,
+                                     bar_y + (self.FOOTER_H - hint_surf.get_height()) // 2))
 
     def _render_scrollbar(self, surface: pygame.Surface) -> None:
         """Draw scrollbar if content overflows."""

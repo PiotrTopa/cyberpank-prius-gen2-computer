@@ -1,10 +1,11 @@
 """
 Engine detail screen — multi-page diagnostic view.
 
-Three sub-pages navigated by ROTATE_LEFT / ROTATE_RIGHT:
-  Page 0: Overview — RPM bar, fuel flow, consumption, temps, hybrid motor RPMs
-  Page 1: Fuel charts — fuel flow time-series (1h), trip consumed stat
-  Page 2: Temperature charts — ICE coolant + inverter temps (1h)
+Four sub-pages navigated by ROTATE_LEFT / ROTATE_RIGHT:
+  Page 0: Engine — RPM bar, fuel flow, consumption, tank levels, motor RPMs
+  Page 1: Temps — hybrid system temperatures (ICE, MG1, MG2, converter)
+  Page 2: Fuel charts — fuel flow time-series (1h), trip consumed stat
+  Page 3: Temp charts — ICE coolant + inverter temps (1h)
 
 This is a diagnostic screen — stays on until strong-press exit (no auto-timeout).
 """
@@ -25,8 +26,8 @@ class EngineDetailScreen(Screen):
 
     HEADER_HEIGHT = 22
     RPM_BAR_HEIGHT = 28
-    NUM_PAGES = 3
-    PAGE_LABELS = ["OVERVIEW", "FUEL CHARTS", "TEMPERATURE"]
+    NUM_PAGES = 4
+    PAGE_LABELS = ["ENGINE", "TEMPS", "FUEL CHARTS", "TEMP CHARTS"]
 
     def __init__(self, size: Tuple[int, int], app=None, store: Optional[Store] = None):
         super().__init__(size, app)
@@ -109,7 +110,7 @@ class EngineDetailScreen(Screen):
         if event == IE.ROTATE_LEFT:
             self._page = (self._page - 1) % self.NUM_PAGES
             return True
-        if event in (IE.PRESS_STRONG, IE.BACK):
+        if event in (IE.PRESS_LIGHT, IE.PRESS_STRONG, IE.BACK):
             if self.app:
                 self.app.pop_screen()
             return True
@@ -124,8 +125,10 @@ class EngineDetailScreen(Screen):
         if self._page == 0:
             self._render_overview(surface)
         elif self._page == 1:
-            self._render_fuel_charts(surface)
+            self._render_temperatures(surface)
         elif self._page == 2:
+            self._render_fuel_charts(surface)
+        elif self._page == 3:
             self._render_temp_charts(surface)
 
         self._render_footer(surface)
@@ -251,27 +254,27 @@ class EngineDetailScreen(Screen):
                 surface.blit(t_surf, (tx - t_surf.get_width() // 2, bar_y + bar_actual_h + 3))
 
     def _render_engine_data(self, surface: pygame.Surface) -> None:
-        """Engine data readouts: fuel, temps."""
-        y0 = self.HEADER_HEIGHT + self.RPM_BAR_HEIGHT + 16
-        pad_x = 10
+        """Engine data readouts: fuel flow and tank levels."""
+        y0 = self.HEADER_HEIGHT + self.RPM_BAR_HEIGHT + 14
+        pad_x = 12
         col_w = self.width // 2 - pad_x
 
-        font_label = get_mono_font(10)
-        font_value = get_mono_font(12)
-        font_section = get_title_font(10)
-        row_h = 18
+        font_label = get_mono_font(11)
+        font_value = get_mono_font(14)
+        font_section = get_title_font(11)
+        row_h = 22
 
-        # ── Left column: Fuel ──
+        # ── Left column: Fuel flow ──
         lx = pad_x
         y = y0
 
         s = font_section.render("FUEL", True, COLORS["cyan"])
         surface.blit(s, (lx, y))
-        y += 14
+        y += 16
 
         # Flow rate
         lbl = font_label.render("FLOW", True, COLORS["text_secondary"])
-        surface.blit(lbl, (lx + 4, y + 2))
+        surface.blit(lbl, (lx + 4, y + 3))
         if self._fuel_flow_rate is not None and self._fuel_flow_rate > 0.05:
             val_str = f"{self._fuel_flow_rate:.1f} L/h"
             color = COLORS["green_bright"]
@@ -288,7 +291,7 @@ class EngineDetailScreen(Screen):
 
         # Instant consumption
         lbl = font_label.render("CONS", True, COLORS["text_secondary"])
-        surface.blit(lbl, (lx + 4, y + 2))
+        surface.blit(lbl, (lx + 4, y + 3))
         if self._instant_consumption > 0.0:
             val_str = f"{self._instant_consumption:.1f} {self._consumption_unit}"
             color = COLORS["green_bright"]
@@ -303,25 +306,9 @@ class EngineDetailScreen(Screen):
         surface.blit(val_surf, (lx + col_w - val_surf.get_width(), y))
         y += row_h
 
-        # Fuel levels
-        lbl = font_label.render("PTR", True, COLORS["text_secondary"])
-        surface.blit(lbl, (lx + 4, y + 2))
-        val_str = f"{self._fuel_level} L"
-        color = COLORS["yellow"] if self._fuel_level < 10 else COLORS["text_value"]
-        val_surf = font_value.render(val_str, True, color)
-        surface.blit(val_surf, (lx + col_w // 2 - val_surf.get_width(), y))
-
-        lbl2 = font_label.render("LPG", True, COLORS["text_secondary"])
-        surface.blit(lbl2, (lx + col_w // 2 + 4, y + 2))
-        val_str2 = f"{self._lpg_level} L"
-        color2 = COLORS["yellow"] if self._lpg_level < 10 else COLORS["text_value"]
-        val_surf2 = font_value.render(val_str2, True, color2)
-        surface.blit(val_surf2, (lx + col_w - val_surf2.get_width(), y))
-        y += row_h
-
-        # Active fuel type + trip consumed
+        # Fuel type
         lbl = font_label.render("TYPE", True, COLORS["text_secondary"])
-        surface.blit(lbl, (lx + 4, y + 2))
+        surface.blit(lbl, (lx + 4, y + 3))
         from ...state.app_state import FuelType
         if self._active_fuel == FuelType.PETROL:
             val_surf = font_value.render("PETROL", True, COLORS["yellow"])
@@ -331,53 +318,52 @@ class EngineDetailScreen(Screen):
             val_surf = font_value.render("OFF", True, COLORS["text_tertiary"])
         surface.blit(val_surf, (lx + col_w - val_surf.get_width(), y))
 
-        # ── Right column: Temperatures ──
+        # ── Right column: Tank levels ──
         rx = self.width // 2 + pad_x
         y = y0
 
-        s = font_section.render("TEMPERATURES", True, COLORS["cyan"])
+        s = font_section.render("LEVELS", True, COLORS["cyan"])
         surface.blit(s, (rx, y))
-        y += 14
+        y += 16
 
-        temps = [
-            ("ICE CLT", self._ice_temp),
-            ("INVERTER", self._inverter_temp),
-            ("MG1 INV", self._mg1_inv_temp),
-            ("MG2 INV", self._mg2_inv_temp),
-            ("MG1 MOT", self._mg1_mot_temp),
-            ("MG2 MOT", self._mg2_mot_temp),
-            ("CONVERT", self._converter_temp),
-        ]
+        # Petrol level
+        lbl = font_label.render("PETROL", True, COLORS["text_secondary"])
+        surface.blit(lbl, (rx + 4, y + 3))
+        val_str = f"{self._fuel_level} L"
+        color = COLORS["yellow"] if self._fuel_level < 10 else COLORS["text_value"]
+        val_surf = font_value.render(val_str, True, color)
+        surface.blit(val_surf, (rx + col_w - val_surf.get_width(), y))
+        y += row_h
 
-        for label_text, temp_val in temps:
-            lbl = font_label.render(label_text, True, COLORS["text_secondary"])
-            surface.blit(lbl, (rx + 4, y + 2))
+        # LPG level
+        lbl = font_label.render("LPG", True, COLORS["text_secondary"])
+        surface.blit(lbl, (rx + 4, y + 3))
+        val_str = f"{self._lpg_level} L"
+        color = COLORS["yellow"] if self._lpg_level < 10 else COLORS["text_value"]
+        val_surf = font_value.render(val_str, True, color)
+        surface.blit(val_surf, (rx + col_w - val_surf.get_width(), y))
+        y += row_h
 
-            if temp_val is not None:
-                val_str = f"{int(temp_val)}\u00b0C"
-                color = self._temp_color(temp_val)
-            else:
-                val_str = "--\u00b0C"
-                color = COLORS["text_tertiary"]
-
-            val_surf = font_value.render(val_str, True, color)
-            surface.blit(val_surf, (rx + col_w - val_surf.get_width(), y))
-            y += row_h
+        # Trip consumed
+        lbl = font_label.render("TRIP", True, COLORS["text_secondary"])
+        surface.blit(lbl, (rx + 4, y + 3))
+        if self._trip_fuel_consumed > 0.001:
+            val_str = f"{self._trip_fuel_consumed:.2f} L"
+            color = COLORS["yellow"]
+        else:
+            val_str = "0.00 L"
+            color = COLORS["text_dim"]
+        val_surf = font_value.render(val_str, True, color)
+        surface.blit(val_surf, (rx + col_w - val_surf.get_width(), y))
 
     def _render_motor_rpms(self, surface: pygame.Surface) -> None:
-        """MG1/MG2/ICE RPMs in a compact row at the bottom."""
-        footer_h = 14
-        row_h = 28
-        y0 = self.height - footer_h - row_h - 2
-        pad_x = 10
-        font_label = get_mono_font(9)
-        font_value = get_mono_font(11)
-
-        # Divider line above motor RPMs
-        pygame.draw.line(
-            surface, COLORS["border_dim"],
-            (4, y0 - 4), (self.width - 4, y0 - 4), 1,
-        )
+        """MG1/MG2/ICE RPMs in a row at the bottom."""
+        footer_h = 22
+        row_h = 30
+        y0 = self.height - footer_h - row_h - 4
+        pad_x = 12
+        font_label = get_mono_font(10)
+        font_value = get_mono_font(12)
 
         col_w = (self.width - pad_x * 2) // 3
 
@@ -402,7 +388,78 @@ class EngineDetailScreen(Screen):
             val_surf = font_value.render(val_str, True, color)
             surface.blit(val_surf, (x, y0 + 14))
 
-    # ─── Page 1: Fuel Charts ──────────────────────────────────────────
+    # ─── Page 1: Temperatures ─────────────────────────────────────────
+
+    def _render_temperatures(self, surface: pygame.Surface) -> None:
+        """Full-page temperature display organized by subsystem."""
+        font_label = get_mono_font(11)
+        font_value = get_mono_font(18)
+        font_section = get_title_font(11)
+
+        pad_x = 14
+        col_w = (self.width - pad_x * 3) // 2
+        y_start = self.HEADER_HEIGHT + 10
+        row_h = 56
+
+        # ── Left column: ICE + MG1 ──
+        lx = pad_x
+        y = y_start
+
+        s = font_section.render("ENGINE & MG1", True, COLORS["cyan"])
+        surface.blit(s, (lx, y))
+        y += 18
+
+        left_temps = [
+            ("ICE COOLANT", self._ice_temp),
+            ("MG1 INVERTER", self._mg1_inv_temp),
+            ("MG1 MOTOR", self._mg1_mot_temp),
+        ]
+
+        for label_text, temp_val in left_temps:
+            lbl = font_label.render(label_text, True, COLORS["text_secondary"])
+            surface.blit(lbl, (lx + 4, y))
+
+            if temp_val is not None:
+                val_str = f"{int(temp_val)}\u00b0C"
+                color = self._temp_color(temp_val)
+            else:
+                val_str = "--\u00b0C"
+                color = COLORS["text_tertiary"]
+
+            val_surf = font_value.render(val_str, True, color)
+            surface.blit(val_surf, (lx + 4, y + 16))
+            y += row_h
+
+        # ── Right column: MG2 + Converter ──
+        rx = pad_x * 2 + col_w
+        y = y_start
+
+        s = font_section.render("MG2 & DC/DC", True, COLORS["cyan"])
+        surface.blit(s, (rx, y))
+        y += 18
+
+        right_temps = [
+            ("DC/DC CONV", self._converter_temp),
+            ("MG2 INVERTER", self._mg2_inv_temp),
+            ("MG2 MOTOR", self._mg2_mot_temp),
+        ]
+
+        for label_text, temp_val in right_temps:
+            lbl = font_label.render(label_text, True, COLORS["text_secondary"])
+            surface.blit(lbl, (rx + 4, y))
+
+            if temp_val is not None:
+                val_str = f"{int(temp_val)}\u00b0C"
+                color = self._temp_color(temp_val)
+            else:
+                val_str = "--\u00b0C"
+                color = COLORS["text_tertiary"]
+
+            val_surf = font_value.render(val_str, True, color)
+            surface.blit(val_surf, (rx + 4, y + 16))
+            y += row_h
+
+    # ─── Page 2: Fuel Charts ──────────────────────────────────────────
 
     def _render_fuel_charts(self, surface: pygame.Surface) -> None:
         pad = 6
@@ -461,7 +518,7 @@ class EngineDetailScreen(Screen):
         surface.blit(val_surf, (x + w - val_surf.get_width() - 6,
                                 y + (h - val_surf.get_height()) // 2))
 
-    # ─── Page 2: Temperature Charts ───────────────────────────────────
+    # ─── Page 3: Temperature Charts ───────────────────────────────────
 
     def _render_temp_charts(self, surface: pygame.Surface) -> None:
         pad = 6
@@ -650,11 +707,30 @@ class EngineDetailScreen(Screen):
     # ─── Footer ───────────────────────────────────────────────────────
 
     def _render_footer(self, surface: pygame.Surface) -> None:
-        font = get_mono_font(9)
-        hint = "\u25C0 ROTATE \u25B6    [HOLD] BACK"
-        s = font.render(hint, True, COLORS["text_tertiary"])
-        surface.blit(s, ((self.width - s.get_width()) // 2,
-                         self.height - s.get_height() - 2))
+        """Render bottom bar with [BACK] button and page navigation hint."""
+        font = get_mono_font(10)
+        bar_h = 22
+        bar_y = self.height - bar_h
+
+        # Dark bar background
+        pygame.draw.rect(surface, COLORS["bg_panel"], (0, bar_y, self.width, bar_h))
+        pygame.draw.line(surface, COLORS["border_dim"], (0, bar_y), (self.width, bar_y))
+
+        # BACK button — always focused (single action)
+        btn_width = 80
+        bx = 8
+        by = bar_y + 3
+        bh = bar_h - 6
+        pygame.draw.rect(surface, COLORS["cyan"], (bx, by, btn_width, bh))
+        s = font.render("BACK", True, COLORS["bg_dark"])
+        surface.blit(s, (bx + (btn_width - s.get_width()) // 2, by + (bh - s.get_height()) // 2))
+
+        # Page dots on the right
+        dot_font = get_mono_font(9)
+        page_hint = "\u25C0 ROTATE \u25B6"
+        hint_surf = dot_font.render(page_hint, True, COLORS["text_tertiary"])
+        surface.blit(hint_surf, (self.width - hint_surf.get_width() - 8,
+                                 bar_y + (bar_h - hint_surf.get_height()) // 2))
 
     # ─── Helpers ──────────────────────────────────────────────────────
 

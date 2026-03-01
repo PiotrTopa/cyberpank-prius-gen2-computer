@@ -122,10 +122,13 @@ class VirtualTwin:
         """
         Initialize solicited CAN subscriptions for key PIDs.
         
-        This enables RPM, SOC and inverter temperature from solicited queries.
-        Uses ISO-TP multi-frame reassembly for PIDs that return >7 bytes (Gateway v2.9.0+).
+        Uses subscription group definitions from comm.subscription_groups.
+        Respects user-configured data source settings for toggleable groups.
+        Core drivetrain PIDs are always subscribed.
         """
         from .ports import OutgoingCommand, DEVICE_CAN
+        from ..comm.subscription_groups import CORE_GROUP, TOGGLEABLE_GROUPS
+        from ..persistence import get_settings
         
         logger.info("Initializing solicited CAN subscriptions...")
         
@@ -136,283 +139,86 @@ class VirtualTwin:
             payload={"a": "mode", "m": "normal"}
         ))
         
-        # Wait briefly for mode switch
         import time
         time.sleep(0.1)
         
-        # Subscribe to key PIDs:
+        # Always subscribe core drivetrain
+        for slot_def in CORE_GROUP.slots:
+            self.output_port.send(OutgoingCommand(
+                device_id=DEVICE_CAN,
+                command_type="sub",
+                payload=slot_def.payload,
+            ))
         
-        # Slot 0: Engine ECU 0x7E0, PID 010C (RPM) @ 500ms
-        # IMPORTANT: Use direct ECU address 0x7E0, NOT broadcast 0x7DF!
-        # Broadcasting to 0x7DF queries ALL ECUs which floods the bus and
-        # can trigger diagnostic sessions in ECUs, causing the master warning triangle.
-        # Also reduced polling rate from 200ms to 500ms to be less aggressive.
-        self.output_port.send(OutgoingCommand(
-            device_id=DEVICE_CAN,
-            command_type="sub",
-            payload={
-                "a": "sub",
-                "slot": 0,
-                "i": "0x7E0",
-                "d": [0x02, 0x01, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "int": 500,
-                "t": 200,
-                "r": ["0x7E8"]
-            }
-        ))
+        # Subscribe toggleable groups based on user settings
+        ds = get_settings().data_sources
+        enabled_names = []
+        for group in TOGGLEABLE_GROUPS:
+            if ds.is_group_enabled(group.key):
+                for slot_def in group.slots:
+                    self.output_port.send(OutgoingCommand(
+                        device_id=DEVICE_CAN,
+                        command_type="sub",
+                        payload=slot_def.payload,
+                    ))
+                enabled_names.append(group.key)
+            else:
+                logger.info("Skipping disabled group: %s", group.key)
         
-        # Slot 1: Engine ECU 0x7E0, PID 0104 (Engine Load %) @ 2000ms
-        # Single-frame response from 0x7E8
-        # NOTE: Was previously 21CF from Hybrid ECU 0x7E2 — but the hybrid
-        # decoder has no handler for PID CF, so responses were silently dropped.
-        # Delta SOC is correctly handled via Battery ECU Slot 4 (21CF @ 0x7E3).
-        self.output_port.send(OutgoingCommand(
-            device_id=DEVICE_CAN,
-            command_type="sub",
-            payload={
-                "a": "sub",
-                "slot": 1,
-                "i": "0x7E0",
-                "d": [0x02, 0x01, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "int": 2000,
-                "t": 200,
-                "r": ["0x7E8"]
-            }
-        ))
-        
-        # Slot 2: Hybrid ECU 0x7E2, PID 21C3 (inverter temps, MG data) @ 1000ms
-        # ISO-TP multi-frame response (31+ bytes) from 0x7EA
-        # Reduced rate from 500ms - less bus load, still fast enough for temps
-        self.output_port.send(OutgoingCommand(
-            device_id=DEVICE_CAN,
-            command_type="sub",
-            payload={
-                "a": "sub",
-                "slot": 2,
-                "i": "0x7E2",
-                "d": [0x02, 0x21, 0xC3, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "int": 1000,
-                "t": 500,
-                "r": ["0x7EA"],
-                "isotp": True
-            }
-        ))
-        
-        # Slot 3: HV Battery ECU 0x7E3, PID 21CE (block voltages) @ 2000ms
-        # ISO-TP multi-frame response (33+ bytes) from 0x7EB
-        # Contains 14 block voltages for delta-V / battery health monitoring
-        self.output_port.send(OutgoingCommand(
-            device_id=DEVICE_CAN,
-            command_type="sub",
-            payload={
-                "a": "sub",
-                "slot": 3,
-                "i": "0x7E3",
-                "d": [0x02, 0x21, 0xCE, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "int": 2000,
-                "t": 500,
-                "r": ["0x7EB"],
-                "isotp": True
-            }
-        ))
-        
-        # Slot 4: HV Battery ECU 0x7E3, PID 21CF (fan speed, air temp, delta SOC) @ 2000ms
-        # Single-frame response from 0x7EB (8 bytes)
-        self.output_port.send(OutgoingCommand(
-            device_id=DEVICE_CAN,
-            command_type="sub",
-            payload={
-                "a": "sub",
-                "slot": 4,
-                "i": "0x7E3",
-                "d": [0x02, 0x21, 0xCF, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "int": 2000,
-                "t": 200,
-                "r": ["0x7EB"]
-            }
-        ))
-        
-        # Slot 5: HV Battery ECU 0x7E3, PID 21D0 (internal resistance) @ 5000ms
-        # ISO-TP multi-frame response from 0x7EB
-        # 14 block resistances for battery health monitoring
-        self.output_port.send(OutgoingCommand(
-            device_id=DEVICE_CAN,
-            command_type="sub",
-            payload={
-                "a": "sub",
-                "slot": 5,
-                "i": "0x7E3",
-                "d": [0x02, 0x21, 0xD0, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "int": 5000,
-                "t": 500,
-                "r": ["0x7EB"],
-                "isotp": True
-            }
-        ))
-        
-        # Slot 6: Hybrid ECU 0x7E2, PID 21D3 (cruise control) @ 1000ms
-        # Single-frame response from 0x7EA (4 bytes)
-        # Cruise set/memory speed, main switch, active flag, cancel/set switches
-        self.output_port.send(OutgoingCommand(
-            device_id=DEVICE_CAN,
-            command_type="sub",
-            payload={
-                "a": "sub",
-                "slot": 6,
-                "i": "0x7E2",
-                "d": [0x02, 0x21, 0xD3, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "int": 1000,
-                "t": 200,
-                "r": ["0x7EA"]
-            }
-        ))
-        
-        # --- Engine ECU 0x7E0 Mode 01 PIDs (single-frame responses from 0x7E8) ---
-        
-        # Slot 7: PID 0142 (Aux/12V battery voltage) @ 5000ms
-        # Control module voltage — monitors 12V battery health
-        self.output_port.send(OutgoingCommand(
-            device_id=DEVICE_CAN,
-            command_type="sub",
-            payload={
-                "a": "sub",
-                "slot": 7,
-                "i": "0x7E0",
-                "d": [0x02, 0x01, 0x42, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "int": 5000,
-                "t": 200,
-                "r": ["0x7E8"]
-            }
-        ))
-        
-        # Slot 8: Hybrid ECU 0x7E2, PID 21C4 (hybrid additional) @ 2000ms
-        # ISO-TP multi-frame response from 0x7EA (16+ bytes)
-        # A/C compressor power, crank position, relay states, engine requests
-        self.output_port.send(OutgoingCommand(
-            device_id=DEVICE_CAN,
-            command_type="sub",
-            payload={
-                "a": "sub",
-                "slot": 8,
-                "i": "0x7E2",
-                "d": [0x02, 0x21, 0xC4, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "int": 2000,
-                "t": 500,
-                "r": ["0x7EA"],
-                "isotp": True
-            }
-        ))
-        
-        # Slot 9: PID 010F (Intake air temperature) @ 5000ms
-        self.output_port.send(OutgoingCommand(
-            device_id=DEVICE_CAN,
-            command_type="sub",
-            payload={
-                "a": "sub",
-                "slot": 9,
-                "i": "0x7E0",
-                "d": [0x02, 0x01, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "int": 5000,
-                "t": 200,
-                "r": ["0x7E8"]
-            }
-        ))
-        
-        # Slot 10: PID 0110 (MAF air flow rate) @ 2000ms
-        self.output_port.send(OutgoingCommand(
-            device_id=DEVICE_CAN,
-            command_type="sub",
-            payload={
-                "a": "sub",
-                "slot": 10,
-                "i": "0x7E0",
-                "d": [0x02, 0x01, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "int": 2000,
-                "t": 200,
-                "r": ["0x7E8"]
-            }
-        ))
-        
-        # Slot 11: PID 0124 (Lambda ratio + O2 sensor voltage) @ 2000ms
-        # Returns 4 bytes: equiv ratio (A,B) + O2 voltage (C,D)
-        self.output_port.send(OutgoingCommand(
-            device_id=DEVICE_CAN,
-            command_type="sub",
-            payload={
-                "a": "sub",
-                "slot": 11,
-                "i": "0x7E0",
-                "d": [0x02, 0x01, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "int": 2000,
-                "t": 200,
-                "r": ["0x7E8"]
-            }
-        ))
-        
-        # Slot 12: PID 0131 (Distance since DTC clear / odometer proxy) @ 10000ms
-        self.output_port.send(OutgoingCommand(
-            device_id=DEVICE_CAN,
-            command_type="sub",
-            payload={
-                "a": "sub",
-                "slot": 12,
-                "i": "0x7E0",
-                "d": [0x02, 0x01, 0x31, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "int": 10000,
-                "t": 200,
-                "r": ["0x7E8"]
-            }
-        ))
-        
-        # Slot 13: PID 0133 (Barometric pressure) @ 10000ms
-        self.output_port.send(OutgoingCommand(
-            device_id=DEVICE_CAN,
-            command_type="sub",
-            payload={
-                "a": "sub",
-                "slot": 13,
-                "i": "0x7E0",
-                "d": [0x02, 0x01, 0x33, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "int": 10000,
-                "t": 200,
-                "r": ["0x7E8"]
-            }
-        ))
-        
-        # Slot 14: PID 0146 (Ambient air temperature) @ 10000ms
-        self.output_port.send(OutgoingCommand(
-            device_id=DEVICE_CAN,
-            command_type="sub",
-            payload={
-                "a": "sub",
-                "slot": 14,
-                "i": "0x7E0",
-                "d": [0x02, 0x01, 0x46, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "int": 10000,
-                "t": 200,
-                "r": ["0x7E8"]
-            }
-        ))
-        
+        core_labels = ", ".join(s.label for s in CORE_GROUP.slots)
         logger.info(
-            "Solicited CAN subscriptions initialized (15 slots: "
-            "RPM, eng load, INV temp, block V, fan/temp, resistance, cruise, "
-            "aux V, hybrid add, intake T, MAF, lambda, odo, baro, ambient T)"
+            "Solicited CAN subscriptions initialized "
+            "(core: %s | enabled: %s)",
+            core_labels, ", ".join(enabled_names) or "none",
         )
         
         # Wait for writer thread to actually send the commands
-        import time
         time.sleep(0.5)
         
         # Log serial stats to confirm commands were sent
         if hasattr(self.output_port, '_ports'):
-            # MultiOutputPort
             for p in self.output_port._ports:
                 if hasattr(p, 'stats'):
                     logger.info(f"Serial stats after sub init: {p.stats}")
         elif hasattr(self.output_port, 'stats'):
             logger.info(f"Serial stats after sub init: {self.output_port.stats}")
     
+    def subscribe_group(self, group) -> None:
+        """Subscribe to all slots in a subscription group.
+        
+        Called by the Data Sources screen when the user enables a group.
+        
+        Args:
+            group: SubscriptionGroup instance from comm.subscription_groups
+        """
+        from .ports import OutgoingCommand, DEVICE_CAN
+        
+        for slot_def in group.slots:
+            self.output_port.send(OutgoingCommand(
+                device_id=DEVICE_CAN,
+                command_type="sub",
+                payload=slot_def.payload,
+            ))
+        logger.info("Subscribed group: %s (%d slots)", group.key, len(group.slots))
+    
+    def unsubscribe_group(self, group) -> None:
+        """Unsubscribe from all slots in a subscription group.
+        
+        Called by the Data Sources screen when the user disables a group.
+        
+        Args:
+            group: SubscriptionGroup instance from comm.subscription_groups
+        """
+        from .ports import OutgoingCommand, DEVICE_CAN
+        
+        for slot_def in group.slots:
+            self.output_port.send(OutgoingCommand(
+                device_id=DEVICE_CAN,
+                command_type="unsub",
+                payload={"a": "unsub", "slot": slot_def.slot},
+            ))
+        logger.info("Unsubscribed group: %s (%d slots)", group.key, len(group.slots))
+
     def _cleanup_solicited_subscriptions(self) -> None:
         """
         Clean up solicited CAN subscriptions and return to listen-only mode.

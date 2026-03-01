@@ -249,6 +249,12 @@ class ClimateScreen(Screen):
         from ...input.manager import InputEvent as IE
         
         self._reset_activity()
+
+        # BACK always exits
+        if event == IE.BACK:
+            self._editing = False
+            self._exit_screen()
+            return True
         
         current_item = self.items[self._selected_index]
         
@@ -381,13 +387,17 @@ class ClimateScreen(Screen):
     def _render_footer(self, surface: pygame.Surface) -> None:
         """Render footer with hints."""
         font = get_mono_font(10)
-        
+        bar_h = 22
+        bar_y = self.height - bar_h
+
+        pygame.draw.rect(surface, COLORS["bg_panel"], (0, bar_y, self.width, bar_h))
+        pygame.draw.line(surface, COLORS["border_dim"], (0, bar_y), (self.width, bar_y))
+
         if self._editing:
-            hint = "[<>] ADJUST   [ENTER] DONE   [SPACE] EXIT"
+            hint = "[TURN] ADJUST   [OK] DONE   [BACK] EXIT"
         else:
-            hint = "[<>] SELECT   [ENTER] EDIT   [SPACE] EXIT"
+            hint = "[TURN] SELECT   [OK] EDIT   [BACK] EXIT"
         
-        hint_surf = font.render(hint, True, COLORS["text_secondary"])
+        hint_surf = font.render(hint, True, COLORS["text_tertiary"])
         hint_x = (self.width - hint_surf.get_width()) // 2
-        hint_y = self.height - hint_surf.get_height() - 4
-        surface.blit(hint_surf, (hint_x, hint_y))
+        surface.blit(hint_surf, (hint_x, bar_y + (bar_h - hint_surf.get_height()) // 2))

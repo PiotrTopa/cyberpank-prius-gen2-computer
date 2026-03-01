@@ -1,6 +1,6 @@
 {
   "ambient": {
-    "mode": "CYBER",
+    "mode": "MANUAL",
     "hue": 180,
     "saturation": 100,
     "brightness": 80
@@ -12,7 +12,7 @@
     "drl_enabled": true
   },
   "audio": {
-    "volume": 60,
+    "volume": 46,
     "bass": 0,
     "mid": 0,
     "treble": 0,
@@ -32,5 +32,13 @@
     "screen_brightness": 100,
     "power_chart_time_base": 3600,
     "vfd_brightness": 100
+  },
+  "data_sources": {
+    "battery_cells": false,
+    "hybrid_extended": true,
+    "engine_sensors": false,
+    "aux_battery": true,
+    "environment": true,
+    "odometer": false
   }
 }

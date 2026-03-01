@@ -722,6 +722,7 @@ DTC_ECUS = [
     (ECUAddress.ENGINE.value, "ENGINE"),
     (ECUAddress.HYBRID.value, "HYBRID"),
     (ECUAddress.HV_BATTERY.value, "HV_BATT"),
+    (ECUAddress.AIRBAG.value, "AIRBAG"),
 ]
 
 

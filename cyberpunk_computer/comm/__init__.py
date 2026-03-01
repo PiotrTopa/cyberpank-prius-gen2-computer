@@ -33,6 +33,7 @@ from .avc_decoder import (
     TouchEvent,
     ButtonEvent,
     AudioParamStatus,
+    HEARTBEAT_BUTTON_CODES,
 )
 from .avc_state import (
     AVCStateManager,
@@ -106,6 +107,7 @@ __all__ = [
     "TouchEvent",
     "ButtonEvent",
     "AudioParamStatus",
+    "HEARTBEAT_BUTTON_CODES",
     # AVC State
     "AVCStateManager",
     "AVCEventType",

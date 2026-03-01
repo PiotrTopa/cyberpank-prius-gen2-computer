@@ -48,6 +48,7 @@ from ..state.actions import (
 from ..comm.avc_decoder import (
     AVCDecoder, AVCMessage, AVCMessageType,
     parse_button_event, parse_touch_event,
+    HEARTBEAT_BUTTON_CODES,
 )
 from ..comm.can_decoder import CANDecoder, CANMessageType
 from ..comm.solicited_can import parse_dtc_response, ECU_NAMES
@@ -147,7 +148,7 @@ class IngressController:
         self._analysis_mode = enabled
     
     def set_solicited_debug(self, enabled: bool) -> None:
-        """Enable/disable solicited CAN debug mode (prints 0x7E8/0x7EA/0x7EB responses)."""
+        """Enable/disable solicited CAN debug mode (prints 0x788/0x7E8/0x7EA/0x7EB responses)."""
         self._solicited_debug = enabled
     
     def set_message_log_callback(
@@ -319,7 +320,7 @@ class IngressController:
                 else:
                     print(f"[RESP] slot={slot} {can_id_raw}: len={len(raw_data)} data={[hex(b) if isinstance(b, int) else b for b in raw_data[:20]]}")
             # Solicited response IDs (direct responses without action field)
-            elif can_id_int in (0x7E8, 0x7EA, 0x7EB):
+            elif can_id_int in (0x788, 0x7E8, 0x7EA, 0x7EB):
                 raw_data = msg.data.get("d", [])
                 print(f"[SOL_RAW] CAN {can_id_raw}: {[hex(b) if isinstance(b, int) else b for b in raw_data[:16]]}")
             # Key unsolicited IDs for battery temp and other data
@@ -341,7 +342,7 @@ class IngressController:
         # Decode using CAN decoder
         decoded = self._can_decoder.decode(msg.data)
         if not decoded:
-            if self._solicited_debug and can_id_int in (0x7E8, 0x7EA, 0x7EB):
+            if self._solicited_debug and can_id_int in (0x788, 0x7E8, 0x7EA, 0x7EB):
                 print(f"[SOL_RAW] Decode returned None for {can_id_raw}")
             return
         
@@ -433,20 +434,31 @@ class IngressController:
         elif classification == "button_press":
             btn = parse_button_event(data)
             if btn:
-                if self._analysis_mode:
-                    status = "PRESS" if btn.is_press else "RELEASE"
-                    seq_str = f"[{seq:>4}]" if seq is not None else ""
-                    print(f"[BTN] {seq_str} {status}: {btn.button_name} (code=0x{btn.button_code:04X})")
-                
-                actions.append(AVCButtonPressAction(
-                    button_code=btn.button_code,
-                    modifier=btn.modifier,
-                    suffix=btn.suffix,
-                    is_press=btn.is_press,
-                    raw_data=btn.raw_data,
-                    button_name=btn.button_name,
-                    source=ActionSource.GATEWAY
-                ))
+                # Skip periodic heartbeat / status codes (0x60xx family)
+                if btn.button_code in HEARTBEAT_BUTTON_CODES:
+                    pass  # Not a real button press — ignore
+                else:
+                    if self._analysis_mode:
+                        status = "PRESS" if btn.is_press else "RELEASE"
+                        seq_str = f"[{seq:>4}]" if seq is not None else ""
+                        raw_hex = " ".join(f"{b:02X}" for b in btn.raw_data)
+                        print(
+                            f"[BTN] {seq_str} {status}: {btn.button_name}"
+                            f" (code=0x{btn.button_code:04X}"
+                            f" mod=0x{btn.modifier:02X}"
+                            f" sfx=0x{btn.suffix:02X}"
+                            f" raw=[{raw_hex}])"
+                        )
+
+                    actions.append(AVCButtonPressAction(
+                        button_code=btn.button_code,
+                        modifier=btn.modifier,
+                        suffix=btn.suffix,
+                        is_press=btn.is_press,
+                        raw_data=btn.raw_data,
+                        button_name=btn.button_name,
+                        source=ActionSource.GATEWAY
+                    ))
         
         # Touch event
         elif classification == "touch_event":
@@ -578,9 +590,11 @@ class IngressController:
                 actions.append(SetSpeedAction(speed, ActionSource.GATEWAY))
         
         # Engine status (0x039 - coolant temp only)
+        # Byte 0 = direct °C, no offset. Valid range: cold start (~-10°C) to hot (~130°C).
+        # Values 254/255 are ECU sentinel/not-ready values (seen first ~20s after ACC on).
         elif msg.msg_type == CANMessageType.ENGINE_RPM:
             coolant_temp = msg.values.get("coolant_temp")
-            if coolant_temp is not None and 40 <= coolant_temp <= 120:
+            if coolant_temp is not None and 0 <= coolant_temp <= 130:
                 actions.append(SetICECoolantTempAction(coolant_temp, ActionSource.GATEWAY))
         
         # Engine Status (0x038 - ICE running state only, no RPM)
@@ -734,6 +748,12 @@ class IngressController:
             if self._solicited_debug:
                 print(f"[SOL] 0x7EB Battery: {msg.values}")
             actions.extend(self._handle_solicited_hv_battery(msg))
+        
+        # Solicited Airbag ECU Response (0x788)
+        elif msg.msg_type == CANMessageType.SOLICITED_AIRBAG:
+            if self._solicited_debug:
+                print(f"[SOL] 0x788 Airbag: {msg.values}")
+            actions.extend(self._handle_solicited_airbag(msg))
         
         return actions
     
@@ -1042,6 +1062,22 @@ class IngressController:
         
         return actions
     
+    def _handle_solicited_airbag(self, msg) -> List[Action]:
+        """
+        Handle solicited response from Airbag ECU (0x788).
+        
+        Only DTC scanning — no PID polling for this ECU.
+        """
+        actions: List[Action] = []
+        values = msg.values
+        
+        # DTC responses (Mode 03/07) from Airbag ECU
+        dtc_actions = self._handle_dtc_response(values, "AIRBAG")
+        if dtc_actions:
+            actions.extend(dtc_actions)
+        
+        return actions
+    
     # ─────────────────────────────────────────────────────────────────────
     # DTC (Diagnostic Trouble Code) Handling
     # ─────────────────────────────────────────────────────────────────────
@@ -1134,6 +1170,7 @@ class IngressController:
             f"0x{ECUAddress.ENGINE + 8:03X}": "ENGINE",
             f"0x{ECUAddress.HYBRID + 8:03X}": "HYBRID", 
             f"0x{ECUAddress.HV_BATTERY + 8:03X}": "HV_BATT",
+            f"0x{ECUAddress.AIRBAG + 8:03X}": "AIRBAG",
         }
         
         ecu_name = ecu_map.get(can_id_raw) if can_id_raw else None
