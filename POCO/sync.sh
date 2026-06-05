@@ -36,12 +36,15 @@ for t in rsync ssh scp envsubst; do
 done
 SECRETS="$HERE/secrets.env"
 [ -f "$SECRETS" ] || { echo "ERROR: $SECRETS missing — copy secrets.env.example and fill it in" >&2; exit 1; }
+# Source secrets, tolerating CRLF (the file is gitignored so not LF-normalized).
+SECRETS_CLEAN="$(mktemp)"
+sed 's/\r$//' "$SECRETS" > "$SECRETS_CLEAN"
 # shellcheck disable=SC1090
-set -a; . "$SECRETS"; set +a
+set -a; . "$SECRETS_CLEAN"; set +a
 
 # --- 1. stage + render -------------------------------------------------------
 STAGE="$(mktemp -d)"
-trap 'rm -rf "$STAGE"' EXIT
+trap 'rm -rf "$STAGE" "$SECRETS_CLEAN"' EXIT
 cp -a "$HERE/rootfs/." "$STAGE/"
 
 # Render every *.tmpl -> same name without .tmpl, then drop the template.
