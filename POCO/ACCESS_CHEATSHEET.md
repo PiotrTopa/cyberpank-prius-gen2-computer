@@ -126,8 +126,8 @@ sudo prius-usb device --reboot   # peripheral — restores USB-network lifeline
 ## Server-side (WireGuard admin)
 
 ```bash
-ssh piotr@192.168.0.74        # jump host node1
-ssh root@46.224.54.21         # WG server; config /etc/wireguard/wg0.conf
+ssh piotr@<JUMP_HOST_IP>      # jump host node1 (real IP kept in private notes)
+ssh root@<WG_SERVER_IP>       # WG server; config /etc/wireguard/wg0.conf
 wg show wg0
 ```
 

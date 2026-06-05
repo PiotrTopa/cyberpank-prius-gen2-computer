@@ -8,7 +8,7 @@ interface-name=wg-homelab
 private-key=${WG_PRIVATE_KEY}
 
 [wireguard-peer.${WG_PEER_PUBLIC_KEY}]
-endpoint=46.224.54.21:51820
+endpoint=${WG_ENDPOINT}
 persistent-keepalive=25
 allowed-ips=10.200.0.0/24;192.168.0.0/24;
 

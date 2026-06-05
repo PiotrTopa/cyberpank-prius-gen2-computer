@@ -26,7 +26,7 @@ Details in [POWER.md](POWER.md).
 
 | Path | Type | Purpose |
 |------|------|---------|
-| `/etc/wireguard/wg-homelab.conf` | WireGuard conf | VPN overlay, addr `10.200.0.5/32`, endpoint `46.224.54.21:51820`, AllowedIPs `10.200.0.0/24,192.168.0.0/24`, keepalive 25 |
+| `/etc/wireguard/wg-homelab.conf` | WireGuard conf | VPN overlay, addr `10.200.0.5/32`, endpoint `<WG_SERVER_IP>:51820`, AllowedIPs `10.200.0.0/24,192.168.0.0/24`, keepalive 25 |
 | NM conn `wg-homelab` | NetworkManager | brings up the WireGuard tunnel, autoconnect yes |
 | NM conn `prius-wan` | NetworkManager | SIM WAN, APN `internet`, `gsm.pin` (value in secrets.env), metric 800, autoconnect yes |
 | `/usr/local/sbin/prius-wifi` | sh script (755) | Wi-Fi mode toggle `prius-wifi {client\|ap\|off\|apply\|status}`. Never touches WAN/VPN |

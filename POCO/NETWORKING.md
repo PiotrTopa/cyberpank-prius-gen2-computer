@@ -6,7 +6,7 @@ The phone runs on a **cellular SIM** WAN with a **WireGuard** overlay. Remote ac
 ## Target architecture (production)
 
 ```
-                       WireGuard server 46.224.54.21 (wg0 10.200.0.1/24, :51820)
+                       WireGuard server <WG_SERVER_IP> (wg0 10.200.0.1/24, :51820)
                         ▲              ▲              ▲
         ┌───────────────┘              │              └───────────────┐
         │ 10.200.0.5                   │ 10.200.0.7                    │ 10.200.0.6
@@ -29,10 +29,14 @@ modem; Wi-Fi is off in production.
 | **ThinkPad** (Windows) | `10.200.0.7` | `uGicop7VoUZGDsBw2uJ9TlopZm8k3I18LkxywNqw8ww=` | service `WireGuardTunnel$thinkpad-vpn` |
 | _(dead)_ old bridge | `10.200.0.2` | `BdiuYOWO…` | inactive >60 d, ignore |
 
-- **Server:** `root@46.224.54.21` (hostname `debian-4gb-nbg1-4`), `wg0 = 10.200.0.1/24`,
-  ListenPort `51820`, server pubkey `5AZoN9eCjltdDhN3cHjKlJohXwzQWO+pS1M5u+SIhA8=`,
-  config `/etc/wireguard/wg0.conf`, `net.ipv4.ip_forward=1`.
-- **Server admin path:** `ssh piotr@192.168.0.74` (jump host `node1`) → `ssh root@46.224.54.21`.
+- **Server:** `root@<WG_SERVER_IP>` (hostname redacted), `wg0 = 10.200.0.1/24`,
+  ListenPort `51820`, server pubkey redacted (kept in private `secrets.env` as
+  `WG_PEER_PUBLIC_KEY`), config `/etc/wireguard/wg0.conf`, `net.ipv4.ip_forward=1`.
+- **Server admin path:** `ssh piotr@<JUMP_HOST_IP>` (jump host `node1`) → `ssh root@<WG_SERVER_IP>`.
+
+> Real server host/IP, jump-host IP and the server public key are intentionally kept
+> out of this public repo. They live in the gitignored `secrets.env`
+> (`WG_ENDPOINT`, `WG_PEER_PUBLIC_KEY`) or in the operator's private notes.
 
 ## Phone network configuration
 
@@ -41,7 +45,7 @@ All managed by **NetworkManager** (+ ModemManager for the modem).
 | Connection | Device | Role | Autoconnect |
 |-----------|--------|------|-------------|
 | `prius-wan` | `qmapmux0.0` (gsm/qrtr0) | **SIM WAN**, APN `internet`, route-metric 800 | yes |
-| `wg-homelab` | wireguard | **VPN overlay** to `46.224.54.21:51820` | yes |
+| `wg-homelab` | wireguard | **VPN overlay** to `<WG_SERVER_IP>:51820` | yes |
 | `prius-home-wifi` | `wlan0` | Wi-Fi **client** (SSID `in_the_center_of_nowhere`), route-metric 600 | **no** (toggle) |
 | `prius-ap` | `wlan0` | Wi-Fi **access point** (SSID `prius`, 2.4 GHz, `10.42.0.1/24` + DHCP) | **no** (toggle) |
 | `prius-dev-wifi` | `wlan0` | legacy dev Wi-Fi client (SSID `in_the_middle_of_nowhere`) | **no** (unused) |
