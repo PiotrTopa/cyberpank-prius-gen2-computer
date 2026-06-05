@@ -1,0 +1,5 @@
+# Local-only provisioning secrets and rendered artifacts — never commit.
+secrets.env
+*.nmconnection
+*.rendered
+.stage/

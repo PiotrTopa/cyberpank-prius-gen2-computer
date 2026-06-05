@@ -1,0 +1,86 @@
+#!/bin/sh
+# prius-netwatch - keep the VPN-over-SIM lifeline alive on the POCO F1.
+#
+# In USB *host* mode the WireGuard-over-LTE tunnel is the ONLY remote channel
+# (the USB-network lifeline is gone). QMI/rmnet data bearers can drop SILENTLY:
+# ModemManager keeps reporting the modem "connected" while the data path is dead,
+# so NetworkManager never sees a state change and never auto-reconnects. The
+# tunnel then stays down until a manual reboot. Observed 2026-06-04: an 18h
+# outage after a 3GPP detach/attach, OS alive the whole time.
+#
+# This watchdog pings the WG server *through* the tunnel and, on sustained
+# failure, escalates: bounce WireGuard -> bounce mobile data -> reboot.
+set -u
+
+PEER_IP=10.200.0.1          # WG server wg0 address (reachable only via tunnel+WAN)
+WAN_CON=prius-wan
+WG_CON=wg-homelab
+STATE=/run/prius-netwatch.fail
+PING_CNT=2
+PING_TO=4
+MIN_UPTIME_REBOOT=600       # don't reboot if we just booted (anti boot-loop)
+
+# escalation thresholds (consecutive failed checks; timer runs every ~60s)
+T_WG=2          # bounce WireGuard (cheap re-handshake)
+T_WAN=4         # bounce mobile data (re-establish bearer -> new IP/route)
+T_WAN2=7        # bounce mobile data again
+T_REBOOT=11     # last resort reboot
+
+log() { echo "prius-netwatch: $*"; }
+check() { ping -c "$PING_CNT" -W "$PING_TO" "$PEER_IP" >/dev/null 2>&1; }
+get_fail() { cat "$STATE" 2>/dev/null || echo 0; }
+set_fail() { echo "$1" > "$STATE"; }
+
+bounce_wg() {
+    log "bouncing $WG_CON"
+    nmcli con down "$WG_CON" >/dev/null 2>&1
+    sleep 1
+    nmcli con up "$WG_CON" >/dev/null 2>&1
+}
+bounce_wan() {
+    log "bouncing $WAN_CON (re-establish data bearer)"
+    nmcli con down "$WAN_CON" >/dev/null 2>&1
+    sleep 2
+    nmcli con up "$WAN_CON" >/dev/null 2>&1
+    sleep 3
+    nmcli con up "$WG_CON" >/dev/null 2>&1
+}
+uptime_s() { cut -d. -f1 /proc/uptime 2>/dev/null || echo 99999; }
+
+once() {
+    if check; then
+        f=$(get_fail)
+        [ "$f" -ne 0 ] && log "link recovered after $f failed check(s)"
+        set_fail 0
+        return 0
+    fi
+    f=$(get_fail); f=$((f+1)); set_fail "$f"
+    log "WG server $PEER_IP unreachable (consecutive failures: $f)"
+    case "$f" in
+        "$T_WG")   bounce_wg ;;
+        "$T_WAN")  bounce_wan ;;
+        "$T_WAN2") bounce_wan ;;
+        "$T_REBOOT")
+            up=$(uptime_s)
+            if [ "$up" -lt "$MIN_UPTIME_REBOOT" ]; then
+                log "would reboot but uptime ${up}s < ${MIN_UPTIME_REBOOT}s; retrying WAN instead"
+                bounce_wan
+                set_fail "$T_WAN2"   # keep cycling WAN bounces, defer reboot
+            else
+                log "sustained outage; rebooting as last resort"
+                sync
+                systemctl reboot
+            fi
+            ;;
+    esac
+}
+
+case "${1:-once}" in
+    once)   once ;;
+    status)
+        echo "fail counter: $(get_fail)"
+        if check; then echo "link: OK ($PEER_IP reachable)"; else echo "link: DOWN ($PEER_IP unreachable)"; fi
+        ;;
+    check)  check && echo OK || echo FAIL ;;
+    *) echo "usage: prius-netwatch {once|status|check}"; exit 1 ;;
+esac

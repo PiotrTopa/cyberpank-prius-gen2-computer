@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch Prius power-mode flag and re-apply profile
+
+[Path]
+PathModified=/etc/prius/power-mode
+Unit=prius-power.service
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+[Unit]
+Description=Prius VPN-over-SIM connectivity watchdog
+Documentation=man:prius-netwatch
+After=network-online.target NetworkManager.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/prius-netwatch once

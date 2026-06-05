@@ -1,0 +1,12 @@
+[Unit]
+Description=Apply Prius wifi mode (client/ap/off) from /etc/prius/wifi-mode
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/prius-wifi apply
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target

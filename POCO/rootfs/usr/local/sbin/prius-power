@@ -1,0 +1,65 @@
+#!/bin/sh
+# prius-power - Prius computer power profiles. Never suspends the system:
+# keeps modem (cellular), WireGuard, SSH and USB/OTG serial listening alive.
+#   low  : key OFF  - offline Gold cluster, cap Silver cluster (lowest idle draw)
+#   full : key ON   - all cores online, full clocks
+set -u
+
+FLAG=/etc/prius/power-mode
+CPU=/sys/devices/system/cpu
+LITTLE_MAX_LOW=1228800     # cap Silver cluster (~1.2 GHz) in low mode
+BIG_CORES="4 5 6 7"        # Gold cluster, offlined in low mode
+
+set_gov() {
+    [ -w "$1/scaling_governor" ] && echo "$2" > "$1/scaling_governor" 2>/dev/null || true
+}
+
+apply_low() {
+    for p in "$CPU"/cpufreq/policy*; do
+        [ -d "$p" ] && set_gov "$p" schedutil
+    done
+    [ -w "$CPU/cpufreq/policy0/scaling_max_freq" ] && \
+        echo "$LITTLE_MAX_LOW" > "$CPU/cpufreq/policy0/scaling_max_freq" 2>/dev/null || true
+    for n in $BIG_CORES; do
+        [ -w "$CPU/cpu$n/online" ] && echo 0 > "$CPU/cpu$n/online" 2>/dev/null || true
+    done
+}
+
+apply_full() {
+    for n in $BIG_CORES; do
+        [ -w "$CPU/cpu$n/online" ] && echo 1 > "$CPU/cpu$n/online" 2>/dev/null || true
+    done
+    for p in "$CPU"/cpufreq/policy*; do
+        [ -d "$p" ] || continue
+        set_gov "$p" schedutil
+        if [ -r "$p/cpuinfo_max_freq" ] && [ -w "$p/scaling_max_freq" ]; then
+            cat "$p/cpuinfo_max_freq" > "$p/scaling_max_freq" 2>/dev/null || true
+        fi
+    done
+}
+
+status() {
+    echo "mode-flag : $(cat "$FLAG" 2>/dev/null || echo '?')"
+    echo "cpus online: $(cat "$CPU/online")"
+    for p in "$CPU"/cpufreq/policy*; do
+        [ -d "$p" ] || continue
+        echo "  $(basename "$p"): gov=$(cat "$p/scaling_governor" 2>/dev/null) cur=$(cat "$p/scaling_cur_freq" 2>/dev/null) max=$(cat "$p/scaling_max_freq" 2>/dev/null)"
+    done
+    g=/sys/class/devfreq/5000000.gpu
+    [ -d "$g" ] && echo "  gpu: cur=$(cat "$g/cur_freq" 2>/dev/null) gov=$(cat "$g/governor" 2>/dev/null)"
+}
+
+mode="${1:-apply}"
+case "$mode" in
+    low|full)
+        echo "$mode" > "$FLAG"
+        [ "$mode" = low ] && apply_low || apply_full
+        ;;
+    apply)
+        m=$(cat "$FLAG" 2>/dev/null || echo full)
+        [ "$m" = low ] && apply_low || apply_full
+        ;;
+    status) status; exit 0 ;;
+    *) echo "usage: prius-power {low|full|apply|status}" >&2; exit 2 ;;
+esac
+status

@@ -1,0 +1,10 @@
+[Unit]
+Description=Apply Prius power profile from /etc/prius/power-mode
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/prius-power apply
+
+[Install]
+WantedBy=multi-user.target

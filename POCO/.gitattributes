@@ -1,0 +1,8 @@
+# All files under POCO/ target a Linux/musl device. Force LF so shebangs and
+# config parsers never see a stray CR (a CRLF shebang breaks #!/bin/sh).
+rootfs/** text eol=lf
+*.sh text eol=lf
+*.dtso text eol=lf
+*.tmpl text eol=lf
+packages.txt text eol=lf
+secrets.env.example text eol=lf

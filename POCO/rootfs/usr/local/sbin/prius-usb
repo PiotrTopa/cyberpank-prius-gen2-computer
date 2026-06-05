@@ -1,0 +1,72 @@
+#!/bin/sh
+# prius-usb - switch the dwc3 USB controller between host and device(peripheral)
+# roles on the POCO F1. dwc3-qcom-legacy on this kernel does NOT support runtime
+# role switching, so the role is set in the device-tree (dr_mode) and applied by
+# reflashing boot.img + rebooting.
+#
+#   host    : OTG host (xHCI) - drives RP2040 / CAN gateways. KILLS the USB-network
+#             lifeline to the build box. Access is then VPN-over-SIM only.
+#   device  : USB peripheral - restores the NCM USB-network lifeline (172.16.42.1),
+#             built by the initramfs at boot.
+#   status  : show live + device-tree-configured role.
+#
+# A switch requires a reboot. After a kernel/linux-postmarketos update the DTB is
+# reinstalled as 'peripheral' - re-run `prius-usb host` to get host mode back.
+set -u
+
+DTB=/boot/dtbs/qcom/sdm845-xiaomi-beryllium-tianma.dtb
+NODE=/soc@0/usb@a6f8800/usb@a600000
+FLAG=/etc/prius/usb-mode
+LIVE=/proc/device-tree/soc@0/usb@a6f8800/usb@a600000/dr_mode
+
+live_mode() { tr -d '\0' < "$LIVE" 2>/dev/null; }
+dtb_mode()  { fdtget "$DTB" "$NODE" dr_mode 2>/dev/null; }
+
+usage() { echo "usage: prius-usb {host|device|status} [--reboot]"; exit 1; }
+
+need_tools() {
+    command -v fdtget >/dev/null 2>&1 || { echo "ERROR: dtc/fdtget missing (apk add dtc)"; exit 1; }
+    command -v mkinitfs >/dev/null 2>&1 || { echo "ERROR: mkinitfs missing"; exit 1; }
+}
+
+apply() { # $1 = host|peripheral  $2 = flagword  $3 = --reboot?
+    need_tools
+    cur="$(dtb_mode)"
+    if [ "$cur" = "$1" ]; then
+        echo "device-tree already dr_mode=$1; (live=$(live_mode))"
+    else
+        echo "patching device-tree dr_mode: $cur -> $1"
+        fdtput -t s "$DTB" "$NODE" dr_mode "$1" || { echo "ERROR: fdtput failed"; exit 1; }
+        echo "verify: $(dtb_mode)"
+        echo "rebuilding + flashing boot.img ..."
+        mkinitfs >/dev/null 2>&1 || mkinitfs
+    fi
+    mkdir -p /etc/prius; echo "$2" > "$FLAG"
+    echo "flag $FLAG = $2"
+    if [ "${3:-}" = "--reboot" ]; then
+        echo "rebooting now to apply (role takes effect on next boot)..."
+        sync; systemctl reboot
+    else
+        echo "NOTE: reboot required to apply the new role:  sudo reboot"
+        echo "      (or re-run with --reboot)"
+    fi
+}
+
+case "${1:-}" in
+    host)    apply host       host   "${2:-}" ;;
+    device)  apply peripheral device "${2:-}" ;;
+    status)
+        echo "live dr_mode      : $(live_mode)"
+        echo "device-tree dr_mode: $(dtb_mode)"
+        echo "flag ($FLAG): $(cat "$FLAG" 2>/dev/null || echo unset)"
+        if ls /sys/bus/usb/devices/usb1 >/dev/null 2>&1; then
+            echo "USB role (live)   : HOST (xHCI active)"
+            echo "downstream devices:"; ls /sys/bus/usb/devices/ | grep -E '^[0-9]+-[0-9]' || echo "  (none connected)"
+        elif [ -n "$(ls /sys/class/udc 2>/dev/null)" ]; then
+            echo "USB role (live)   : DEVICE (gadget/lifeline)"
+        else
+            echo "USB role (live)   : (no xhci, no udc)"
+        fi
+        ;;
+    *) usage ;;
+esac

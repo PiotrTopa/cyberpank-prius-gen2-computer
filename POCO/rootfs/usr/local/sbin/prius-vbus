@@ -1,0 +1,127 @@
+#!/bin/sh
+# prius-vbus - make the POCO F1 source its own 5 V VBUS as a USB host.
+#
+# WHY: the PMI8998 has a USB-OTG boost converter at SPMI offset 0x1100 whose
+# register layout is identical to the PM8150B. The in-tree generic
+# `qcom_usb_vbus-regulator` driver is chip-agnostic (it only reads reg/compatible
+# from the device-tree), so adding a regulator node under pmic@2 with the
+# pm8150b-vbus-reg compatible makes that driver enable the boost at boot. With
+# `regulator-always-on` the phone permanently sources 5 V on its USB-C port, so a
+# directly-plugged device enumerates with NO external power / Y-cable. No kernel
+# rebuild and no role-switch driver are required (the role is fixed `host` via the
+# dwc3 dr_mode - see prius-usb).
+#
+# This patches the DTB by decompile -> insert node -> recompile, then mkinitfs
+# (repack+flash boot.img). It is IDEMPOTENT: a no-op if the node already exists.
+# Re-run it after a kernel/linux-postmarketos update (which reinstalls a pristine
+# DTB and drops this node). Pair with `prius-usb host` which re-applies dr_mode.
+#
+#   prius-vbus apply  [--reboot]   add the node if missing (default action)
+#   prius-vbus status              show node + regulator + live VBUS state
+#   prius-vbus revert [--reboot]   remove the node again
+set -u
+
+DTB=/boot/dtbs/qcom/sdm845-xiaomi-beryllium-tianma.dtb
+PMIC_PATH=/proc/device-tree/soc@0/spmi@c440000/pmic@2
+NODE_NAME="usb-vbus-regulator@1100"
+BK_BASE=/root/boot-backup
+
+need_tools() {
+    for t in dtc mkinitfs; do
+        command -v "$t" >/dev/null 2>&1 || { echo "ERROR: $t missing (apk add dtc)"; exit 1; }
+    done
+}
+
+node_live() { [ -e "$PMIC_PATH/$NODE_NAME" ]; }
+
+backup() {
+    bk="$BK_BASE/vbus-$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$bk"
+    cp -a /boot/boot.img "$bk/boot.img.pre-vbus"
+    cp -a "$DTB" "$bk/tianma.dtb.pre-vbus"
+    echo "backup: $bk"
+}
+
+flash() { # $1 = --reboot?
+    echo "rebuilding + flashing boot.img ..."
+    mkinitfs >/dev/null 2>&1 || mkinitfs
+    if [ "${1:-}" = "--reboot" ]; then
+        echo "rebooting to apply (regulator enables on next boot)..."
+        sync; systemctl --no-block reboot
+    else
+        echo "NOTE: reboot required to apply:  sudo systemctl --no-block reboot"
+    fi
+}
+
+apply() {
+    need_tools
+    if dtc -I dtb -O dts "$DTB" 2>/dev/null | grep -q "$NODE_NAME"; then
+        echo "DTB already has $NODE_NAME (live present: $(node_live && echo yes || echo 'no - reboot pending'))"
+        return 0
+    fi
+    backup
+    dtc -I dtb -O dts -o /tmp/prius-vbus.dts "$DTB" 2>/dev/null
+    # Insert the regulator node just before charger@1000 inside pmic@2.
+    awk '
+    /charger@1000 \{/ && !done {
+      print "\t\t\t\tusb_vbus: usb-vbus-regulator@1100 {";
+      print "\t\t\t\t\tcompatible = \"qcom,pm8150b-vbus-reg\";";
+      print "\t\t\t\t\treg = <0x1100>;";
+      print "\t\t\t\t\tregulator-min-microamp = <500000>;";
+      print "\t\t\t\t\tregulator-max-microamp = <3000000>;";
+      print "\t\t\t\t\tregulator-always-on;";
+      print "\t\t\t\t\tregulator-boot-on;";
+      print "\t\t\t\t};";
+      print "";
+      done=1;
+    }
+    {print}
+    ' /tmp/prius-vbus.dts > /tmp/prius-vbus.new.dts
+    if ! grep -q "$NODE_NAME" /tmp/prius-vbus.new.dts; then
+        echo "ERROR: could not find charger@1000 anchor in DTS; aborting (DTB unchanged)"; exit 1
+    fi
+    dtc -I dts -O dtb -o "$DTB" /tmp/prius-vbus.new.dts 2>/tmp/prius-vbus.dtc.err || {
+        echo "ERROR: dtc recompile failed:"; cat /tmp/prius-vbus.dtc.err; exit 1; }
+    echo "inserted $NODE_NAME into $DTB"
+    flash "${1:-}"
+}
+
+revert() {
+    need_tools
+    if ! dtc -I dtb -O dts "$DTB" 2>/dev/null | grep -q "$NODE_NAME"; then
+        echo "node not present in DTB; nothing to revert"; return 0
+    fi
+    backup
+    dtc -I dtb -O dts -o /tmp/prius-vbus.dts "$DTB" 2>/dev/null
+    # Drop the node block (from its opening line to its closing brace).
+    awk '
+    /usb-vbus-regulator@1100 \{/ {skip=1}
+    skip && /};/ {skip=0; next}
+    skip {next}
+    {print}
+    ' /tmp/prius-vbus.dts > /tmp/prius-vbus.new.dts
+    dtc -I dts -O dtb -o "$DTB" /tmp/prius-vbus.new.dts 2>/dev/null
+    echo "removed $NODE_NAME from $DTB"
+    flash "${1:-}"
+}
+
+status() {
+    echo "DTB node present  : $(dtc -I dtb -O dts "$DTB" 2>/dev/null | grep -q "$NODE_NAME" && echo yes || echo no)"
+    echo "live DT node      : $(node_live && echo yes || echo no)"
+    reg=$(grep -l usb_vbus /sys/class/regulator/*/name 2>/dev/null | head -1)
+    if [ -n "$reg" ]; then
+        d=$(dirname "$reg")
+        echo "regulator         : $(basename "$d") name=$(cat "$reg") state=$(cat "$d/state" 2>/dev/null)"
+    else
+        echo "regulator         : (not registered)"
+    fi
+    echo "dwc3 dr_mode      : $(tr -d '\0' < /proc/device-tree/soc@0/usb@a6f8800/usb@a600000/dr_mode 2>/dev/null)"
+    echo "downstream USB    :"; lsusb 2>/dev/null | sed 's/^/  /' || echo "  (lsusb unavailable)"
+}
+
+case "${1:-apply}" in
+    apply)  apply  "${2:-}" ;;
+    revert) revert "${2:-}" ;;
+    status) status ;;
+    *) echo "usage: prius-vbus {apply|revert|status} [--reboot]" >&2; exit 2 ;;
+esac

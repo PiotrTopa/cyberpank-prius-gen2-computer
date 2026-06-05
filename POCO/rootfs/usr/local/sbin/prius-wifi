@@ -1,0 +1,57 @@
+#!/bin/sh
+# prius-wifi - toggle wlan0 between home-wifi client, prius AP, or off.
+# Invariants: NEVER touch the SIM WAN (prius-wan) or WireGuard (wg-homelab);
+# those stay up so SSH-over-cellular + VPN always survive a wifi switch.
+# Modes (flag /etc/prius/wifi-mode): client | ap | off
+set -eu
+FLAG=/etc/prius/wifi-mode
+CLIENT_CON=prius-home-wifi
+AP_CON=prius-ap
+
+read_flag() { [ -r "$FLAG" ] && tr -d ' \t\n' < "$FLAG" || echo off; }
+
+set_client() {
+  nmcli radio wifi on
+  nmcli con down "$AP_CON" >/dev/null 2>&1 || true
+  nmcli con up "$CLIENT_CON"
+}
+set_ap() {
+  nmcli radio wifi on
+  nmcli con down "$CLIENT_CON" >/dev/null 2>&1 || true
+  nmcli con up "$AP_CON"
+}
+set_off() {
+  nmcli con down "$CLIENT_CON" >/dev/null 2>&1 || true
+  nmcli con down "$AP_CON" >/dev/null 2>&1 || true
+  nmcli radio wifi off
+}
+
+apply() {
+  case "$(read_flag)" in
+    client) set_client ;;
+    ap)     set_ap ;;
+    off|*)  set_off ;;
+  esac
+}
+
+status() {
+  echo "wifi-mode flag : $(read_flag)"
+  echo "radio          : $(nmcli radio wifi 2>/dev/null)"
+  echo "wlan0          : $(nmcli -t -f GENERAL.STATE dev show wlan0 2>/dev/null | cut -d: -f2)"
+  echo "wlan0 ip       : $(nmcli -t -f IP4.ADDRESS dev show wlan0 2>/dev/null | cut -d: -f2 | head -1)"
+  echo "active wifi con: $(nmcli -t -f NAME,TYPE con show --active 2>/dev/null | awk -F: '$2=="802-11-wireless"{print $1}' | tr '\n' ' ')"
+  echo "WAN/VPN intact : $(nmcli -t -f NAME con show --active 2>/dev/null | grep -E 'prius-wan|wg-homelab' | tr '\n' ' ')"
+  echo "default routes :"
+  ip route show default | sed 's/^/  /'
+}
+
+write_flag() { echo "$1" | tee "$FLAG" >/dev/null; }
+
+case "${1:-status}" in
+  client) write_flag client; apply ;;
+  ap)     write_flag ap;     apply ;;
+  off)    write_flag off;    apply ;;
+  apply)  apply ;;
+  status) status ;;
+  *) echo "usage: prius-wifi {client|ap|off|apply|status}" >&2; exit 2 ;;
+esac

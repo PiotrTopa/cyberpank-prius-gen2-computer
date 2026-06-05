@@ -1,0 +1,42 @@
+# Packages we add on top of a stock postmarketOS beryllium image (apk world subset).
+# Stock base (postmarketos-base*, device-xiaomi-beryllium*, alpine-baselayout,
+# apk-tools, busybox, musl-utils) is intentionally NOT listed.
+# Installed by: provision.sh --packages  (apk add, idempotent).
+
+# --- USB host / device-tree tooling ---
+dtc
+usbutils
+zstd
+rsync
+
+# --- CAN / gateway ---
+can-utils
+
+# --- networking: SIM WAN + Wi-Fi + WireGuard ---
+networkmanager
+networkmanager-cli
+networkmanager-wifi
+networkmanager-wwan
+modemmanager
+wireguard-tools
+wpa_supplicant
+dnsmasq
+
+# --- privilege / power ---
+sudo-rs
+powertop
+
+# --- GPU compute (freedreno / OpenCL / Vulkan) ---
+mesa-egl
+mesa-gbm
+mesa-gl
+mesa-rusticl
+mesa-vulkan-freedreno
+opencl-icd-loader
+clinfo
+vulkan-loader
+vulkan-tools
+
+# --- Adreno 630 firmware ---
+firmware-qcom-adreno-a630
+firmware-qcom-adreno-a630-sqe

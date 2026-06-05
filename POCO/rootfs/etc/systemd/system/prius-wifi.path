@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch /etc/prius/wifi-mode and re-apply prius-wifi on change
+
+[Path]
+PathModified=/etc/prius/wifi-mode
+Unit=prius-wifi.service
+
+[Install]
+WantedBy=multi-user.target
