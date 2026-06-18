@@ -28,6 +28,9 @@ from .ports import (
     DEVICE_SATELLITE_DRL,
     DEVICE_SATELLITE_LIGHT_SENSOR,
     DEVICE_VFD,
+    DEVICE_POWERBOX_BASE,
+    DEVICE_POWERBOX_POWER,
+    DEVICE_POWERBOX_EVENTS,
 )
 
 from .ingress import IngressController
@@ -37,13 +40,22 @@ from .file_io import FileInputPort, PlaybackState
 from .serial_io import SerialPort, SerialConfig, SerialInputPort, SerialOutputPort
 from .mock_io import MockInputPort, MockOutputPort, LogOutputPort
 from .udp_output import UDPOutputPort, MultiOutputPort
+from .multi_input import MultiInputPort
 from .comm_logger import CommLogger, LogConfig, CommLoggerManager
+from .trip_recorder import TripRecorder, RecordingConfig, RotationPolicy
 from .vfd_output import (
     register_vfd_handlers,
     create_vfd_energy_handler,
     create_vfd_state_handler,
     create_vfd_config_handler,
     create_all_vfd_handlers,
+)
+from .powerbox import (
+    parse_powerbox_message,
+    register_powerbox_ingress,
+    build_power_off_command,
+    PowerboxCommander,
+    PriusPowerController,
 )
 
 from .factory import (
@@ -79,6 +91,7 @@ __all__ = [
     "LogOutputPort",
     "UDPOutputPort",
     "MultiOutputPort",
+    "MultiInputPort",
     
     # Communication logging
     "CommLogger",
@@ -115,4 +128,15 @@ __all__ = [
     "DEVICE_SATELLITE_DRL",
     "DEVICE_SATELLITE_LIGHT_SENSOR",
     "DEVICE_VFD",
+    "DEVICE_POWERBOX_BASE",
+    "DEVICE_POWERBOX_POWER",
+    "DEVICE_POWERBOX_EVENTS",
+    "parse_powerbox_message",
+    "register_powerbox_ingress",
+    "build_power_off_command",
+    "PowerboxCommander",
+    "PriusPowerController",
+    "TripRecorder",
+    "RecordingConfig",
+    "RotationPolicy",
 ]

@@ -54,6 +54,14 @@ log "installing rootfs overlay from $SRC"
         *)                                        mode=644 ;;
     esac
     install -D -m "$mode" -o root -g root "$SRC/$rel" "$dst"
+    # Strip CRLF from text assets that the kernel/systemd/NM parse directly.
+    # A stray CR in a shebang (#!/bin/sh\r) makes the loader fail with 203/EXEC
+    # ("bad interpreter: No such file or directory"). Files staged from a Windows
+    # working tree can carry CRLF even with .gitattributes, so normalize on-device.
+    case "$rel" in
+        usr/local/sbin/*|etc/systemd/system/*|etc/NetworkManager/*|etc/prius/*)
+            sed -i 's/\r$//' "$dst" ;;
+    esac
     log "  $dst ($mode)"
 done
 
@@ -67,12 +75,43 @@ for kv in power-mode:full wifi-mode:off usb-mode:host; do
     fi
 done
 
+# Seed the backend service config once (never clobber a live token/port).
+if [ ! -f /etc/prius/backend.env ]; then
+    cat > /etc/prius/backend.env <<'EOF'
+# Config for prius-backend.service (the headless board-computer backend).
+BACKEND_REPO=/home/user/cyberpunk
+BACKEND_GATEWAY_PORT=/dev/ttyACM0
+BACKEND_BAUDRATE=1000000
+BACKEND_API_HOST=0.0.0.0
+BACKEND_API_PORT=8080
+BACKEND_DB=/home/user/cyberpunk/data/metrics.db
+BACKEND_TICK_HZ=50
+# Bearer token required by the network API. Empty = open (LAN/VPN only!).
+BACKEND_AUTH_TOKEN=
+BACKEND_EXTRA_ARGS=
+
+# Trip recording: rotating per-trip NDJSON logs (replay-compatible). 0=off.
+BACKEND_RECORD=0
+BACKEND_RECORD_DIR=/home/user/cyberpunk/logs/trips
+# Segmentation: trip | session | continuous
+BACKEND_RECORD_SEGMENTATION=trip
+# What to record: all | comma list of system,can,avc,satellite,powerbox,outgoing
+BACKEND_RECORD_INCLUDE=all
+# Rotation limits (0 = unlimited for that dimension).
+BACKEND_RECORD_MAX_FILES=60
+BACKEND_RECORD_MAX_TOTAL_MB=512
+BACKEND_RECORD_MAX_AGE_DAYS=30
+EOF
+    log "seeded /etc/prius/backend.env"
+fi
+
 # --- 4. activate systemd units + NetworkManager ------------------------------
 log "reloading systemd + enabling units"
 systemctl daemon-reload
 for u in prius-power.service prius-power.path \
          prius-wifi.service prius-wifi.path \
          prius-netwatch.service prius-netwatch.timer \
+         prius-backend.service \
          backlight-off.service; do
     systemctl enable "$u" >/dev/null 2>&1 || log "  (enable $u skipped)"
 done

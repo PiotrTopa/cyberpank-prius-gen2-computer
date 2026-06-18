@@ -437,6 +437,44 @@ class VFDSatelliteState:
 
 
 @dataclass(frozen=True)
+class PowerboxState:
+    """
+    Powerbox state (second RP2040, device ids 200-202).
+
+    The powerbox sits between the Prius 12 V electrical system and the POCO
+    board computer. It reports:
+
+    - the ignition switch (stacyjka) position: ``acc_on`` (accessory/ON) plus the
+      constant-battery line ``batt_present``;
+    - INA219 telemetry on the computer's 12 V feed: bus ``system_voltage`` (the
+      Prius aux battery), ``current_draw_a`` and ``power_draw_w`` consumed by the
+      computer.
+
+    The computer reacts to this: ACC drives the POCO power profile (full/low) and
+    a sustained under-voltage triggers a request for the powerbox to cut POCO
+    power so the battery is never deep-discharged. All fields are populated by the
+    ingress; ``undervoltage`` / ``shutdown_requested`` are set by the rules.
+    """
+    connected: bool = False           # powerbox link present (NDJSON seen)
+
+    # Ignition switch (stacyjka)
+    acc_on: bool = False              # accessory / ON position
+    batt_present: bool = True         # constant +12 V battery line present
+
+    # INA219 telemetry on the computer's 12 V feed
+    system_voltage: Optional[float] = None  # bus voltage = Prius 12 V aux battery (V)
+    current_draw_a: Optional[float] = None  # computer current draw (A)
+    power_draw_w: Optional[float] = None     # computer power consumption (W)
+
+    # Rule-computed protection state
+    undervoltage: bool = False        # voltage sustained below the cut threshold
+    shutdown_requested: bool = False  # computer asked the powerbox to cut POCO power
+    shutdown_reason: str = ""
+
+    last_update_time: float = 0.0
+
+
+@dataclass(frozen=True)
 class AppState:
     """
     Complete application state.
@@ -456,7 +494,8 @@ class AppState:
     diagnostics: DiagnosticsState = field(default_factory=DiagnosticsState)
     display: DisplayState = field(default_factory=DisplayState)
     vfd_satellite: VFDSatelliteState = field(default_factory=VFDSatelliteState)
-    
+    powerbox: PowerboxState = field(default_factory=PowerboxState)
+
     # UI-only state (not from vehicle)
     screen_brightness: int = 100
     ambient_hue: int = 180

@@ -1,0 +1,21 @@
+[Unit]
+Description=CyberPunk Prius headless backend (virtual twin + metrics + network API)
+Documentation=file:///home/user/cyberpunk/POCO/SCRIPTS_AND_FILES.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# ensure-venv is idempotent: fast no-op once the venv + deps are in place.
+ExecStartPre=/usr/local/sbin/prius-backend ensure-venv
+ExecStart=/usr/local/sbin/prius-backend run
+
+# Resilient: the USB gateway may be absent at boot or hot-unplugged.
+Restart=always
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

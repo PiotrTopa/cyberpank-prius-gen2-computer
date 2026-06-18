@@ -1,0 +1,117 @@
+#!/bin/sh
+# prius-backend - manage the headless CyberPunk backend service on the phone.
+#
+# The backend is the board computer's brain: it talks to the gateway over USB
+# serial, runs the virtual-twin state machine, records metrics to SQLite and
+# exposes the network API (REST + WebSocket) consumed by the remote pygame
+# frontend and the future Android app.
+#
+# Subcommands:
+#   ensure-venv : create/refresh the Python venv and install backend deps
+#   run         : exec the backend (used as the systemd ExecStart)
+#   status      : show service + listener state
+#
+# Config lives in /etc/prius/backend.env (seeded by provision.sh).
+set -u
+
+ENV_FILE=/etc/prius/backend.env
+
+# Defaults (overridden by ENV_FILE if present).
+BACKEND_REPO=/home/user/cyberpunk
+BACKEND_GATEWAY_PORT=/dev/ttyACM0
+BACKEND_BAUDRATE=1000000
+BACKEND_API_HOST=0.0.0.0
+BACKEND_API_PORT=8080
+BACKEND_DB=/home/user/cyberpunk/data/metrics.db
+BACKEND_TICK_HZ=50
+BACKEND_AUTH_TOKEN=
+BACKEND_EXTRA_ARGS=
+
+# Trip recording (rotating per-trip NDJSON logs). Off by default.
+BACKEND_RECORD=0
+BACKEND_RECORD_DIR=/home/user/cyberpunk/logs/trips
+BACKEND_RECORD_SEGMENTATION=trip
+BACKEND_RECORD_INCLUDE=all
+BACKEND_RECORD_MAX_FILES=60
+BACKEND_RECORD_MAX_TOTAL_MB=512
+BACKEND_RECORD_MAX_AGE_DAYS=30
+
+# shellcheck disable=SC1090
+[ -f "$ENV_FILE" ] && . "$ENV_FILE"
+
+VENV="$BACKEND_REPO/.venv"
+PY="$VENV/bin/python"
+REQ="$BACKEND_REPO/cyberpunk_computer/backend/requirements-backend.txt"
+
+ensure_venv() {
+    [ -d "$BACKEND_REPO" ] || { echo "prius-backend: repo not found at $BACKEND_REPO" >&2; exit 1; }
+    if [ ! -x "$PY" ]; then
+        echo "prius-backend: creating venv at $VENV (with system site-packages)"
+        # --system-site-packages lets us reuse apk-built native libs (py3-pyserial)
+        # so pip only needs to add the pure-Python web stack.
+        python3 -m venv --system-site-packages "$VENV"
+    fi
+    "$PY" -m pip install --upgrade pip >/dev/null 2>&1 || true
+    if [ -f "$REQ" ]; then
+        echo "prius-backend: installing backend deps from $REQ"
+        "$PY" -m pip install -r "$REQ"
+    else
+        echo "prius-backend: WARN $REQ missing; installing fallback set"
+        "$PY" -m pip install 'fastapi>=0.110.0' 'uvicorn>=0.27.0' 'websockets>=12.0' 'pyserial>=3.5'
+    fi
+    mkdir -p "$(dirname "$BACKEND_DB")"
+}
+
+run() {
+    [ -x "$PY" ] || ensure_venv
+    set -- \
+        --gateway-port "$BACKEND_GATEWAY_PORT" \
+        --baudrate "$BACKEND_BAUDRATE" \
+        --api-host "$BACKEND_API_HOST" \
+        --api-port "$BACKEND_API_PORT" \
+        --db "$BACKEND_DB" \
+        --tick-hz "$BACKEND_TICK_HZ"
+    [ -n "$BACKEND_AUTH_TOKEN" ] && set -- "$@" --auth-token "$BACKEND_AUTH_TOKEN"
+    if [ "$BACKEND_RECORD" = "1" ] || [ "$BACKEND_RECORD" = "true" ]; then
+        set -- "$@" --record \
+            --record-dir "$BACKEND_RECORD_DIR" \
+            --record-segmentation "$BACKEND_RECORD_SEGMENTATION" \
+            --record-include "$BACKEND_RECORD_INCLUDE" \
+            --record-max-files "$BACKEND_RECORD_MAX_FILES" \
+            --record-max-total-mb "$BACKEND_RECORD_MAX_TOTAL_MB" \
+            --record-max-age-days "$BACKEND_RECORD_MAX_AGE_DAYS"
+    fi
+    # shellcheck disable=SC2086
+    [ -n "$BACKEND_EXTRA_ARGS" ] && set -- "$@" $BACKEND_EXTRA_ARGS
+    cd "$BACKEND_REPO" || exit 1
+    echo "prius-backend: exec python -m cyberpunk_computer.backend $*"
+    exec "$PY" -m cyberpunk_computer.backend "$@"
+}
+
+status() {
+    echo "repo      : $BACKEND_REPO"
+    echo "venv      : $([ -x "$PY" ] && echo present || echo MISSING)"
+    echo "gateway   : $BACKEND_GATEWAY_PORT $([ -e "$BACKEND_GATEWAY_PORT" ] && echo '(present)' || echo '(absent)')"
+    echo "api       : $BACKEND_API_HOST:$BACKEND_API_PORT"
+    echo "db        : $BACKEND_DB"
+    if [ "$BACKEND_RECORD" = "1" ] || [ "$BACKEND_RECORD" = "true" ]; then
+        echo "recording : on -> $BACKEND_RECORD_DIR ($BACKEND_RECORD_SEGMENTATION, $BACKEND_RECORD_INCLUDE)"
+    else
+        echo "recording : off"
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+        echo "unit      : $(systemctl is-active prius-backend.service 2>/dev/null || echo unknown)"
+    fi
+    if command -v ss >/dev/null 2>&1; then
+        echo "listener  :"
+        ss -ltnp 2>/dev/null | grep ":$BACKEND_API_PORT" || echo "  (not listening)"
+    fi
+}
+
+cmd="${1:-status}"
+case "$cmd" in
+    ensure-venv) ensure_venv ;;
+    run)         run ;;
+    status)      status ;;
+    *) echo "usage: prius-backend {ensure-venv|run|status}" >&2; exit 2 ;;
+esac

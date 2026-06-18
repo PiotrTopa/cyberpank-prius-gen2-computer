@@ -99,7 +99,14 @@ class ActionType(Enum):
     
     # VFD Satellite actions (device 110)
     UPDATE_VFD_SATELLITE = auto()  # Update VFD computed state
-    
+
+    # Powerbox actions (second RP2040, devices 200-202)
+    SET_POWERBOX_TELEMETRY = auto()    # INA219 voltage/current/power
+    SET_POWERBOX_IGNITION = auto()     # ACC (stacyjka) + constant battery line
+    SET_POWERBOX_CONNECTION = auto()   # powerbox link present/absent
+    SET_POWERBOX_UNDERVOLTAGE = auto() # sustained under-voltage flag (rule)
+    REQUEST_POWERBOX_SHUTDOWN = auto() # ask powerbox to cut POCO power (rule)
+
     # AVC Input actions (buttons and touch)
     AVC_BUTTON_PRESS = auto()
     AVC_BUTTON_RELEASE = auto()
@@ -1145,6 +1152,77 @@ class UpdateVFDSatelliteAction(Action):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Powerbox Actions (second RP2040, devices 200-202)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class SetPowerboxTelemetryAction(Action):
+    """INA219 telemetry on the computer's 12 V feed."""
+    voltage: Optional[float] = None  # bus voltage = Prius 12 V aux battery (V)
+    current: Optional[float] = None  # computer current draw (A)
+    power: Optional[float] = None    # computer power consumption (W)
+
+    def __init__(
+        self,
+        voltage: Optional[float] = None,
+        current: Optional[float] = None,
+        power: Optional[float] = None,
+        source: ActionSource = ActionSource.GATEWAY,
+    ):
+        super().__init__(ActionType.SET_POWERBOX_TELEMETRY, source)
+        self.voltage = voltage
+        self.current = current
+        self.power = power
+
+
+@dataclass
+class SetPowerboxIgnitionAction(Action):
+    """Ignition switch (stacyjka): ACC/ON position + constant battery line."""
+    acc_on: bool = False
+    batt_present: bool = True
+
+    def __init__(
+        self,
+        acc_on: bool,
+        batt_present: bool = True,
+        source: ActionSource = ActionSource.GATEWAY,
+    ):
+        super().__init__(ActionType.SET_POWERBOX_IGNITION, source)
+        self.acc_on = acc_on
+        self.batt_present = batt_present
+
+
+@dataclass
+class SetPowerboxConnectionAction(Action):
+    """Powerbox link present/absent."""
+    connected: bool = False
+
+    def __init__(self, connected: bool, source: ActionSource = ActionSource.GATEWAY):
+        super().__init__(ActionType.SET_POWERBOX_CONNECTION, source)
+        self.connected = connected
+
+
+@dataclass
+class SetPowerboxUndervoltageAction(Action):
+    """Sustained under-voltage flag (set by the protection rule)."""
+    undervoltage: bool = False
+
+    def __init__(self, undervoltage: bool, source: ActionSource = ActionSource.INTERNAL):
+        super().__init__(ActionType.SET_POWERBOX_UNDERVOLTAGE, source)
+        self.undervoltage = undervoltage
+
+
+@dataclass
+class RequestPowerboxShutdownAction(Action):
+    """Ask the powerbox to cut POCO power (set by the protection rule)."""
+    reason: str = ""
+
+    def __init__(self, reason: str = "", source: ActionSource = ActionSource.INTERNAL):
+        super().__init__(ActionType.REQUEST_POWERBOX_SHUTDOWN, source)
+        self.reason = reason
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Batch Action
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1152,12 +1230,12 @@ class UpdateVFDSatelliteAction(Action):
 class BatchAction(Action):
     """
     Batch multiple actions together.
-    
+
     Useful for atomic updates from a single gateway message
     that affects multiple state slices.
     """
     actions: List[Action] = None
-    
+
     def __init__(self, actions: List[Action], source: ActionSource = ActionSource.INTERNAL):
         super().__init__(ActionType.BATCH, source)
         self.actions = actions or []

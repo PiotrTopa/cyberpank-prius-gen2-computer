@@ -31,6 +31,13 @@ DEVICE_SATELLITE_DRL = 106       # DRL controller (output)
 DEVICE_SATELLITE_LIGHT_SENSOR = 107  # Rain/light sensor (input)
 DEVICE_VFD = 110                 # VFD display satellite (output)
 
+# Powerbox (second RP2040 on its own USB-CDC port) — reserved id range so its
+# device ids never collide with the gateway's. Messages from the powerbox port
+# are offset into this range by MultiInputPort. Protocol is future work.
+DEVICE_POWERBOX_BASE = 200       # Powerbox system/control
+DEVICE_POWERBOX_POWER = 201      # Powerbox power/voltage telemetry
+DEVICE_POWERBOX_EVENTS = 202     # Powerbox discrete power events (ignition/source)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Message Types

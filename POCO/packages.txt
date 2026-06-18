@@ -12,6 +12,14 @@ rsync
 # --- CAN / gateway ---
 can-utils
 
+# --- backend service (headless board computer: virtual twin + metrics + API) ---
+# python3 + venv tooling; the venv (created with --system-site-packages by
+# prius-backend) reuses py3-pyserial and pip-adds fastapi/uvicorn/websockets.
+python3
+py3-pip
+py3-virtualenv
+py3-pyserial
+
 # --- networking: SIM WAN + Wi-Fi + WireGuard ---
 networkmanager
 networkmanager-cli

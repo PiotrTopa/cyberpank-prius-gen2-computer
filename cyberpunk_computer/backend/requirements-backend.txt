@@ -1,0 +1,14 @@
+# Backend runtime dependencies for the headless service on postmarketOS/Alpine.
+#
+# Installed into the repo venv by `prius-backend ensure-venv`. The venv is created
+# with --system-site-packages so apk-provided native libs (py3-pyserial) are
+# reused; pip only adds the pure-Python web stack below.
+#
+# NOTE: we deliberately use plain `uvicorn` (not uvicorn[standard]) plus
+# `websockets` to avoid building uvloop/httptools/watchfiles (C/Rust) on
+# aarch64/musl. uvicorn auto-detects `websockets` for the WS endpoint.
+
+fastapi>=0.110.0
+uvicorn>=0.27.0
+websockets>=12.0
+pyserial>=3.5

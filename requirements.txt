@@ -7,6 +7,14 @@ pygame>=2.5.0
 # Serial communication (for Gateway)
 pyserial>=3.5
 
+# Backend network API (headless service: python -m cyberpunk_computer.backend)
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+
+# Frontend remote client (python -m cyberpunk_computer.frontend)
+# Optional: without it the frontend falls back to REST polling of /api/v1/state.
+websocket-client>=1.7.0
+
 # Development dependencies
 # pytest>=7.4.0
 # pytest-asyncio>=0.21.0

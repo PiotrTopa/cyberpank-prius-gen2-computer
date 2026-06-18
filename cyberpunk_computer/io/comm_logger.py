@@ -108,6 +108,11 @@ class CommLogger:
         """Total messages logged."""
         return self._messages_logged
     
+    @property
+    def bytes_written(self) -> int:
+        """Total bytes written to the log file."""
+        return self._bytes_written
+    
     def _generate_filepath(self) -> Path:
         """Generate timestamped filepath."""
         directory = Path(self._config.directory)

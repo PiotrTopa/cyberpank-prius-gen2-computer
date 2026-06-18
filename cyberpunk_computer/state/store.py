@@ -32,7 +32,10 @@ from .actions import (
     SetBatteryDeltaSOCAction, SetBlockVoltagesAction,
     SetStoredDTCsAction, SetPendingDTCsAction, SetDTCScanStateAction,
     UpdateDebugInfoAction, AVCButtonPressAction, AVCTouchEventAction,
-    SetPowerChartTimeBaseAction
+    SetPowerChartTimeBaseAction,
+    SetPowerboxTelemetryAction, SetPowerboxIgnitionAction,
+    SetPowerboxConnectionAction, SetPowerboxUndervoltageAction,
+    RequestPowerboxShutdownAction,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,6 +54,7 @@ class StateSlice(Enum):
     DYNAMICS = auto()  # Vehicle dynamics (steering, accel, wheel pulses, etc.)
     VFD_SATELLITE = auto()  # VFD satellite display state (device 110)
     DIAGNOSTICS = auto()  # OBD-II DTC diagnostics
+    POWERBOX = auto()  # Powerbox: ignition (ACC/BATT) + INA219 telemetry (devices 200-202)
     ALL = auto()
 
 
@@ -874,7 +878,62 @@ class Store:
                     vfd_satellite=replace(self._state.vfd_satellite, **kwargs)
                 )
                 affected.add(StateSlice.VFD_SATELLITE)
-        
+
+        # Powerbox reducers (second RP2040, devices 200-202)
+        elif action.type == ActionType.SET_POWERBOX_TELEMETRY:
+            import time as _t
+            kwargs = {"connected": True, "last_update_time": _t.time()}
+            if action.voltage is not None:
+                kwargs["system_voltage"] = action.voltage
+            if action.current is not None:
+                kwargs["current_draw_a"] = action.current
+            if action.power is not None:
+                kwargs["power_draw_w"] = action.power
+            self._state = replace(
+                self._state,
+                powerbox=replace(self._state.powerbox, **kwargs),
+            )
+            affected.add(StateSlice.POWERBOX)
+
+        elif action.type == ActionType.SET_POWERBOX_IGNITION:
+            import time as _t
+            self._state = replace(
+                self._state,
+                powerbox=replace(
+                    self._state.powerbox,
+                    connected=True,
+                    acc_on=action.acc_on,
+                    batt_present=action.batt_present,
+                    last_update_time=_t.time(),
+                ),
+            )
+            affected.add(StateSlice.POWERBOX)
+
+        elif action.type == ActionType.SET_POWERBOX_CONNECTION:
+            self._state = replace(
+                self._state,
+                powerbox=replace(self._state.powerbox, connected=action.connected),
+            )
+            affected.add(StateSlice.POWERBOX)
+
+        elif action.type == ActionType.SET_POWERBOX_UNDERVOLTAGE:
+            self._state = replace(
+                self._state,
+                powerbox=replace(self._state.powerbox, undervoltage=action.undervoltage),
+            )
+            affected.add(StateSlice.POWERBOX)
+
+        elif action.type == ActionType.REQUEST_POWERBOX_SHUTDOWN:
+            self._state = replace(
+                self._state,
+                powerbox=replace(
+                    self._state.powerbox,
+                    shutdown_requested=True,
+                    shutdown_reason=action.reason,
+                ),
+            )
+            affected.add(StateSlice.POWERBOX)
+
         return affected
     
     def _log_state_change(self, action: Action, old_state: AppState, new_state: AppState) -> None:

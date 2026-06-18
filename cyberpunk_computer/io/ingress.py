@@ -143,6 +143,15 @@ class IngressController:
         """Get the input port."""
         return self._input_port
     
+    def set_input_port(self, input_port: InputPort) -> None:
+        """Replace the input source.
+
+        Intended to be called once during composition, BEFORE start(), e.g. to
+        wrap the gateway port in a MultiInputPort that also reads the powerbox.
+        Not safe to call while the ingress is running.
+        """
+        self._input_port = input_port
+    
     def set_analysis_mode(self, enabled: bool) -> None:
         """Enable/disable analysis mode for debugging."""
         self._analysis_mode = enabled
