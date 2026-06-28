@@ -301,6 +301,14 @@ class BackendService:
             twin.ingress.set_input_port(merged)
             twin.input_port = merged
             logger.info("Powerbox port enabled on %s", pb_path)
+            # Prime the USB hub cache so recovery still works after the
+            # device disappears from the bus.
+            import os
+            try:
+                real = os.path.realpath(pb_path)
+                powerbox._find_parent_hub_id(os.path.basename(real))
+            except Exception:
+                pass
 
         # Powerbox computer-side: ingress parsers + power-management rules.
         if cfg.powerbox_enabled:
@@ -546,10 +554,10 @@ class BackendService:
         logs once per stall.
 
         Recovery: when ``powerbox_auto_recover`` is enabled we additionally force
-        the serial port to close+reopen, which toggles DTR and resets the MCU so
-        it re-enumerates and resumes streaming. This is gated behind a cooldown
-        and (by default) an ACC-present guard, because resetting the MCU is only
-        safe once OUT1 survives that reset — see the config docstrings.
+        the serial port to close+reopen.  If the RP2040 has disappeared from the
+        USB bus entirely (failed re-enumeration), ``force_reconnect`` escalates to
+        resetting the parent USB hub, which power-cycles all ports and forces
+        re-enumeration.
         """
         cfg = self.config
         if not cfg.powerbox_enabled or self.twin is None:

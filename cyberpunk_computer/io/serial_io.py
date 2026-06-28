@@ -345,68 +345,140 @@ class SerialPort(BidirectionalPort):
         self._last_reconnect_attempt = 0.0
 
     def force_reconnect(self) -> None:
-        """Force the link down and immediately reconnect (same port).
+        """Force the link down and trigger USB-level recovery if needed.
 
         Used by the backend's link-staleness watchdog to recover a *silently
-        wedged* USB-CDC link: the board is still alive but stdout no longer
-        drains, so ``readline()`` returns empty forever and the reader never
-        raises -> auto-reconnect never fires. Closing and reopening the port
-        toggles DTR, which resets the RP2040; the MCU reboots, re-enumerates
-        USB and starts streaming again, clearing the wedge.
-        
+        wedged* USB-CDC link.  Escalation strategy:
+
+        1. If the tty device node still exists, close the serial handle so the
+           reader loop reopens it on the next iteration (DTR toggle).
+        2. If the tty has disappeared from the kernel (RP2040 failed USB
+           re-enumeration after a prior reset attempt), reset the parent USB
+           hub via sysfs unbind/bind.  This power-cycles all hub ports and
+           forces every downstream device to re-enumerate from scratch.
+
         Safe to call from another thread; the reader loop owns the actual reopen.
         """
+        import os
+        import subprocess
+
         logger.warning(
             f"Forcing serial reconnect on {self.config.port} "
             "(staleness watchdog recovery)"
         )
-        
-        # MicroPython CDC driver can get permanently wedged if the host
-        # stops reading. DTR toggle does NOT reboot RP2040 (requires 1200 baud).
-        # We must perform a true USB bus reset (USBDEVFS_RESET) on the host to
-        # force the RP2040 TinyUSB stack to reset and clear the wedge.
+
+        real_port = None
+        tty_name = None
         try:
-            import os
-            import time
             real_port = os.path.realpath(self.config.port)
             tty_name = os.path.basename(real_port)
-            device_dir = f"/sys/class/tty/{tty_name}/device"
-            
-            if os.path.exists(device_dir):
-                # device_dir is a symlink like -> ../../../1-1.1:1.0
-                # we want the parent usb device "1-1.1"
-                usb_device_path = os.path.dirname(os.path.realpath(device_dir))
-                bus_num_path = os.path.join(usb_device_path, "busnum")
-                dev_num_path = os.path.join(usb_device_path, "devnum")
-                
-                if os.path.exists(bus_num_path) and os.path.exists(dev_num_path):
-                    with open(bus_num_path, "r") as f:
-                        bus = int(f.read().strip())
-                    with open(dev_num_path, "r") as f:
-                        dev = int(f.read().strip())
-                        
-                    dev_path = f"/dev/bus/usb/{bus:03d}/{dev:03d}"
-                    logger.info(f"Executing USBDEVFS_RESET on {dev_path} for {tty_name}")
-                    
-                    import fcntl
-                    USBDEVFS_RESET = 21780
-                    try:
-                        with open(dev_path, "w") as fd:
-                            fcntl.ioctl(fd, USBDEVFS_RESET, 0)
-                        time.sleep(1.0)
-                    except PermissionError:
-                        logger.warning(f"Permission denied for {dev_path}, falling back to sudo...")
-                        import subprocess
-                        reset_script = f"import fcntl; fd = open('{dev_path}', 'w'); fcntl.ioctl(fd, 21780, 0)"
-                        subprocess.run(["sudo", "python3", "-c", reset_script], check=False)
-                        time.sleep(1.0)
-        except Exception as e:
-            logger.error(f"Failed to reset USB bus: {e}")
+        except Exception:
+            pass
 
-        # Drop the wedged handle and clear the backoff so the reader loop
-        # reopens on its next iteration (which re-asserts DTR -> MCU reset).
+        device_present = (
+            tty_name is not None
+            and os.path.exists(f"/sys/class/tty/{tty_name}/device")
+        )
+
+        if not device_present:
+            # The device is gone from the kernel entirely.  The only recovery
+            # is to reset the parent USB hub so the RP2040 re-enumerates.
+            hub_id = self._find_parent_hub_id(tty_name)
+            if hub_id:
+                logger.warning(
+                    "Device %s gone from bus — resetting parent USB hub %s",
+                    self.config.port, hub_id,
+                )
+                self._reset_usb_hub(hub_id)
+            else:
+                logger.error(
+                    "Device %s gone and cannot determine parent hub; "
+                    "manual intervention required.",
+                    self.config.port,
+                )
+
+        # Drop the wedged handle so the reader loop reopens on its next
+        # iteration.  After a hub reset the UsbSerialMonitor will detect the
+        # re-enumerated device and call retarget().
         self._handle_disconnect()
         self._last_reconnect_attempt = time.time()
+
+    # ------------------------------------------------------------------
+    # USB hub helpers
+    # ------------------------------------------------------------------
+
+    # Cache the hub id so we can still reset it after the device disappears.
+    _cached_hub_id: Optional[str] = None
+
+    def _find_parent_hub_id(self, tty_name: Optional[str] = None) -> Optional[str]:
+        """Return the sysfs bus-id of the parent USB hub (e.g. ``1-1``).
+
+        Tries the live sysfs path first; falls back to a cached value from a
+        previous successful lookup (the device may have already disappeared).
+        """
+        import os
+
+        hub_id = None
+        if tty_name:
+            device_dir = f"/sys/class/tty/{tty_name}/device"
+            if os.path.exists(device_dir):
+                try:
+                    # device_dir resolves to e.g. .../1-1.1:1.0
+                    # parent of parent is the hub: .../1-1
+                    iface_path = os.path.realpath(device_dir)      # .../1-1.1:1.0
+                    usb_dev_path = os.path.dirname(iface_path)      # .../1-1.1
+                    hub_path = os.path.dirname(usb_dev_path)         # .../1-1
+                    hub_id = os.path.basename(hub_path)
+                    # Validate: it should look like "1-1", not "usb1"
+                    if hub_id.startswith("usb"):
+                        hub_id = None
+                except Exception:
+                    pass
+
+        if hub_id:
+            self._cached_hub_id = hub_id
+        elif self._cached_hub_id:
+            hub_id = self._cached_hub_id
+            logger.info("Using cached hub id %s (device already gone)", hub_id)
+
+        return hub_id
+
+    @staticmethod
+    def _reset_usb_hub(hub_id: str) -> None:
+        """Unbind and rebind a USB hub to force all downstream devices to
+        re-enumerate.  Requires write access to ``/sys/bus/usb/drivers/usb/``
+        (typically root or a udev rule granting access to the service user).
+        """
+        import subprocess
+
+        unbind = f"/sys/bus/usb/drivers/usb/unbind"
+        bind = f"/sys/bus/usb/drivers/usb/bind"
+
+        try:
+            # Try direct write first (works if running as root or with a
+            # udev rule granting write permission).
+            try:
+                with open(unbind, "w") as f:
+                    f.write(hub_id)
+                time.sleep(0.5)
+                with open(bind, "w") as f:
+                    f.write(hub_id)
+            except PermissionError:
+                logger.info("Direct sysfs write failed, using sudo for hub reset")
+                subprocess.run(
+                    ["sudo", "sh", "-c", f"echo {hub_id} > {unbind}"],
+                    check=True, timeout=5,
+                )
+                time.sleep(0.5)
+                subprocess.run(
+                    ["sudo", "sh", "-c", f"echo {hub_id} > {bind}"],
+                    check=True, timeout=5,
+                )
+            # Give the hub and downstream devices time to re-enumerate.
+            time.sleep(2.0)
+            logger.info("USB hub %s reset completed", hub_id)
+        except Exception as exc:
+            logger.error("USB hub reset failed for %s: %s", hub_id, exc)
 
 class SerialInputPort(InputPort):
     """
