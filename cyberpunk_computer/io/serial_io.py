@@ -353,11 +353,8 @@ class SerialPort(BidirectionalPort):
         raises -> auto-reconnect never fires. Closing and reopening the port
         toggles DTR, which resets the RP2040; the MCU reboots, re-enumerates
         USB and starts streaming again, clearing the wedge.
-
-        WARNING: because this resets the MCU via DTR, the caller MUST ensure the
-        power rail survives that reset (OUT1 self-latch / ACC present) before
-        invoking it, or the board will drop OUT1 mid-reset and suicide. Safe to
-        call from another thread; the reader loop owns the actual reopen.
+        
+        Safe to call from another thread; the reader loop owns the actual reopen.
         """
         logger.warning(
             f"Forcing serial reconnect on {self.config.port} "
@@ -366,10 +363,11 @@ class SerialPort(BidirectionalPort):
         
         # MicroPython CDC driver can get permanently wedged if the host
         # stops reading. DTR toggle does NOT reboot RP2040 (requires 1200 baud).
-        # We must perform a USB unbind/bind on the host to clear the wedge.
+        # We must perform a true USB bus reset (USBDEVFS_RESET) on the host to
+        # force the RP2040 TinyUSB stack to reset and clear the wedge.
         try:
             import os
-            import subprocess
+            import time
             real_port = os.path.realpath(self.config.port)
             tty_name = os.path.basename(real_port)
             device_dir = f"/sys/class/tty/{tty_name}/device"
@@ -378,20 +376,30 @@ class SerialPort(BidirectionalPort):
                 # device_dir is a symlink like -> ../../../1-1.1:1.0
                 # we want the parent usb device "1-1.1"
                 usb_device_path = os.path.dirname(os.path.realpath(device_dir))
-                bus_id = os.path.basename(usb_device_path)
+                bus_num_path = os.path.join(usb_device_path, "busnum")
+                dev_num_path = os.path.join(usb_device_path, "devnum")
                 
-                # We must unbind from the cdc_acm driver, not the root usb driver
-                # The interface is typically bus_id:1.0
-                interface_id = f"{bus_id}:1.0"
-                
-                logger.info(f"Executing USB unbind/bind on interface {interface_id} for {tty_name}")
-                unbind_cmd = f"echo {interface_id} > /sys/bus/usb/drivers/cdc_acm/unbind"
-                bind_cmd = f"echo {interface_id} > /sys/bus/usb/drivers/cdc_acm/bind"
-                
-                subprocess.run(["bash", "-c", unbind_cmd], check=False)
-                time.sleep(0.2)
-                subprocess.run(["bash", "-c", bind_cmd], check=False)
-                time.sleep(0.5)
+                if os.path.exists(bus_num_path) and os.path.exists(dev_num_path):
+                    with open(bus_num_path, "r") as f:
+                        bus = int(f.read().strip())
+                    with open(dev_num_path, "r") as f:
+                        dev = int(f.read().strip())
+                        
+                    dev_path = f"/dev/bus/usb/{bus:03d}/{dev:03d}"
+                    logger.info(f"Executing USBDEVFS_RESET on {dev_path} for {tty_name}")
+                    
+                    import fcntl
+                    USBDEVFS_RESET = 21780
+                    try:
+                        with open(dev_path, "w") as fd:
+                            fcntl.ioctl(fd, USBDEVFS_RESET, 0)
+                        time.sleep(1.0)
+                    except PermissionError:
+                        logger.warning(f"Permission denied for {dev_path}, falling back to sudo...")
+                        import subprocess
+                        reset_script = f"import fcntl; fd = open('{dev_path}', 'w'); fcntl.ioctl(fd, 21780, 0)"
+                        subprocess.run(["sudo", "python3", "-c", reset_script], check=False)
+                        time.sleep(1.0)
         except Exception as e:
             logger.error(f"Failed to reset USB bus: {e}")
 

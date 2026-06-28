@@ -159,11 +159,6 @@ class BackendConfig:
     # Minimum spacing between recovery attempts (s). Prevents a permanently dead
     # link from being reset in a tight loop while it re-enumerates.
     powerbox_recover_cooldown_s: float = 20.0
-    # Safety guard: skip auto-recovery while ignition (ACC) is OFF. With the
-    # legacy pin design OUT1 is not held during an MCU reset unless ACC drives
-    # it, so a DTR reset with ACC off would drop the rail and suicide the board.
-    # Set False once the OUT1 reset-survival hardware (self-latch) is installed.
-    powerbox_recover_requires_acc: bool = True
     # Whether a tripped under-voltage also powers the POCO off locally. Off by
     # default; the powerbox is expected to cut the rail. Enable on the target.
     local_poweroff_on_undervoltage: bool = False
@@ -661,11 +656,8 @@ class BackendService:
     def _maybe_recover_powerbox(self, pb, age: float) -> None:
         """Force a powerbox serial reset to clear a wedged link, if enabled.
 
-        Rate-limited by ``powerbox_recover_cooldown_s`` and, unless
-        ``powerbox_recover_requires_acc`` is cleared, skipped while ignition is
-        off (a DTR reset with ACC off would drop the OUT1 rail and suicide the
-        board on the legacy pin design). No-op when no powerbox serial handle is
-        wired (e.g. replay mode).
+        Rate-limited by ``powerbox_recover_cooldown_s``. No-op when no powerbox
+        serial handle is wired (e.g. replay mode).
         """
         cfg = self.config
         if not cfg.powerbox_auto_recover:
@@ -673,24 +665,6 @@ class BackendService:
         if self._powerbox_serial is None:
             return
             
-        # The powerbox is wedged, so its own acc_on state might be stale (stuck False).
-        # We must also check the Gateway's vehicle.acc_on state to know if the ignition
-        # was turned ON after the wedge occurred.
-        acc_on = pb.acc_on
-        if self.twin and self.twin.store:
-            acc_on = acc_on or self.twin.store.state.vehicle.acc_on
-            
-        if cfg.powerbox_recover_requires_acc and not acc_on:
-            # Edge-log once so the operator knows recovery is being withheld.
-            if self._pb_recover_attempts == 0:
-                self._pb_recover_attempts = -1  # sentinel: "withheld" logged
-                logger.warning(
-                    "Powerbox auto-recovery WITHHELD: link stale but ignition "
-                    "(ACC) is off; a DTR reset could drop OUT1 and suicide the "
-                    "board. Set powerbox_recover_requires_acc=False once OUT1 "
-                    "survives reset."
-                )
-            return
         now = time.time()
         if (now - self._pb_recover_last) < cfg.powerbox_recover_cooldown_s:
             return
