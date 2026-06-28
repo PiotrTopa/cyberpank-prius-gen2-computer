@@ -686,7 +686,7 @@ class BackendService:
             self._pb_recover_attempts, age,
         )
         try:
-            self._powerbox_serial.force_reconnect()
+            self._powerbox_serial.force_reconnect(attempt=self._pb_recover_attempts)
         except Exception:
             logger.exception("Powerbox force_reconnect failed")
 

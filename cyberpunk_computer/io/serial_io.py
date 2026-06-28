@@ -344,18 +344,17 @@ class SerialPort(BidirectionalPort):
         self._handle_disconnect()
         self._last_reconnect_attempt = 0.0
 
-    def force_reconnect(self) -> None:
+    def force_reconnect(self, attempt: int = 1) -> None:
         """Force the link down and trigger USB-level recovery if needed.
 
         Used by the backend's link-staleness watchdog to recover a *silently
         wedged* USB-CDC link.  Escalation strategy:
 
-        1. If the tty device node still exists, close the serial handle so the
-           reader loop reopens it on the next iteration (DTR toggle).
-        2. If the tty has disappeared from the kernel (RP2040 failed USB
-           re-enumeration after a prior reset attempt), reset the parent USB
-           hub via sysfs unbind/bind.  This power-cycles all hub ports and
-           forces every downstream device to re-enumerate from scratch.
+        1. Attempt 1: If the tty device node still exists, close the serial
+           handle so the reader loop reopens it on the next iteration.
+        2. Attempt 2+: If the device is gone from the kernel entirely OR if
+           simple close/reopen failed to clear the wedge (MCU firmware stuck),
+           reset the parent USB hub via sysfs unbind/bind.
 
         Safe to call from another thread; the reader loop owns the actual reopen.
         """
@@ -364,7 +363,7 @@ class SerialPort(BidirectionalPort):
 
         logger.warning(
             f"Forcing serial reconnect on {self.config.port} "
-            "(staleness watchdog recovery)"
+            f"(staleness watchdog recovery, attempt #{attempt})"
         )
 
         real_port = None
@@ -380,14 +379,14 @@ class SerialPort(BidirectionalPort):
             and os.path.exists(f"/sys/class/tty/{tty_name}/device")
         )
 
-        if not device_present:
-            # The device is gone from the kernel entirely.  The only recovery
+        if not device_present or attempt > 1:
+            reason = "gone from bus" if not device_present else "escalation"
             # is to reset the parent USB hub so the RP2040 re-enumerates.
             hub_id = self._find_parent_hub_id(tty_name)
             if hub_id:
                 logger.warning(
-                    "Device %s gone from bus — resetting parent USB hub %s",
-                    self.config.port, hub_id,
+                    "Device %s %s — resetting parent USB hub %s",
+                    self.config.port, reason, hub_id,
                 )
                 self._reset_usb_hub(hub_id)
             else:
