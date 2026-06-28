@@ -47,6 +47,7 @@ class SerialConfig:
     timeout: float = 0.1
     auto_reconnect: bool = True  # Auto-reconnect on disconnect
     reconnect_delay: float = 2.0  # Seconds between reconnect attempts
+    keepalive_ping: Optional[str] = None  # Ping message to send when idle
 
 
 class SerialPort(BidirectionalPort):
@@ -224,7 +225,7 @@ class SerialPort(BidirectionalPort):
                     logger.debug(f"Invalid JSON from serial: {e}")
                     self._stats["rx_errors"] += 1
                     
-            except (serial.SerialException, OSError) as e:
+            except (serial.SerialException, OSError, TypeError) as e:
                 # Connection lost - mark as disconnected
                 if self._running:
                     logger.warning(f"Serial connection lost: {e}")
@@ -232,7 +233,7 @@ class SerialPort(BidirectionalPort):
                     
             except Exception as e:
                 if self._running:
-                    logger.error(f"Serial reader error: {e}")
+                    logger.error(f"Serial reader error: {e}", exc_info=True)
                     self._stats["rx_errors"] += 1
     
     def _writer_loop(self) -> None:
@@ -248,8 +249,18 @@ class SerialPort(BidirectionalPort):
                 continue
             
             try:
-                command = self._tx_queue.get(timeout=0.1)
+                command = self._tx_queue.get(timeout=2.0)
+            except queue.Empty:
+                # If TX queue is empty, send a ping to keep gateway awake (if configured)
+                if self.config.keepalive_ping and self._serial and self._connected:
+                    try:
+                        self._serial.write(self.config.keepalive_ping.encode('utf-8'))
+                        self._serial.flush()
+                    except Exception:
+                        pass
+                continue
                 
+            try:
                 # Convert to JSON and send
                 json_data = command.to_gateway_json()
                 line = json.dumps(json_data) + "\n"
@@ -262,7 +273,7 @@ class SerialPort(BidirectionalPort):
                     
             except queue.Empty:
                 continue
-            except (serial.SerialException, OSError) as e:
+            except (serial.SerialException, OSError, TypeError) as e:
                 # Connection lost
                 if self._running:
                     logger.warning(f"Serial write failed: {e}")
@@ -297,7 +308,7 @@ class SerialPort(BidirectionalPort):
         self._last_reconnect_attempt = now
         
         try:
-            logger.info(f"Attempting to reconnect to {self.config.port}...")
+            logger.debug(f"Attempting to reconnect to {self.config.port}...")
             self._serial = serial.Serial(
                 port=self.config.port,
                 baudrate=self.config.baudrate,
@@ -312,8 +323,82 @@ class SerialPort(BidirectionalPort):
             logger.debug(f"Reconnection failed: {e}")
             return False
 
+    def retarget(self, new_port: str) -> None:
+        """
+        Point this port at a different device path and force a reconnect.
 
-# Separate classes for when only input or output is needed
+        Used by USB hotplug discovery: when the powerbox/gateway re-enumerates
+        on a new ``/dev/ttyACM*`` (or is plugged in for the first time after
+        boot), the monitor calls ``retarget`` so the reader loop reconnects to
+        the correct device instead of the stale path. Safe to call from another
+        thread; the reader loop owns the actual (re)connect.
+        """
+        if new_port == self.config.port and self._connected:
+            logger.debug(f"retarget no-op: already on {new_port}")
+            return
+
+        logger.info(f"Retargeting serial port {self.config.port} -> {new_port}")
+        self.config.port = new_port
+        # Drop any current connection and clear the backoff so the reader loop
+        # reconnects to the new path on its next iteration.
+        self._handle_disconnect()
+        self._last_reconnect_attempt = 0.0
+
+    def force_reconnect(self) -> None:
+        """Force the link down and immediately reconnect (same port).
+
+        Used by the backend's link-staleness watchdog to recover a *silently
+        wedged* USB-CDC link: the board is still alive but stdout no longer
+        drains, so ``readline()`` returns empty forever and the reader never
+        raises -> auto-reconnect never fires. Closing and reopening the port
+        toggles DTR, which resets the RP2040; the MCU reboots, re-enumerates
+        USB and starts streaming again, clearing the wedge.
+
+        WARNING: because this resets the MCU via DTR, the caller MUST ensure the
+        power rail survives that reset (OUT1 self-latch / ACC present) before
+        invoking it, or the board will drop OUT1 mid-reset and suicide. Safe to
+        call from another thread; the reader loop owns the actual reopen.
+        """
+        logger.warning(
+            f"Forcing serial reconnect on {self.config.port} "
+            "(staleness watchdog recovery)"
+        )
+        
+        # MicroPython CDC driver can get permanently wedged if the host
+        # stops reading. DTR toggle does NOT reboot RP2040 (requires 1200 baud).
+        # We must perform a USB unbind/bind on the host to clear the wedge.
+        try:
+            import os
+            import subprocess
+            real_port = os.path.realpath(self.config.port)
+            tty_name = os.path.basename(real_port)
+            device_dir = f"/sys/class/tty/{tty_name}/device"
+            
+            if os.path.exists(device_dir):
+                # device_dir is a symlink like -> ../../../1-1.1:1.0
+                # we want the parent usb device "1-1.1"
+                usb_device_path = os.path.dirname(os.path.realpath(device_dir))
+                bus_id = os.path.basename(usb_device_path)
+                
+                # We must unbind from the cdc_acm driver, not the root usb driver
+                # The interface is typically bus_id:1.0
+                interface_id = f"{bus_id}:1.0"
+                
+                logger.info(f"Executing USB unbind/bind on interface {interface_id} for {tty_name}")
+                unbind_cmd = f"echo {interface_id} > /sys/bus/usb/drivers/cdc_acm/unbind"
+                bind_cmd = f"echo {interface_id} > /sys/bus/usb/drivers/cdc_acm/bind"
+                
+                subprocess.run(["bash", "-c", unbind_cmd], check=False)
+                time.sleep(0.2)
+                subprocess.run(["bash", "-c", bind_cmd], check=False)
+                time.sleep(0.5)
+        except Exception as e:
+            logger.error(f"Failed to reset USB bus: {e}")
+
+        # Drop the wedged handle and clear the backoff so the reader loop
+        # reopens on its next iteration (which re-asserts DTR -> MCU reset).
+        self._handle_disconnect()
+        self._last_reconnect_attempt = time.time()
 
 class SerialInputPort(InputPort):
     """
