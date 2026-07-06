@@ -1,0 +1,11 @@
+# RP2040 powerbox/gateway (MicroPython, VID 2e8a) are NOT modems.
+#
+# Tell ModemManager to ignore them so it stops probing/holding the CDC-ACM tty.
+# MM's AT-command probes open the port, write to it, then close it, which corrupts
+# the MicroPython REPL / telemetry stream.
+#
+# MODE="0666" makes the tty world-rw so the backend and recovery tooling can
+# open it immediately after (re-)enumeration without racing a sudo chmod. Both
+# the powerbox (hub port 1) and gateway (hub port 2) share VID 2e8a.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", ENV{ID_MM_DEVICE_IGNORE}="1", MODE="0666"
+SUBSYSTEMS=="usb", ATTRS{idVendor}=="2e8a", ENV{ID_MM_DEVICE_IGNORE}="1"

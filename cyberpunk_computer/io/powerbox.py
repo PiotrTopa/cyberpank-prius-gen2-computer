@@ -306,7 +306,7 @@ def build_button_command(ms: int = 3000) -> OutgoingCommand:
     )
 
 
-def build_fan_command(pin: int, duty: int) -> OutgoingCommand:
+def build_fan_command(pin: int, duty: int, freq: int = 25000) -> OutgoingCommand:
     """Set the chassis fan PWM duty cycle.
 
     ``pin`` is the RP2040 GPIO driving the fan MOSFET (14 for the chassis fan).
@@ -315,7 +315,7 @@ def build_fan_command(pin: int, duty: int) -> OutgoingCommand:
     return OutgoingCommand(
         device_id=POWERBOX_LOCAL_SYSTEM,
         command_type="power",
-        payload={"a": "fan", "pin": int(pin), "duty": int(duty)},
+        payload={"a": "fan", "pin": int(pin), "duty": int(duty), "freq": int(freq)},
         priority=20,
     )
 
@@ -356,9 +356,9 @@ class PowerboxCommander:
     def press_button(self, ms: int = 3000) -> bool:
         return self._send(build_button_command(ms), "power-button %dms" % ms, warn=True)
 
-    def set_fan(self, pin: int, duty: int) -> bool:
-        return self._send(build_fan_command(pin, duty),
-                          "fan pin%d duty=%d" % (pin, duty))
+    def set_fan(self, pin: int, duty: int, freq: int = 25000) -> bool:
+        return self._send(build_fan_command(pin, duty, freq),
+                          "fan pin%d duty=%d freq=%d" % (pin, duty, freq))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

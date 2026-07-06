@@ -34,6 +34,8 @@ from fastapi import (
     WebSocketDisconnect,
     status,
 )
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 
 from ..metrics import MetricsDatabase
 from .bridge import StoreBridge
@@ -215,6 +217,12 @@ def create_app(
             logger.debug("WebSocket stream closed", exc_info=True)
         finally:
             bridge.unregister_client(client)
+
+    # ── dashboard ────────────────────────────────────────────────────────────
+
+    dashboard_path = Path(__file__).parent.parent.parent / "dashboard" / "dist"
+    if dashboard_path.exists():
+        app.mount("/", StaticFiles(directory=str(dashboard_path), html=True), name="dashboard")
 
     return app
 

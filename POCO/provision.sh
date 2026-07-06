@@ -108,6 +108,15 @@ fi
 # --- 4. activate systemd units + NetworkManager ------------------------------
 log "reloading systemd + enabling units"
 systemctl daemon-reload
+
+# Reload udev so the RP2040 ModemManager-ignore rule (99-prius-rp2040-nomm)
+# takes effect without a reboot. Without this, MM keeps probing the powerbox/
+# gateway CDC-ACM ttys until the next boot.
+if command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules >/dev/null 2>&1 || log "  (udev reload skipped)"
+    udevadm trigger --subsystem-match=tty >/dev/null 2>&1 || true
+    log "reloaded udev rules"
+fi
 for u in prius-power.service prius-power.path \
          prius-wifi.service prius-wifi.path \
          prius-netwatch.service prius-netwatch.timer \

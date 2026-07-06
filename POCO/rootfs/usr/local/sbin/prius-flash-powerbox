@@ -1,0 +1,67 @@
+#!/bin/sh
+# prius-flash-powerbox - reliable hands-off OTA flash of the powerbox firmware.
+#
+# The powerbox firmware auto-runs main.py and soft-reboots on Ctrl-C, so there is
+# no stable REPL and a plain `mpremote fs cp` fails ("could not enter raw repl").
+# This wrapper drops the board into the momentary post-sys.exit REPL with a
+# pyserial Ctrl-C nudge and copies the file with `mpremote resume` (which skips
+# mpremote's own soft-reset and so catches that window). Once in raw-REPL the
+# board is held, so the copy completes. See POCO/POWER.md.
+#
+# Usage:
+#   sudo systemctl stop prius-backend
+#   prius-flash-powerbox /path/to/main.py        # flash + verify + reset
+#   sudo systemctl restart prius-backend         # do this within 60 s!
+#
+# Env overrides: PRIUS_POWERBOX_BYID, PRIUS_FLASH_TRIES (default 30),
+#                MPREMOTE (default: ~/.local/bin/mpremote)
+set -eu
+
+SRC="${1:?usage: prius-flash-powerbox <firmware.py> [dest_name]}"
+DEST="${2:-main.py}"
+BYID="${PRIUS_POWERBOX_BYID:-/dev/serial/by-id/usb-MicroPython_Board_in_FS_mode_503359277a7c699f-if00}"
+MPR="${MPREMOTE:-$HOME/.local/bin/mpremote}"
+TRIES="${PRIUS_FLASH_TRIES:-30}"
+
+[ -r "$SRC" ] || { echo "flash: cannot read $SRC" >&2; exit 1; }
+[ -e "$BYID" ] || { echo "flash: device not present at $BYID" >&2; exit 1; }
+command -v "$MPR" >/dev/null 2>&1 || [ -x "$MPR" ] || { echo "flash: mpremote not found ($MPR)" >&2; exit 1; }
+
+nudge() {
+    python3 - "$BYID" <<'PY' 2>/dev/null || true
+import serial, sys, time
+try:
+    s = serial.Serial(sys.argv[1], 115200, timeout=0.2)
+    for _ in range(4):
+        s.write(b"\r\x03\x03"); s.flush(); time.sleep(0.08)
+    s.close()
+except Exception:
+    pass
+PY
+}
+
+echo "flash: copying $SRC -> :$DEST (up to $TRIES tries)"
+ok=0
+i=1
+while [ "$i" -le "$TRIES" ]; do
+    nudge
+    if "$MPR" resume connect "$BYID" fs cp "$SRC" ":$DEST" >/tmp/prius-flash.log 2>&1; then
+        echo "flash: copied on attempt $i"
+        ok=1
+        break
+    fi
+    printf '%s ' "$i"
+    i=$((i + 1))
+done
+echo
+[ "$ok" -eq 1 ] || { echo "flash: FAILED after $TRIES tries" >&2; tail -2 /tmp/prius-flash.log >&2; exit 2; }
+
+nudge
+"$MPR" resume connect "$BYID" exec \
+    "f=open('$DEST');v=[l for l in f if l.startswith('VERSION')];f.close();print('flash: on-device',(v[0].strip() if v else 'NO VERSION LINE'))" \
+    2>&1 | grep -E 'flash: on-device' || echo "flash: verify step inconclusive" >&2
+
+nudge
+"$MPR" resume connect "$BYID" reset >/dev/null 2>&1 || true
+echo "flash: reset sent - firmware booting (OUT1 latches HIGH first)."
+echo "flash: NOW run 'sudo systemctl restart prius-backend' within 60 s."

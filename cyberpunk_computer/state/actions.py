@@ -1318,8 +1318,8 @@ class SetPocoTelemetryAction(Action):
     """Internal POCO phone battery + thermal telemetry."""
     poco_power_w: Optional[float] = None
     poco_core_temp: Optional[float] = None
+    poco_ema_temp: Optional[float] = None
     poco_gpu_temp: Optional[float] = None
-    poco_battery_temp: Optional[float] = None
     fan_duty_pct: Optional[float] = None
 
     def __init__(
@@ -1327,7 +1327,7 @@ class SetPocoTelemetryAction(Action):
         poco_power_w: Optional[float] = None,
         poco_core_temp: Optional[float] = None,
         poco_gpu_temp: Optional[float] = None,
-        poco_battery_temp: Optional[float] = None,
+        poco_ema_temp: Optional[float] = None,
         fan_duty_pct: Optional[float] = None,
         source: ActionSource = ActionSource.INTERNAL,
     ):
@@ -1335,7 +1335,7 @@ class SetPocoTelemetryAction(Action):
         self.poco_power_w = poco_power_w
         self.poco_core_temp = poco_core_temp
         self.poco_gpu_temp = poco_gpu_temp
-        self.poco_battery_temp = poco_battery_temp
+        self.poco_ema_temp = poco_ema_temp
         self.fan_duty_pct = fan_duty_pct
 
 class SetOutAction(Action):

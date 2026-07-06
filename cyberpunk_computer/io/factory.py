@@ -458,7 +458,8 @@ def _create_production_io(config: VirtualTwinConfig):
         port=config.serial_port,
         baudrate=config.serial_baudrate,
         auto_reconnect=config.serial_auto_reconnect,
-        reconnect_delay=config.serial_reconnect_delay
+        reconnect_delay=config.serial_reconnect_delay,
+        keepalive_ping='{"id":0,"d":{"a":"ping"}}\n'
     )
     
     # Input: Serial port

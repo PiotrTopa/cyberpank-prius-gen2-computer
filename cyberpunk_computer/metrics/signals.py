@@ -77,6 +77,13 @@ SIGNALS: List[Signal] = [
     Signal("powerbox_voltage", "V", lambda s: s.powerbox.system_voltage, "Computer 12V supply voltage (INA219)"),
     Signal("powerbox_current", "A", lambda s: s.powerbox.current_draw_a, "Computer current draw (INA219)"),
     Signal("powerbox_power", "W", lambda s: s.powerbox.power_draw_w, "Computer power consumption (INA219)"),
+    Signal("poco_power", "W", lambda s: s.powerbox.poco_power_w, "POCO internal power consumption"),
+    Signal("powerbox_energy", "mAh", lambda s: s.powerbox.energy_mah, "Computer accumulated energy (INA219)"),
+    Signal("powerbox_bmp_t", "°C", lambda s: s.powerbox.bmp_t, "Computer BMP280 temperature"),
+    Signal("powerbox_bmp_p", "Pa", lambda s: s.powerbox.bmp_p, "Computer BMP280 pressure"),
+    Signal("powerbox_aht_t", "°C", lambda s: s.powerbox.aht_t, "Computer AHT20 temperature"),
+    Signal("powerbox_aht_h", "%", lambda s: s.powerbox.aht_h, "Computer AHT20 humidity"),
+    Signal("powerbox_acc", "", lambda s: 1.0 if s.powerbox.acc_on else 0.0, "Ignition/ACC sense via powerbox GP11"),
 ]
 
 # Quick lookup by name.
@@ -119,6 +126,7 @@ def detect_events(
     v_prev, v_cur = prev.vehicle, cur.vehicle
     e_prev, e_cur = prev.energy, cur.energy
     c_prev, c_cur = prev.connection, cur.connection
+    pb_prev, pb_cur = prev.powerbox, cur.powerbox
 
     if v_prev.ig_on != v_cur.ig_on:
         events.append((ts, "ignition", _onoff(v_cur.ig_on)))
@@ -134,5 +142,7 @@ def detect_events(
         events.append((ts, "battery", "charge_start" if e_cur.charging else "charge_stop"))
     if c_prev.connected != c_cur.connected:
         events.append((ts, "gateway", "connected" if c_cur.connected else "disconnected"))
+    if pb_prev.acc_on != pb_cur.acc_on:
+        events.append((ts, "powerbox_accessory", _onoff(pb_cur.acc_on)))
 
     return events

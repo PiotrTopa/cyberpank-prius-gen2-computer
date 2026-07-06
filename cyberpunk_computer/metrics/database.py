@@ -44,7 +44,7 @@ HOUR = 3600
 DAY = 86400
 
 # Retention windows (None = keep forever).
-RAW_RETENTION_DAYS = 14
+RAW_RETENTION_DAYS = 2
 MIN_RETENTION_DAYS = 90
 HOUR_RETENTION_DAYS = 730  # ~2 years
 DAY_RETENTION_DAYS: Optional[int] = None  # keep forever
@@ -337,13 +337,13 @@ class MetricsDatabase:
 
     @staticmethod
     def pick_resolution(start: float, end: float) -> str:
-        """Choose a sensible tier for a time range to keep series ~<2k points."""
-        span = max(1.0, end - start)
-        if span <= 2 * HOUR:
+        """Choose the highest reasonable resolution for the requested window."""
+        delta = end - start
+        if delta <= 10 * MINUTE:
             return "raw"
-        if span <= 4 * DAY:
+        if delta <= 2 * HOUR:
             return "1m"
-        if span <= 120 * DAY:
+        if delta <= 8 * DAY:
             return "1h"
         return "1d"
 

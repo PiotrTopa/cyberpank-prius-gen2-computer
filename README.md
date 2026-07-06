@@ -44,6 +44,12 @@ A pygame-based HMI (Human-Machine Interface) application designed to run on a **
    │ Vehicle │       │   Audio   │        │  Satellites │
    │   ECUs  │       │  System   │        │  (Custom)   │
    └─────────┘       └───────────┘        └─────────────┘
+
+┌──────────────────────────────────────────────────────────────┐
+│                    Powerbox (RP2040)                         │
+│  Direct USB-CDC NDJSON connection to POCO                    │
+│  Monitors INA219 (V/A) and controls ignition state.          │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ## 📡 Communication Protocol
@@ -59,6 +65,7 @@ See: [PROTOCOL.md](./docs/PROTOCOL.md) for full specification.
 {"id": 1, "d": {...}}  // CAN - Vehicle bus
 {"id": 2, "d": {...}}  // AVC-LAN - Multimedia bus
 {"id": 6+, "d": {...}} // SATELLITES - RS485 modules
+{"id": 200+, "d": {...}} // POWERBOX - Local power telemetry
 ```
 
 ## 🚀 Quick Start
@@ -148,6 +155,7 @@ cyberpunk-prius-gen2-computer/
 │   │   ├── egress.py            # State → Hardware output
 │   │   ├── file_io.py           # File replay (development)
 │   │   ├── serial_io.py         # Serial UART (production)
+│   │   ├── powerbox.py          # Powerbox state translation
 │   │   └── factory.py           # VirtualTwin factory
 │   ├── state/                   # State management
 │   │   ├── store.py             # Central state store
@@ -158,6 +166,11 @@ cyberpunk-prius-gen2-computer/
 │       ├── avc_decoder.py       # AVC-LAN protocol
 │       ├── avc_commands.py      # AVC-LAN commands
 │       └── can_decoder.py       # CAN bus decoder
+├── powerbox/                    # RP2040 Powerbox firmware
+│   ├── main.py                  # NDJSON firmware
+│   ├── ina219.py                # I2C driver
+│   ├── rescue.sh                # Bootloop recovery
+│   └── README.md                # Powerbox docs
 ├── assets/                      # Static assets
 │   ├── fonts/
 │   └── data/                    # Sample recordings
@@ -194,3 +207,5 @@ MIT License - See [LICENSE](./LICENSE) for details.
 
 - [Gateway](../Gateway/) - RP2040-based communication bridge
 - [Satellites](../Gateway/satellites/) - Distributed RS485 modules
+- [Powerbox](./powerbox/) - POCO F1 companion RP2040 power manager
+

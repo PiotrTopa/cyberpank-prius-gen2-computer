@@ -166,6 +166,13 @@ def _build_stop(params: Dict[str, Any]) -> Action:
     return SetReadyModeAction(False, source=ActionSource.UI)
 
 
+def _build_set_out(params: Dict[str, Any]) -> Action:
+    from ..state.actions import SetOutAction
+    ch = _as_int(_require(params, "channel"), "channel", 2, 3)
+    on = _as_bool(_require(params, "on"), "on")
+    return SetOutAction(ch, on, source=ActionSource.UI)
+
+
 # name -> (builder, description, params-doc)
 COMMANDS: Dict[str, Dict[str, Any]] = {
     "set_volume": {
@@ -210,6 +217,11 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
     },
     "start": {"builder": _build_start, "description": "Remote start (enter READY).", "params": {}},
     "stop": {"builder": _build_stop, "description": "Leave READY mode.", "params": {}},
+    "set_out": {
+        "builder": _build_set_out,
+        "description": "Set powerbox OUT2 or OUT3.",
+        "params": {"channel": "int 2..3", "on": "bool"},
+    },
 }
 
 

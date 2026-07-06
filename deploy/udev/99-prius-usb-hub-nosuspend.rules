@@ -1,0 +1,11 @@
+# Disable USB autosuspend for the RP2040 hub on the Prius.
+# The hub (1-1) has control=auto / autosuspend=0 by default, which lets the
+# kernel suspend it whenever children are idle.  A suspended hub stops
+# forwarding IN tokens, causing the RP2040's CDC TX FIFO to fill up.
+# MicroPython's sys.stdout.write() then blocks until the hub wakes, creating
+# intermittent stalls.  Setting control=on keeps the hub permanently active.
+#
+# Match the hub by vendor (1a6b = Linux Foundation root/virtual hub ICs used
+# by most embedded hubs) on the known bus path.  If the hub changes, update
+# ATTRS{idVendor}/ATTRS{idProduct} or match by KERNELS.
+ACTION=="add", SUBSYSTEM=="usb", KERNEL=="1-1", ATTR{power/control}="on"

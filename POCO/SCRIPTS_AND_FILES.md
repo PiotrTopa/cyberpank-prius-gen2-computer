@@ -22,6 +22,22 @@ or reverse-engineer where the flags/scripts live. Stock pmOS files are not liste
 
 Details in [POWER.md](POWER.md).
 
+## USB per-port power (powerbox / gateway recovery)
+
+| Path | Type | Purpose |
+|------|------|---------|
+| `/usr/local/sbin/prius-usb-power` | sh script (755) | per-port USB power control/recovery via `uhubctl -f`. `prius-usb-power {status\|cycle\|off\|on\|locate} [TARGET]`. Recovers a wedged RP2040 powerbox/gateway (silent USB-CDC) by cycling its **hub port** |
+| `/usr/local/sbin/prius-flash-powerbox` | sh script (755) | reliable hands-off OTA flash of the powerbox firmware: `prius-flash-powerbox <main.py>`. Drops the auto-running firmware into its momentary REPL with a pyserial Ctrl-C nudge and copies via `mpremote resume` (skips the soft-reset that otherwise re-runs `main.py`). Verifies + resets. Stop `prius-backend` first; restart it within 60 s. See [POWER.md](POWER.md) |
+| apk `uhubctl` | package | per-port USB power switching CLI (in [packages.txt](packages.txt)) |
+
+- Car hub is Terminus/D-Link `1a40:0101`, falsely reports **ganged** → the script
+  always passes **`-f`**.
+- **Port map:** powerbox = hub `1-1` **port 1**, gateway = **port 2**. The backend
+  discovers roles by this topology (works even when a board is silent/wedged).
+- The powerbox is **USB-powered only**, so a port power-cycle (≥ 4 s off) is a true
+  cold reset of the MCU. The firmware uses non-blocking USB-CDC writes (never wedges)
+  with a watchdog backstop. Full detail + recovery procedure in [POWER.md](POWER.md).
+
 ## Networking
 
 | Path | Type | Purpose |

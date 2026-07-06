@@ -1,0 +1,103 @@
+#!/bin/sh
+# prius-usb-power - per-port USB power control / recovery for the powerbox &
+# gateway behind the car's USB hub, using uhubctl.
+#
+# WHY: the RP2040 powerbox/gateway speak over USB-CDC. A MicroPython USB-CDC link
+# can occasionally wedge after hours of uptime (the firmware blocks on a stdout
+# write when the host stops draining), leaving the device enumerated but SILENT.
+# A USB re-enumeration alone does NOT reset the MCU; cutting and restoring the
+# hub PORT POWER does recover it (it resets the device's USB peripheral and, if
+# the board is bus-powered, the whole MCU).
+#
+# HARDWARE: the car uses a Terminus/D-Link-class hub (idVendor 1a40:0101) whose
+# EEPROM wrongly reports power switching as "ganged". uhubctl therefore needs the
+# force flag (-f) to drive an individual port. (Same quirk as the bench "nokia1"
+# D-Link DUB-H4 - see .infra/servers/nokia1.md.)
+#
+# USAGE:
+#   prius-usb-power status                 # list hubs + ports + attached devices
+#   prius-usb-power cycle [TARGET]         # power-cycle a port (default: powerbox)
+#   prius-usb-power off   [TARGET]
+#   prius-usb-power on    [TARGET]
+#   prius-usb-power locate [TARGET]        # print resolved "hub port" for TARGET
+#
+# TARGET may be:
+#   - a tty device path        e.g. /dev/ttyACM0
+#   - a /dev/serial/by-id/...   symlink (preferred; stable across renumbering)
+#   - an explicit "LOCATION PORT" pair  e.g.  "1-1 1"
+#   - omitted -> defaults to $PRIUS_POWERBOX_BYID (the powerbox board)
+set -u
+
+UHUBCTL="$(command -v uhubctl || echo /usr/sbin/uhubctl)"
+DELAY="${PRIUS_USB_CYCLE_DELAY:-3}"
+
+# Stable by-id symlink of the powerbox board (MicroPython RP2040). Override via
+# env if the board serial changes.
+PRIUS_POWERBOX_BYID="${PRIUS_POWERBOX_BYID:-/dev/serial/by-id/usb-MicroPython_Board_in_FS_mode_503359277a7c699f-if00}"
+
+die() { echo "prius-usb-power: $*" >&2; exit 1; }
+
+[ -x "$UHUBCTL" ] || die "uhubctl not found (apk add uhubctl)"
+
+# Resolve a tty/by-id/explicit TARGET to "HUB_LOCATION PORT" (e.g. "1-1 1").
+resolve() {
+    target="${1:-$PRIUS_POWERBOX_BYID}"
+
+    # Already an explicit "LOCATION PORT" pair?
+    case "$target" in
+        *" "*) echo "$target"; return 0 ;;
+    esac
+
+    # Resolve by-id symlink / relative path to a real /dev/tty* node.
+    node="$target"
+    [ -L "$node" ] && node="$(readlink -f "$node")"
+    [ -e "$node" ] || die "target not found: $target"
+
+    name="$(basename "$node")"                       # ttyACM0
+    syspath="$(readlink -f "/sys/class/tty/$name/device" 2>/dev/null)" \
+        || die "no sysfs for $name"
+    # syspath = .../usb1/1-1/1-1.1/1-1.1:1.0  (the interface) -> parent is usbdev.
+    usbdev="$(basename "$(dirname "$syspath")")"      # 1-1.1
+    case "$usbdev" in
+        *.*)
+            hub="${usbdev%.*}"                        # 1-1
+            port="${usbdev##*.}"                      # 1
+            ;;
+        *)
+            # Device sits directly on a root hub (e.g. "1-1"): root hub is usbN.
+            hub="${usbdev%%-*}"                       # 1
+            port="${usbdev##*-}"                      # 1
+            hub="usb${hub}"
+            ;;
+    esac
+    echo "$hub $port"
+}
+
+case "${1:-status}" in
+    status)
+        "$UHUBCTL" -f 2>&1
+        ;;
+    locate)
+        resolve "${2:-}"
+        ;;
+    off|on)
+        set -- "$1" "$(resolve "${2:-}")"
+        # shellcheck disable=SC2086
+        loc=$(set -- $2; echo "$1"); prt=$(set -- $2; echo "$2")
+        echo "powering $1 hub=$loc port=$prt"
+        "$UHUBCTL" -f -l "$loc" -p "$prt" -a "$1"
+        ;;
+    cycle)
+        lp="$(resolve "${2:-}")"
+        loc=$(set -- $lp; echo "$1"); prt=$(set -- $lp; echo "$2")
+        echo "power-cycling hub=$loc port=$prt (off ${DELAY}s -> on)"
+        "$UHUBCTL" -f -l "$loc" -p "$prt" -a off
+        sleep "$DELAY"
+        "$UHUBCTL" -f -l "$loc" -p "$prt" -a on
+        echo "done; device re-enumerates in a few seconds"
+        ;;
+    *)
+        echo "usage: prius-usb-power {status|cycle|off|on|locate} [TARGET]" >&2
+        exit 2
+        ;;
+esac

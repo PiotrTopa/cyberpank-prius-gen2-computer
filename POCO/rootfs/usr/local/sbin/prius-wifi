@@ -18,6 +18,7 @@ set_client() {
 set_ap() {
   nmcli radio wifi on
   nmcli con down "$CLIENT_CON" >/dev/null 2>&1 || true
+  sleep 2
   nmcli con up "$AP_CON"
 }
 set_off() {

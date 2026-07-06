@@ -40,3 +40,6 @@ Thumbs.db
 # Project specific
 *.log
 .env
+
+# Runtime metrics database
+/data/

@@ -6,6 +6,7 @@
 # --- USB host / device-tree tooling ---
 dtc
 usbutils
+uhubctl
 zstd
 rsync
 

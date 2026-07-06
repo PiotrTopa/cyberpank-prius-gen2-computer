@@ -19,12 +19,16 @@ ENV_FILE=/etc/prius/backend.env
 # Defaults (overridden by ENV_FILE if present).
 BACKEND_REPO=/home/user/cyberpunk
 BACKEND_GATEWAY_PORT=/dev/ttyACM0
+BACKEND_POWERBOX_PORT=
 BACKEND_BAUDRATE=1000000
 BACKEND_API_HOST=0.0.0.0
 BACKEND_API_PORT=8080
 BACKEND_DB=/home/user/cyberpunk/data/metrics.db
 BACKEND_TICK_HZ=50
 BACKEND_AUTH_TOKEN=
+BACKEND_AUTO_DISCOVER=1
+BACKEND_USB_HOTPLUG=1
+BACKEND_POWERBOX_AUTO_RECOVER=1
 BACKEND_EXTRA_ARGS=
 
 # Trip recording (rotating per-trip NDJSON logs). Off by default.
@@ -64,6 +68,10 @@ ensure_venv() {
 
 run() {
     [ -x "$PY" ] || ensure_venv
+    
+    # Disable autosuspend for the USB hub so the powerbox CDC link doesn't wedge
+    echo "on" > /sys/bus/usb/devices/1-1/power/control 2>/dev/null || true
+
     set -- \
         --gateway-port "$BACKEND_GATEWAY_PORT" \
         --baudrate "$BACKEND_BAUDRATE" \
@@ -71,7 +79,11 @@ run() {
         --api-port "$BACKEND_API_PORT" \
         --db "$BACKEND_DB" \
         --tick-hz "$BACKEND_TICK_HZ"
+    [ -n "$BACKEND_POWERBOX_PORT" ] && set -- "$@" --powerbox-port "$BACKEND_POWERBOX_PORT"
     [ -n "$BACKEND_AUTH_TOKEN" ] && set -- "$@" --auth-token "$BACKEND_AUTH_TOKEN"
+    { [ "$BACKEND_AUTO_DISCOVER" = "0" ] || [ "$BACKEND_AUTO_DISCOVER" = "false" ]; } && set -- "$@" --no-auto-discover
+    { [ "$BACKEND_USB_HOTPLUG" = "0" ] || [ "$BACKEND_USB_HOTPLUG" = "false" ]; } && set -- "$@" --no-usb-hotplug
+    { [ "$BACKEND_POWERBOX_AUTO_RECOVER" = "1" ] || [ "$BACKEND_POWERBOX_AUTO_RECOVER" = "true" ]; } && set -- "$@" --powerbox-auto-recover
     if [ "$BACKEND_RECORD" = "1" ] || [ "$BACKEND_RECORD" = "true" ]; then
         set -- "$@" --record \
             --record-dir "$BACKEND_RECORD_DIR" \
@@ -92,6 +104,11 @@ status() {
     echo "repo      : $BACKEND_REPO"
     echo "venv      : $([ -x "$PY" ] && echo present || echo MISSING)"
     echo "gateway   : $BACKEND_GATEWAY_PORT $([ -e "$BACKEND_GATEWAY_PORT" ] && echo '(present)' || echo '(absent)')"
+    if [ -n "$BACKEND_POWERBOX_PORT" ]; then
+        echo "powerbox  : $BACKEND_POWERBOX_PORT $([ -e "$BACKEND_POWERBOX_PORT" ] && echo '(present)' || echo '(absent)')"
+    else
+        echo "powerbox  : (not configured)"
+    fi
     echo "api       : $BACKEND_API_HOST:$BACKEND_API_PORT"
     echo "db        : $BACKEND_DB"
     if [ "$BACKEND_RECORD" = "1" ] || [ "$BACKEND_RECORD" = "true" ]; then

@@ -475,9 +475,9 @@ class PowerboxState:
     poco_power_w: Optional[float] = None     # POCO phone internal power (W)
 
     # POCO thermal telemetry (sysfs thermal zones, °C)
-    poco_core_temp: Optional[float] = None    # max CPU/cluster temperature
+    poco_core_temp: Optional[float] = None
+    poco_ema_temp: Optional[float] = None    # max CPU/cluster temperature
     poco_gpu_temp: Optional[float] = None     # max GPU temperature
-    poco_battery_temp: Optional[float] = None # battery temperature
 
     # Chassis fan state (PWM on powerbox GPIO 14)
     fan_duty_pct: float = 0.0                 # current fan duty cycle (0-100%)

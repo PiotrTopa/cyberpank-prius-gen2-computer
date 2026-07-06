@@ -924,8 +924,8 @@ class Store:
                 kwargs["poco_core_temp"] = action.poco_core_temp
             if action.poco_gpu_temp is not None:
                 kwargs["poco_gpu_temp"] = action.poco_gpu_temp
-            if action.poco_battery_temp is not None:
-                kwargs["poco_battery_temp"] = action.poco_battery_temp
+            if action.poco_ema_temp is not None:
+                kwargs["poco_ema_temp"] = action.poco_ema_temp
             if action.fan_duty_pct is not None:
                 kwargs["fan_duty_pct"] = action.fan_duty_pct
             if kwargs:

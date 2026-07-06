@@ -168,7 +168,7 @@ class TripRecorder:
             self._close(reason="idle")
 
     def on_ignition(self, acc_on: bool) -> None:
-        """Bound trips by the powerbox ignition (ACC/stacyjka) when enabled."""
+        """Bound trips by the powerbox ignition (ACC) when enabled."""
         if not self._started:
             return
         if not self.config.use_ignition or self.config.segmentation != "trip":

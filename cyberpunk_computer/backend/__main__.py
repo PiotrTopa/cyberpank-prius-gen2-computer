@@ -18,6 +18,17 @@ from .service import BackendConfig, BackendService
 from ..io import RecordingConfig, RotationPolicy
 
 
+def parse_port_roles(roles_str: str | None) -> dict[int, str] | None:
+    if not roles_str:
+        return None
+    roles = {}
+    for part in roles_str.split(","):
+        if ":" in part:
+            port, role = part.split(":", 1)
+            roles[int(port.strip())] = role.strip()
+    return roles
+
+
 def _build_recording(args: argparse.Namespace) -> RecordingConfig:
     include = {tok.strip().lower() for tok in (args.record_include or "").split(",") if tok.strip()}
     if not include or "all" in include:
@@ -55,6 +66,10 @@ def _build_config(args: argparse.Namespace) -> BackendConfig:
     return BackendConfig(
         gateway_port=args.gateway_port,
         powerbox_port=args.powerbox_port,
+        auto_discover=not args.no_auto_discover,
+        usb_hotplug=not args.no_usb_hotplug,
+        usb_hub=args.usb_hub or os.environ.get("BACKEND_HUB"),
+        usb_port_roles=parse_port_roles(args.usb_port_roles or os.environ.get("BACKEND_USB_PORT_ROLES")),
         serial_baudrate=args.baudrate,
         api_host=args.api_host,
         api_port=args.api_port,
@@ -72,6 +87,15 @@ def _build_config(args: argparse.Namespace) -> BackendConfig:
         undervoltage_confirm_s=args.undervoltage_confirm,
         shutdown_grace_s=args.shutdown_grace,
         local_poweroff_on_undervoltage=args.local_poweroff,
+        powerbox_auto_recover=args.powerbox_auto_recover,
+        chassis_fan_freq=args.chassis_fan_freq,
+        fan_full_start_delta=args.fan_full_start_delta,
+        fan_full_stop_delta=args.fan_full_stop_delta,
+        fan_full_max_pct=args.fan_full_max_pct,
+        fan_full_ramp_range=args.fan_full_ramp_range,
+        fan_safety_temp=args.fan_safety_temp,
+        fan_ema_alpha_up=args.fan_ema_alpha_up,
+        fan_ema_alpha_down=args.fan_ema_alpha_down,
         verbose=args.verbose,
     )
 
@@ -85,6 +109,27 @@ def main() -> None:
     parser.add_argument(
         "--powerbox-port", default=None, help="powerbox serial port (optional)"
     )
+    parser.add_argument(
+        "--no-auto-discover",
+        action="store_true",
+        help="disable USB role auto-discovery; use the explicit --gateway-port/"
+             "--powerbox-port paths instead",
+    )
+    parser.add_argument(
+        "--no-usb-hotplug",
+        action="store_true",
+        help="disable the background USB hotplug monitor",
+    )
+    parser.add_argument(
+        "--usb-hub",
+        default=None,
+        help="restrict discovery to a specific USB hub (e.g. 1-1). Or use BACKEND_HUB.",
+    )
+    parser.add_argument(
+        "--usb-port-roles",
+        default=None,
+        help="comma-separated port:role mapping (e.g. 1:powerbox,2:gateway). Or use BACKEND_USB_PORT_ROLES.",
+    )
     parser.add_argument("--baudrate", type=int, default=1_000_000, help="serial baudrate")
     parser.add_argument("--api-host", default="0.0.0.0", help="API bind host")
     parser.add_argument("--api-port", type=int, default=8080, help="API bind port")
@@ -95,6 +140,9 @@ def main() -> None:
     )
     parser.add_argument("--db", default="data/metrics.db", help="metrics SQLite path")
     parser.add_argument("--tick-hz", type=float, default=50.0, help="engine loop rate")
+    parser.add_argument(
+        "--chassis-fan-freq", type=int, default=25000, help="PWM frequency for the chassis fan (Hz)"
+    )
 
     # Replay (run off a recorded NDJSON log instead of the live gateway)
     replay = parser.add_argument_group("replay")
@@ -196,6 +244,22 @@ def main() -> None:
         action="store_true",
         help="also run 'systemctl poweroff' locally when under-voltage trips",
     )
+    parser.add_argument(
+        "--powerbox-auto-recover",
+        action="store_true",
+        help="enable powerbox auto-recovery (force MCU reset via DTR toggle)",
+    )
+    
+    # Chassis Fan Configuration
+    fan = parser.add_argument_group("chassis fan")
+    fan.add_argument("--fan-full-start-delta", type=float, default=5.0, help="Delta T (°C) to start fan (full mode)")
+    fan.add_argument("--fan-full-stop-delta", type=float, default=3.0, help="Delta T (°C) to stop fan (full mode)")
+    fan.add_argument("--fan-full-max-pct", type=float, default=100.0, help="Max fan duty pct (full mode)")
+    fan.add_argument("--fan-full-ramp-range", type=float, default=10.0, help="Delta T range to ramp from 0 to max (full mode)")
+    fan.add_argument("--fan-safety-temp", type=float, default=70.0, help="Absolute POCO temp to override and force 100% duty (°C)")
+    fan.add_argument("--fan-ema-alpha-up", type=float, default=0.1, help="EMA filter fast-rise coefficient (default 0.1)")
+    fan.add_argument("--fan-ema-alpha-down", type=float, default=0.01, help="EMA filter slow-decay coefficient (default 0.01)")
+
     parser.add_argument("-v", "--verbose", action="store_true", help="verbose logging")
     args = parser.parse_args()
 

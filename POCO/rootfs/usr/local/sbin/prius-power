@@ -23,12 +23,14 @@ apply_low() {
     for n in $BIG_CORES; do
         [ -w "$CPU/cpu$n/online" ] && echo 0 > "$CPU/cpu$n/online" 2>/dev/null || true
     done
+    /usr/local/sbin/prius-wifi off
 }
 
 apply_full() {
     for n in $BIG_CORES; do
         [ -w "$CPU/cpu$n/online" ] && echo 1 > "$CPU/cpu$n/online" 2>/dev/null || true
     done
+    /usr/local/sbin/prius-wifi ap
     for p in "$CPU"/cpufreq/policy*; do
         [ -d "$p" ] || continue
         set_gov "$p" schedutil

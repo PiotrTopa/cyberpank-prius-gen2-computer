@@ -6,7 +6,7 @@ RP2040 (ignition position + INA219 telemetry, see :mod:`cyberpunk_computer.io.po
 and drive two side effects through injected callables so they stay unit-testable:
 
     * :class:`PowerModeRule` — switches the POCO CPU power profile to ``full`` when
-      the ignition (ACC/stacyjka) is on and ``low`` when the key is off.
+      the ignition (ACC) is on and ``low`` when the key is off.
     * :class:`UndervoltageProtectionRule` — when the Prius 12 V aux battery sags
       below a threshold for a sustained period, it flags the state and asks the
       powerbox to cut POCO power (after a graceful shutdown window).
@@ -27,6 +27,7 @@ from .engine import StateRule, RulePriority
 from ..actions import (
     RequestPowerboxShutdownAction,
     SetPowerboxUndervoltageAction,
+    SetPowerboxPowerModeAction,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,8 @@ class PowerModeRule(StateRule):
             return
         try:
             self._apply_mode(new_acc)
+            mode_str = "full" if new_acc else "low"
+            store.dispatch(SetPowerboxPowerModeAction(mode_str))
         except Exception:
             logger.exception("PowerModeRule.apply_mode failed (acc_on=%s)", new_acc)
 

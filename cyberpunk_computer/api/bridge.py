@@ -45,14 +45,19 @@ class StoreBridge:
         self._clients: Set["asyncio.Queue[Dict[str, Any]]"] = set()
         self._latest: Optional[Dict[str, Any]] = None
         self._latest_ts: float = 0.0
+        self._throttle_s: float = 1.0
 
     # ── engine (main) thread side ────────────────────────────────────────────
 
     def on_state(self, state: Any) -> None:
         """Store subscription callback. Runs on the engine thread."""
-        envelope = {"type": "state", "ts": time.time(), "state": serialize_state(state)}
+        now = time.time()
+        if now - self._latest_ts < self._throttle_s:
+            return
+            
+        envelope = {"type": "state", "ts": now, "state": serialize_state(state)}
         self._latest = envelope
-        self._latest_ts = envelope["ts"]
+        self._latest_ts = now
         loop = self._loop
         if loop is not None:
             try:

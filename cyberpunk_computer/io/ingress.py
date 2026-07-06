@@ -125,6 +125,12 @@ class IngressController:
         
         # Message logging callbacks (multiple can be registered)
         self._message_log_callbacks: list[Callable[[RawMessage, str], None]] = []
+
+        # Last (role, version) logged at INFO for the gateway identity. The
+        # gateway firmware re-announces IDENT every ~10 s; without de-duping we
+        # would log "Gateway identified" every 10 s. Edge-triggered: INFO on
+        # first-seen / change, DEBUG otherwise.
+        self._last_gateway_identity: Optional[tuple] = None
         
         # DTC scan accumulator: collects DTCs from multiple ECUs
         self._dtc_scan_pending_ecus: set = set()  # ECUs we're waiting for
@@ -283,8 +289,61 @@ class IngressController:
         if "GATEWAY_READY" in message_text:
             version = data.get("ver", "unknown")
             can_ready = data.get("can") == "CAN_READY"
+            now = time.time()
             
             logger.info(f"Gateway ready: v{version}, CAN={can_ready}")
+            self._last_gateway_identity = ("gateway", version)
+            
+            self._store.dispatch(SetConnectionStateAction(
+                connected=True,
+                gateway_version=version,
+                can_ready=can_ready,
+                last_heartbeat_time=now,
+                last_message_time=now,
+                source=ActionSource.GATEWAY
+            ))
+        
+        elif message_text == "GW_HB":
+            # Rolling liveness heartbeat (gateway firmware >= 2.28.0), ~1 Hz.
+            # This is the primary presence signal: it keeps the connection marked
+            # up and lets the host re-attach after every ACC power-cycle without
+            # needing the one-shot GATEWAY_READY/IDENT banner. Edge-triggered
+            # logging so the journal is not spammed every second.
+            version = data.get("ver", "unknown")
+            now = time.time()
+            identity = ("gateway", version)
+            if identity != self._last_gateway_identity:
+                self._last_gateway_identity = identity
+                logger.info(f"Gateway heartbeat online: v{version}")
+            else:
+                logger.debug(
+                    "Gateway heartbeat n=%s up=%ss",
+                    data.get("n"), data.get("up"),
+                )
+            self._store.dispatch(SetConnectionStateAction(
+                connected=True,
+                gateway_version=version,
+                can_ready=bool(data.get("can")),
+                gateway_hb=data.get("n"),
+                gateway_uptime_s=data.get("up"),
+                last_heartbeat_time=now,
+                last_message_time=now,
+                source=ActionSource.GATEWAY
+            ))
+        
+        elif message_text.upper() == "IDENT" and \
+                str(data.get("role", "gateway")).lower() in ("gateway", ""):
+            # Periodic identity re-announce (every ~10 s). Establishes/refreshes
+            # the gateway connection when the backend opened the port mid-stream
+            # and missed the one-time GATEWAY_READY boot banner. Edge-triggered
+            # logging so it does not spam the journal every 10 s.
+            version = data.get("ver", "unknown")
+            identity = ("gateway", version)
+            if identity != self._last_gateway_identity:
+                self._last_gateway_identity = identity
+                logger.info(f"Gateway identified: v{version}")
+            else:
+                logger.debug(f"Gateway identified (re-announce): v{version}")
             
             self._store.dispatch(SetConnectionStateAction(
                 connected=True,
