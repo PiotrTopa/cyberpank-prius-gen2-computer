@@ -104,9 +104,11 @@ class TestForceReconnect:
         port = SerialPort(cfg)
         return port
 
-    def test_device_present_does_simple_disconnect(self, fake_sysfs):
-        """When the tty device node exists, force_reconnect should just call
-        _handle_disconnect without attempting a hub reset."""
+    def test_device_present_escalates_to_hub_reset(self, fake_sysfs):
+        """Even when the tty device node still exists, force_reconnect should
+        escalate straight to a hub reset: a MicroPython RP2040 CDC wedge is a
+        host/link-level stall that a plain close/reopen cannot clear, so the
+        device must be re-enumerated via the parent hub."""
         port = self._make_port(fake_sysfs)
         # Monkey-patch os.path.realpath to resolve our fake port name to
         # the fake sysfs tty name.
@@ -140,7 +142,7 @@ class TestForceReconnect:
                         port.force_reconnect()
 
                         mock_disc.assert_called_once()
-                        mock_hub.assert_not_called()
+                        mock_hub.assert_called_once()
 
     def test_device_gone_triggers_hub_reset(self, fake_sysfs):
         """When the tty device has disappeared from the kernel, force_reconnect

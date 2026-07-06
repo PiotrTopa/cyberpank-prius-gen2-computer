@@ -148,7 +148,7 @@ class BackendConfig:
     # flips powerbox.connected -> False so the dashboard/operator sees the link
     # is dead; it auto-clears when fresh frames resume. 0 disables. Recovery
     # (USB hub-port power-cycle) is deliberately NOT automatic — see docs.
-    powerbox_stale_s: float = 6.0
+    powerbox_stale_s: float = 15.0
     # Automatic link recovery: when the staleness watchdog trips, force the
     # powerbox serial port to close+reopen. That toggles DTR, which RESETS the
     # RP2040 -> it reboots, re-enumerates USB-CDC and resumes streaming, clearing
@@ -178,22 +178,31 @@ class BackendConfig:
     # between POCO core temperature and cabin temperature (AHT20).
     chassis_fan_enabled: bool = True
     chassis_fan_pin: int = 14             # powerbox GPIO pin driving the fan
+    chassis_fan_freq: int = 25000         # PWM frequency in Hz
     chassis_fan_tick_s: float = 2.0       # control loop cadence (seconds)
     # "full" power-mode profile (ACC on, heavy load)
-    fan_full_start_delta: float = 5.0     # start fanning when delta_t > this (°C)
-    fan_full_stop_delta: float = 3.0      # stop fanning when delta_t < this (°C)
+    fan_full_start_temp: float = 50.0     # start fanning when poco_max > this (°C)
+    fan_full_stop_temp: float = 45.0      # stop fanning when poco_max < this (°C)
+    fan_full_start_delta: float = 20.0    # AND delta_t > this (°C)
+    fan_full_stop_delta: float = 15.0     # OR delta_t < this (°C)
     fan_full_max_pct: float = 100.0       # max duty cycle (%)
-    fan_full_ramp_range: float = 10.0     # ramp from min to max over this delta range (°C)
+    fan_full_ramp_range: float = 30.0     # ramp from 50C to 80C
     # "low" power-mode profile (ACC off, idle)
-    fan_low_start_delta: float = 8.0
-    fan_low_stop_delta: float = 5.0
-    fan_low_max_pct: float = 60.0
-    fan_low_ramp_range: float = 12.0
+    fan_low_start_temp: float = 50.0
+    fan_low_stop_temp: float = 45.0
+    fan_low_start_delta: float = 20.0
+    fan_low_stop_delta: float = 15.0
+    fan_low_max_pct: float = 100.0        # user requested 100% at 80C
+    fan_low_ramp_range: float = 30.0      # ramp from 50C to 80C
     # Safety: absolute POCO temp override (fan at 100% regardless of delta)
-    fan_safety_temp: float = 70.0         # °C
+    fan_safety_temp: float = 80.0         # °C
     # Fallback: no cabin temp — use absolute POCO thresholds
     fan_fallback_start_temp: float = 50.0 # °C
     fan_fallback_stop_temp: float = 45.0  # °C
+
+    # Asymmetric EMA filter for simulated heatsink temperature
+    fan_ema_alpha_up: float = 0.1         # Fast rise (e.g. 0.1 for ~10s time constant at 1Hz)
+    fan_ema_alpha_down: float = 0.01      # Slow decay (e.g. 0.01 for ~100s time constant)
 
     verbose: bool = False
 
@@ -245,6 +254,7 @@ class BackendService:
         self._fan_active: bool = False      # hysteresis latch
         self._fan_last_duty: int = -1       # last sent duty (avoid re-sending same value)
         self._fan_last_log_pct: float = -1.0  # edge-triggered logging
+        self._fan_ema_temp: Optional[float] = None  # Simulated heatsink temp
 
     # ── composition ────────────────────────────────────────────────────────
 
@@ -744,7 +754,6 @@ class BackendService:
                 poco_power_w=power_w,
                 poco_core_temp=cpu_temp,
                 poco_gpu_temp=gpu_temp,
-                poco_battery_temp=batt_temp,
             ))
 
     def _chassis_fan_tick(self) -> None:
@@ -776,53 +785,74 @@ class BackendService:
         if not poco_temps:
             # No thermal data → safe default: fan off.
             self._set_fan_duty(0)
+            self._fan_ema_temp = None
             return
-        poco_max = max(poco_temps)
+        poco_max_raw = max(poco_temps)
 
-        # Safety override: absolute temperature too high.
-        if poco_max >= cfg.fan_safety_temp:
+        # Safety override: absolute raw temperature too high (ignore EMA delay).
+        if poco_max_raw >= cfg.fan_safety_temp:
             self._set_fan_duty(65535)  # 100%
+            self._fan_ema_temp = poco_max_raw  # Keep EMA updated
+            self._publish_poco_ema_temp(self._fan_ema_temp, 100.0)
             return
+
+        # Asymmetric EMA (Simulated Heatsink Temperature)
+        if self._fan_ema_temp is None:
+            self._fan_ema_temp = poco_max_raw
+        else:
+            if poco_max_raw > self._fan_ema_temp:
+                self._fan_ema_temp += cfg.fan_ema_alpha_up * (poco_max_raw - self._fan_ema_temp)
+            else:
+                self._fan_ema_temp += cfg.fan_ema_alpha_down * (poco_max_raw - self._fan_ema_temp)
+
+        poco_max = self._fan_ema_temp
 
         cabin_temp = pb.aht_t  # may be None if sensor not available
 
         # Select profile based on power mode.
         is_full = pb.power_mode == "full"
         if is_full:
+            start_temp = cfg.fan_full_start_temp
+            stop_temp = cfg.fan_full_stop_temp
             start_delta = cfg.fan_full_start_delta
             stop_delta = cfg.fan_full_stop_delta
             max_pct = cfg.fan_full_max_pct
             ramp_range = cfg.fan_full_ramp_range
         else:
+            start_temp = cfg.fan_low_start_temp
+            stop_temp = cfg.fan_low_stop_temp
             start_delta = cfg.fan_low_start_delta
             stop_delta = cfg.fan_low_stop_delta
             max_pct = cfg.fan_low_max_pct
             ramp_range = cfg.fan_low_ramp_range
 
         if cabin_temp is not None:
-            # Normal mode: differential-based.
+            # Normal mode: differential + absolute-based.
             delta_t = poco_max - cabin_temp
         else:
-            # Fallback: no cabin sensor — use absolute POCO temp with the
-            # fallback thresholds shifted to act like deltas.
-            delta_t = poco_max
-            start_delta = cfg.fan_fallback_start_temp
-            stop_delta = cfg.fan_fallback_stop_temp
+            # Fallback: no cabin sensor — use absolute POCO temp, ignore delta constraints
+            delta_t = 999.0
+            start_delta = 0.0
+            stop_delta = 0.0
+            start_temp = cfg.fan_fallback_start_temp
+            stop_temp = cfg.fan_fallback_stop_temp
 
-        # Hysteresis: once active, stay active until delta drops below stop.
+        # Hysteresis: once active, stay active until temp/delta drops below stop thresholds.
         if self._fan_active:
-            if delta_t < stop_delta:
+            if poco_max < stop_temp or delta_t < stop_delta:
                 self._fan_active = False
         else:
-            if delta_t > start_delta:
+            if poco_max > start_temp and delta_t >= start_delta:
                 self._fan_active = True
 
         if not self._fan_active:
             self._set_fan_duty(0)
+            # Publish idle state so the dashboard's simulated temp stays fresh.
+            self._publish_poco_ema_temp(self._fan_ema_temp, 0.0)
             return
 
-        # Linear ramp from start_delta to start_delta+ramp_range.
-        t = (delta_t - start_delta) / max(ramp_range, 0.1)
+        # Linear ramp from start_temp to start_temp+ramp_range based on absolute temp.
+        t = (poco_max - start_temp) / max(ramp_range, 0.1)
         duty_pct = max(0.0, min(max_pct, t * max_pct))
         # Minimum duty when active: 15% (fan needs a minimum to spin up).
         if duty_pct > 0 and duty_pct < 15.0:
@@ -830,15 +860,38 @@ class BackendService:
         duty_raw = int(duty_pct / 100.0 * 65535)
         self._set_fan_duty(duty_raw)
 
-        # Update state for dashboard visibility.
+        # Update fan duty for dashboard visibility (EMA temp already published above).
         if self.twin and self.twin.store:
             from ..state.actions import SetPocoTelemetryAction
-            self.twin.store.dispatch(SetPocoTelemetryAction(fan_duty_pct=duty_pct))
+            self.twin.store.dispatch(SetPocoTelemetryAction(
+                fan_duty_pct=duty_pct,
+                poco_ema_temp=self._fan_ema_temp
+            ))
+
+    def _publish_poco_ema_temp(
+        self, ema_temp: Optional[float], fan_duty_pct: Optional[float] = None
+    ) -> None:
+        """Publish the simulated heatsink (EMA) temperature to the store.
+
+        Called every fan tick regardless of fan state so the dashboard's
+        "Simulated Temp" always reflects the latest value.
+        """
+        if ema_temp is None or not (self.twin and self.twin.store):
+            return
+        from ..state.actions import SetPocoTelemetryAction
+        self.twin.store.dispatch(SetPocoTelemetryAction(
+            poco_ema_temp=ema_temp,
+            fan_duty_pct=fan_duty_pct,
+        ))
 
     def _set_fan_duty(self, duty_raw: int) -> None:
         """Send the fan duty to the powerbox, de-duplicating unchanged values."""
-        if duty_raw == self._fan_last_duty:
-            return
+        # Add a 1% (approx 655 units) deadband to prevent serial spam from EMA noise.
+        # Always send if turning exactly ON or exactly OFF.
+        if self._fan_last_duty != -1:
+            if abs(duty_raw - self._fan_last_duty) < 655 and (duty_raw == 0) == (self._fan_last_duty == 0):
+                return
+                
         self._fan_last_duty = duty_raw
         duty_pct = round(duty_raw / 65535.0 * 100.0, 1)
         # Edge-triggered logging: log on meaningful changes (>5% or on/off).
@@ -858,7 +911,7 @@ class BackendService:
                 getattr(pb, 'power_mode', '?') if pb else '?',
             )
         if self.powerbox_commander:
-            self.powerbox_commander.set_fan(self.config.chassis_fan_pin, duty_raw)
+            self.powerbox_commander.set_fan(self.config.chassis_fan_pin, duty_raw, self.config.chassis_fan_freq)
 
     def _maybe_recover_powerbox(self, pb, age: float) -> None:
         """Force a powerbox serial reset to clear a wedged link, if enabled.
@@ -881,11 +934,13 @@ class BackendService:
         self._pb_recover_attempts += 1
         logger.warning(
             "Powerbox auto-recovery: forcing serial reset (attempt #%d, link "
-            "stale %.1fs). DTR toggle will reset the MCU to clear the wedge.",
+            "stale %.1fs). Re-enumerating via parent-hub reset to clear the "
+            "wedged CDC link.",
             self._pb_recover_attempts, age,
         )
         try:
             self._powerbox_serial.force_reconnect(attempt=self._pb_recover_attempts)
+            self._fan_last_duty = -1
         except Exception:
             logger.exception("Powerbox force_reconnect failed")
 

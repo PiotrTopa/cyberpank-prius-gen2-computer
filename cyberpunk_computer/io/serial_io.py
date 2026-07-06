@@ -68,6 +68,7 @@ class SerialPort(BidirectionalPort):
         self.config = config or SerialConfig()
         
         self._serial: Optional["serial.Serial"] = None
+        self._serial_lock = threading.Lock()
         self._connected = False
         self._running = False
         
@@ -108,11 +109,13 @@ class SerialPort(BidirectionalPort):
             return False
         
         try:
-            self._serial = serial.Serial(
+            s = serial.Serial(
                 port=self.config.port,
                 baudrate=self.config.baudrate,
                 timeout=self.config.timeout
             )
+            with self._serial_lock:
+                self._serial = s
             self._connected = True
             self._running = True
             
@@ -148,12 +151,13 @@ class SerialPort(BidirectionalPort):
         if self._writer_thread and self._writer_thread.is_alive():
             self._writer_thread.join(timeout=1.0)
         
-        if self._serial:
-            try:
-                self._serial.close()
-            except Exception as e:
-                logger.error(f"Error closing serial port: {e}")
-            self._serial = None
+        with self._serial_lock:
+            if self._serial:
+                try:
+                    self._serial.close()
+                except Exception as e:
+                    logger.error(f"Error closing serial port: {e}")
+                self._serial = None
         
         self._connected = False
         logger.info("Serial port closed")
@@ -201,12 +205,14 @@ class SerialPort(BidirectionalPort):
             if not self._connected and self.config.auto_reconnect:
                 self._attempt_reconnect()
             
-            if not self._serial or not self._connected:
+            with self._serial_lock:
+                s = self._serial
+            if s is None or not self._connected:
                 time.sleep(0.1)
                 continue
             
             try:
-                line = self._serial.readline()
+                line = s.readline()
                 if not line:
                     continue
                 
@@ -239,7 +245,9 @@ class SerialPort(BidirectionalPort):
     def _writer_loop(self) -> None:
         """Background thread for writing to serial."""
         while self._running:
-            if not self._serial or not self._connected:
+            with self._serial_lock:
+                s = self._serial
+            if s is None or not self._connected:
                 # Drain queue while disconnected to prevent buildup
                 try:
                     self._tx_queue.get_nowait()
@@ -252,10 +260,10 @@ class SerialPort(BidirectionalPort):
                 command = self._tx_queue.get(timeout=2.0)
             except queue.Empty:
                 # If TX queue is empty, send a ping to keep gateway awake (if configured)
-                if self.config.keepalive_ping and self._serial and self._connected:
+                if self.config.keepalive_ping and s is not None and self._connected:
                     try:
-                        self._serial.write(self.config.keepalive_ping.encode('utf-8'))
-                        self._serial.flush()
+                        s.write(self.config.keepalive_ping.encode('utf-8'))
+                        s.flush()
                     except Exception:
                         pass
                 continue
@@ -265,9 +273,9 @@ class SerialPort(BidirectionalPort):
                 json_data = command.to_gateway_json()
                 line = json.dumps(json_data) + "\n"
                 
-                if self._serial and self._connected:
-                    self._serial.write(line.encode('utf-8'))
-                    self._serial.flush()
+                if s is not None and self._connected:
+                    s.write(line.encode('utf-8'))
+                    s.flush()
                     self._stats["tx_messages"] += 1
                     logger.debug(f"TX [{command.device_id}:{command.command_type}]: {line.strip()[:120]}")
                     
@@ -286,12 +294,13 @@ class SerialPort(BidirectionalPort):
     def _handle_disconnect(self) -> None:
         """Handle serial port disconnection."""
         self._connected = False
-        if self._serial:
-            try:
-                self._serial.close()
-            except Exception:
-                pass
-            self._serial = None
+        with self._serial_lock:
+            if self._serial:
+                try:
+                    self._serial.close()
+                except Exception:
+                    pass
+                self._serial = None
         logger.info("Serial port disconnected")
     
     def _attempt_reconnect(self) -> bool:
@@ -309,11 +318,13 @@ class SerialPort(BidirectionalPort):
         
         try:
             logger.debug(f"Attempting to reconnect to {self.config.port}...")
-            self._serial = serial.Serial(
+            s = serial.Serial(
                 port=self.config.port,
                 baudrate=self.config.baudrate,
                 timeout=self.config.timeout
             )
+            with self._serial_lock:
+                self._serial = s
             self._connected = True
             self._stats["reconnects"] += 1
             logger.info(f"Serial port reconnected successfully (attempt #{self._stats['reconnects']})")
@@ -345,28 +356,32 @@ class SerialPort(BidirectionalPort):
         self._last_reconnect_attempt = 0.0
 
     def force_reconnect(self, attempt: int = 1) -> None:
-        """Force the link down and trigger USB-level recovery if needed.
+        """Force the link down and trigger USB-level recovery.
 
         Used by the backend's link-staleness watchdog to recover a *silently
-        wedged* USB-CDC link.  Escalation strategy:
+        wedged* USB-CDC link.  The MicroPython RP2040 CDC wedge is a host/link
+        level IN-endpoint stall: the board keeps running and a plain
+        close/reopen of the tty does NOT reset the MCU or re-enumerate the
+        device on MicroPython, so it never clears the wedge.  The only thing
+        that reliably recovers the link is re-enumerating the device via a
+        parent-hub reset, so we escalate straight to the hub reset on the very
+        first attempt instead of wasting a full staleness cycle (~20 s) on a
+        reopen that cannot help.
 
-        1. Attempt 1: If the tty device node still exists, close the serial
-           handle so the reader loop reopens it on the next iteration.
-        2. Attempt 2+: If the device is gone from the kernel entirely OR if
-           simple close/reopen failed to clear the wedge (MCU firmware stuck),
-           reset the parent USB hub via sysfs unbind/bind.
+        (A true VBUS power-cycle would be more forceful still, but it cold-boots
+        the bus-powered powerbox and would collapse the self-latched OUT1 rail
+        when ACC is off, killing the whole computer — hence the gentler
+        driver-level unbind/bind here.)
 
         Safe to call from another thread; the reader loop owns the actual reopen.
         """
         import os
-        import subprocess
 
         logger.warning(
             f"Forcing serial reconnect on {self.config.port} "
             f"(staleness watchdog recovery, attempt #{attempt})"
         )
 
-        real_port = None
         tty_name = None
         try:
             real_port = os.path.realpath(self.config.port)
@@ -379,22 +394,20 @@ class SerialPort(BidirectionalPort):
             and os.path.exists(f"/sys/class/tty/{tty_name}/device")
         )
 
-        if not device_present or attempt > 1:
-            reason = "gone from bus" if not device_present else "escalation"
-            # is to reset the parent USB hub so the RP2040 re-enumerates.
-            hub_id = self._find_parent_hub_id(tty_name)
-            if hub_id:
-                logger.warning(
-                    "Device %s %s — resetting parent USB hub %s",
-                    self.config.port, reason, hub_id,
-                )
-                self._reset_usb_hub(hub_id)
-            else:
-                logger.error(
-                    "Device %s gone and cannot determine parent hub; "
-                    "manual intervention required.",
-                    self.config.port,
-                )
+        reason = "gone from bus" if not device_present else "wedged link"
+        hub_id = self._find_parent_hub_id(tty_name)
+        if hub_id:
+            logger.warning(
+                "Device %s %s — resetting parent USB hub %s",
+                self.config.port, reason, hub_id,
+            )
+            self._reset_usb_hub(hub_id)
+        else:
+            logger.error(
+                "Device %s %s and cannot determine parent hub; "
+                "manual intervention required.",
+                self.config.port, reason,
+            )
 
         # Drop the wedged handle so the reader loop reopens on its next
         # iteration.  After a hub reset the UsbSerialMonitor will detect the
@@ -459,7 +472,11 @@ class SerialPort(BidirectionalPort):
             try:
                 with open(unbind, "w") as f:
                     f.write(hub_id)
-                time.sleep(0.5)
+                # Dwell long enough for the downstream Full-Speed device to fully
+                # drop off the bus before re-binding. Too short a gap leaves the
+                # RP2040 half-enumerated and the re-bind fails with -32 (EPIPE),
+                # forcing extra recovery cycles.
+                time.sleep(1.5)
                 with open(bind, "w") as f:
                     f.write(hub_id)
             except PermissionError:
@@ -468,7 +485,7 @@ class SerialPort(BidirectionalPort):
                     ["sudo", "sh", "-c", f"echo {hub_id} > {unbind}"],
                     check=True, timeout=5,
                 )
-                time.sleep(0.5)
+                time.sleep(1.5)
                 subprocess.run(
                     ["sudo", "sh", "-c", f"echo {hub_id} > {bind}"],
                     check=True, timeout=5,
