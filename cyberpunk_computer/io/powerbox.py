@@ -8,7 +8,7 @@ reports:
 
     device 200 (DEVICE_POWERBOX_BASE)   system / status / command acks
     device 201 (DEVICE_POWERBOX_POWER)  INA219 telemetry: voltage / current / power
-    device 202 (DEVICE_POWERBOX_EVENTS) ignition (ACC/stacyjka) + constant battery line
+    device 202 (DEVICE_POWERBOX_EVENTS) ignition (ACC) + constant battery line
 
 This module provides:
 
@@ -42,6 +42,7 @@ from ..state.actions import (
     Action,
     SetPowerboxConnectionAction,
     SetPowerboxIgnitionAction,
+    SetPowerboxPowerStatusAction,
     SetPowerboxTelemetryAction,
 )
 
@@ -50,6 +51,24 @@ if TYPE_CHECKING:  # avoid import cycles at runtime
     from .ports import OutputPort
 
 logger = logging.getLogger(__name__)
+
+# Last (role, version) we logged at INFO for the powerbox identity. The firmware
+# re-announces IDENT every IDENT_HEARTBEAT_MS (~10 s) so the backend can identify
+# a device that connected mid-stream; without de-duping we would log "Powerbox
+# identified" at INFO every 10 s and bury real events (watchdog/recovery). We log
+# at INFO only on first-seen or when role/version changes, DEBUG otherwise.
+_last_identity_logged: Optional[tuple] = None
+
+
+def reset_identity_log() -> None:
+    """Forget the last-logged powerbox identity.
+
+    Called when the link is marked disconnected (staleness watchdog) so the next
+    IDENT/READY after recovery logs at INFO again — a genuine "link came back"
+    event — instead of being de-duped to DEBUG.
+    """
+    global _last_identity_logged
+    _last_identity_logged = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -78,12 +97,14 @@ def _coerce_bool(value) -> Optional[bool]:
 
 
 def parse_power_telemetry(data: dict) -> List[Action]:
-    """Decode device 201 INA219 telemetry.
+    """Decode device 201 INA219 and env telemetry.
 
     Accepted keys (SI units preferred, milli-units tolerated):
         v / volt / voltage     bus voltage in volts   (or mv / mvolt in millivolts)
         i / cur / current      current in amps         (or ma / mcur in milliamps)
         p / pwr / power         power in watts          (or mw / mpwr in milliwatts)
+        bmp_t, bmp_p           BMP280 temperature (C), pressure (Pa)
+        aht_t, aht_h           AHT20 temperature (C), relative humidity (%)
     """
     voltage = _coerce_float(data.get("v", data.get("voltage", data.get("volt"))))
     if voltage is None:
@@ -103,9 +124,18 @@ def parse_power_telemetry(data: dict) -> List[Action]:
         if mw is not None:
             power = mw / 1000.0
 
-    if voltage is None and current is None and power is None:
+    bmp_t = _coerce_float(data.get("bmp_t"))
+    bmp_p = _coerce_float(data.get("bmp_p"))
+    aht_t = _coerce_float(data.get("aht_t"))
+    aht_h = _coerce_float(data.get("aht_h"))
+    energy_mah = _coerce_float(data.get("mah"))
+
+    if voltage is None and current is None and power is None and bmp_t is None and aht_t is None and energy_mah is None:
         return []
-    return [SetPowerboxTelemetryAction(voltage=voltage, current=current, power=power)]
+    return [SetPowerboxTelemetryAction(
+        voltage=voltage, current=current, power=power,
+        bmp_t=bmp_t, bmp_p=bmp_p, aht_t=aht_t, aht_h=aht_h, energy_mah=energy_mah
+    )]
 
 
 def parse_power_event(data: dict) -> List[Action]:
@@ -141,12 +171,49 @@ def parse_power_event(data: dict) -> List[Action]:
 
 
 def parse_powerbox_system(data: dict) -> List[Action]:
-    """Decode device 200 system/status messages (ready banner, acks)."""
+    """Decode device 200 system/status messages (ready banner, IDENT, STATUS, acks)."""
     msg = str(data.get("msg", "")).upper()
-    if "POWERBOX_READY" in msg or "READY" in msg:
+    if "POWERBOX_READY" in msg or "IDENT" in msg or "READY" in msg:
         ver = data.get("ver", "unknown")
-        logger.info("Powerbox ready: v%s", ver)
+        role = data.get("role", "powerbox")
+        is_boot = "POWERBOX_READY" in msg  # genuine boot banner (firmware (re)booted)
+        kind = "ready" if is_boot else ("identified" if "IDENT" in msg else "ready")
+        # Edge-triggered logging. A POWERBOX_READY boot banner always logs at INFO
+        # (it marks a fresh firmware boot — a meaningful event). The routine ~10 s
+        # IDENT re-announce only logs at INFO on first-seen or role/version change,
+        # DEBUG otherwise, so it does not bury watchdog/recovery events.
+        global _last_identity_logged
+        identity = (role, ver)
+        if is_boot or identity != _last_identity_logged:
+            _last_identity_logged = identity
+            logger.info("Powerbox %s: role=%s v%s", kind, role, ver)
+        else:
+            logger.debug("Powerbox %s (re-announce): role=%s v%s", kind, role, ver)
         return [SetPowerboxConnectionAction(connected=True)]
+
+    if msg == "STATUS":
+        # Periodic power-management heartbeat: OUT rail states + POCO liveness +
+        # rolling counter + state machine. Any missing key stays None (no update).
+        def _b(key):
+            return _coerce_bool(data[key]) if key in data else None
+        hb = data.get("hb")
+        try:
+            hb = int(hb) if hb is not None else None
+        except (TypeError, ValueError):
+            hb = None
+        pm = data.get("pm")
+        return [SetPowerboxPowerStatusAction(
+            out1=_b("out1"), out2=_b("out2"), out3=_b("out3"),
+            poco_alive=_b("poco"),
+            pm_state=str(pm) if pm is not None else None,
+            hb=hb,
+        )]
+
+    if msg in ("SHUTDOWN", "SUICIDE"):
+        # Powerbox is tearing down power. Reflect the state machine so the
+        # dashboard/operator can see it; the rail states follow in STATUS.
+        logger.warning("Powerbox %s: %s", msg, data.get("reason", ""))
+        return [SetPowerboxPowerStatusAction(pm_state=msg.lower())]
 
     ack = data.get("ack")
     if ack:
@@ -184,18 +251,72 @@ def register_powerbox_ingress(ingress: "IngressController") -> None:
 # Outbound: computer -> powerbox commands
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_power_off_command(reason: str = "undervoltage", grace_s: int = 30) -> OutgoingCommand:
-    """Command the powerbox to cut POCO power after a grace period.
+# The powerbox listens on its LOCAL system channel (id 0). Commands are sent on
+# the powerbox's own OutputPort, so the wire id is the powerbox-local id — NOT the
+# computer-side DEVICE_POWERBOX_BASE offset (that offset only applies to ingress,
+# where MultiInputPort maps the powerbox's id 0 -> 200).
+POWERBOX_LOCAL_SYSTEM = 0
 
-    ``grace_s`` gives the OS time to shut down cleanly before the rail is cut.
-    The device id is in the reserved powerbox range; a powerbox OutputPort is
-    expected to translate it back to the powerbox's local id 0.
+
+def build_power_off_command(reason: str = "undervoltage", grace_s: int = 30) -> OutgoingCommand:
+    """Command the powerbox to shut down (and ultimately suicide) POCO power.
+
+    ``grace_s`` gives the OS time to shut down cleanly before the powerbox drops
+    the master rail (OUT1).
     """
     return OutgoingCommand(
-        device_id=DEVICE_POWERBOX_BASE,
+        device_id=POWERBOX_LOCAL_SYSTEM,
         command_type="power",
         payload={"a": "off", "reason": reason, "grace_s": int(grace_s)},
         priority=100,
+    )
+
+
+def build_heartbeat_command(counter: int) -> OutgoingCommand:
+    """Send the POCO->powerbox heartbeat with a rolling counter (0-255)."""
+    return OutgoingCommand(
+        device_id=POWERBOX_LOCAL_SYSTEM,
+        command_type="power",
+        payload={"a": "hb", "n": int(counter) & 0xFF},
+        priority=10,
+    )
+
+
+def build_out_command(channel: int, on: bool) -> OutgoingCommand:
+    """Set a controllable rail: OUT2 (RS485 satellites) or OUT3 (spare).
+
+    OUT1 (master rail) is intentionally not controllable this way — it is only
+    dropped by the powerbox's own shutdown/suicide path.
+    """
+    return OutgoingCommand(
+        device_id=POWERBOX_LOCAL_SYSTEM,
+        command_type="power",
+        payload={"a": "out", "ch": int(channel), "on": bool(on)},
+        priority=50,
+    )
+
+
+def build_button_command(ms: int = 3000) -> OutgoingCommand:
+    """Pulse the POCO power button: ~3000 ms = power on, ~10000 ms = force reboot."""
+    return OutgoingCommand(
+        device_id=POWERBOX_LOCAL_SYSTEM,
+        command_type="power",
+        payload={"a": "button", "ms": int(ms)},
+        priority=60,
+    )
+
+
+def build_fan_command(pin: int, duty: int) -> OutgoingCommand:
+    """Set the chassis fan PWM duty cycle.
+
+    ``pin`` is the RP2040 GPIO driving the fan MOSFET (14 for the chassis fan).
+    ``duty`` is the raw duty_u16 value (0-65535).
+    """
+    return OutgoingCommand(
+        device_id=POWERBOX_LOCAL_SYSTEM,
+        command_type="power",
+        payload={"a": "fan", "pin": int(pin), "duty": int(duty)},
+        priority=20,
     )
 
 
@@ -205,22 +326,39 @@ class PowerboxCommander:
     def __init__(self, output_port: "Optional[OutputPort]" = None) -> None:
         self._output_port = output_port
 
-    def request_power_off(self, reason: str = "undervoltage", grace_s: int = 30) -> bool:
-        cmd = build_power_off_command(reason=reason, grace_s=grace_s)
+    def _send(self, cmd: OutgoingCommand, what: str, warn: bool = False) -> bool:
         if self._output_port is None:
-            logger.warning(
-                "Powerbox power-off requested (reason=%s, grace=%ds) but no powerbox "
-                "output port is wired — command not sent", reason, grace_s,
-            )
+            log = logger.warning if warn else logger.debug
+            log("Powerbox %s requested but no output port is wired — not sent", what)
             return False
         try:
             ok = self._output_port.send(cmd)
-            logger.warning("Sent powerbox power-off (reason=%s, grace=%ds): ok=%s",
-                           reason, grace_s, ok)
+            (logger.warning if warn else logger.debug)("Sent powerbox %s: ok=%s", what, ok)
             return bool(ok)
         except Exception:
-            logger.exception("Failed to send powerbox power-off command")
+            logger.exception("Failed to send powerbox %s", what)
             return False
+
+    def request_power_off(self, reason: str = "undervoltage", grace_s: int = 30) -> bool:
+        return self._send(
+            build_power_off_command(reason=reason, grace_s=grace_s),
+            "power-off (reason=%s, grace=%ds)" % (reason, grace_s),
+            warn=True,
+        )
+
+    def send_heartbeat(self, counter: int) -> bool:
+        return self._send(build_heartbeat_command(counter), "heartbeat")
+
+    def set_out(self, channel: int, on: bool) -> bool:
+        return self._send(build_out_command(channel, on),
+                          "out%d=%s" % (channel, "on" if on else "off"), warn=True)
+
+    def press_button(self, ms: int = 3000) -> bool:
+        return self._send(build_button_command(ms), "power-button %dms" % ms, warn=True)
+
+    def set_fan(self, pin: int, duty: int) -> bool:
+        return self._send(build_fan_command(pin, duty),
+                          "fan pin%d duty=%d" % (pin, duty))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

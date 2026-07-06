@@ -102,10 +102,14 @@ class ActionType(Enum):
 
     # Powerbox actions (second RP2040, devices 200-202)
     SET_POWERBOX_TELEMETRY = auto()    # INA219 voltage/current/power
-    SET_POWERBOX_IGNITION = auto()     # ACC (stacyjka) + constant battery line
+    SET_POWERBOX_IGNITION = auto()     # ACC + constant battery line
     SET_POWERBOX_CONNECTION = auto()   # powerbox link present/absent
     SET_POWERBOX_UNDERVOLTAGE = auto() # sustained under-voltage flag (rule)
     REQUEST_POWERBOX_SHUTDOWN = auto() # ask powerbox to cut POCO power (rule)
+    SET_POWERBOX_POWER_MODE = auto()   # POCO CPU power profile (rule)
+    SET_POWERBOX_POWER_STATUS = auto()
+    SET_POCO_TELEMETRY = auto() # OUT1/2/3 + POCO heartbeat (powerbox STATUS)
+    SET_OUT = auto()
 
     # AVC Input actions (buttons and touch)
     AVC_BUTTON_PRESS = auto()
@@ -902,10 +906,20 @@ class SetConnectionStateAction(Action):
     gateway_version: Optional[str] = None
     
     def __init__(self, connected: bool, gateway_version: Optional[str] = None,
+                 can_ready: Optional[bool] = None,
+                 gateway_hb: Optional[int] = None,
+                 gateway_uptime_s: Optional[float] = None,
+                 last_heartbeat_time: Optional[float] = None,
+                 last_message_time: Optional[float] = None,
                  source: ActionSource = ActionSource.INTERNAL):
         super().__init__(ActionType.SET_CONNECTION_STATE, source)
         self.connected = connected
         self.gateway_version = gateway_version
+        self.can_ready = can_ready
+        self.gateway_hb = gateway_hb
+        self.gateway_uptime_s = gateway_uptime_s
+        self.last_heartbeat_time = last_heartbeat_time
+        self.last_message_time = last_message_time
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1161,23 +1175,38 @@ class SetPowerboxTelemetryAction(Action):
     voltage: Optional[float] = None  # bus voltage = Prius 12 V aux battery (V)
     current: Optional[float] = None  # computer current draw (A)
     power: Optional[float] = None    # computer power consumption (W)
+    bmp_t: Optional[float] = None
+    bmp_p: Optional[float] = None
+    aht_t: Optional[float] = None
+    aht_h: Optional[float] = None
+    energy_mah: Optional[float] = None
 
     def __init__(
         self,
         voltage: Optional[float] = None,
         current: Optional[float] = None,
         power: Optional[float] = None,
+        bmp_t: Optional[float] = None,
+        bmp_p: Optional[float] = None,
+        aht_t: Optional[float] = None,
+        aht_h: Optional[float] = None,
+        energy_mah: Optional[float] = None,
         source: ActionSource = ActionSource.GATEWAY,
     ):
         super().__init__(ActionType.SET_POWERBOX_TELEMETRY, source)
         self.voltage = voltage
         self.current = current
         self.power = power
+        self.bmp_t = bmp_t
+        self.bmp_p = bmp_p
+        self.aht_t = aht_t
+        self.aht_h = aht_h
+        self.energy_mah = energy_mah
 
 
 @dataclass
 class SetPowerboxIgnitionAction(Action):
-    """Ignition switch (stacyjka): ACC/ON position + constant battery line."""
+    """Ignition switch: ACC/ON position + constant battery line."""
     acc_on: bool = False
     batt_present: bool = True
 
@@ -1222,6 +1251,50 @@ class RequestPowerboxShutdownAction(Action):
         self.reason = reason
 
 
+@dataclass
+class SetPowerboxPowerModeAction(Action):
+    """Set the POCO CPU power profile (set by the PowerModeRule)."""
+    mode: str = "full"
+
+    def __init__(self, mode: str, source: ActionSource = ActionSource.INTERNAL):
+        super().__init__(ActionType.SET_POWERBOX_POWER_MODE, source)
+        self.mode = mode
+
+
+@dataclass
+class SetPowerboxPowerStatusAction(Action):
+    """Mirror the powerbox STATUS heartbeat: OUT rail states + POCO liveness.
+
+    Populated from the powerbox firmware's periodic STATUS message
+    (``{"msg":"STATUS","hb":n,"out1":1,"out2":1,"out3":0,"poco":1,"pm":"normal"}``).
+    Any field left None is not updated.
+    """
+    out1: Optional[bool] = None
+    out2: Optional[bool] = None
+    out3: Optional[bool] = None
+    poco_alive: Optional[bool] = None
+    pm_state: Optional[str] = None
+    hb: Optional[int] = None
+
+    def __init__(
+        self,
+        out1: Optional[bool] = None,
+        out2: Optional[bool] = None,
+        out3: Optional[bool] = None,
+        poco_alive: Optional[bool] = None,
+        pm_state: Optional[str] = None,
+        hb: Optional[int] = None,
+        source: ActionSource = ActionSource.GATEWAY,
+    ):
+        super().__init__(ActionType.SET_POWERBOX_POWER_STATUS, source)
+        self.out1 = out1
+        self.out2 = out2
+        self.out3 = out3
+        self.poco_alive = poco_alive
+        self.pm_state = pm_state
+        self.hb = hb
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Batch Action
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1239,3 +1312,35 @@ class BatchAction(Action):
     def __init__(self, actions: List[Action], source: ActionSource = ActionSource.INTERNAL):
         super().__init__(ActionType.BATCH, source)
         self.actions = actions or []
+
+@dataclass
+class SetPocoTelemetryAction(Action):
+    """Internal POCO phone battery + thermal telemetry."""
+    poco_power_w: Optional[float] = None
+    poco_core_temp: Optional[float] = None
+    poco_gpu_temp: Optional[float] = None
+    poco_battery_temp: Optional[float] = None
+    fan_duty_pct: Optional[float] = None
+
+    def __init__(
+        self,
+        poco_power_w: Optional[float] = None,
+        poco_core_temp: Optional[float] = None,
+        poco_gpu_temp: Optional[float] = None,
+        poco_battery_temp: Optional[float] = None,
+        fan_duty_pct: Optional[float] = None,
+        source: ActionSource = ActionSource.INTERNAL,
+    ):
+        super().__init__(ActionType.SET_POCO_TELEMETRY, source)
+        self.poco_power_w = poco_power_w
+        self.poco_core_temp = poco_core_temp
+        self.poco_gpu_temp = poco_gpu_temp
+        self.poco_battery_temp = poco_battery_temp
+        self.fan_duty_pct = fan_duty_pct
+
+class SetOutAction(Action):
+    """Set OUT2 or OUT3 state."""
+    def __init__(self, channel: int, on: bool, source: ActionSource = ActionSource.UI):
+        super().__init__(ActionType.SET_OUT, source)
+        self.channel = channel
+        self.on = on

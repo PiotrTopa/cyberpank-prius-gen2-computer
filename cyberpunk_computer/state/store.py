@@ -35,7 +35,7 @@ from .actions import (
     SetPowerChartTimeBaseAction,
     SetPowerboxTelemetryAction, SetPowerboxIgnitionAction,
     SetPowerboxConnectionAction, SetPowerboxUndervoltageAction,
-    RequestPowerboxShutdownAction,
+    RequestPowerboxShutdownAction, SetPowerboxPowerModeAction,
 )
 
 logger = logging.getLogger(__name__)
@@ -661,12 +661,18 @@ class Store:
         # Connection reducers
         elif action.type == ActionType.SET_CONNECTION_STATE:
             a = action  # type: SetConnectionStateAction
+            conn = self._state.connection
             self._state = replace(
                 self._state,
                 connection=replace(
-                    self._state.connection,
+                    conn,
                     connected=a.connected,
-                    gateway_version=a.gateway_version or self._state.connection.gateway_version
+                    gateway_version=a.gateway_version or conn.gateway_version,
+                    can_ready=a.can_ready if a.can_ready is not None else conn.can_ready,
+                    gateway_hb=a.gateway_hb if a.gateway_hb is not None else conn.gateway_hb,
+                    gateway_uptime_s=a.gateway_uptime_s if a.gateway_uptime_s is not None else conn.gateway_uptime_s,
+                    last_heartbeat_time=a.last_heartbeat_time if a.last_heartbeat_time is not None else conn.last_heartbeat_time,
+                    last_message_time=a.last_message_time if a.last_message_time is not None else conn.last_message_time,
                 )
             )
             affected.add(StateSlice.CONNECTION)
@@ -887,13 +893,47 @@ class Store:
                 kwargs["system_voltage"] = action.voltage
             if action.current is not None:
                 kwargs["current_draw_a"] = action.current
-            if action.power is not None:
-                kwargs["power_draw_w"] = action.power
+            
+            pwr = action.power
+            if pwr is None and action.voltage is not None and action.current is not None:
+                pwr = action.voltage * action.current
+            
+            if pwr is not None:
+                kwargs["power_draw_w"] = pwr
+            if action.bmp_t is not None:
+                kwargs["bmp_t"] = action.bmp_t
+            if action.bmp_p is not None:
+                kwargs["bmp_p"] = action.bmp_p
+            if action.aht_t is not None:
+                kwargs["aht_t"] = action.aht_t
+            if action.aht_h is not None:
+                kwargs["aht_h"] = action.aht_h
+            if action.energy_mah is not None:
+                kwargs["energy_mah"] = action.energy_mah
             self._state = replace(
                 self._state,
                 powerbox=replace(self._state.powerbox, **kwargs),
             )
             affected.add(StateSlice.POWERBOX)
+
+        elif action.type == ActionType.SET_POCO_TELEMETRY:
+            kwargs = {}
+            if action.poco_power_w is not None:
+                kwargs["poco_power_w"] = action.poco_power_w
+            if action.poco_core_temp is not None:
+                kwargs["poco_core_temp"] = action.poco_core_temp
+            if action.poco_gpu_temp is not None:
+                kwargs["poco_gpu_temp"] = action.poco_gpu_temp
+            if action.poco_battery_temp is not None:
+                kwargs["poco_battery_temp"] = action.poco_battery_temp
+            if action.fan_duty_pct is not None:
+                kwargs["fan_duty_pct"] = action.fan_duty_pct
+            if kwargs:
+                self._state = replace(
+                    self._state,
+                    powerbox=replace(self._state.powerbox, **kwargs)
+                )
+                affected.add(StateSlice.POWERBOX)
 
         elif action.type == ActionType.SET_POWERBOX_IGNITION:
             import time as _t
@@ -910,9 +950,13 @@ class Store:
             affected.add(StateSlice.POWERBOX)
 
         elif action.type == ActionType.SET_POWERBOX_CONNECTION:
+            kwargs = {"connected": action.connected}
+            if action.connected:
+                import time as _t
+                kwargs["last_update_time"] = _t.time()
             self._state = replace(
                 self._state,
-                powerbox=replace(self._state.powerbox, connected=action.connected),
+                powerbox=replace(self._state.powerbox, **kwargs),
             )
             affected.add(StateSlice.POWERBOX)
 
@@ -931,6 +975,37 @@ class Store:
                     shutdown_requested=True,
                     shutdown_reason=action.reason,
                 ),
+            )
+            affected.add(StateSlice.POWERBOX)
+
+        elif action.type == ActionType.SET_POWERBOX_POWER_MODE:
+            self._state = replace(
+                self._state,
+                powerbox=replace(
+                    self._state.powerbox,
+                    power_mode=action.mode,
+                ),
+            )
+            affected.add(StateSlice.POWERBOX)
+
+        elif action.type == ActionType.SET_POWERBOX_POWER_STATUS:
+            import time as _t
+            kwargs = {"connected": True, "last_update_time": _t.time()}
+            if action.out1 is not None:
+                kwargs["out1"] = action.out1
+            if action.out2 is not None:
+                kwargs["out2"] = action.out2
+            if action.out3 is not None:
+                kwargs["out3"] = action.out3
+            if action.poco_alive is not None:
+                kwargs["poco_alive"] = action.poco_alive
+            if action.pm_state is not None:
+                kwargs["pm_state"] = action.pm_state
+            if action.hb is not None:
+                kwargs["powerbox_hb"] = action.hb
+            self._state = replace(
+                self._state,
+                powerbox=replace(self._state.powerbox, **kwargs),
             )
             affected.add(StateSlice.POWERBOX)
 

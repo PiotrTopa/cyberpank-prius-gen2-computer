@@ -315,6 +315,13 @@ class ConnectionState:
     can_ready: bool = False
     avc_ready: bool = False
     last_message_time: Optional[float] = None
+    # Liveness heartbeat (gateway firmware >= 2.28.0). The gateway is power-cycled
+    # with ACC, so these let the UI show presence/liveness that survives every
+    # reconnect: gateway_hb is the rolling 0-255 counter, gateway_uptime_s the
+    # firmware uptime, last_heartbeat_time the host clock of the last GW_HB.
+    gateway_hb: Optional[int] = None
+    gateway_uptime_s: Optional[float] = None
+    last_heartbeat_time: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -444,7 +451,7 @@ class PowerboxState:
     The powerbox sits between the Prius 12 V electrical system and the POCO
     board computer. It reports:
 
-    - the ignition switch (stacyjka) position: ``acc_on`` (accessory/ON) plus the
+    - the ignition switch position: ``acc_on`` (accessory/ON) plus the
       constant-battery line ``batt_present``;
     - INA219 telemetry on the computer's 12 V feed: bus ``system_voltage`` (the
       Prius aux battery), ``current_draw_a`` and ``power_draw_w`` consumed by the
@@ -457,7 +464,7 @@ class PowerboxState:
     """
     connected: bool = False           # powerbox link present (NDJSON seen)
 
-    # Ignition switch (stacyjka)
+    # Ignition switch
     acc_on: bool = False              # accessory / ON position
     batt_present: bool = True         # constant +12 V battery line present
 
@@ -465,11 +472,38 @@ class PowerboxState:
     system_voltage: Optional[float] = None  # bus voltage = Prius 12 V aux battery (V)
     current_draw_a: Optional[float] = None  # computer current draw (A)
     power_draw_w: Optional[float] = None     # computer power consumption (W)
+    poco_power_w: Optional[float] = None     # POCO phone internal power (W)
+
+    # POCO thermal telemetry (sysfs thermal zones, °C)
+    poco_core_temp: Optional[float] = None    # max CPU/cluster temperature
+    poco_gpu_temp: Optional[float] = None     # max GPU temperature
+    poco_battery_temp: Optional[float] = None # battery temperature
+
+    # Chassis fan state (PWM on powerbox GPIO 14)
+    fan_duty_pct: float = 0.0                 # current fan duty cycle (0-100%)
+
+    # Environmental telemetry
+    bmp_t: Optional[float] = None
+    bmp_p: Optional[float] = None
+    aht_t: Optional[float] = None
+    aht_h: Optional[float] = None
+    energy_mah: Optional[float] = None
 
     # Rule-computed protection state
     undervoltage: bool = False        # voltage sustained below the cut threshold
     shutdown_requested: bool = False  # computer asked the powerbox to cut POCO power
     shutdown_reason: str = ""
+    power_mode: str = "low"           # POCO CPU power profile (low|full)
+
+    # Power-management GPIO mirror (from the powerbox STATUS heartbeat).
+    # OUT1 = master rail (POCO+RP2040+hub) latch; OUT2 = RS485 satellite power;
+    # OUT3 = spare. pm_state is the powerbox state machine: normal/shutdown/dead.
+    out1: Optional[bool] = None       # master rail latched on (HIGH)
+    out2: Optional[bool] = None       # RS485 satellite power on
+    out3: Optional[bool] = None       # spare rail on
+    poco_alive: Optional[bool] = None # powerbox sees a live POCO heartbeat
+    pm_state: str = ""                # powerbox PM state: normal|shutdown|dead
+    powerbox_hb: Optional[int] = None # powerbox's rolling heartbeat counter (0-255)
 
     last_update_time: float = 0.0
 

@@ -173,6 +173,28 @@ class BackendConfig:
     # pre-2.28.0 gateway that does not heartbeat. 0 disables.
     gateway_stale_s: float = 8.0
 
+    # ── Chassis fan control ──────────────────────────────────────────────────
+    # PWM fan on powerbox GPIO 14. Driven automatically based on the delta
+    # between POCO core temperature and cabin temperature (AHT20).
+    chassis_fan_enabled: bool = True
+    chassis_fan_pin: int = 14             # powerbox GPIO pin driving the fan
+    chassis_fan_tick_s: float = 2.0       # control loop cadence (seconds)
+    # "full" power-mode profile (ACC on, heavy load)
+    fan_full_start_delta: float = 5.0     # start fanning when delta_t > this (°C)
+    fan_full_stop_delta: float = 3.0      # stop fanning when delta_t < this (°C)
+    fan_full_max_pct: float = 100.0       # max duty cycle (%)
+    fan_full_ramp_range: float = 10.0     # ramp from min to max over this delta range (°C)
+    # "low" power-mode profile (ACC off, idle)
+    fan_low_start_delta: float = 8.0
+    fan_low_stop_delta: float = 5.0
+    fan_low_max_pct: float = 60.0
+    fan_low_ramp_range: float = 12.0
+    # Safety: absolute POCO temp override (fan at 100% regardless of delta)
+    fan_safety_temp: float = 70.0         # °C
+    # Fallback: no cabin temp — use absolute POCO thresholds
+    fan_fallback_start_temp: float = 50.0 # °C
+    fan_fallback_stop_temp: float = 45.0  # °C
+
     verbose: bool = False
 
 
@@ -217,6 +239,12 @@ class BackendService:
         self._gw_stale: bool = False
 
         self._poco_poll_last: float = 0.0
+
+        # Chassis fan controller state.
+        self._fan_last_tick: float = 0.0
+        self._fan_active: bool = False      # hysteresis latch
+        self._fan_last_duty: int = -1       # last sent duty (avoid re-sending same value)
+        self._fan_last_log_pct: float = -1.0  # edge-triggered logging
 
     # ── composition ────────────────────────────────────────────────────────
 
@@ -359,6 +387,17 @@ class BackendService:
         cfg = self.config
 
         register_powerbox_ingress(twin.ingress)
+
+        try:
+            from pathlib import Path
+            flag_path = Path(cfg.power_mode_flag)
+            if flag_path.exists():
+                mode = flag_path.read_text().strip()
+                if mode in ("low", "full"):
+                    from ..state.actions import SetPowerboxPowerModeAction
+                    twin.store.dispatch(SetPowerboxPowerModeAction(mode))
+        except Exception:
+            pass
 
         controller = PriusPowerController(flag_path=cfg.power_mode_flag)
         # Wire the powerbox's own serial link as the command output port so the
@@ -503,6 +542,7 @@ class BackendService:
                     self._powerbox_watchdog_tick()
                     self._gateway_watchdog_tick()
                     self._poco_power_tick()
+                    self._chassis_fan_tick()
                     if self.recorder is not None:
                         self.recorder.tick()
                 except Exception:
@@ -639,27 +679,186 @@ class BackendService:
                 "Gateway link RECOVERED: heartbeat resumed (age %.1fs).", age,
             )
 
+    # ── POCO thermal zone mapping ────────────────────────────────────────────
+    # Zones on the Poco F1 (SDM845 / beryllium):
+    #   cpu0..cpu7-thermal, cluster0/1-thermal  → CPU cores / clusters
+    #   gpu-top-thermal, gpu-bottom-thermal      → GPU
+    #   qcom-battery                             → battery
+    #   aoss*, mem, wlan, camera, video, modem   → SoC peripherals
+    # We track the hottest CPU/cluster, GPU, and battery independently.
+    _THERMAL_CPU_PREFIXES = ("cpu", "cluster")
+    _THERMAL_GPU_PREFIXES = ("gpu",)
+    _THERMAL_BATTERY_NAMES = ("qcom-battery",)
+
+    @staticmethod
+    def _read_poco_thermals() -> tuple:
+        """Read all sysfs thermal zones and return (max_cpu, max_gpu, battery) in °C.
+
+        Returns (None, None, None) on systems without thermal zones.
+        """
+        import glob
+        cpu_max = None
+        gpu_max = None
+        battery = None
+        try:
+            for zone_dir in glob.glob("/sys/class/thermal/thermal_zone*"):
+                try:
+                    with open(zone_dir + "/type", "r") as f:
+                        zone_type = f.read().strip()
+                    with open(zone_dir + "/temp", "r") as f:
+                        temp_c = float(f.read().strip()) / 1000.0
+                except (OSError, ValueError):
+                    continue
+                if any(zone_type.startswith(p) for p in BackendService._THERMAL_CPU_PREFIXES):
+                    cpu_max = max(cpu_max, temp_c) if cpu_max is not None else temp_c
+                elif any(zone_type.startswith(p) for p in BackendService._THERMAL_GPU_PREFIXES):
+                    gpu_max = max(gpu_max, temp_c) if gpu_max is not None else temp_c
+                elif zone_type in BackendService._THERMAL_BATTERY_NAMES:
+                    battery = temp_c
+        except Exception:
+            pass
+        return (cpu_max, gpu_max, battery)
+
     def _poco_power_tick(self) -> None:
-        """Poll POCO's internal battery telemetry from sysfs (~1 Hz)."""
+        """Poll POCO's internal battery + thermal telemetry from sysfs (~1 Hz)."""
         now = time.time()
         if now - self._poco_poll_last < 1.0:
             return
         self._poco_poll_last = now
+
+        power_w = None
         try:
             with open("/sys/class/power_supply/qcom-battery/voltage_now", "r") as f:
                 v_now = float(f.read().strip()) / 1_000_000.0  # uV to V
             with open("/sys/class/power_supply/qcom-battery/current_now", "r") as f:
                 i_now = float(f.read().strip()) / 1_000_000.0  # uA to A
-            # Calculate power (W). Current might be negative when charging/discharging.
-            # We want absolute power consumption, or just power flow (negative = charging battery).
-            # The POCO power stack is mostly stable ~4V. We'll use absolute to represent the power magnitude,
-            # or just let it be signed so user sees charging vs discharging.
-            power_w = v_now * i_now
-            if self.twin and self.twin.store:
-                from ..state.actions import SetPocoTelemetryAction
-                self.twin.store.dispatch(SetPocoTelemetryAction(poco_power_w=abs(power_w)))
+            power_w = abs(v_now * i_now)
         except (OSError, ValueError):
             pass
+
+        cpu_temp, gpu_temp, batt_temp = self._read_poco_thermals()
+
+        if self.twin and self.twin.store:
+            from ..state.actions import SetPocoTelemetryAction
+            self.twin.store.dispatch(SetPocoTelemetryAction(
+                poco_power_w=power_w,
+                poco_core_temp=cpu_temp,
+                poco_gpu_temp=gpu_temp,
+                poco_battery_temp=batt_temp,
+            ))
+
+    def _chassis_fan_tick(self) -> None:
+        """Intelligent chassis fan controller.
+
+        Drives a PWM fan on powerbox GPIO ``chassis_fan_pin`` based on the
+        temperature differential between the POCO (max of CPU/GPU) and the
+        cabin (AHT20 on the powerbox). Two profiles (full/low) are selected by
+        the current power mode. Hysteresis prevents oscillation.
+        """
+        cfg = self.config
+        if not cfg.chassis_fan_enabled or not cfg.powerbox_enabled:
+            return
+        if self.powerbox_commander is None:
+            return
+        now = time.time()
+        if now - self._fan_last_tick < cfg.chassis_fan_tick_s:
+            return
+        self._fan_last_tick = now
+
+        if self.twin is None:
+            return
+        pb = self.twin.store.state.powerbox
+        if not pb.connected:
+            return
+
+        # Determine the hottest POCO temperature (max of CPU and GPU).
+        poco_temps = [t for t in (pb.poco_core_temp, pb.poco_gpu_temp) if t is not None]
+        if not poco_temps:
+            # No thermal data → safe default: fan off.
+            self._set_fan_duty(0)
+            return
+        poco_max = max(poco_temps)
+
+        # Safety override: absolute temperature too high.
+        if poco_max >= cfg.fan_safety_temp:
+            self._set_fan_duty(65535)  # 100%
+            return
+
+        cabin_temp = pb.aht_t  # may be None if sensor not available
+
+        # Select profile based on power mode.
+        is_full = pb.power_mode == "full"
+        if is_full:
+            start_delta = cfg.fan_full_start_delta
+            stop_delta = cfg.fan_full_stop_delta
+            max_pct = cfg.fan_full_max_pct
+            ramp_range = cfg.fan_full_ramp_range
+        else:
+            start_delta = cfg.fan_low_start_delta
+            stop_delta = cfg.fan_low_stop_delta
+            max_pct = cfg.fan_low_max_pct
+            ramp_range = cfg.fan_low_ramp_range
+
+        if cabin_temp is not None:
+            # Normal mode: differential-based.
+            delta_t = poco_max - cabin_temp
+        else:
+            # Fallback: no cabin sensor — use absolute POCO temp with the
+            # fallback thresholds shifted to act like deltas.
+            delta_t = poco_max
+            start_delta = cfg.fan_fallback_start_temp
+            stop_delta = cfg.fan_fallback_stop_temp
+
+        # Hysteresis: once active, stay active until delta drops below stop.
+        if self._fan_active:
+            if delta_t < stop_delta:
+                self._fan_active = False
+        else:
+            if delta_t > start_delta:
+                self._fan_active = True
+
+        if not self._fan_active:
+            self._set_fan_duty(0)
+            return
+
+        # Linear ramp from start_delta to start_delta+ramp_range.
+        t = (delta_t - start_delta) / max(ramp_range, 0.1)
+        duty_pct = max(0.0, min(max_pct, t * max_pct))
+        # Minimum duty when active: 15% (fan needs a minimum to spin up).
+        if duty_pct > 0 and duty_pct < 15.0:
+            duty_pct = 15.0
+        duty_raw = int(duty_pct / 100.0 * 65535)
+        self._set_fan_duty(duty_raw)
+
+        # Update state for dashboard visibility.
+        if self.twin and self.twin.store:
+            from ..state.actions import SetPocoTelemetryAction
+            self.twin.store.dispatch(SetPocoTelemetryAction(fan_duty_pct=duty_pct))
+
+    def _set_fan_duty(self, duty_raw: int) -> None:
+        """Send the fan duty to the powerbox, de-duplicating unchanged values."""
+        if duty_raw == self._fan_last_duty:
+            return
+        self._fan_last_duty = duty_raw
+        duty_pct = round(duty_raw / 65535.0 * 100.0, 1)
+        # Edge-triggered logging: log on meaningful changes (>5% or on/off).
+        if abs(duty_pct - self._fan_last_log_pct) > 5.0 or \
+                (duty_pct == 0) != (self._fan_last_log_pct == 0):
+            self._fan_last_log_pct = duty_pct
+            pb = self.twin.store.state.powerbox if self.twin else None
+            poco_t = max(t for t in (getattr(pb, 'poco_core_temp', None),
+                                     getattr(pb, 'poco_gpu_temp', None))
+                         if t is not None) if pb else None
+            cabin_t = getattr(pb, 'aht_t', None) if pb else None
+            logger.info(
+                "Chassis fan → %.0f%% (poco=%.1f°C cabin=%s mode=%s)",
+                duty_pct,
+                poco_t if poco_t is not None else -1,
+                "%.1f°C" % cabin_t if cabin_t is not None else "N/A",
+                getattr(pb, 'power_mode', '?') if pb else '?',
+            )
+        if self.powerbox_commander:
+            self.powerbox_commander.set_fan(self.config.chassis_fan_pin, duty_raw)
 
     def _maybe_recover_powerbox(self, pb, age: float) -> None:
         """Force a powerbox serial reset to clear a wedged link, if enabled.
