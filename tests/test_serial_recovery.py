@@ -122,6 +122,8 @@ class TestForceReconnect:
         def patched_realpath(path):
             if path == port.config.port:
                 return f"/dev/{fake_sysfs.tty_name}"
+            if path == f"/sys/class/tty/{fake_sysfs.tty_name}/device":
+                return fake_sysfs.iface_dir
             return orig_realpath(path)
 
         def patched_exists(path):
@@ -133,6 +135,8 @@ class TestForceReconnect:
                         fake_sysfs.tty_name, "device",
                     )
                 )
+            if path == f"/sys/bus/usb/devices/{fake_sysfs.hub_id}":
+                return True  # parent hub still on the bus → hub-level reset
             return orig_exists(path)
 
         with mock.patch("os.path.realpath", side_effect=patched_realpath):
@@ -166,6 +170,8 @@ class TestForceReconnect:
         def patched_exists(path):
             if path == f"/sys/class/tty/{fake_sysfs.tty_name}/device":
                 return False
+            if path == f"/sys/bus/usb/devices/{fake_sysfs.hub_id}":
+                return True  # device gone but parent hub still present → hub reset
             return orig_exists(path)
 
         with mock.patch("os.path.realpath", side_effect=patched_realpath):
@@ -176,6 +182,41 @@ class TestForceReconnect:
 
                         mock_disc.assert_called_once()
                         mock_hub.assert_called_once_with(fake_sysfs.hub_id)
+
+    def test_hub_gone_escalates_to_controller_reset(self, fake_sysfs):
+        """When the device AND its parent hub have both vanished from the bus
+        (the signature of a dead USB host controller), force_reconnect should
+        escalate to a host-controller rebind rather than uselessly retrying a
+        hub reset on a device path that no longer exists."""
+        port = self._make_port(fake_sysfs)
+        port._cached_hub_id = fake_sysfs.hub_id
+        fake_sysfs.remove_device()
+
+        orig_exists = os.path.exists
+        orig_realpath = os.path.realpath
+
+        def patched_realpath(path):
+            if path == port.config.port:
+                return f"/dev/{fake_sysfs.tty_name}"
+            return orig_realpath(path)
+
+        def patched_exists(path):
+            if path == f"/sys/class/tty/{fake_sysfs.tty_name}/device":
+                return False
+            if path == f"/sys/bus/usb/devices/{fake_sysfs.hub_id}":
+                return False  # parent hub gone too → controller likely dead
+            return orig_exists(path)
+
+        with mock.patch("os.path.realpath", side_effect=patched_realpath):
+            with mock.patch("os.path.exists", side_effect=patched_exists):
+                with mock.patch.object(port, "_handle_disconnect") as mock_disc:
+                    with mock.patch.object(port, "_reset_usb_hub") as mock_hub:
+                        with mock.patch.object(port, "_reset_usb_controller") as mock_ctrl:
+                            port.force_reconnect()
+
+                            mock_disc.assert_called_once()
+                            mock_hub.assert_not_called()
+                            mock_ctrl.assert_called_once()
 
     def test_hub_id_cached_on_first_lookup(self, fake_sysfs):
         """_find_parent_hub_id should cache the hub ID and return it even

@@ -396,12 +396,26 @@ class SerialPort(BidirectionalPort):
 
         reason = "gone from bus" if not device_present else "wedged link"
         hub_id = self._find_parent_hub_id(tty_name)
-        if hub_id:
+        hub_present = bool(hub_id) and os.path.exists(f"/sys/bus/usb/devices/{hub_id}")
+        if hub_present:
             logger.warning(
                 "Device %s %s — resetting parent USB hub %s",
                 self.config.port, reason, hub_id,
             )
             self._reset_usb_hub(hub_id)
+        elif hub_id:
+            # The parent hub itself has vanished from the bus. This is the
+            # signature of a dead USB host controller ("xHCI HC died"): the
+            # whole tree below the root hub is gone, so a hub-level unbind/bind
+            # just fails with ENODEV forever (never recovers). Escalate to a
+            # host-controller (xhci-hcd) rebind, which re-inits the controller
+            # and re-enumerates every downstream device.
+            logger.warning(
+                "Device %s %s AND parent hub %s is gone — USB host controller "
+                "likely dead; escalating to controller rebind.",
+                self.config.port, reason, hub_id,
+            )
+            self._reset_usb_controller()
         else:
             logger.error(
                 "Device %s %s and cannot determine parent hub; "
@@ -495,6 +509,78 @@ class SerialPort(BidirectionalPort):
             logger.info("USB hub %s reset completed", hub_id)
         except Exception as exc:
             logger.error("USB hub reset failed for %s: %s", hub_id, exc)
+
+    @staticmethod
+    def _find_usb_controller() -> "tuple[Optional[str], Optional[str]]":
+        """Locate the USB host controller platform device and its driver dir.
+
+        Walks from a root hub (``usb1``/``usb2``) up to the platform device that
+        owns it (e.g. ``xhci-hcd.0.auto``) and resolves that device's driver
+        directory (e.g. ``/sys/bus/platform/drivers/xhci-hcd``). Returns
+        ``(controller_id, driver_dir)`` or ``(None, None)``.
+        """
+        import os
+
+        for root in ("usb1", "usb2"):
+            root_path = f"/sys/bus/usb/devices/{root}"
+            if not os.path.exists(root_path):
+                continue
+            try:
+                real = os.path.realpath(root_path)          # .../xhci-hcd.0.auto/usb1
+                ctrl_path = os.path.dirname(real)            # .../xhci-hcd.0.auto
+                ctrl_id = os.path.basename(ctrl_path)        # xhci-hcd.0.auto
+                drv_link = os.path.join(ctrl_path, "driver")
+                if os.path.exists(drv_link):
+                    drv_dir = os.path.realpath(drv_link)     # .../platform/drivers/xhci-hcd
+                    return ctrl_id, drv_dir
+            except Exception:
+                continue
+        return None, None
+
+    @classmethod
+    def _reset_usb_controller(cls) -> None:
+        """Unbind and rebind the USB host controller to revive a dead HC.
+
+        Used when the whole USB tree (including the device's parent hub) has
+        disappeared — the signature of an xHCI controller crash. Rebinding the
+        controller's platform driver re-initializes the HC and re-enumerates
+        every downstream device (both the powerbox and the gateway).
+        """
+        import subprocess
+
+        ctrl_id, drv_dir = cls._find_usb_controller()
+        if not ctrl_id or not drv_dir:
+            logger.error(
+                "USB controller rebind requested but controller could not be "
+                "located; manual intervention required."
+            )
+            return
+
+        unbind = f"{drv_dir}/unbind"
+        bind = f"{drv_dir}/bind"
+        try:
+            try:
+                with open(unbind, "w") as f:
+                    f.write(ctrl_id)
+                time.sleep(2.0)
+                with open(bind, "w") as f:
+                    f.write(ctrl_id)
+            except PermissionError:
+                logger.info("Direct sysfs write failed, using sudo for controller rebind")
+                subprocess.run(
+                    ["sudo", "sh", "-c", f"echo {ctrl_id} > {unbind}"],
+                    check=True, timeout=8,
+                )
+                time.sleep(2.0)
+                subprocess.run(
+                    ["sudo", "sh", "-c", f"echo {ctrl_id} > {bind}"],
+                    check=True, timeout=8,
+                )
+            # The controller + full tree take longer to re-enumerate than a hub.
+            time.sleep(4.0)
+            logger.info("USB host controller %s rebind completed", ctrl_id)
+        except Exception as exc:
+            logger.error("USB host controller rebind failed for %s: %s", ctrl_id, exc)
 
 class SerialInputPort(InputPort):
     """
