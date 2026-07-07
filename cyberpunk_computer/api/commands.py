@@ -173,6 +173,17 @@ def _build_set_out(params: Dict[str, Any]) -> Action:
     return SetOutAction(ch, on, source=ActionSource.UI)
 
 
+def _build_set_fan(params: Dict[str, Any]) -> Action:
+    from ..state.actions import SetFanOverrideAction
+    pct = _as_float(_require(params, "pct"), "pct", 0.0, 100.0)
+    return SetFanOverrideAction(pct, source=ActionSource.UI)
+
+
+def _build_fan_auto(params: Dict[str, Any]) -> Action:
+    from ..state.actions import SetFanOverrideAction
+    return SetFanOverrideAction(None, source=ActionSource.UI)
+
+
 # name -> (builder, description, params-doc)
 COMMANDS: Dict[str, Dict[str, Any]] = {
     "set_volume": {
@@ -221,6 +232,16 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
         "builder": _build_set_out,
         "description": "Set powerbox OUT2 or OUT3.",
         "params": {"channel": "int 2..3", "on": "bool"},
+    },
+    "set_fan": {
+        "builder": _build_set_fan,
+        "description": "Manually pin the chassis fan duty (overrides automatic control).",
+        "params": {"pct": "float 0..100"},
+    },
+    "fan_auto": {
+        "builder": _build_fan_auto,
+        "description": "Clear the chassis fan override and return to automatic control.",
+        "params": {},
     },
 }
 

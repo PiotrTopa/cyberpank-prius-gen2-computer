@@ -110,6 +110,7 @@ class ActionType(Enum):
     SET_POWERBOX_POWER_STATUS = auto()
     SET_POCO_TELEMETRY = auto() # OUT1/2/3 + POCO heartbeat (powerbox STATUS)
     SET_OUT = auto()
+    SET_FAN_OVERRIDE = auto()   # manual chassis-fan override (None = auto)
 
     # AVC Input actions (buttons and touch)
     AVC_BUTTON_PRESS = auto()
@@ -1344,3 +1345,14 @@ class SetOutAction(Action):
         super().__init__(ActionType.SET_OUT, source)
         self.channel = channel
         self.on = on
+
+
+class SetFanOverrideAction(Action):
+    """Manually override the chassis fan duty.
+
+    ``pct`` in 0..100 pins the fan to that duty regardless of temperature;
+    ``pct=None`` clears the override and returns the fan to automatic control.
+    """
+    def __init__(self, pct: Optional[float], source: ActionSource = ActionSource.UI):
+        super().__init__(ActionType.SET_FAN_OVERRIDE, source)
+        self.pct = pct

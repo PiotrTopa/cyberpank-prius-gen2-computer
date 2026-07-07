@@ -200,9 +200,14 @@ class BackendConfig:
     fan_fallback_start_temp: float = 50.0 # °C
     fan_fallback_stop_temp: float = 45.0  # °C
 
-    # Asymmetric EMA filter for simulated heatsink temperature
-    fan_ema_alpha_up: float = 0.1         # Fast rise (e.g. 0.1 for ~10s time constant at 1Hz)
-    fan_ema_alpha_down: float = 0.01      # Slow decay (e.g. 0.01 for ~100s time constant)
+    # Asymmetric EMA filter for the simulated heatsink temperature. The raw die
+    # sensor (max CPU/GPU) spikes fast under load, but the physical heatsink has
+    # a much larger thermal mass. Measured on-device (POCO F1 chassis heatsink):
+    # heating time constant ~65 s, passive cooldown tail ~60 s. With a 2 s tick,
+    # alpha = tick / tau, so ~0.03 makes the EMA track the real heatsink instead
+    # of the noisy die temperature.
+    fan_ema_alpha_up: float = 0.03        # rise: tau ~= 2s/0.03 ~= 65s (measured ~65s)
+    fan_ema_alpha_down: float = 0.03      # fall: tau ~= 2s/0.03 ~= 65s (measured ~60s)
 
     verbose: bool = False
 
@@ -777,6 +782,19 @@ class BackendService:
         if self.twin is None:
             return
         pb = self.twin.store.state.powerbox
+
+        # Manual override: pin the fan to a fixed duty regardless of temperature.
+        # Set via the `set_fan` API command (SetFanOverrideAction); cleared with
+        # `fan_auto`. Bypasses the automatic controller entirely.
+        override = getattr(pb, "fan_override_pct", None)
+        if override is not None:
+            pct = max(0.0, min(100.0, float(override)))
+            self._set_fan_duty(int(pct / 100.0 * 65535))
+            temps = [t for t in (pb.poco_core_temp, pb.poco_gpu_temp) if t is not None]
+            if temps:
+                self._publish_poco_ema_temp(max(temps), pct)
+            return
+
         if not pb.connected:
             return
 

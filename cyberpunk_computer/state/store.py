@@ -935,6 +935,14 @@ class Store:
                 )
                 affected.add(StateSlice.POWERBOX)
 
+        elif action.type == ActionType.SET_FAN_OVERRIDE:
+            # Manual fan override; pct=None clears it (back to automatic).
+            self._state = replace(
+                self._state,
+                powerbox=replace(self._state.powerbox, fan_override_pct=action.pct),
+            )
+            affected.add(StateSlice.POWERBOX)
+
         elif action.type == ActionType.SET_POWERBOX_IGNITION:
             import time as _t
             self._state = replace(

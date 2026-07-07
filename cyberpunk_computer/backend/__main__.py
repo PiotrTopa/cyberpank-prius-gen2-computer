@@ -257,8 +257,8 @@ def main() -> None:
     fan.add_argument("--fan-full-max-pct", type=float, default=100.0, help="Max fan duty pct (full mode)")
     fan.add_argument("--fan-full-ramp-range", type=float, default=10.0, help="Delta T range to ramp from 0 to max (full mode)")
     fan.add_argument("--fan-safety-temp", type=float, default=70.0, help="Absolute POCO temp to override and force 100% duty (°C)")
-    fan.add_argument("--fan-ema-alpha-up", type=float, default=0.1, help="EMA filter fast-rise coefficient (default 0.1)")
-    fan.add_argument("--fan-ema-alpha-down", type=float, default=0.01, help="EMA filter slow-decay coefficient (default 0.01)")
+    fan.add_argument("--fan-ema-alpha-up", type=float, default=0.03, help="EMA filter rise coefficient (default 0.03 ~= 65s heatsink at 2s tick)")
+    fan.add_argument("--fan-ema-alpha-down", type=float, default=0.03, help="EMA filter fall coefficient (default 0.03 ~= 65s heatsink at 2s tick)")
 
     parser.add_argument("-v", "--verbose", action="store_true", help="verbose logging")
     args = parser.parse_args()

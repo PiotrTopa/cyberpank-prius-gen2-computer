@@ -481,6 +481,7 @@ class PowerboxState:
 
     # Chassis fan state (PWM on powerbox GPIO 14)
     fan_duty_pct: float = 0.0                 # current fan duty cycle (0-100%)
+    fan_override_pct: Optional[float] = None  # manual override (None = automatic)
 
     # Environmental telemetry
     bmp_t: Optional[float] = None
