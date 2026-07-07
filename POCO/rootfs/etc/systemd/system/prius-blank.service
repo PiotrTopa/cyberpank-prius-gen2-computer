@@ -1,0 +1,17 @@
+[Unit]
+Description=Blank the unused DSI display pipeline to save idle power (headless box)
+Documentation=file:/home/user/cyberpunk/POCO/POWER.md
+After=multi-user.target
+
+[Service]
+# Resident daemon: becomes DRM master, disables the CRTC (DSI PLL/panel off),
+# and holds master so fbcon can't re-enable it. On stop it restores the mode.
+Type=simple
+ExecStart=/usr/local/sbin/prius-blankd
+# If it ever dies, fbcon restores the console (safe); re-blank to keep the saving.
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+
+# Not [Install]-enabled: prius-power starts/stops this per power-mode
+# (blank in `low`, restore in `full`). Do not enable it standalone.

@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""prius-blankd — power down the unused DSI display pipeline to save idle power.
+
+The POCO F1 board computer is headless: the local panel backlight is always off
+and the dashboard is served over the network. But on the mainline sdm845 kernel
+the DSI PLL (~1.9 GHz) + MDSS keep clocking as long as fbcon holds the CRTC
+enabled, wasting ~0.19 W (~8% of the resting draw, measured on the INA219).
+
+This daemon becomes DRM master and disables every active CRTC (a modeset "off"),
+which powers down the DSI PHY/PLL and panel bias regulators. It then *holds*
+master and idles so the in-kernel fbcon client cannot re-enable the pipe. On
+SIGTERM/SIGINT it restores the saved CRTC configuration and exits, bringing the
+display back exactly as it was.
+
+Self-contained: raw DRM UAPI ioctls via ctypes (no libdrm / no compiler needed).
+
+Lifecycle is managed by prius-blank.service:
+    systemctl start prius-blank   # blank  (run this daemon, hold master)
+    systemctl stop  prius-blank   # restore (SIGTERM -> restore + exit)
+prius-power starts it in `low` mode and stops it in `full` mode.
+"""
+import ctypes
+import ctypes.util
+import os
+import signal
+import sys
+
+DRI_NODE = os.environ.get("PRIUS_DRI_NODE", "/dev/dri/card0")
+
+# ---- Linux ioctl encoding (asm-generic) ----
+_IOC_NRBITS, _IOC_TYPEBITS, _IOC_SIZEBITS = 8, 8, 14
+_IOC_NRSHIFT = 0
+_IOC_TYPESHIFT = _IOC_NRSHIFT + _IOC_NRBITS
+_IOC_SIZESHIFT = _IOC_TYPESHIFT + _IOC_TYPEBITS
+_IOC_DIRSHIFT = _IOC_SIZESHIFT + _IOC_SIZEBITS
+_IOC_NONE, _IOC_WRITE, _IOC_READ = 0, 1, 2
+
+
+def _IOC(d, t, nr, size):
+    return (d << _IOC_DIRSHIFT) | (ord(t) << _IOC_TYPESHIFT) | \
+           (nr << _IOC_NRSHIFT) | (size << _IOC_SIZESHIFT)
+
+
+def _IO(t, nr):
+    return _IOC(_IOC_NONE, t, nr, 0)
+
+
+def _IOWR(t, nr, size):
+    return _IOC(_IOC_READ | _IOC_WRITE, t, nr, size)
+
+
+# ---- DRM UAPI structs ----
+class drm_mode_modeinfo(ctypes.Structure):
+    _fields_ = [
+        ("clock", ctypes.c_uint32),
+        ("hdisplay", ctypes.c_uint16), ("hsync_start", ctypes.c_uint16),
+        ("hsync_end", ctypes.c_uint16), ("htotal", ctypes.c_uint16),
+        ("hskew", ctypes.c_uint16),
+        ("vdisplay", ctypes.c_uint16), ("vsync_start", ctypes.c_uint16),
+        ("vsync_end", ctypes.c_uint16), ("vtotal", ctypes.c_uint16),
+        ("vscan", ctypes.c_uint16),
+        ("vrefresh", ctypes.c_uint32),
+        ("flags", ctypes.c_uint32),
+        ("type", ctypes.c_uint32),
+        ("name", ctypes.c_char * 32),
+    ]
+
+
+class drm_mode_card_res(ctypes.Structure):
+    _fields_ = [
+        ("fb_id_ptr", ctypes.c_uint64),
+        ("crtc_id_ptr", ctypes.c_uint64),
+        ("connector_id_ptr", ctypes.c_uint64),
+        ("encoder_id_ptr", ctypes.c_uint64),
+        ("count_fbs", ctypes.c_uint32),
+        ("count_crtcs", ctypes.c_uint32),
+        ("count_connectors", ctypes.c_uint32),
+        ("count_encoders", ctypes.c_uint32),
+        ("min_width", ctypes.c_uint32), ("max_width", ctypes.c_uint32),
+        ("min_height", ctypes.c_uint32), ("max_height", ctypes.c_uint32),
+    ]
+
+
+class drm_mode_crtc(ctypes.Structure):
+    _fields_ = [
+        ("set_connectors_ptr", ctypes.c_uint64),
+        ("count_connectors", ctypes.c_uint32),
+        ("crtc_id", ctypes.c_uint32),
+        ("fb_id", ctypes.c_uint32),
+        ("x", ctypes.c_uint32), ("y", ctypes.c_uint32),
+        ("gamma_size", ctypes.c_uint32),
+        ("mode_valid", ctypes.c_uint32),
+        ("mode", drm_mode_modeinfo),
+    ]
+
+
+DRM_IOCTL_SET_MASTER = _IO('d', 0x1e)
+DRM_IOCTL_DROP_MASTER = _IO('d', 0x1f)
+DRM_IOCTL_MODE_GETRESOURCES = _IOWR('d', 0xA0, ctypes.sizeof(drm_mode_card_res))
+DRM_IOCTL_MODE_GETCRTC = _IOWR('d', 0xA1, ctypes.sizeof(drm_mode_crtc))
+DRM_IOCTL_MODE_SETCRTC = _IOWR('d', 0xA2, ctypes.sizeof(drm_mode_crtc))
+
+_libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+_libc.ioctl.restype = ctypes.c_int
+
+
+def ioctl(fd, req, arg=None):
+    ctypes.set_errno(0)
+    a = ctypes.byref(arg) if arg is not None else 0
+    r = _libc.ioctl(ctypes.c_int(fd), ctypes.c_ulong(req), a)
+    if r < 0:
+        e = ctypes.get_errno()
+        raise OSError(e, os.strerror(e))
+    return r
+
+
+def log(msg):
+    sys.stderr.write("prius-blankd: %s\n" % msg)
+    sys.stderr.flush()
+
+
+_stop = False
+
+
+def _on_sig(signum, frame):
+    global _stop
+    _stop = True
+
+
+def main():
+    node = sys.argv[1] if len(sys.argv) > 1 else DRI_NODE
+    fd = os.open(node, os.O_RDWR | os.O_CLOEXEC)
+
+    # Become DRM master so our modeset sticks and fbcon can't override it.
+    try:
+        ioctl(fd, DRM_IOCTL_SET_MASTER)
+    except OSError as e:
+        log("SET_MASTER: %s (continuing; first opener is usually master)" % e)
+
+    # Enumerate CRTCs (two-call pattern: first for counts, then for data).
+    res = drm_mode_card_res()
+    ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, res)
+    n_crtcs = res.count_crtcs
+    n_conns = res.count_connectors
+    crtc_ids = (ctypes.c_uint32 * max(n_crtcs, 1))()
+    conn_ids = (ctypes.c_uint32 * max(n_conns, 1))()
+    res.crtc_id_ptr = ctypes.cast(crtc_ids, ctypes.c_void_p).value
+    res.connector_id_ptr = ctypes.cast(conn_ids, ctypes.c_void_p).value
+    res.fb_id_ptr = 0
+    res.encoder_id_ptr = 0
+    res.count_fbs = 0
+    res.count_encoders = 0
+    res.count_crtcs = n_crtcs
+    res.count_connectors = n_conns
+    ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, res)
+
+    # Save each active CRTC's state, then disable it.
+    saved = []
+    n_blanked = 0
+    for i in range(n_crtcs):
+        c = drm_mode_crtc()
+        c.crtc_id = crtc_ids[i]
+        try:
+            ioctl(fd, DRM_IOCTL_MODE_GETCRTC, c)
+        except OSError:
+            continue
+        saved.append(c)
+        if not c.mode_valid and c.fb_id == 0:
+            continue  # already off
+        off = drm_mode_crtc()
+        off.crtc_id = crtc_ids[i]
+        off.fb_id = 0
+        off.count_connectors = 0
+        off.set_connectors_ptr = 0
+        off.mode_valid = 0
+        try:
+            ioctl(fd, DRM_IOCTL_MODE_SETCRTC, off)
+            n_blanked += 1
+        except OSError as e:
+            log("SETCRTC(off) crtc %d: %s" % (crtc_ids[i], e))
+
+    if n_blanked == 0:
+        log("no active CRTC blanked (already off?)")
+    log("blanked %d CRTC(s); holding master. pid %d" % (n_blanked, os.getpid()))
+
+    signal.signal(signal.SIGTERM, _on_sig)
+    signal.signal(signal.SIGINT, _on_sig)
+    while not _stop:
+        signal.pause()
+
+    # Restore each CRTC that was on, re-attaching all connectors (single DSI).
+    for r in saved:
+        if not r.mode_valid:
+            continue
+        r.set_connectors_ptr = ctypes.cast(conn_ids, ctypes.c_void_p).value
+        r.count_connectors = n_conns
+        try:
+            ioctl(fd, DRM_IOCTL_MODE_SETCRTC, r)
+        except OSError as e:
+            log("SETCRTC(restore) crtc %d: %s" % (r.crtc_id, e))
+
+    try:
+        ioctl(fd, DRM_IOCTL_DROP_MASTER)
+    except OSError:
+        pass
+    os.close(fd)  # lastclose also triggers fbcon mode restore as a backstop
+    log("restored, exiting")
+
+
+if __name__ == "__main__":
+    main()

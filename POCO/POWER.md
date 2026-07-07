@@ -8,8 +8,8 @@ Instead we keep the system awake and scale the **CPU** between two profiles:
 
 | Profile | Meaning | What it does | `cpus online` |
 |---------|---------|--------------|----------------|
-| `low`  | ignition OFF / resting | offline Gold cluster (`cpu4-7`); Silver cluster `schedutil`, capped to 1.2 GHz | `0-3` |
-| `full` | ignition ON / active   | all cores online; `schedutil`, max clocks on both clusters | `0-7` |
+| `low`  | ignition OFF / resting | offline Gold cluster (`cpu4-7`); Silver cluster `schedutil`, capped to 1.2 GHz; **blank the DSI display pipeline** | `0-3` |
+| `full` | ignition ON / active   | all cores online; `schedutil`, max clocks on both clusters; **restore the display** | `0-7` |
 
 Across **both** profiles the modem, WireGuard, SSH, and OTG serial stay fully alive.
 The GPU (`freedreno`) auto-idles to `cur=0` on its own (`simple_ondemand`) — we don't touch it.
@@ -83,6 +83,47 @@ Use **B** from the future ignition/battery message handler — it just needs to 
   stayed `connected`, WireGuard alive, default route via `qmapmux0.0`, SSH responsive.
 - Path watcher: writing `full` → cores auto-online to `0-7`; writing `low` → back to `0-3`.
 - Survives reboot (service applies the flag on boot).
+
+## Display pipeline blanking (DSI power-down)
+
+The box is **headless**: the local panel's backlight is always off
+(`backlight-off.service`) and the dashboard is served over the network. But on
+the mainline sdm845 kernel the display pipeline never power-collapses on its own
+— as long as the in-kernel **fbcon** client holds the CRTC enabled, the **DSI PLL
+(~1.9 GHz VCO)** plus the MDSS byte/pixel/MDP clocks keep running at full rate
+even though nothing is on screen. Legacy sysfs blanking can't stop it: writing
+`.../dpms = off` is `EPERM` under atomic KMS, and unbinding fbcon doesn't drop
+the clocks.
+
+`prius-blankd` fixes this by doing a real modeset-off from userspace:
+
+- opens `/dev/dri/card0`, becomes **DRM master**, and disables every active CRTC
+  via `DRM_IOCTL_MODE_SETCRTC` (`fb_id=0`, no connectors). This powers down the
+  DSI PHY/PLL and the panel bias regulators (`labibb`).
+- **holds** master and idles, so fbcon can't re-enable the pipe.
+- on `SIGTERM`/`SIGINT` it restores the saved CRTC mode and exits (and fbcon's
+  lastclose restore is a backstop), bringing the display back exactly as it was.
+
+It's a self-contained Python script using raw DRM ioctls via `ctypes` — no
+`libdrm` and no compiler required.
+
+**Measured saving (INA219, clean idle A/B):** blanking drops the total draw by
+**~0.19 W (−8.1%)** — from ~2.29 W to ~2.11 W resting — corroborated by
+`poco_power` (−14%) with bus voltage flat. This is the single largest idle lever
+found (WiFi-off was only ~37 mW).
+
+Lifecycle is a systemd service driven by the power profile, **not** enabled
+standalone:
+
+| Unit | Type | Purpose |
+|------|------|---------|
+| `prius-blank.service` | simple | runs `prius-blankd` (blank + hold master; restore on stop) |
+
+`prius-power` toggles it: `apply_low` runs `systemctl start prius-blank`
+(blank), `apply_full` runs `systemctl stop prius-blank` (restore). So the display
+is blanked at rest (key off, where battery draw matters most) and restored on
+`full` (key on) in case the local panel is ever needed for on-site debugging.
+`prius-power status` prints `display : blanked|on`.
 
 ## Status / decisions
 

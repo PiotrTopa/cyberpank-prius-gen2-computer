@@ -19,6 +19,8 @@ or reverse-engineer where the flags/scripts live. Stock pmOS files are not liste
 | `/etc/prius/power-mode` | flag file (664) | single source of truth: `low` or `full`. Default `low` |
 | `/etc/systemd/system/prius-power.service` | systemd oneshot (enabled) | runs `prius-power apply` on boot/trigger |
 | `/etc/systemd/system/prius-power.path` | systemd path (enabled) | watches `/etc/prius/power-mode`, triggers the service on change |
+| `/usr/local/sbin/prius-blankd` | python script (755) | DRM display-blank daemon: modeset-off the DSI pipeline, hold master, restore on stop (~0.19 W idle saving) |
+| `/etc/systemd/system/prius-blank.service` | systemd simple (not enabled) | runs `prius-blankd`; started/stopped by `prius-power` low/full |
 
 Details in [POWER.md](POWER.md).
 
@@ -129,6 +131,7 @@ Details in [NETWORKING.md](NETWORKING.md).
 - **Power flag** → `/etc/prius/power-mode`
 - **Power script** → `/usr/local/sbin/prius-power`
 - **Power units** → `/etc/systemd/system/prius-power.{service,path}`
+- **Display-blank daemon** → `/usr/local/sbin/prius-blankd` + `/etc/systemd/system/prius-blank.service`
 - **Wi-Fi flag** → `/etc/prius/wifi-mode`
 - **Wi-Fi script** → `/usr/local/sbin/prius-wifi`
 - **Wi-Fi units** → `/etc/systemd/system/prius-wifi.{service,path}`
