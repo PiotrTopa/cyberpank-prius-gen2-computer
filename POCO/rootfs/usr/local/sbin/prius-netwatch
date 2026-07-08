@@ -9,7 +9,13 @@
 # outage after a 3GPP detach/attach, OS alive the whole time.
 #
 # This watchdog pings the WG server *through* the tunnel and, on sustained
-# failure, escalates: bounce WireGuard -> bounce mobile data -> reboot.
+# failure, escalates: bounce WireGuard -> bounce mobile data -> reset the modem
+# (firmware reset via mmcli / RF toggle) -> reboot.
+#
+# Observed 2026-07-08: an ~8h outage where the bearer wedged in BOTH directions
+# (the WG hub saw zero rx from the prius). Tearing down the NM connection
+# (`nmcli con down/up prius-wan`) does NOT clear a modem stuck at the QMI/firmware
+# level, so a dedicated modem-reset tier was added before the reboot fallback.
 set -u
 
 PEER_IP=10.200.0.1          # WG server wg0 address (reachable only via tunnel+WAN)
@@ -23,7 +29,8 @@ MIN_UPTIME_REBOOT=600       # don't reboot if we just booted (anti boot-loop)
 # escalation thresholds (consecutive failed checks; timer runs every ~60s)
 T_WG=2          # bounce WireGuard (cheap re-handshake)
 T_WAN=4         # bounce mobile data (re-establish bearer -> new IP/route)
-T_WAN2=7        # bounce mobile data again
+T_MODEM=6       # firmware-reset the modem (clears a wedged QMI bearer)
+T_WAN2=8        # bounce mobile data again
 T_REBOOT=11     # last resort reboot
 
 log() { echo "prius-netwatch: $*"; }
@@ -36,6 +43,28 @@ bounce_wg() {
     nmcli con down "$WG_CON" >/dev/null 2>&1
     sleep 1
     nmcli con up "$WG_CON" >/dev/null 2>&1
+}
+reset_modem() {
+    # A silent QMI/firmware wedge survives an NM connection bounce; force a real
+    # modem reset. Prefer mmcli's firmware reset (the modem re-enumerates), and
+    # always RF-toggle wwan via NM as a driver-level fallback. Then bring the
+    # bearer + tunnel back up (NM re-applies the SIM PIN from the connection).
+    log "resetting modem (firmware reset + RF toggle)"
+    if command -v mmcli >/dev/null 2>&1; then
+        m=$(mmcli -L 2>/dev/null | grep -oE '/Modem/[0-9]+' | head -1 | grep -oE '[0-9]+$')
+        if [ -n "$m" ]; then
+            log "mmcli --reset modem $m"
+            mmcli -m "$m" --reset >/dev/null 2>&1
+            sleep 20   # let the modem drop off and re-enumerate
+        fi
+    fi
+    nmcli radio wwan off >/dev/null 2>&1
+    sleep 3
+    nmcli radio wwan on  >/dev/null 2>&1
+    sleep 10
+    nmcli con up "$WAN_CON" >/dev/null 2>&1
+    sleep 3
+    nmcli con up "$WG_CON"  >/dev/null 2>&1
 }
 bounce_wan() {
     log "bouncing $WAN_CON (re-establish data bearer)"
@@ -59,13 +88,14 @@ once() {
     case "$f" in
         "$T_WG")   bounce_wg ;;
         "$T_WAN")  bounce_wan ;;
+        "$T_MODEM") reset_modem ;;
         "$T_WAN2") bounce_wan ;;
         "$T_REBOOT")
             up=$(uptime_s)
             if [ "$up" -lt "$MIN_UPTIME_REBOOT" ]; then
-                log "would reboot but uptime ${up}s < ${MIN_UPTIME_REBOOT}s; retrying WAN instead"
-                bounce_wan
-                set_fail "$T_WAN2"   # keep cycling WAN bounces, defer reboot
+                log "would reboot but uptime ${up}s < ${MIN_UPTIME_REBOOT}s; retrying instead"
+                reset_modem
+                set_fail "$((T_MODEM - 1))"   # re-run modem-reset + WAN cycle, defer reboot
             else
                 log "sustained outage; rebooting as last resort"
                 sync
