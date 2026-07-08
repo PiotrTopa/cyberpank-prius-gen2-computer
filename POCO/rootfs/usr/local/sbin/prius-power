@@ -21,6 +21,9 @@ display_off() {
         systemctl start prius-blank.service >/dev/null 2>&1 || true
 }
 display_on() {
+    # Retained as a manual override only (display is normally kept blanked in
+    # both profiles). Run `prius-blank` stop or this via an edited profile if a
+    # physical screen is ever needed for debugging.
     command -v systemctl >/dev/null 2>&1 && \
         systemctl stop prius-blank.service >/dev/null 2>&1 || true
 }
@@ -39,7 +42,11 @@ apply_low() {
 }
 
 apply_full() {
-    display_on
+    # The DSI display/graphics output is never used on this box (GPU compute is
+    # still available -- blanking is a DRM modeset-off of the display controller,
+    # not the Adreno GPU). So keep the panel blanked in full mode too; only the
+    # CPU/wifi profile differs from low.
+    display_off
     for n in $BIG_CORES; do
         [ -w "$CPU/cpu$n/online" ] && echo 1 > "$CPU/cpu$n/online" 2>/dev/null || true
     done

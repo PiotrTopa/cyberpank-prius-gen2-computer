@@ -8,8 +8,8 @@ Instead we keep the system awake and scale the **CPU** between two profiles:
 
 | Profile | Meaning | What it does | `cpus online` |
 |---------|---------|--------------|----------------|
-| `low`  | ignition OFF / resting | offline Gold cluster (`cpu4-7`); Silver cluster `schedutil`, capped to 1.2 GHz; **blank the DSI display pipeline** | `0-3` |
-| `full` | ignition ON / active   | all cores online; `schedutil`, max clocks on both clusters; **restore the display** | `0-7` |
+| `low`  | ignition OFF / resting | offline Gold cluster (`cpu4-7`); Silver cluster `schedutil`, capped to 1.2 GHz; DSI display kept blanked | `0-3` |
+| `full` | ignition ON / active   | all cores online; `schedutil`, max clocks on both clusters; DSI display kept blanked | `0-7` |
 
 Across **both** profiles the modem, WireGuard, SSH, and OTG serial stay fully alive.
 The GPU (`freedreno`) auto-idles to `cur=0` on its own (`simple_ondemand`) — we don't touch it.
@@ -119,10 +119,13 @@ standalone:
 |------|------|---------|
 | `prius-blank.service` | simple | runs `prius-blankd` (blank + hold master; restore on stop) |
 
-`prius-power` toggles it: `apply_low` runs `systemctl start prius-blank`
-(blank), `apply_full` runs `systemctl stop prius-blank` (restore). So the display
-is blanked at rest (key off, where battery draw matters most) and restored on
-`full` (key on) in case the local panel is ever needed for on-site debugging.
+`prius-power` starts it in **both** profiles (`apply_low` and `apply_full` both
+run `systemctl start prius-blank`) — the DSI display/graphics output is never
+used on this box, so it stays blanked at all times for the ~0.19 W saving. This
+does **not** touch the Adreno GPU: blanking is a DRM modeset-off of the display
+controller only, so GPU compute (point clouds, radar, etc. via `/dev/dri/renderD128`)
+remains fully available. `display_on()` is retained as a manual override if the
+physical panel is ever needed for on-site debugging (`systemctl stop prius-blank`).
 `prius-power status` prints `display : blanked|on`.
 
 ## Status / decisions
