@@ -7,3 +7,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/prius-netwatch once
+# A wedged modem can make a recovery command block; without a ceiling a hung run
+# would keep the oneshot "running" forever, so the .timer (OnUnitActiveSec) would
+# never re-fire and the watchdog would die until a manual power-cycle. Bound it.
+TimeoutStartSec=180
