@@ -322,6 +322,10 @@ class ConnectionState:
     gateway_hb: Optional[int] = None
     gateway_uptime_s: Optional[float] = None
     last_heartbeat_time: Optional[float] = None
+    # Actual USB hub-port power state of the gateway board (from uhubctl), polled
+    # by the backend so the UI can show/toggle it like the powerbox OUT rails.
+    # None until first read; True = port powered, False = port cut.
+    gateway_usb_power: Optional[bool] = None
 
 
 @dataclass(frozen=True)

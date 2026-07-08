@@ -676,6 +676,17 @@ class Store:
                 )
             )
             affected.add(StateSlice.CONNECTION)
+
+        elif action.type == ActionType.SET_GATEWAY_USB_POWER:
+            a = action  # type: SetGatewayUsbPowerAction
+            self._state = replace(
+                self._state,
+                connection=replace(
+                    self._state.connection,
+                    gateway_usb_power=a.on,
+                ),
+            )
+            affected.add(StateSlice.CONNECTION)
         
         # AVC Input reducers (buttons and touch)
         elif action.type == ActionType.AVC_BUTTON_PRESS:

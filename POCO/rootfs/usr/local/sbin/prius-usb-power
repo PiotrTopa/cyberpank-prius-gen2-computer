@@ -40,6 +40,9 @@ die() { echo "prius-usb-power: $*" >&2; exit 1; }
 [ -x "$UHUBCTL" ] || die "uhubctl not found (apk add uhubctl)"
 
 # Resolve a tty/by-id/explicit TARGET to "HUB_LOCATION PORT" (e.g. "1-1 1").
+# The resolved location is cached under /run keyed by the target, so on/off/locate
+# still work for a target whose device node is GONE (e.g. after we powered its
+# port off) -- otherwise turning a port back ON would be impossible.
 resolve() {
     target="${1:-$PRIUS_POWERBOX_BYID}"
 
@@ -48,10 +51,16 @@ resolve() {
         *" "*) echo "$target"; return 0 ;;
     esac
 
+    cache="/run/prius-usb-power.$(printf '%s' "$target" | tr -c 'A-Za-z0-9._-' '_')"
+
     # Resolve by-id symlink / relative path to a real /dev/tty* node.
     node="$target"
     [ -L "$node" ] && node="$(readlink -f "$node")"
-    [ -e "$node" ] || die "target not found: $target"
+    if [ ! -e "$node" ]; then
+        # Device absent (likely we powered its port off) -> use cached location.
+        if [ -f "$cache" ]; then cat "$cache"; return 0; fi
+        die "target not found and no cached location: $target"
+    fi
 
     name="$(basename "$node")"                       # ttyACM0
     syspath="$(readlink -f "/sys/class/tty/$name/device" 2>/dev/null)" \
@@ -70,7 +79,7 @@ resolve() {
             hub="usb${hub}"
             ;;
     esac
-    echo "$hub $port"
+    printf '%s %s\n' "$hub" "$port" | tee "$cache"
 }
 
 case "${1:-status}" in

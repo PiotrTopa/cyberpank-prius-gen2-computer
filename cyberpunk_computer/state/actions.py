@@ -96,6 +96,7 @@ class ActionType(Enum):
     SET_SCREEN_BRIGHTNESS = auto()
     SET_AMBIENT_COLOR = auto()
     SET_POWER_CHART_TIME_BASE = auto()
+    SET_GATEWAY_USB_POWER = auto()
     
     # VFD Satellite actions (device 110)
     UPDATE_VFD_SATELLITE = auto()  # Update VFD computed state
@@ -1344,6 +1345,13 @@ class SetOutAction(Action):
     def __init__(self, channel: int, on: bool, source: ActionSource = ActionSource.UI):
         super().__init__(ActionType.SET_OUT, source)
         self.channel = channel
+        self.on = on
+
+
+class SetGatewayUsbPowerAction(Action):
+    """Toggle gateway USB port power (via uhubctl)."""
+    def __init__(self, on: bool, source: ActionSource = ActionSource.UI):
+        super().__init__(ActionType.SET_GATEWAY_USB_POWER, source)
         self.on = on
 
 

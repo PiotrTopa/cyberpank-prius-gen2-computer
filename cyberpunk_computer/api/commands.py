@@ -184,6 +184,12 @@ def _build_fan_auto(params: Dict[str, Any]) -> Action:
     return SetFanOverrideAction(None, source=ActionSource.UI)
 
 
+def _build_gateway_power(params: Dict[str, Any]) -> Action:
+    from ..state.actions import SetGatewayUsbPowerAction
+    on = _as_bool(_require(params, "on"), "on")
+    return SetGatewayUsbPowerAction(on, source=ActionSource.UI)
+
+
 # name -> (builder, description, params-doc)
 COMMANDS: Dict[str, Dict[str, Any]] = {
     "set_volume": {
@@ -242,6 +248,11 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
         "builder": _build_fan_auto,
         "description": "Clear the chassis fan override and return to automatic control.",
         "params": {},
+    },
+    "gateway_power": {
+        "builder": _build_gateway_power,
+        "description": "Turn the CAN gateway board's USB hub-port power on or off.",
+        "params": {"on": "bool"},
     },
 }
 

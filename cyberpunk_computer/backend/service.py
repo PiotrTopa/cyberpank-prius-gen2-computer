@@ -173,6 +173,10 @@ class BackendConfig:
     # pre-2.28.0 gateway that does not heartbeat. 0 disables.
     gateway_stale_s: float = 8.0
 
+    # Cadence for polling the gateway's USB hub-port power via uhubctl so the UI
+    # can show/toggle it like the powerbox OUT rails. 0 disables the poll.
+    gateway_usb_poll_s: float = 10.0
+
     # ── Chassis fan control ──────────────────────────────────────────────────
     # PWM fan on powerbox GPIO 14. Driven automatically based on the delta
     # between POCO core temperature and cabin temperature (AHT20).
@@ -261,6 +265,11 @@ class BackendService:
         self._fan_last_log_pct: float = -1.0  # edge-triggered logging
         self._fan_ema_temp: Optional[float] = None  # Simulated heatsink temp
 
+        # Gateway USB hub-port power control/telemetry (uhubctl via prius-usb-power).
+        self._gateway_usb_target: Optional[str] = None  # stable by-id path of the gateway board
+        self._gwusb_last_poll: float = 0.0
+        self._gwusb_loc: Optional[str] = None           # cached "HUB PORT" (e.g. "1-1.4 2")
+
     # ── composition ────────────────────────────────────────────────────────
 
     def build(self) -> None:
@@ -308,6 +317,14 @@ class BackendService:
                     "USB auto-discovery: gateway=%s powerbox=%s",
                     gateway_port, powerbox_port,
                 )
+
+            # Remember a stable target for gateway USB hub-port power control.
+            # Prefer the discovered by-id path; fall back to the configured port.
+            # Ignore the pending placeholder (device not present at build time).
+            if gateway_port and gateway_port != _GATEWAY_PENDING_PORT:
+                self._gateway_usb_target = gateway_port
+            else:
+                self._gateway_usb_target = cfg.gateway_port
 
             twin = create_virtual_twin(
                 VirtualTwinConfig(
@@ -435,6 +452,33 @@ class BackendService:
 
         twin.store.add_middleware(_powerbox_middleware)
 
+        def _system_middleware(action, store) -> None:
+            from ..state.actions import ActionSource
+            if getattr(action, "source", None) != ActionSource.UI:
+                return
+            if type(action).__name__ != "SetGatewayUsbPowerAction":
+                return
+            import subprocess
+            state = "on" if action.on else "off"
+            # Target the gateway board by its stable by-id path; prius-usb-power
+            # resolves (and caches) the actual hub+port, so this is robust to USB
+            # renumbering. The hub location is NOT fixed (it renumbers across
+            # reboots), so a hardcoded "1-1 2" was wrong and toggled the wrong port.
+            target = self._gateway_usb_target
+            if not target:
+                logger.error("Cannot toggle gateway USB power: no gateway target resolved")
+                return
+            try:
+                subprocess.Popen(
+                    ["sudo", "prius-usb-power", state, target],
+                    start_new_session=True,
+                )
+                logger.info("Executed prius-usb-power %s for gateway (%s)", state, target)
+            except Exception as e:
+                logger.error("Failed to execute prius-usb-power: %s", e)
+
+        twin.store.add_middleware(_system_middleware)
+
         def request_shutdown(reason: str) -> None:
             commander.request_power_off(reason=reason, grace_s=cfg.shutdown_grace_s)
             if cfg.local_poweroff_on_undervoltage:
@@ -556,6 +600,7 @@ class BackendService:
                     self._powerbox_heartbeat_tick()
                     self._powerbox_watchdog_tick()
                     self._gateway_watchdog_tick()
+                    self._gateway_usb_power_tick()
                     self._poco_power_tick()
                     self._chassis_fan_tick()
                     if self.recorder is not None:
@@ -693,6 +738,101 @@ class BackendService:
             logger.info(
                 "Gateway link RECOVERED: heartbeat resumed (age %.1fs).", age,
             )
+
+    def _gateway_usb_power_tick(self) -> None:
+        """Poll the gateway's USB hub-port power state and mirror it into state.
+
+        The gateway board hangs off a uhubctl-controllable hub port. Unlike the
+        powerbox OUT rails (reported in the ~1 Hz STATUS heartbeat), the USB port
+        power has no telemetry channel, so we read ground truth from uhubctl (via
+        `prius-usb-power`) on a slow cadence and dispatch an INTERNAL-sourced
+        SetGatewayUsbPowerAction. INTERNAL (not UI) means this does NOT re-trigger
+        the _system_middleware that actually toggles the port -- it only reflects
+        state, so the UI can show it like OUT1/OUT2 and stays truthful even when
+        the port is toggled by ACC cycling or a manual CLI run.
+        """
+        import subprocess
+
+        cfg = self.config
+        if self.twin is None or not self._gateway_usb_target:
+            return
+        interval = getattr(cfg, "gateway_usb_poll_s", 10.0)
+        if interval <= 0:
+            return
+        now = time.time()
+        if (now - self._gwusb_last_poll) < interval:
+            return
+        self._gwusb_last_poll = now
+
+        try:
+            powered = self._read_gateway_usb_power()
+        except Exception:
+            logger.debug("gateway USB power poll failed", exc_info=True)
+            return
+        if powered is None:
+            return
+        if self.twin.store.state.connection.gateway_usb_power != powered:
+            from ..state.actions import SetGatewayUsbPowerAction, ActionSource
+            self.twin.store.dispatch(
+                SetGatewayUsbPowerAction(powered, source=ActionSource.INTERNAL)
+            )
+
+    def _read_gateway_usb_power(self) -> Optional[bool]:
+        """Return True/False for the gateway hub-port power, or None if unknown.
+
+        Resolves the gateway's "HUB PORT" via `prius-usb-power locate` (cached),
+        then reads `prius-usb-power status` and inspects the PORT_POWER bit
+        (0x0100) of that port's status word. On this hub a cut port reads `0000`
+        while a powered port reads `01xx`, so the power bit is authoritative.
+        """
+        import subprocess
+        import re
+
+        # Resolve (and cache) the gateway's hub location + port number.
+        if self._gwusb_loc is None:
+            try:
+                out = subprocess.run(
+                    ["sudo", "prius-usb-power", "locate", self._gateway_usb_target],
+                    capture_output=True, text=True, timeout=10,
+                ).stdout.strip()
+            except Exception:
+                return None
+            if not out or " " not in out:
+                return None
+            self._gwusb_loc = out
+        hub, _, port = self._gwusb_loc.partition(" ")
+        hub = hub.strip()
+        port = port.strip()
+        if not hub or not port:
+            return None
+
+        try:
+            status = subprocess.run(
+                ["sudo", "prius-usb-power", "status"],
+                capture_output=True, text=True, timeout=10,
+            ).stdout
+        except Exception:
+            return None
+
+        # Find the section for our hub, then the port line within it.
+        in_hub = False
+        for line in status.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("Current status for hub "):
+                # e.g. "Current status for hub 1-1.4 [1a40:0101 ...]"
+                m = re.search(r"hub\s+(\S+)\s", stripped + " ")
+                in_hub = bool(m and m.group(1) == hub)
+                continue
+            if in_hub and stripped.startswith(f"Port {port}:"):
+                m = re.search(r"Port\s+\d+:\s+([0-9a-fA-F]+)", stripped)
+                if not m:
+                    return None
+                flags = int(m.group(1), 16)
+                return bool(flags & 0x0100)  # PORT_POWER
+        # Hub/port not found in status: the cached location is likely stale (USB
+        # renumbered). Drop it so the next poll re-resolves from the by-id path.
+        self._gwusb_loc = None
+        return None
 
     # ── POCO thermal zone mapping ────────────────────────────────────────────
     # Zones on the Poco F1 (SDM845 / beryllium):

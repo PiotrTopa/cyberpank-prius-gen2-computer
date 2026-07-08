@@ -82,6 +82,7 @@ interface Connection {
   gateway_hb?: number | null;
   gateway_uptime_s?: number | null;
   last_heartbeat_time?: number | null;
+  gateway_usb_power?: boolean | null;
 }
 
 interface AppState {
@@ -357,6 +358,22 @@ export default function App() {
     return () => clearInterval(interval);
   }, [fetchHistory]);
 
+  const sendCommand = async (name: string, params: Record<string, any> = {}) => {
+    try {
+      const res = await fetch(`${API_URL}/commands/${name}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params)
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(`Command failed: ${err.detail || res.statusText}`);
+      }
+    } catch (e: any) {
+      alert(`Command failed: ${e.message}`);
+    }
+  };
+
   useEffect(() => {
     let ws: WebSocket;
     let reconnectTimer: number;
@@ -592,6 +609,39 @@ export default function App() {
 
           {activeTab === 'controls' && (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
+              <Panel title="Gateway USB Power" icon={Radio}>
+                <div className="flex items-center justify-between mb-3">
+                  <span className="text-xs font-mono uppercase tracking-wider text-slate-400">Current State</span>
+                  <span className={`text-xs font-mono uppercase font-bold px-2 py-0.5 rounded ${
+                    conn?.gateway_usb_power == null ? 'text-slate-500 bg-slate-700/40'
+                      : conn.gateway_usb_power ? 'text-prius-green bg-prius-green/10'
+                      : 'text-prius-red bg-prius-red/10'}`}>
+                    {conn?.gateway_usb_power == null ? 'N/A' : conn.gateway_usb_power ? 'POWERED' : 'OFF'}
+                  </span>
+                </div>
+                <div className="flex gap-3">
+                  <button
+                    className={`flex-1 py-4 border rounded-xl transition-all duration-300 flex flex-col items-center gap-1 ${
+                      conn?.gateway_usb_power
+                        ? 'border-prius-green/60 text-prius-green bg-prius-green/10'
+                        : 'border-prius-blue/40 text-prius-blue hover:bg-prius-blue/10 hover:border-prius-blue'}`}
+                    onClick={() => sendCommand('gateway_power', { on: true })}
+                  >
+                    <span className="font-mono uppercase text-xs font-bold">Power ON</span>
+                  </button>
+                  <button
+                    className={`flex-1 py-4 border rounded-xl transition-all duration-300 flex flex-col items-center gap-1 ${
+                      conn?.gateway_usb_power === false
+                        ? 'border-prius-red/60 text-prius-red bg-prius-red/10'
+                        : 'border-slate-700/60 text-slate-400 hover:bg-white/5 hover:border-slate-500'}`}
+                    onClick={() => sendCommand('gateway_power', { on: false })}
+                  >
+                    <span className="font-mono uppercase text-xs font-bold">Power OFF</span>
+                  </button>
+                </div>
+                <p className="text-xs text-slate-500 mt-3 text-center">Cuts/restores the CAN gateway board's USB hub-port power</p>
+              </Panel>
+
               <Panel title="Remote Control" icon={Power}>
                 <button
                   className="w-full py-8 border-2 border-dashed border-prius-blue/40 rounded-xl text-prius-blue hover:bg-prius-blue/10 hover:border-prius-blue transition-all duration-300 flex flex-col items-center justify-center gap-2"
@@ -603,16 +653,20 @@ export default function App() {
                 <p className="text-xs text-slate-500 text-center">Sends ACC wake via powerbox · coming soon</p>
               </Panel>
 
-              <Panel title="System Status" icon={LayoutDashboard}>
-                <StatusRow label="Backend Stream" on={connected} onText="LIVE" offText="DOWN" />
-                <StatusRow label="Powerbox Firmware" on={pb.connected} onText="ACTIVE" offText="OFFLINE" />
-                <StatusRow label="Gateway Link" on={conn?.connected} onText="UP" offText="DOWN" />
-                <StatusRow label="CAN Gateway" on={conn?.can_ready} onText="READY" offText="WAIT" />
-                <DataRow label="Telemetry Age" value={fmtAge(pb.last_update_time, now)} />
-                <DataRow label="Gateway Ver" value={conn?.gateway_version ?? undefined} />
+              <Panel title="System Status" icon={LayoutDashboard} className="md:col-span-2">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-1">
+                  <StatusRow label="Backend Stream" on={connected} onText="LIVE" offText="DOWN" />
+                  <StatusRow label="Powerbox Firmware" on={pb.connected} onText="ACTIVE" offText="OFFLINE" />
+                  <StatusRow label="Gateway Link" on={conn?.connected} onText="UP" offText="DOWN" />
+                  <StatusRow label="Gateway USB Power" on={conn?.gateway_usb_power} onText="POWERED" offText="OFF" />
+                  <StatusRow label="CAN Gateway" on={conn?.can_ready} onText="READY" offText="WAIT" />
+                  <DataRow label="Telemetry Age" value={fmtAge(pb.last_update_time, now)} />
+                  <DataRow label="Gateway Ver" value={conn?.gateway_version ?? undefined} />
+                </div>
               </Panel>
             </div>
           )}
+
         </div>
 
         <footer className="text-center text-[0.65rem] font-mono text-slate-600 tracking-wider pb-2">
