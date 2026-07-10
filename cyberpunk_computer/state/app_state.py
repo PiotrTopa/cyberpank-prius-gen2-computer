@@ -326,6 +326,8 @@ class ConnectionState:
     # by the backend so the UI can show/toggle it like the powerbox OUT rails.
     # None until first read; True = port powered, False = port cut.
     gateway_usb_power: Optional[bool] = None
+    gateway_usb_power_desired: Optional[bool] = None
+
 
 
 @dataclass(frozen=True)

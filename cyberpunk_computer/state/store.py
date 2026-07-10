@@ -679,14 +679,19 @@ class Store:
 
         elif action.type == ActionType.SET_GATEWAY_USB_POWER:
             a = action  # type: SetGatewayUsbPowerAction
+            from .actions import ActionSource
+            conn = self._state.connection
+            new_desired = a.on if a.source == ActionSource.UI else conn.gateway_usb_power_desired
             self._state = replace(
                 self._state,
                 connection=replace(
-                    self._state.connection,
+                    conn,
                     gateway_usb_power=a.on,
+                    gateway_usb_power_desired=new_desired,
                 ),
             )
             affected.add(StateSlice.CONNECTION)
+
         
         # AVC Input reducers (buttons and touch)
         elif action.type == ActionType.AVC_BUTTON_PRESS:

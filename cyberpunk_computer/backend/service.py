@@ -460,11 +460,11 @@ class BackendService:
                 return
             import subprocess
             state = "on" if action.on else "off"
-            # Target the gateway board by its stable by-id path; prius-usb-power
-            # resolves (and caches) the actual hub+port, so this is robust to USB
-            # renumbering. The hub location is NOT fixed (it renumbers across
-            # reboots), so a hardcoded "1-1 2" was wrong and toggled the wrong port.
-            target = self._gateway_usb_target
+            # Target the gateway board by its stable by-id path, OR its cached physical
+            # hub location (e.g. "1-1.4 2") if it's already been located. We must use
+            # the cached location when turning it ON because the by-id symlink does
+            # not exist when the port is powered off!
+            target = self._gwusb_loc if self._gwusb_loc else self._gateway_usb_target
             if not target:
                 logger.error("Cannot toggle gateway USB power: no gateway target resolved")
                 return
@@ -771,7 +771,29 @@ class BackendService:
             return
         if powered is None:
             return
-        if self.twin.store.state.connection.gateway_usb_power != powered:
+            
+        conn_state = self.twin.store.state.connection
+        desired = conn_state.gateway_usb_power_desired
+        
+        # Enforce desired state if it was explicitly set via UI and it mismatches reality
+        if desired is not None and desired != powered:
+            logger.warning(
+                "Gateway USB power mismatch (actual: %s, desired: %s). Enforcing desired state.", 
+                powered, desired
+            )
+            state_str = "on" if desired else "off"
+            target = self._gwusb_loc if self._gwusb_loc else self._gateway_usb_target
+            try:
+                subprocess.Popen(
+                    ["sudo", "prius-usb-power", state_str, target],
+                    start_new_session=True,
+                )
+            except Exception as e:
+                logger.error("Failed to enforce gateway USB power: %s", e)
+            # The action will be dispatched on the next poll when it actually takes effect
+            return
+
+        if conn_state.gateway_usb_power != powered:
             from ..state.actions import SetGatewayUsbPowerAction, ActionSource
             self.twin.store.dispatch(
                 SetGatewayUsbPowerAction(powered, source=ActionSource.INTERNAL)

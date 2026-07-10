@@ -64,7 +64,7 @@ from ina219 import INA219
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 
 # Device role — reported in the unified identify ("whoami") response and the
 # ready banner so the computer can discover which USB-CDC port is the powerbox
@@ -151,6 +151,12 @@ POCO_BOOT_GRACE_MS = 60000
 # After a power-button press, wait this long before pressing again (lets the POCO
 # finish booting; avoids a press storm / accidental power-off).
 POCO_WAKE_COOLDOWN_MS = 60000
+# Wake escalation: a 3 s press only powers ON a POCO that is OFF. A POCO whose
+# SoC has FROZEN (kernel hang — observed 2x on 2026-07-10) ignores short presses;
+# only a long (~10 s+) forced power-cycle recovers it. After this many short
+# wake presses with no heartbeat recovery, escalate to a long press.
+POCO_WAKE_SHORT_TRIES = 2
+POCO_BTN_FORCE_MS = 12000     # forced hard power-cycle hold (POCO F1: ~10 s)
 
 # Firmware-local under-voltage backstop. The backend's UndervoltageProtectionRule
 # (11.0 V / 5 s) normally handles low voltage gracefully by sending an "off"
@@ -361,6 +367,7 @@ class PowerManager:
         # POCO power button.
         self.last_btn_ms = time.ticks_add(now, -POCO_WAKE_COOLDOWN_MS)
         self.pending_button_ms = 0
+        self.wake_tries = 0           # consecutive wake presses without recovery
         # Shutdown / suicide.
         self.poco_should_run = True
         self.shutdown_t0 = 0
@@ -483,10 +490,19 @@ class PowerManager:
                 self._suicide("poco_down" if poco_down else "grace_timeout")
         elif self.state == "normal" and self.poco_should_run:
             # Wake a dead POCO with the power button (after boot grace + cooldown).
+            # Escalate: short presses power ON an off POCO; if those don't bring
+            # the heartbeat back the SoC is likely FROZEN, and only a long
+            # (~12 s) forced power-cycle recovers it.
             past_boot = time.ticks_diff(now, self.boot_ms) >= POCO_BOOT_GRACE_MS
             cooled = time.ticks_diff(now, self.last_btn_ms) >= POCO_WAKE_COOLDOWN_MS
-            if past_boot and cooled and not self.poco_alive(now):
-                self._press_button(POCO_BTN_PRESS_MS)
+            if self.poco_alive(now):
+                self.wake_tries = 0
+            elif past_boot and cooled:
+                if self.wake_tries < POCO_WAKE_SHORT_TRIES:
+                    self._press_button(POCO_BTN_PRESS_MS)
+                else:
+                    self._press_button(POCO_BTN_FORCE_MS)
+                self.wake_tries += 1
 
 
 # ─── Command Processing ──────────────────────────────────────────────────────

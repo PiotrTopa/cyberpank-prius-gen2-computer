@@ -128,6 +128,34 @@ remains fully available. `display_on()` is retained as a manual override if the
 physical panel is ever needed for on-site debugging (`systemctl stop prius-blank`).
 `prius-power status` prints `display : blanked|on`.
 
+## Freeze recovery (hardware watchdog + powerbox escalation)
+
+The sdm845 SoC has been observed to **hard-freeze**: kernel dead, zero network
+traffic (not even WG handshake attempts), no panic, journal just stops
+mid-stream (2x on 2026-07-10, boots ending 04:11:14 and once ~70 s into early
+boot). No software watchdog can recover this — the whole OS is gone. Three
+layers of defence, from fastest to last-resort:
+
+1. **APSS hardware watchdog** (`qcom_wdt` @ 17980000, `/dev/watchdog0`) —
+   systemd PID 1 pets it (`/etc/systemd/system.conf.d/10-watchdog.conf`,
+   `RuntimeWatchdogSec=30`). A frozen kernel gets a SoC self-reset within 30 s.
+   Note: qcom_wdt rejects timeouts > ~37 s, so 30 s (60 s fails EINVAL).
+2. **Panic-on-oops** (`/etc/sysctl.d/10-lockup-panic.conf`): `kernel.panic=10`,
+   `kernel.panic_on_oops=1`. (softlockup/hung_task detectors not built into
+   this pmOS kernel.)
+3. **Powerbox wake escalation** (firmware ≥ 1.6.0): when the POCO heartbeat
+   dies, the powerbox presses the power button. A short 3 s press only powers
+   ON an *off* POCO — a *frozen* one ignores it (verified 2026-07-10: powerbox
+   press at freeze+16 s rebooted it, but the rescue boot froze again and 3 s
+   presses did nothing for 4.5 h). After `POCO_WAKE_SHORT_TRIES` (2) failed
+   short presses, the powerbox escalates to a 12 s forced hard power-cycle
+   hold, repeating each 60 s cooldown until the heartbeat returns.
+
+Freeze forensics are poor: pstore/ramoops is not wired up on this kernel, so a
+freeze leaves nothing behind. If freezes continue despite the watchdog,
+suspicion falls on deep platform idle (CX/AOSS collapse); next lever would be
+disabling the deepest cpuidle states or wiring up ramoops.
+
 ## Status / decisions
 
 - **Current scope is final for now: CPU-only scaling.** Going further on `low` (I/O throttle,
