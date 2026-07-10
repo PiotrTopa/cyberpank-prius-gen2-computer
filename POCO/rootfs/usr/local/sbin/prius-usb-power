@@ -9,24 +9,25 @@
 # hub PORT POWER does recover it (it resets the device's USB peripheral and, if
 # the board is bus-powered, the whole MCU).
 #
-# HARDWARE: the car hub enumerates as a generic Terminus FE1.1 (1a40:0101,
-# descriptor wHubCharacteristic=0x0000 "ganged") - NOT as a real D-Link DUB-H4
-# (2001:f103), whose rev D1 does per-port power. Measured 2026-07-10: per-port
-# off/cycle on this unit is a DATA-ONLY disconnect - VBUS stays up on every
-# port (powerbox energy_mah kept counting, gateway uptime survived). The
-# "ganged" report is thus CORRECT: only an ALL-ports gang off actually cuts
-# VBUS. uhubctl still needs -f to accept commands at all, and per-port off/on
-# remains useful as a data-level disconnect/re-enumeration.
+# HARDWARE: the car hub is a genuine D-Link DUB-H4 rev D1 (2001:f103), which
+# supports TRUE PER-PORT power switching (on uhubctl's supported list).
+# [ASSUMED - hub ordered 2026-07-10, NOT yet bench-verified; test per-port
+# VBUS cut on arrival: powerbox energy_mah must reset to ~0 after a port-1
+# cycle. Until swapped in, the old hub may still be the ganged rev F1
+# (Terminus FE1.1s, 1a40:0101), where per-port off is a DATA-ONLY disconnect
+# and only `hubcycle` really cuts VBUS.]
+# Per-port off/cycle = full cold reset of just that board; `hubcycle` remains
+# as the big hammer that gang-cuts every port at once.
 # => For a real cold reset of a wedged board use `hubcycle` (cuts the whole
 #    hub's VBUS; safe: powerbox OUT1 has a >30 s hardware hold-up).
 #
 # USAGE:
 #   prius-usb-power status                 # list hubs + ports + attached devices
-#   prius-usb-power cycle [TARGET]         # re-enumerate a port (data-only!)
+#   prius-usb-power cycle [TARGET]         # power-cycle a port (per-port VBUS cut)
 #   prius-usb-power off   [TARGET]
 #   prius-usb-power on    [TARGET]
 #   prius-usb-power locate [TARGET]        # print resolved "hub port" for TARGET
-#   prius-usb-power hubcycle               # REAL VBUS cut: gang-off whole hub 4s
+#   prius-usb-power hubcycle               # big hammer: gang-off whole hub 4s
 #
 # TARGET may be:
 #   - a tty device path        e.g. /dev/ttyACM0

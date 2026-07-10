@@ -221,19 +221,22 @@ OUT1 (12 V rail)  →  USB hub 5 V  →  VBUS  →  powerbox MCU
 
 Two consequences follow from this single chain:
 
-* **Cold reset via VBUS — whole-hub only.** The hub's power switching is
-  genuinely **ganged** (Terminus FE1.1 `1a40:0101`, `wHubCharacteristic 0x0000`;
-  it is *not* a real D-Link DUB-H4 `2001:f103`, whose rev D1 would do per-port
-  power). Measured 2026-07-10: a per-port `off`/`cycle` is a **data-only
-  disconnect** — VBUS stays up (powerbox `energy_mah` kept counting through a
-  port-1 cycle; gateway uptime survived a port-2 off). For a real cold reset
-  (RAM cleared, `energy_mah` → ~0, `main.py` restarts) use
-  `prius-usb-power hubcycle` — an all-ports gang off (≥ 4 s to drain bulk
-  capacitance) that resets **every** board on the hub. This is also the only
-  cure for a hard-wedged RP2040 USB PHY (`error -71`, connect-but-no-enable —
-  seen on the gateway 2026-07-10). (An earlier 2026-06-18 test appeared to show
-  a per-port cycle cold-resetting the powerbox; that no longer reproduces —
-  treat per-port power as data-only on this unit.)
+* **Cold reset via VBUS — per-port.** The hub is a genuine **D-Link DUB-H4
+  rev D1** (`2001:f103`), which does **true per-port power switching**
+  *(ASSUMED — ordered 2026-07-10, not yet bench-verified; on arrival confirm a
+  port-1 `cycle` resets powerbox `energy_mah` → ~0 while the gateway keeps
+  running)*. A per-port `prius-usb-power cycle` (≥ 4 s off to drain bulk
+  capacitance) is a full cold reset of just that board: RAM cleared,
+  `energy_mah` → ~0, `main.py` restarts. `prius-usb-power hubcycle` remains as
+  the big hammer that gang-cuts **every** port — use it if a single-port cut
+  ever fails to clear a hard-wedged RP2040 USB PHY (`error -71`,
+  connect-but-no-enable — seen on the gateway 2026-07-10).
+  *(History: the previous hub was a DUB-H4 rev F1 — Terminus FE1.1s silicon,
+  `1a40:0101`, genuinely ganged — where per-port off was a data-only
+  disconnect: VBUS stayed up, powerbox `energy_mah` kept counting through a
+  port-1 cycle, gateway uptime survived a port-2 off; only `hubcycle` truly
+  cut power. If per-port switching ever seems fake again, check which hub is
+  actually installed and which VID:PID it enumerates as.)*
 * **Self-latch / suicide.** OUT1 is driven by the powerbox MCU *and* gates the hub
   that powers it. On ACC the rail comes up via the `OUT1 OR ACC` term, the MCU
   boots and immediately drives OUT1 HIGH to **latch its own (and POCO's) power**,
