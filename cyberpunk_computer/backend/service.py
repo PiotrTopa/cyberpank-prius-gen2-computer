@@ -771,12 +771,13 @@ class BackendService:
             return
         if powered is None:
             return
-            
+
         conn_state = self.twin.store.state.connection
         desired = conn_state.gateway_usb_power_desired
-        
+
         # Enforce desired state if it was explicitly set via UI and it mismatches reality
         if desired is not None and desired != powered:
+            import subprocess
             logger.warning(
                 "Gateway USB power mismatch (actual: %s, desired: %s). Enforcing desired state.", 
                 powered, desired
