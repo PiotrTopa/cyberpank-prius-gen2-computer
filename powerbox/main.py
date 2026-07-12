@@ -156,7 +156,8 @@ POCO_WAKE_COOLDOWN_MS = 60000
 # only a long (~10 s+) forced power-cycle recovers it. After this many short
 # wake presses with no heartbeat recovery, escalate to a long press.
 POCO_WAKE_SHORT_TRIES = 2
-POCO_BTN_FORCE_MS = 12000     # forced hard power-cycle hold (POCO F1: ~10 s)
+POCO_BTN_FORCE_MS = 35000     # forced hard power-cycle hold (POCO F1: ~30-40 s)
+POCO_FORCE_COOLDOWN_MS = 300000 # after a forced hard power-cycle, wait this long (disk checks etc)
 
 # Firmware-local under-voltage backstop. The backend's UndervoltageProtectionRule
 # (11.0 V / 5 s) normally handles low voltage gracefully by sending an "off"
@@ -494,7 +495,8 @@ class PowerManager:
             # the heartbeat back the SoC is likely FROZEN, and only a long
             # (~12 s) forced power-cycle recovers it.
             past_boot = time.ticks_diff(now, self.boot_ms) >= POCO_BOOT_GRACE_MS
-            cooled = time.ticks_diff(now, self.last_btn_ms) >= POCO_WAKE_COOLDOWN_MS
+            current_cooldown = POCO_FORCE_COOLDOWN_MS if self.wake_tries > POCO_WAKE_SHORT_TRIES else POCO_WAKE_COOLDOWN_MS
+            cooled = time.ticks_diff(now, self.last_btn_ms) >= current_cooldown
             if self.poco_alive(now):
                 self.wake_tries = 0
             elif past_boot and cooled:
