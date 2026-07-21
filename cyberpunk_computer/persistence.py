@@ -97,6 +97,27 @@ class DataSourceSettings:
 
 
 @dataclass
+class SatelliteSettings:
+    """Persisted per-satellite options (RS485 satellites, device ids 100+).
+
+    ``nodes`` maps device_id (as str, JSON-friendly) to the raw config payload
+    that should be (re)pushed to that satellite whenever it comes online after
+    a restart or a rail power-up (see backend.satellites.SatelliteSupervisor).
+    """
+    nodes: dict = field(default_factory=dict)
+
+    def desired_configs(self) -> dict:
+        """Return {int device_id: config dict}, skipping malformed keys."""
+        out = {}
+        for key, cfg in (self.nodes or {}).items():
+            try:
+                out[int(key)] = dict(cfg)
+            except (TypeError, ValueError):
+                pass
+        return out
+
+
+@dataclass
 class UserSettings:
     """All user-configurable settings."""
     ambient: AmbientSettings = field(default_factory=AmbientSettings)
@@ -105,6 +126,7 @@ class UserSettings:
     climate: ClimateSettings = field(default_factory=ClimateSettings)
     display: DisplaySettings = field(default_factory=DisplaySettings)
     data_sources: DataSourceSettings = field(default_factory=DataSourceSettings)
+    satellites: SatelliteSettings = field(default_factory=SatelliteSettings)
 
 
 def _safe_load(cls, data: dict):
@@ -175,6 +197,8 @@ class SettingsManager:
                 self.settings.display = _safe_load(DisplaySettings, data['display'])
             if 'data_sources' in data:
                 self.settings.data_sources = _safe_load(DataSourceSettings, data['data_sources'])
+            if 'satellites' in data:
+                self.settings.satellites = _safe_load(SatelliteSettings, data['satellites'])
             
             logger.info(f"Loaded settings from {self.settings_file}")
             return True

@@ -6,7 +6,7 @@ All state is immutable - changes create new state objects.
 """
 
 from dataclasses import dataclass, field, replace
-from typing import Optional
+from typing import Dict, FrozenSet, Mapping, Optional
 from enum import Enum, auto
 
 
@@ -516,6 +516,52 @@ class PowerboxState:
 
 
 @dataclass(frozen=True)
+class SatelliteNode:
+    """Virtual-twin model of one RS485 satellite (device id >= 100).
+
+    ``desired_config`` holds the persisted per-satellite options (loaded from
+    user settings at boot); ``reported_config`` mirrors what the satellite last
+    acknowledged/reported. ``config_synced`` goes False whenever the node is
+    (re)discovered after being offline — the config-sync supervisor then
+    re-pushes ``desired_config`` so a satellite restart is reconfigured
+    automatically.
+    """
+    device_id: int = 0
+    name: str = ""
+    online: bool = False
+    last_seen: float = 0.0            # time.time() of last ingress traffic
+    boot_id: int = 0                  # bumps on every offline->online transition
+    fw_version: str = ""
+    config_synced: bool = False       # desired_config pushed since last boot
+    desired_config: Mapping = field(default_factory=dict)
+    reported_config: Mapping = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SatellitesState:
+    """RS485 satellite power management + per-node twin state.
+
+    Power model (OUT2 rail): the rail is requested ON iff ``power_holders`` is
+    non-empty. Holders are named wake-locks:
+
+        * ``"acc"``      — held while the ignition (ACC) is on;
+        * ``"queue"``    — held while the satellite job queue is non-empty
+                            (plus a linger window to absorb bursts);
+        * ``"manual:*"`` — operator/API holds.
+
+    ``power_requested`` is the rule-computed desired OUT2 value (observability;
+    the actual rail state is mirrored in ``powerbox.out2``).
+    """
+    nodes: Mapping[int, SatelliteNode] = field(default_factory=dict)
+    power_holders: FrozenSet[str] = frozenset()
+    power_requested: bool = False
+    # Job queue observability (fed by the SatelliteJobQueue executor)
+    queue_depth: int = 0
+    active_job: str = ""
+    last_update_time: float = 0.0
+
+
+@dataclass(frozen=True)
 class AppState:
     """
     Complete application state.
@@ -536,6 +582,7 @@ class AppState:
     display: DisplayState = field(default_factory=DisplayState)
     vfd_satellite: VFDSatelliteState = field(default_factory=VFDSatelliteState)
     powerbox: PowerboxState = field(default_factory=PowerboxState)
+    satellites: SatellitesState = field(default_factory=SatellitesState)
 
     # UI-only state (not from vehicle)
     screen_brightness: int = 100

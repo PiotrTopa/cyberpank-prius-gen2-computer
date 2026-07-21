@@ -9,25 +9,27 @@
 # hub PORT POWER does recover it (it resets the device's USB peripheral and, if
 # the board is bus-powered, the whole MCU).
 #
-# HARDWARE: the car hub is a genuine D-Link DUB-H4 rev D1 (2001:f103), which
-# supports TRUE PER-PORT power switching (on uhubctl's supported list).
-# [ASSUMED - hub ordered 2026-07-10, NOT yet bench-verified; test per-port
-# VBUS cut on arrival: powerbox energy_mah must reset to ~0 after a port-1
-# cycle. Until swapped in, the old hub may still be the ganged rev F1
-# (Terminus FE1.1s, 1a40:0101), where per-port off is a DATA-ONLY disconnect
-# and only `hubcycle` really cuts VBUS.]
-# Per-port off/cycle = full cold reset of just that board; `hubcycle` remains
-# as the big hammer that gang-cuts every port at once.
-# => For a real cold reset of a wedged board use `hubcycle` (cuts the whole
-#    hub's VBUS; safe: powerbox OUT1 has a >30 s hardware hold-up).
+# HARDWARE: the "new" hub (labeled D-Link DUB-H4 rev D1) is an ActionStar
+# 2101:8500 inside (5 internal ports + built-in HID 2101:8501 = LED
+# controller; uhubctl issue #88 = same guts as unsupported rev C1; the truly
+# per-port DUB-H4 rev D enumerates as Genesys 05E3:0608). Bench-tested
+# 2026-07-21 on nokia1: ONLY the socket wired to INTERNAL PORT 5 has real
+# switchable VBUS; the other sockets stay powered even with ALL ports
+# commanded off. So: put the GATEWAY on the port-5 socket (it is the board
+# whose USB PHY hard-wedges with error -71 and needs real VBUS cuts); the
+# powerbox has other recovery paths (DTR reset, mpremote, firmware WDT).
+# On all other sockets, off/cycle is a DATA-ONLY disconnect and `hubcycle`
+# does NOT cut their power either.
+# (Old hub was DUB-H4 rev F1, Terminus FE1.1s 1a40:0101, fully ganged:
+# per-port off data-only, but hubcycle DID gang-cut all VBUS there.)
 #
 # USAGE:
 #   prius-usb-power status                 # list hubs + ports + attached devices
-#   prius-usb-power cycle [TARGET]         # power-cycle a port (per-port VBUS cut)
+#   prius-usb-power cycle [TARGET]         # port cycle (real VBUS only on port-5 socket)
 #   prius-usb-power off   [TARGET]
 #   prius-usb-power on    [TARGET]
 #   prius-usb-power locate [TARGET]        # print resolved "hub port" for TARGET
-#   prius-usb-power hubcycle               # big hammer: gang-off whole hub 4s
+#   prius-usb-power hubcycle               # gang-off whole hub 4s (old F1 hub only)
 #
 # TARGET may be:
 #   - a tty device path        e.g. /dev/ttyACM0

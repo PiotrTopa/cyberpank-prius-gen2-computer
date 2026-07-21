@@ -155,7 +155,7 @@ model + the host-side staleness watchdog that detects a silent USB-CDC link stal
 
 ## Hardware Setup
 * **Host System:** POCO F1 (`prius`) running postmarketOS.
-* **USB Hub:** genuine D-Link DUB-H4 **rev D1** (`2001:f103`) — supports **true per-port power switching** *(assumed; installed unit ordered 2026-07-10, verify on arrival: a port-1 cycle must reset `energy_mah` → ~0)*. The previous hub was a DUB-H4 rev F1 (Terminus FE1.1s, `1a40:0101`), which is genuinely ganged — per-port off there was a data-only disconnect.
+* **USB Hub:** labeled D-Link DUB-H4 **rev D1**, but internally an **ActionStar `2101:8500`** (same guts as the unsupported rev C1 — uhubctl issue #88; a truly per-port rev D enumerates as Genesys `05E3:0608`). Bench-tested 2026-07-21: **only the socket on internal port 5 has switchable VBUS** — put the **gateway** there; all other sockets are hardwired 5 V (off/cycle = data-only), and even an all-ports gang off doesn't cut them. The built-in HID `2101:8501` is the LED controller, not a power interface. (Previous hub: DUB-H4 rev F1, Terminus FE1.1s `1a40:0101`, fully ganged — there `hubcycle` really cut all VBUS.)
 * **Microcontroller:** Raspberry Pi Pico (RP2040) connected to **Port 1** of the USB Hub.
 * **Power:** The RP2040 is **bus-powered** (runs off USB VBUS — no direct 12 V line to the MCU), **but the USB bus is fed from the OUT1 12 V rail** (`OUT1 → hub 5 V → VBUS → MCU`). The INA219 *senses* the 12 V system. Because the MCU drives OUT1 and OUT1 gates the hub that powers it, the board latches its own power (survives ACC removal) and a USB VBUS cut cold-resets it.
 
@@ -183,7 +183,7 @@ The `prius` host has been configured to remotely manage and program the RP2040 w
 1. **`mpremote` Installation**: The official MicroPython tool `mpremote` is installed on `prius` (`~/.local/bin/mpremote`). This allows accessing the REPL and file system of the RP2040 over SSH.
 2. **`uhubctl` Installation**: The `uhubctl` package is installed on `prius` to allow programmatic power cycling of the USB hub ports.
 3. **Power Cycling the RP2040**:
-   The DUB-H4 rev D1 does real per-port switching; keep the force flag (`-f`) anyway — it is harmless and required on ganged hubs (like the old rev F1) where the descriptor blocks port commands.
+   On this hub only the internal-port-5 socket really switches VBUS (see Hardware Setup above); keep the force flag (`-f`) — the descriptor claims "ganged" and blocks port commands without it.
 
    To power cycle the RP2040 on Port 1 (use **≥ 4 s off** for a true cold reset —
    the MCU is bus-powered, so cutting VBUS fully resets it; do this with ACC on so

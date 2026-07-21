@@ -31,6 +31,15 @@ DEVICE_SATELLITE_DRL = 106       # DRL controller (output)
 DEVICE_SATELLITE_LIGHT_SENSOR = 107  # Rain/light sensor (input)
 DEVICE_VFD = 110                 # VFD display satellite (output)
 
+# Registry of known RS485 satellites (device_id -> human name). Used to seed
+# the SatellitesState twin nodes; unknown ids seen on the bus are added
+# dynamically with an auto-generated name.
+SATELLITE_NAMES = {
+    DEVICE_SATELLITE_DRL: "drl",
+    DEVICE_SATELLITE_LIGHT_SENSOR: "light_sensor",
+    DEVICE_VFD: "vfd",
+}
+
 # Powerbox (second RP2040 on its own USB-CDC port) — reserved id range so its
 # device ids never collide with the gateway's. Messages from the powerbox port
 # are offset into this range by MultiInputPort. Protocol is future work.

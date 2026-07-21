@@ -21,11 +21,10 @@ display_off() {
         systemctl start prius-blank.service >/dev/null 2>&1 || true
 }
 display_on() {
-    # Retained as a manual override only (display is normally kept blanked in
-    # both profiles). Run `prius-blank` stop or this via an edited profile if a
-    # physical screen is ever needed for debugging.
-    command -v systemctl >/dev/null 2>&1 && \
-        systemctl stop prius-blank.service >/dev/null 2>&1 || true
+    # DISABLED as a runtime path: restoring the panel after the labibb unbind
+    # (see prius-blankd / POWER.md "LAB over-current IRQ storm") hard-hangs
+    # the kernel. Reboot without prius-blank running to get the display back.
+    echo "display restore requires a reboot (see POWER.md: LAB IRQ storm)" >&2
 }
 
 apply_low() {

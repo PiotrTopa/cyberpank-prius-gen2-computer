@@ -300,6 +300,7 @@ class RulesEngine:
                 StateSlice.DISPLAY,
                 StateSlice.VFD_SATELLITE,
                 StateSlice.POWERBOX,
+                StateSlice.SATELLITES,
             }
         
         changed: Set[StateSlice] = set()
@@ -324,6 +325,8 @@ class RulesEngine:
             changed.add(StateSlice.VFD_SATELLITE)
         if old_state.powerbox != new_state.powerbox:
             changed.add(StateSlice.POWERBOX)
+        if old_state.satellites != new_state.satellites:
+            changed.add(StateSlice.SATELLITES)
         
         return changed
 

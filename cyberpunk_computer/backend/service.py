@@ -56,6 +56,16 @@ from ..state.rules.power_management import (
     PowerModeRule,
     UndervoltageProtectionRule,
 )
+from ..state.rules.satellite_power import (
+    SatelliteAccHoldRule,
+    SatellitePowerRule,
+)
+from .satellites import (
+    SatelliteJobQueue,
+    SatelliteScheduler,
+    SatelliteSupervisor,
+    command_job,
+)
 from ..api import ApiServer, StoreBridge
 
 logger = logging.getLogger(__name__)
@@ -177,6 +187,28 @@ class BackendConfig:
     # can show/toggle it like the powerbox OUT rails. 0 disables the poll.
     gateway_usb_poll_s: float = 10.0
 
+    # ── RS485 satellites (OUT2 rail power management + twin) ─────────────────
+    # The satellite subsystem: OUT2 wake-lock power rule (rail on while ACC is
+    # on or jobs are pending), the serialized job queue, periodic scheduler and
+    # the presence/config-sync supervisor. Requires powerbox_enabled for the
+    # physical rail control; without a powerbox link it still tracks presence
+    # and runs jobs (rail assumed up).
+    satellites_enabled: bool = True
+    # Linger before OUT2 is actually dropped after the last wake-lock releases.
+    # Absorbs bursts (queued jobs arriving back-to-back) and key-off bounce.
+    satellite_linger_s: float = 10.0
+    # Re-send cadence while the powerbox out2 mirror disagrees with the rule.
+    satellite_retry_s: float = 5.0
+    # Mark a satellite twin node offline after this long without traffic.
+    satellite_offline_after_s: float = 15.0
+    # Periodic key-off sensor wake: every interval, power the rail and let the
+    # listed satellites report (their traffic refreshes the twin). 0 disables.
+    # Example: interval=300 + devices=(107,) reads the light sensor every 5 min.
+    satellite_poll_interval_s: float = 0.0
+    satellite_poll_devices: tuple = ()
+    # Payload sent to each polled device to solicit a report.
+    satellite_poll_payload: str = '{"a":"status"}'
+
     # ── Chassis fan control ──────────────────────────────────────────────────
     # PWM fan on powerbox GPIO 14. Driven automatically based on the delta
     # between POCO core temperature and cabin temperature (AHT20).
@@ -230,6 +262,10 @@ class BackendService:
         self.api: Optional[ApiServer] = None
         self.power_controller: Optional[PriusPowerController] = None
         self.powerbox_commander: Optional[PowerboxCommander] = None
+        self.satellite_queue: Optional[SatelliteJobQueue] = None
+        self.satellite_scheduler: Optional[SatelliteScheduler] = None
+        self.satellite_supervisor: Optional[SatelliteSupervisor] = None
+        self._satellite_sup_last: float = 0.0
         self.recorder: Optional[TripRecorder] = None
         self._unsubscribe = None
         self._unsubscribe_powerbox = None
@@ -374,6 +410,10 @@ class BackendService:
         if cfg.powerbox_enabled:
             self._wire_powerbox(twin)
 
+        # RS485 satellites: OUT2 wake-lock power rules + job queue + twin.
+        if cfg.satellites_enabled:
+            self._wire_satellites(twin)
+
         # Trip recording: tap ingress/egress and write rotating per-trip logs.
         if cfg.recording.enabled:
             self._wire_recording(twin)
@@ -443,7 +483,15 @@ class BackendService:
             from ..state.actions import ActionSource
             if getattr(action, "source", None) == ActionSource.UI and self.powerbox_commander:
                 if type(action).__name__ == "SetOutAction":
-                    self.powerbox_commander.set_out(action.channel, action.on)
+                    if action.channel == 2 and self.config.satellites_enabled:
+                        # OUT2 is owned by the satellite power rule (wake-locks);
+                        # translate a manual UI toggle into a manual hold so the
+                        # rule and the operator don't fight over the rail.
+                        from ..state.actions import SatellitePowerHoldAction
+                        store.dispatch(SatellitePowerHoldAction(
+                            "manual:ui", acquire=action.on))
+                    else:
+                        self.powerbox_commander.set_out(action.channel, action.on)
                 elif type(action).__name__ == "SetReadyModeAction":
                     if action.on:
                         self.powerbox_commander.press_button(3000)
@@ -504,6 +552,121 @@ class BackendService:
             "Powerbox computer-side wired (undervoltage<%.1fV, flag=%s)",
             cfg.undervoltage_threshold, cfg.power_mode_flag,
         )
+
+    def _wire_satellites(self, twin: VirtualTwin) -> None:
+        """Wire the RS485 satellite subsystem: power rules, job queue, twin.
+
+        Power model: the OUT2 rail is on iff at least one wake-lock holder is
+        held — ``acc`` (ignition on), ``queue`` (jobs pending/running) or
+        ``manual:*``. The queue serializes ALL satellite work (scheduled reads,
+        event commands, config pushes), so overlapping jobs share one rail
+        power-up with no flapping. Dev-safe: without a powerbox link the rail
+        command is log-only and jobs run assuming the rail is up.
+        """
+        cfg = self.config
+        store = twin.store
+
+        queue = SatelliteJobQueue(store, output_port=twin.output_port)
+        scheduler = SatelliteScheduler(queue, store)
+
+        # Persisted per-satellite options -> auto re-push after satellite boot.
+        desired_configs = {}
+        try:
+            from ..persistence import SettingsManager
+            desired_configs = SettingsManager().settings.satellites.desired_configs()
+        except Exception:
+            logger.exception("Failed to load persisted satellite configs")
+        supervisor = SatelliteSupervisor(
+            queue, store,
+            desired_configs=desired_configs,
+            offline_after_s=cfg.satellite_offline_after_s,
+        )
+        supervisor.seed()
+
+        # Rules: ACC wake-lock + holder-set -> physical OUT2 (via commander).
+        def _set_out2(on: bool) -> bool:
+            if self.powerbox_commander is None:
+                logger.info("OUT2 -> %s (no powerbox commander, log-only)", on)
+                return False
+            return self.powerbox_commander.set_out(2, on)
+
+        # Gateway (CAN/AVC + RS485 master) is bonded to the same wake-lock
+        # logic: needed with ACC (CAN/AVC) and for satellite jobs (RS485).
+        # Dispatch drives _system_middleware (uhubctl toggle) and sets the
+        # desired state that _gateway_usb_power_tick keeps enforcing.
+        def _set_gateway(on: bool) -> None:
+            from ..state.actions import SetGatewayUsbPowerAction, ActionSource
+            store.dispatch(SetGatewayUsbPowerAction(on, source=ActionSource.UI))
+
+        twin.rules_engine.register(SatelliteAccHoldRule())
+        twin.rules_engine.register(SatellitePowerRule(
+            set_out2=_set_out2,
+            linger_s=cfg.satellite_linger_s,
+            retry_s=cfg.satellite_retry_s,
+            set_gateway=_set_gateway,
+        ))
+
+        # Route EnqueueSatelliteCommandAction (API/events) into the queue.
+        def _satellite_middleware(action, _store) -> None:
+            if type(action).__name__ == "EnqueueSatelliteCommandAction":
+                queue.submit(command_job(
+                    action.device_id, action.payload,
+                    name=action.name, priority=action.priority,
+                ))
+        store.add_middleware(_satellite_middleware)
+
+        # Optional periodic key-off sensor wake ("every 5 min read sensors").
+        if cfg.satellite_poll_interval_s > 0 and cfg.satellite_poll_devices:
+            import json as _json
+            from .satellites import PeriodicJobSpec, PRIORITY_SCHEDULED, SatelliteJob
+
+            try:
+                poll_payload = _json.loads(cfg.satellite_poll_payload)
+            except ValueError:
+                logger.error("Bad satellite_poll_payload %r — poll disabled",
+                             cfg.satellite_poll_payload)
+                poll_payload = None
+
+            if poll_payload is not None:
+                devices = tuple(int(d) for d in cfg.satellite_poll_devices)
+
+                def _poll_factory() -> SatelliteJob:
+                    def start(ctx) -> None:
+                        for dev in devices:
+                            ctx.send(dev, dict(poll_payload))
+                    return SatelliteJob(
+                        name="sched:poll", start=start,
+                        priority=PRIORITY_SCHEDULED,
+                    )
+
+                scheduler.add(PeriodicJobSpec(
+                    name="sched:poll",
+                    interval_s=cfg.satellite_poll_interval_s,
+                    factory=_poll_factory,
+                ))
+
+        self.satellite_queue = queue
+        self.satellite_scheduler = scheduler
+        self.satellite_supervisor = supervisor
+        logger.info(
+            "Satellite subsystem wired (linger=%.0fs, offline_after=%.0fs, "
+            "poll=%.0fs %s, configs=%s)",
+            cfg.satellite_linger_s, cfg.satellite_offline_after_s,
+            cfg.satellite_poll_interval_s, cfg.satellite_poll_devices,
+            sorted(desired_configs) or "none",
+        )
+
+    def _satellite_tick(self) -> None:
+        """Advance the satellite queue/scheduler/supervisor (engine loop)."""
+        if self.satellite_queue is None:
+            return
+        self.satellite_queue.tick()
+        self.satellite_scheduler.tick()
+        now = time.time()
+        # Supervisor (presence aging + config sync) needs only ~1 Hz.
+        if (now - self._satellite_sup_last) >= 1.0:
+            self._satellite_sup_last = now
+            self.satellite_supervisor.tick()
 
     def _wire_recording(self, twin: VirtualTwin) -> None:
         """Tap ingress/egress into a rotating per-trip recorder."""
@@ -603,6 +766,7 @@ class BackendService:
                     self._gateway_usb_power_tick()
                     self._poco_power_tick()
                     self._chassis_fan_tick()
+                    self._satellite_tick()
                     if self.recorder is not None:
                         self.recorder.tick()
                 except Exception:

@@ -8,16 +8,32 @@ enabled, wasting ~0.19 W (~8% of the resting draw, measured on the INA219).
 
 This daemon becomes DRM master and disables every active CRTC (a modeset "off"),
 which powers down the DSI PHY/PLL and panel bias regulators. It then *holds*
-master and idles so the in-kernel fbcon client cannot re-enable the pipe. On
-SIGTERM/SIGINT it restores the saved CRTC configuration and exits, bringing the
-display back exactly as it was.
+master and idles so the in-kernel fbcon client cannot re-enable the pipe.
+
+Root-cause hardening (2026-07-11): with the panel unprepared, the pmi8998
+LAB/IBB driver leaves its level-triggered over-current IRQ enabled while the
+LAB regulator is off, causing a ~13 kHz interrupt storm on the SPMI/PMIC
+arbiter (observed: 99M+ interrupts, 43 min CPU in 2 h, and a 6 h system-wide
+D-state wedge — journald/sync unkillable). And re-preparing the panel after a
+labibb driver rebind hard-hangs the kernel (stale regulator consumer handles).
+Therefore after blanking we:
+
+    1. unbind the DRM fbcon vtconsole, so nothing can ever re-modeset the
+       panel behind our back (even if this daemon dies);
+    2. unbind the qcom-lab-ibb-regulator platform driver, freeing the storming
+       IRQ for good.
+
+Consequence: the display CANNOT be restored at runtime anymore — a reboot is
+required to get the panel back. This box is headless, so that is the intended
+trade-off. On SIGTERM/SIGINT the daemon simply exits without touching the
+panel (no restore — restoring is what hangs the kernel).
 
 Self-contained: raw DRM UAPI ioctls via ctypes (no libdrm / no compiler needed).
 
 Lifecycle is managed by prius-blank.service:
-    systemctl start prius-blank   # blank  (run this daemon, hold master)
-    systemctl stop  prius-blank   # restore (SIGTERM -> restore + exit)
-prius-power starts it in `low` mode and stops it in `full` mode.
+    systemctl start prius-blank   # blank (modeset off + fbcon/labibb unbind)
+    systemctl stop  prius-blank   # exits; display stays off until reboot
+prius-power keeps it started in both power profiles.
 """
 import ctypes
 import ctypes.util
@@ -26,6 +42,8 @@ import signal
 import sys
 
 DRI_NODE = os.environ.get("PRIUS_DRI_NODE", "/dev/dri/card0")
+LABIBB_DRIVER = "/sys/bus/platform/drivers/qcom-lab-ibb-regulator"
+VTCON_DIR = "/sys/class/vtconsole"
 
 # ---- Linux ioctl encoding (asm-generic) ----
 _IOC_NRBITS, _IOC_TYPEBITS, _IOC_SIZEBITS = 8, 8, 14
@@ -127,6 +145,51 @@ def _on_sig(signum, frame):
     _stop = True
 
 
+def unbind_fbcon():
+    """Unbind the DRM framebuffer vtconsole so nothing re-modesets the panel.
+
+    Restoring the panel after the labibb unbind hard-hangs the kernel, so we
+    make sure fbcon cannot do it behind our back (e.g. if this daemon dies).
+    The dummy console takes over; the box is headless anyway.
+    """
+    try:
+        for vt in os.listdir(VTCON_DIR):
+            base = os.path.join(VTCON_DIR, vt)
+            with open(os.path.join(base, "name")) as f:
+                name = f.read()
+            if "frame buffer" not in name:
+                continue
+            with open(os.path.join(base, "bind"), "w") as f:
+                f.write("0")
+            log("unbound %s (%s)" % (vt, name.strip()))
+    except OSError as e:
+        log("fbcon unbind failed: %s (continuing)" % e)
+
+
+def unbind_labibb():
+    """Unbind the LAB/IBB regulator driver to stop the over-current IRQ storm.
+
+    With the panel unprepared the kernel driver leaves the level-triggered
+    lab-over-current IRQ enabled while LAB is off -> ~13 kHz storm on the SPMI
+    arbiter (can starve PMIC transactions and wedge the whole system).
+    Unbinding frees the IRQ. NEVER rebind at runtime: the panel driver keeps
+    stale regulator handles and the next prepare hangs the kernel (reboot
+    restores everything cleanly).
+    """
+    unbind = os.path.join(LABIBB_DRIVER, "unbind")
+    try:
+        devs = [d for d in os.listdir(LABIBB_DRIVER)
+                if d not in ("bind", "unbind", "uevent")]
+        for dev in devs:
+            with open(unbind, "w") as f:
+                f.write(dev)
+            log("unbound labibb device %s (over-current IRQ storm stopped)" % dev)
+        if not devs:
+            log("labibb already unbound")
+    except OSError as e:
+        log("labibb unbind failed: %s (IRQ storm may persist!)" % e)
+
+
 def main():
     node = sys.argv[1] if len(sys.argv) > 1 else DRI_NODE
     fd = os.open(node, os.O_RDWR | os.O_CLOEXEC)
@@ -154,8 +217,7 @@ def main():
     res.count_connectors = n_conns
     ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, res)
 
-    # Save each active CRTC's state, then disable it.
-    saved = []
+    # Disable each active CRTC (no state saving — restore path removed).
     n_blanked = 0
     for i in range(n_crtcs):
         c = drm_mode_crtc()
@@ -164,7 +226,6 @@ def main():
             ioctl(fd, DRM_IOCTL_MODE_GETCRTC, c)
         except OSError:
             continue
-        saved.append(c)
         if not c.mode_valid and c.fb_id == 0:
             continue  # already off
         off = drm_mode_crtc()
@@ -181,6 +242,11 @@ def main():
 
     if n_blanked == 0:
         log("no active CRTC blanked (already off?)")
+
+    # Harden: no runtime restore path exists past this point (see docstring).
+    unbind_fbcon()
+    unbind_labibb()
+
     log("blanked %d CRTC(s); holding master. pid %d" % (n_blanked, os.getpid()))
 
     signal.signal(signal.SIGTERM, _on_sig)
@@ -188,23 +254,14 @@ def main():
     while not _stop:
         signal.pause()
 
-    # Restore each CRTC that was on, re-attaching all connectors (single DSI).
-    for r in saved:
-        if not r.mode_valid:
-            continue
-        r.set_connectors_ptr = ctypes.cast(conn_ids, ctypes.c_void_p).value
-        r.count_connectors = n_conns
-        try:
-            ioctl(fd, DRM_IOCTL_MODE_SETCRTC, r)
-        except OSError as e:
-            log("SETCRTC(restore) crtc %d: %s" % (r.crtc_id, e))
-
+    # NO modeset restore: re-preparing the panel after the labibb unbind
+    # hard-hangs the kernel. The display stays off; reboot to restore it.
     try:
         ioctl(fd, DRM_IOCTL_DROP_MASTER)
     except OSError:
         pass
-    os.close(fd)  # lastclose also triggers fbcon mode restore as a backstop
-    log("restored, exiting")
+    os.close(fd)
+    log("exiting; display stays off (reboot to restore the panel)")
 
 
 if __name__ == "__main__":

@@ -184,10 +184,25 @@ def _build_fan_auto(params: Dict[str, Any]) -> Action:
     return SetFanOverrideAction(None, source=ActionSource.UI)
 
 
-def _build_gateway_power(params: Dict[str, Any]) -> Action:
-    from ..state.actions import SetGatewayUsbPowerAction
+def _build_satellite_power_hold(params: Dict[str, Any]) -> Action:
+    from ..state.actions import SatellitePowerHoldAction
+    name = str(_require(params, "name")).strip()
+    if not name or len(name) > 32:
+        raise CommandError("parameter 'name' must be a short non-empty string")
     on = _as_bool(_require(params, "on"), "on")
-    return SetGatewayUsbPowerAction(on, source=ActionSource.UI)
+    return SatellitePowerHoldAction(f"manual:{name}", acquire=on, source=ActionSource.UI)
+
+
+def _build_satellite_send(params: Dict[str, Any]) -> Action:
+    from ..state.actions import EnqueueSatelliteCommandAction
+    device_id = _as_int(_require(params, "device_id"), "device_id", 100, 199)
+    payload = _require(params, "payload")
+    if not isinstance(payload, dict):
+        raise CommandError("parameter 'payload' must be an object")
+    priority = _as_int(params.get("priority", 50), "priority", 0, 100)
+    return EnqueueSatelliteCommandAction(
+        device_id, payload, priority=priority, source=ActionSource.UI,
+    )
 
 
 # name -> (builder, description, params-doc)
@@ -249,10 +264,27 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
         "description": "Clear the chassis fan override and return to automatic control.",
         "params": {},
     },
-    "gateway_power": {
-        "builder": _build_gateway_power,
-        "description": "Turn the CAN gateway board's USB hub-port power on or off.",
-        "params": {"on": "bool"},
+    "satellite_power_hold": {
+        "builder": _build_satellite_power_hold,
+        "description": (
+            "Acquire/release a named manual wake-lock on the OUT2 satellite rail. "
+            "The rail stays powered while any holder (acc/queue/manual) is held."
+        ),
+        "params": {"name": "string (holder name)", "on": "bool"},
+    },
+    "satellite_send": {
+        "builder": _build_satellite_send,
+        "description": (
+            "Enqueue a command to an RS485 satellite. Powers the OUT2 rail if "
+            "needed, waits for the rail, sends the payload, and powers back "
+            "down after the linger window (jobs are serialized, FIFO within "
+            "priority — lower runs first)."
+        ),
+        "params": {
+            "device_id": "int 100..199",
+            "payload": "object (raw NDJSON 'd' payload for the satellite)",
+            "priority": "int 0..100 (optional, default 50, lower = sooner)",
+        },
     },
 }
 

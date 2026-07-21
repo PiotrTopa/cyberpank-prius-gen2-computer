@@ -5,13 +5,15 @@ After=multi-user.target
 
 [Service]
 # Resident daemon: becomes DRM master, disables the CRTC (DSI PLL/panel off),
-# and holds master so fbcon can't re-enable it. On stop it restores the mode.
+# unbinds fbcon + the LAB/IBB regulator driver (over-current IRQ storm fix,
+# see POWER.md), and holds master. There is NO runtime restore — the panel
+# comes back only after a reboot (headless box; restoring hangs the kernel).
 Type=simple
 ExecStart=/usr/local/sbin/prius-blankd
-# If it ever dies, fbcon restores the console (safe); re-blank to keep the saving.
+# If it ever dies the panel stays off (fbcon is unbound) — just re-run.
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=10
 
-# Not [Install]-enabled: prius-power starts/stops this per power-mode
-# (blank in `low`, restore in `full`). Do not enable it standalone.
+# Not [Install]-enabled: prius-power starts this in both power profiles.
+# Do not stop it expecting the display back — reboot instead.

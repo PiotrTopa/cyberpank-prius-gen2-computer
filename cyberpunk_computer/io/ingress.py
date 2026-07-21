@@ -17,7 +17,8 @@ from dataclasses import dataclass
 
 from .ports import (
     InputPort, RawMessage, MessageCategory,
-    DEVICE_SYSTEM, DEVICE_CAN, DEVICE_AVC, DEVICE_SATELLITE_BASE
+    DEVICE_SYSTEM, DEVICE_CAN, DEVICE_AVC, DEVICE_SATELLITE_BASE,
+    DEVICE_POWERBOX_BASE,
 )
 from ..state.store import Store
 from ..state.actions import (
@@ -113,6 +114,11 @@ class IngressController:
         
         # Satellite message handlers (device_id -> handler)
         self._satellite_handlers: Dict[int, Callable[[dict], List[Action]]] = {}
+
+        # Satellite presence: last time a "seen" action was dispatched per
+        # device (throttles twin updates to ~1/s per satellite).
+        self._satellite_seen_dispatch: Dict[int, float] = {}
+        self._satellite_seen_min_interval = 1.0
         
         # Statistics
         self._stats = IngressStats()
@@ -443,7 +449,25 @@ class IngressController:
         self._stats.satellite_messages += 1
         
         device_id = msg.device_id
-        
+
+        # Presence: ANY traffic from a real RS485 satellite (100..199, handled
+        # or not) refreshes its twin node (last_seen/online); powerbox ids
+        # (200+) also route through here but are NOT satellites. Throttled to
+        # ~1/s per device. The reducer bumps boot_id on the offline->online
+        # edge, which triggers the config re-push (see
+        # backend.satellites.SatelliteSupervisor).
+        if DEVICE_SATELLITE_BASE <= device_id < DEVICE_POWERBOX_BASE:
+            now = time.time()
+            last = self._satellite_seen_dispatch.get(device_id, 0.0)
+            if (now - last) >= self._satellite_seen_min_interval:
+                self._satellite_seen_dispatch[device_id] = now
+                from ..state.actions import UpdateSatelliteNodeAction
+                fw = msg.data.get("ver") if isinstance(msg.data, dict) else None
+                self._store.dispatch(UpdateSatelliteNodeAction(
+                    device_id, seen=True,
+                    fw_version=str(fw) if fw is not None else None,
+                ))
+
         # Check for registered handler
         handler = self._satellite_handlers.get(device_id)
         if handler:

@@ -16,7 +16,7 @@ from enum import Enum, auto
 from .app_state import (
     AppState, AudioState, ClimateState, VehicleState, 
     EnergyState, ConnectionState, GearPosition, InputState, DisplayState,
-    DynamicsState
+    DynamicsState, SatelliteNode
 )
 from .chart_data import ChartDataStore
 from .actions import (
@@ -36,6 +36,8 @@ from .actions import (
     SetPowerboxTelemetryAction, SetPowerboxIgnitionAction,
     SetPowerboxConnectionAction, SetPowerboxUndervoltageAction,
     RequestPowerboxShutdownAction, SetPowerboxPowerModeAction,
+    SatellitePowerHoldAction, SetSatellitePowerAction,
+    UpdateSatelliteNodeAction, SetSatelliteQueueAction,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,6 +57,7 @@ class StateSlice(Enum):
     VFD_SATELLITE = auto()  # VFD satellite display state (device 110)
     DIAGNOSTICS = auto()  # OBD-II DTC diagnostics
     POWERBOX = auto()  # Powerbox: ignition (ACC/BATT) + INA219 telemetry (devices 200-202)
+    SATELLITES = auto()  # RS485 satellites: OUT2 power wake-locks + per-node twin (devices 100+)
     ALL = auto()
 
 
@@ -1032,6 +1035,84 @@ class Store:
                 powerbox=replace(self._state.powerbox, **kwargs),
             )
             affected.add(StateSlice.POWERBOX)
+
+        elif action.type == ActionType.SATELLITE_POWER_HOLD:
+            import time as _t
+            holders = set(self._state.satellites.power_holders)
+            if action.acquire:
+                holders.add(action.holder)
+            else:
+                holders.discard(action.holder)
+            if frozenset(holders) != self._state.satellites.power_holders:
+                self._state = replace(
+                    self._state,
+                    satellites=replace(
+                        self._state.satellites,
+                        power_holders=frozenset(holders),
+                        last_update_time=_t.time(),
+                    ),
+                )
+                affected.add(StateSlice.SATELLITES)
+
+        elif action.type == ActionType.SET_SATELLITE_POWER:
+            import time as _t
+            self._state = replace(
+                self._state,
+                satellites=replace(
+                    self._state.satellites,
+                    power_requested=action.requested,
+                    last_update_time=_t.time(),
+                ),
+            )
+            affected.add(StateSlice.SATELLITES)
+
+        elif action.type == ActionType.UPDATE_SATELLITE_NODE:
+            import time as _t
+            now = _t.time()
+            nodes = dict(self._state.satellites.nodes)
+            node = nodes.get(action.device_id) or SatelliteNode(device_id=action.device_id)
+            kwargs = {}
+            if action.seen:
+                kwargs["last_seen"] = now
+                kwargs["online"] = True
+            if action.online is not None:
+                kwargs["online"] = action.online
+            # Offline->online = the satellite (re)booted or the rail came back:
+            # bump boot_id and force a config re-push.
+            if kwargs.get("online") and not node.online:
+                kwargs["boot_id"] = node.boot_id + 1
+                kwargs["config_synced"] = False
+            if action.name is not None:
+                kwargs["name"] = action.name
+            if action.fw_version is not None:
+                kwargs["fw_version"] = action.fw_version
+            if action.config_synced is not None:
+                kwargs["config_synced"] = action.config_synced
+            if action.desired_config is not None:
+                kwargs["desired_config"] = dict(action.desired_config)
+            if action.reported_config is not None:
+                kwargs["reported_config"] = dict(action.reported_config)
+            nodes[action.device_id] = replace(node, **kwargs)
+            self._state = replace(
+                self._state,
+                satellites=replace(
+                    self._state.satellites, nodes=nodes, last_update_time=now,
+                ),
+            )
+            affected.add(StateSlice.SATELLITES)
+
+        elif action.type == ActionType.SET_SATELLITE_QUEUE:
+            import time as _t
+            self._state = replace(
+                self._state,
+                satellites=replace(
+                    self._state.satellites,
+                    queue_depth=action.depth,
+                    active_job=action.active_job,
+                    last_update_time=_t.time(),
+                ),
+            )
+            affected.add(StateSlice.SATELLITES)
 
         return affected
     

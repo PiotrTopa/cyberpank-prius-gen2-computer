@@ -113,6 +113,13 @@ class ActionType(Enum):
     SET_OUT = auto()
     SET_FAN_OVERRIDE = auto()   # manual chassis-fan override (None = auto)
 
+    # RS485 satellite power management + twin (devices 100+)
+    SATELLITE_POWER_HOLD = auto()      # acquire/release a named OUT2 wake-lock
+    SET_SATELLITE_POWER = auto()       # rule-computed desired OUT2 (observability)
+    UPDATE_SATELLITE_NODE = auto()     # presence/config updates for one node
+    SET_SATELLITE_QUEUE = auto()       # job-queue depth + active job (observability)
+    ENQUEUE_SATELLITE_COMMAND = auto() # submit a command job to the satellite queue
+
     # AVC Input actions (buttons and touch)
     AVC_BUTTON_PRESS = auto()
     AVC_BUTTON_RELEASE = auto()
@@ -1364,3 +1371,89 @@ class SetFanOverrideAction(Action):
     def __init__(self, pct: Optional[float], source: ActionSource = ActionSource.UI):
         super().__init__(ActionType.SET_FAN_OVERRIDE, source)
         self.pct = pct
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RS485 satellite power management + twin actions
+# ─────────────────────────────────────────────────────────────────────────────
+
+class SatellitePowerHoldAction(Action):
+    """Acquire (``acquire=True``) or release a named OUT2 wake-lock holder.
+
+    The OUT2 satellite rail stays powered while at least one holder is held
+    (``"acc"``, ``"queue"``, ``"manual:<name>"`` …). See SatellitesState.
+    """
+    def __init__(self, holder: str, acquire: bool, source: ActionSource = ActionSource.INTERNAL):
+        super().__init__(ActionType.SATELLITE_POWER_HOLD, source)
+        self.holder = holder
+        self.acquire = acquire
+
+
+class SetSatellitePowerAction(Action):
+    """Rule-computed desired OUT2 state (observability mirror)."""
+    def __init__(self, requested: bool, source: ActionSource = ActionSource.INTERNAL):
+        super().__init__(ActionType.SET_SATELLITE_POWER, source)
+        self.requested = requested
+
+
+class UpdateSatelliteNodeAction(Action):
+    """Update one satellite twin node. ``None`` fields are left unchanged.
+
+    ``seen=True`` refreshes ``last_seen`` and forces ``online=True`` (dispatched
+    by ingress on any traffic from the device). An offline->online transition
+    bumps ``boot_id`` and clears ``config_synced`` in the reducer, which the
+    config-sync supervisor uses to re-push persisted options after a satellite
+    restart.
+    """
+    def __init__(
+        self,
+        device_id: int,
+        seen: bool = False,
+        online: Optional[bool] = None,
+        name: Optional[str] = None,
+        fw_version: Optional[str] = None,
+        config_synced: Optional[bool] = None,
+        desired_config: Optional[dict] = None,
+        reported_config: Optional[dict] = None,
+        source: ActionSource = ActionSource.GATEWAY,
+    ):
+        super().__init__(ActionType.UPDATE_SATELLITE_NODE, source)
+        self.device_id = device_id
+        self.seen = seen
+        self.online = online
+        self.name = name
+        self.fw_version = fw_version
+        self.config_synced = config_synced
+        self.desired_config = desired_config
+        self.reported_config = reported_config
+
+
+class SetSatelliteQueueAction(Action):
+    """Mirror the satellite job queue state (depth + active job name)."""
+    def __init__(self, depth: int, active_job: str = "", source: ActionSource = ActionSource.INTERNAL):
+        super().__init__(ActionType.SET_SATELLITE_QUEUE, source)
+        self.depth = depth
+        self.active_job = active_job
+
+
+class EnqueueSatelliteCommandAction(Action):
+    """Submit a raw command job to the satellite job queue.
+
+    Routed by the backend middleware to the SatelliteJobQueue: the queue
+    acquires the OUT2 power hold, waits for the target satellite to come
+    online, sends ``payload`` to ``device_id`` and releases the hold after the
+    linger window. Does not mutate state itself.
+    """
+    def __init__(
+        self,
+        device_id: int,
+        payload: dict,
+        priority: int = 50,
+        name: str = "",
+        source: ActionSource = ActionSource.UI,
+    ):
+        super().__init__(ActionType.ENQUEUE_SATELLITE_COMMAND, source)
+        self.device_id = device_id
+        self.payload = payload
+        self.priority = priority
+        self.name = name or f"cmd:{device_id}"

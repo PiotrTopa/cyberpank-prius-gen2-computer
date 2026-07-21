@@ -100,12 +100,33 @@ the clocks.
 - opens `/dev/dri/card0`, becomes **DRM master**, and disables every active CRTC
   via `DRM_IOCTL_MODE_SETCRTC` (`fb_id=0`, no connectors). This powers down the
   DSI PHY/PLL and the panel bias regulators (`labibb`).
-- **holds** master and idles, so fbcon can't re-enable the pipe.
-- on `SIGTERM`/`SIGINT` it restores the saved CRTC mode and exits (and fbcon's
-  lastclose restore is a backstop), bringing the display back exactly as it was.
+- **unbinds the DRM fbcon vtconsole** so nothing can re-modeset the panel, and
+  **unbinds the `qcom-lab-ibb-regulator` driver** (see the IRQ-storm section
+  below).
+- **holds** master and idles. There is **no runtime restore**: on
+  `SIGTERM`/`SIGINT` it exits leaving the panel off — **reboot to get the
+  display back**.
 
 It's a self-contained Python script using raw DRM ioctls via `ctypes` — no
 `libdrm` and no compiler required.
+
+### LAB over-current IRQ storm / system-wide hang (root cause, 2026-07-11)
+
+With the panel unprepared, the pmi8998 **labibb** kernel driver leaves its
+*level-triggered* `lab-over-current` IRQ (IRQ 87, `pmic_arb`) enabled while the
+LAB regulator is **off**. The line never clears, so the IRQ **storms at
+~13 kHz** — observed 99M+ interrupts and 43 min of `irq/87-lab-over` thread CPU
+in 2 h, all on CPU0. The storm floods the SPMI/PMIC arbiter and can starve
+PMIC transactions system-wide; it caused a **6-hour hang** (2026-07-10 23:02 →
+04:51: journald/timesyncd/`sync` unkillable in D-state, `/dev/kmsg` overrun,
+47 service-restart timeouts) that needed a manual reboot.
+
+Verified live: stopping `prius-blankd` (panel re-prepared) stops the storm
+instantly; re-blanking restarts it; unbinding the labibb driver frees the IRQ
+for good. **Never rebind labibb at runtime** — the panel driver keeps stale
+regulator handles and the next panel prepare hard-hangs the kernel (reproduced;
+recovered only by the powerbox freeze-recovery long-press). Hence blanking is
+now a one-way trip per boot.
 
 **Measured saving (INA219, clean idle A/B):** blanking drops the total draw by
 **~0.19 W (−8.1%)** — from ~2.29 W to ~2.11 W resting — corroborated by
@@ -117,15 +138,16 @@ standalone:
 
 | Unit | Type | Purpose |
 |------|------|---------|
-| `prius-blank.service` | simple | runs `prius-blankd` (blank + hold master; restore on stop) |
+| `prius-blank.service` | simple | runs `prius-blankd` (blank + fbcon/labibb unbind + hold master; no runtime restore) |
 
 `prius-power` starts it in **both** profiles (`apply_low` and `apply_full` both
 run `systemctl start prius-blank`) — the DSI display/graphics output is never
 used on this box, so it stays blanked at all times for the ~0.19 W saving. This
 does **not** touch the Adreno GPU: blanking is a DRM modeset-off of the display
 controller only, so GPU compute (point clouds, radar, etc. via `/dev/dri/renderD128`)
-remains fully available. `display_on()` is retained as a manual override if the
-physical panel is ever needed for on-site debugging (`systemctl stop prius-blank`).
+remains fully available. To use the physical panel for on-site debugging,
+**reboot with `prius-blank` masked** — runtime restore was removed (it hangs
+the kernel, see the IRQ-storm section above).
 `prius-power status` prints `display : blanked|on`.
 
 ## Freeze recovery (hardware watchdog + powerbox escalation)
@@ -176,13 +198,24 @@ POCO side depends on:
 | Rail | Pin  | Drives | Default | Behaviour |
 |------|------|--------|---------|-----------|
 | OUT1 | GP29 | POCO + RP2040 + USB-hub 5 V (master) | **latched HIGH** | `computer_power = OUT1 OR ACC`. LOW = **suicide**. |
-| OUT2 | GP28 | RS485 satellite power | ON | Controllable while the Prius is off. |
+| OUT2 | GP28 | RS485 satellite power | ON | Backend-managed wake-lock rail (see below). |
 | OUT3 | GP27 | Spare | OFF | Unused. |
 | GP15 | —    | POCO power button (short-to-GND) | high-Z | LOW pulse = press (~3 s on, ~10 s force-reboot). |
 
 **Auto-start + latch.** The rail is OR-ed with ACC, so the RP2040 boots
 automatically when the ignition is ON. The firmware drives OUT1 HIGH immediately
 to *latch* the rail, holding power after ACC drops for a graceful shutdown.
+
+**OUT2 satellite rail (backend wake-locks).** The firmware boots OUT2 ON
+(fail-safe) but never manages it; policy lives in the backend
+(`state/rules/satellite_power.py` + `backend/satellites.py`). The rail is ON iff
+at least one named wake-lock is held: `acc` (ignition on → satellites always
+ready), `queue` (the satellite job queue has pending/running work — scheduled
+sensor reads, event commands, config pushes) or `manual:*` (API holds). A
+~10 s linger before the final OFF absorbs back-to-back jobs so the rail never
+flaps, and sustained 12 V under-voltage cancels queued key-off work outright.
+Jobs are serialized through one priority queue (FIFO within priority), which
+also matches the half-duplex RS485 bus. See `docs/VIRTUAL_TWIN_ARCHITECTURE.md`.
 
 **Suicide.** Driving OUT1 LOW removes the latch; once ACC is also gone the whole
 computer powers off, protecting the 12 V battery. This happens after a
@@ -221,22 +254,27 @@ OUT1 (12 V rail)  →  USB hub 5 V  →  VBUS  →  powerbox MCU
 
 Two consequences follow from this single chain:
 
-* **Cold reset via VBUS — per-port.** The hub is a genuine **D-Link DUB-H4
-  rev D1** (`2001:f103`), which does **true per-port power switching**
-  *(ASSUMED — ordered 2026-07-10, not yet bench-verified; on arrival confirm a
-  port-1 `cycle` resets powerbox `energy_mah` → ~0 while the gateway keeps
-  running)*. A per-port `prius-usb-power cycle` (≥ 4 s off to drain bulk
-  capacitance) is a full cold reset of just that board: RAM cleared,
-  `energy_mah` → ~0, `main.py` restarts. `prius-usb-power hubcycle` remains as
-  the big hammer that gang-cuts **every** port — use it if a single-port cut
-  ever fails to clear a hard-wedged RP2040 USB PHY (`error -71`,
-  connect-but-no-enable — seen on the gateway 2026-07-10).
-  *(History: the previous hub was a DUB-H4 rev F1 — Terminus FE1.1s silicon,
-  `1a40:0101`, genuinely ganged — where per-port off was a data-only
-  disconnect: VBUS stayed up, powerbox `energy_mah` kept counting through a
-  port-1 cycle, gateway uptime survived a port-2 off; only `hubcycle` truly
-  cut power. If per-port switching ever seems fake again, check which hub is
-  actually installed and which VID:PID it enumerates as.)*
+* **Cold reset via VBUS — one switchable socket only.** The replacement hub
+  (labeled **D-Link DUB-H4 rev D1**) is an **ActionStar `2101:8500`** inside
+  (5 internal ports + built-in HID `2101:8501`, which is just the LED
+  controller). That's the same silicon as the *unsupported* rev C1 (uhubctl
+  issue #88); the genuinely per-port DUB-H4 rev D enumerates as Genesys
+  `05E3:0608`. **Bench-tested 2026-07-21 (nokia1):** only the socket wired to
+  **internal port 5** has real switchable VBUS — every other socket keeps
+  power even with *all* ports commanded off (their 5 V is hardwired, no
+  FETs). Consequences:
+  - **Put the gateway on the port-5 socket** — it's the board whose USB PHY
+    hard-wedges (`error -71`, connect-but-no-enable) and needs a real VBUS
+    cut; a `prius-usb-power cycle` there is a true cold reset.
+  - The powerbox on any other socket gets **data-only** off/cycle; recover it
+    via DTR-pulse serial reset / `mpremote` / its firmware WDT, or ultimately
+    by dropping OUT1 (whole-computer power path).
+  - `hubcycle` (all-ports gang off) does **not** cut the non-switchable
+    sockets on this hub — it only worked on the old rev F1.
+  *(History: the previous hub was a DUB-H4 rev F1 — Terminus FE1.1s
+  `1a40:0101`, fully ganged — per-port off was data-only there too, but
+  `hubcycle` really gang-cut all VBUS. If hub hardware changes again, re-test
+  which sockets actually switch before trusting the docs.)*
 * **Self-latch / suicide.** OUT1 is driven by the powerbox MCU *and* gates the hub
   that powers it. On ACC the rail comes up via the `OUT1 OR ACC` term, the MCU
   boots and immediately drives OUT1 HIGH to **latch its own (and POCO's) power**,
