@@ -88,7 +88,7 @@ class BackendConfig:
     # ── USB serial auto-discovery / hotplug ─────────────────────────────────
     # The gateway and powerbox are both MicroPython boards and enumerate as
     # /dev/ttyACM* in arbitrary order. The devices live on dedicated, fixed USB
-    # hub ports (powerbox=port 1, gateway=port 2), so roles are resolved purely
+    # hub ports (powerbox=port 2, gateway=port 5), so roles are resolved purely
     # from the USB topology — NO probing. This is deterministic, survives
     # renumbering/replug, and crucially never opens/writes to the device the way
     # a "whoami" probe would (probing the MicroPython CDC link can corrupt it and
@@ -100,7 +100,7 @@ class BackendConfig:
     hotplug_interval: float = 2.0
     # Physical hub-port → role map (devices live on dedicated ports). Resolved
     # from USB topology, so it works even when a device is silent/wedged. Set to
-    # None to use discovery.DEFAULT_PORT_ROLES ({1: powerbox, 2: gateway}).
+    # None to use discovery.DEFAULT_PORT_ROLES ({2: powerbox, 5: gateway}).
     usb_port_roles: Optional[dict] = None  # None -> discovery.DEFAULT_PORT_ROLES
     usb_hub: Optional[str] = None          # restrict to a hub location e.g. "1-1"
     # Pure port-based discovery: never probe the device with "whoami". Probing
@@ -509,10 +509,15 @@ class BackendService:
             import subprocess
             state = "on" if action.on else "off"
             # Target the gateway board by its stable by-id path, OR its cached physical
-            # hub location (e.g. "1-1.4 2") if it's already been located. We must use
+            # hub location (e.g. "1-1 5") if it's already been located. We must use
             # the cached location when turning it ON because the by-id symlink does
-            # not exist when the port is powered off!
-            target = self._gwusb_loc if self._gwusb_loc else self._gateway_usb_target
+            # not exist when the port is powered off! Fall back to the static
+            # hub/port-role config if neither is available yet.
+            target = (
+                self._gwusb_loc
+                or self._gateway_static_loc()
+                or self._gateway_usb_target
+            )
             if not target:
                 logger.error("Cannot toggle gateway USB power: no gateway target resolved")
                 return
@@ -964,11 +969,33 @@ class BackendService:
                 SetGatewayUsbPowerAction(powered, source=ActionSource.INTERNAL)
             )
 
+    def _gateway_static_loc(self) -> Optional[str]:
+        """Derive the gateway's "HUB PORT" from static config, or None.
+
+        Uses the configured (or default) hub location and port-role map, so the
+        gateway port can be controlled even when its device node is gone (port
+        powered off, PHY wedged) and no cached location exists.
+        """
+        from ..io.discovery import DEFAULT_PORT_ROLES, ROLE_GATEWAY
+
+        cfg = self.config
+        hub = getattr(cfg, "usb_hub", None)
+        if not hub:
+            return None
+        roles = getattr(cfg, "usb_port_roles", None) or DEFAULT_PORT_ROLES
+        for port, role in roles.items():
+            if role == ROLE_GATEWAY:
+                return f"{hub} {port}"
+        return None
+
     def _read_gateway_usb_power(self) -> Optional[bool]:
         """Return True/False for the gateway hub-port power, or None if unknown.
 
         Resolves the gateway's "HUB PORT" via `prius-usb-power locate` (cached),
-        then reads `prius-usb-power status` and inspects the PORT_POWER bit
+        falling back to the static hub/port-role config when the device node is
+        absent (e.g. backend started while the gateway port was powered off —
+        without the fallback the port could never be turned back on). Then reads
+        `prius-usb-power status` and inspects the PORT_POWER bit
         (0x0100) of that port's status word. On this hub a cut port reads `0000`
         while a powered port reads `01xx`, so the power bit is authoritative.
         """
@@ -977,16 +1004,22 @@ class BackendService:
 
         # Resolve (and cache) the gateway's hub location + port number.
         if self._gwusb_loc is None:
+            out = ""
             try:
                 out = subprocess.run(
                     ["sudo", "prius-usb-power", "locate", self._gateway_usb_target],
                     capture_output=True, text=True, timeout=10,
                 ).stdout.strip()
             except Exception:
+                pass
+            if out and " " in out:
+                self._gwusb_loc = out
+            else:
+                # Device node absent (port powered off / PHY wedged): derive the
+                # location statically from the configured hub + port-role map.
+                self._gwusb_loc = self._gateway_static_loc()
+            if self._gwusb_loc is None:
                 return None
-            if not out or " " not in out:
-                return None
-            self._gwusb_loc = out
         hub, _, port = self._gwusb_loc.partition(" ")
         hub = hub.strip()
         port = port.strip()

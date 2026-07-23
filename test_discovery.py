@@ -179,10 +179,10 @@ def test_port_mapping():
     check("parse-nested", parse_hub_port("1-1.3.2") == ("1-1.3", 2))
     check("parse-roothub", parse_hub_port("1-1") == ("usb1", 1))
 
-    # Devices maintained on dedicated ports: powerbox=1, gateway=2.
+    # Devices maintained on dedicated ports: powerbox=2, gateway=5.
     topo = {
-        "/dev/serial/by-id/usb-MicroPython_Board_AAA-if00": ("1-1", 1),  # powerbox
-        "/dev/serial/by-id/usb-MicroPython_Board_BBB-if00": ("1-1", 2),  # gateway
+        "/dev/serial/by-id/usb-MicroPython_Board_AAA-if00": ("1-1", 2),  # powerbox
+        "/dev/serial/by-id/usb-MicroPython_Board_BBB-if00": ("1-1", 5),  # gateway
         "/dev/serial/by-id/usb-Other-if00": ("1-1", 3),                  # unmapped
     }
     resolver = lambda p: topo.get(p, (None, None))  # noqa: E731

@@ -367,12 +367,17 @@ Recovery / control is per **hub port** via [`uhubctl`](https://github.com/mvp/uh
 
 | Hub port (`1-1`) | Device | by-id |
 |------------------|--------|-------|
-| **port 1** | **powerbox** (12 V telemetry + ACC/ignition) | `usb-MicroPython_Board_in_FS_mode_503359277a7c699f-if00` |
-| **port 2** | **gateway** (CAN / AVC-LAN / RS485) | (attached on its own dedicated port) |
+| **port 1** | built-in HID LED controller (ActionStar 2101:8501, internal) | — |
+| **port 2** | **powerbox** (12 V telemetry + ACC/ignition) | `usb-MicroPython_Board_in_FS_mode_503359277a7c699f-if00` |
+| **port 5** | **gateway** (CAN / AVC-LAN / RS485) | `usb-MicroPython_Board_in_FS_mode_50443405b862d21c-if00` |
+
+Port 5's socket is the **only one with genuinely switchable VBUS** on this hub
+(ActionStar 2101:8500 "DUB-H4 rev D1"), so the gateway — whose USB PHY can
+hard-wedge with error -71 and needs real power cuts — lives there.
 
 The backend's USB discovery uses this topology as the **primary** strategy
 (`discover_roles_combined` → `discover_roles_by_port`, `DEFAULT_PORT_ROLES =
-{1: powerbox, 2: gateway}`): role is resolved purely from the physical port, so it
+{2: powerbox, 5: gateway}`): role is resolved purely from the physical port, so it
 binds the right board **even while it is silent/wedged** and is immune to ACM
 renumbering / replugging. `whoami` probing is only the fallback for unmapped ports.
 

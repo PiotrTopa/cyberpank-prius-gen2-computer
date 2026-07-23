@@ -51,10 +51,14 @@ DEFAULT_BAUDRATE = 1_000_000
 DEFAULT_PROBE_TIMEOUT = 3.0
 
 # Physical USB-hub-port → role map. The devices are maintained on dedicated hub
-# ports (powerbox on port 1, gateway on port 2), so role can be resolved purely
-# from the topology — no probing, and it works even when a device is wedged and
-# silent. This is the primary discovery strategy; whoami is the fallback.
-DEFAULT_PORT_ROLES: Dict[int, str] = {1: ROLE_POWERBOX, 2: ROLE_GATEWAY}
+# ports, so role can be resolved purely from the topology — no probing, and it
+# works even when a device is wedged and silent. This is the primary discovery
+# strategy; whoami is the fallback.
+# Current hub (ActionStar 2101:8500 "DUB-H4 rev D1", 5 internal ports; port 1 is
+# the built-in HID LED controller): powerbox on port 2, gateway on port 5 — the
+# ONLY socket with genuinely switchable VBUS, so the gateway (whose USB PHY can
+# hard-wedge with error -71) gets real power-cut recovery.
+DEFAULT_PORT_ROLES: Dict[int, str] = {2: ROLE_POWERBOX, 5: ROLE_GATEWAY}
 
 
 def parse_hub_port(usbdev: str):
@@ -62,8 +66,8 @@ def parse_hub_port(usbdev: str):
 
     Examples::
 
-        "1-1.1"   -> ("1-1", 1)       # powerbox: hub 1-1, port 1
-        "1-1.2"   -> ("1-1", 2)       # gateway:  hub 1-1, port 2
+        "1-1.2"   -> ("1-1", 2)       # powerbox: hub 1-1, port 2
+        "1-1.5"   -> ("1-1", 5)       # gateway:  hub 1-1, port 5
         "1-1.3.2" -> ("1-1.3", 2)     # nested hub
         "1-1"     -> ("usb1", 1)      # device directly on a root hub
     """

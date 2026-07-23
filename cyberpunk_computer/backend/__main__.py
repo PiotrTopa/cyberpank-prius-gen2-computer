@@ -128,7 +128,7 @@ def main() -> None:
     parser.add_argument(
         "--usb-port-roles",
         default=None,
-        help="comma-separated port:role mapping (e.g. 1:powerbox,2:gateway). Or use BACKEND_USB_PORT_ROLES.",
+        help="comma-separated port:role mapping (e.g. 2:powerbox,5:gateway). Or use BACKEND_USB_PORT_ROLES.",
     )
     parser.add_argument("--baudrate", type=int, default=1_000_000, help="serial baudrate")
     parser.add_argument("--api-host", default="0.0.0.0", help="API bind host")
