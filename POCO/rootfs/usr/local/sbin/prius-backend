@@ -41,7 +41,9 @@ BACKEND_RECORD_MAX_TOTAL_MB=512
 BACKEND_RECORD_MAX_AGE_DAYS=30
 
 # shellcheck disable=SC1090
-[ -f "$ENV_FILE" ] && . "$ENV_FILE"
+# set -a: exported so env-driven backend options (BACKEND_MFD_*, BACKEND_HUB,
+# BACKEND_USB_PORT_ROLES, ...) reach the Python process, not just this script.
+if [ -f "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi
 
 VENV="$BACKEND_REPO/.venv"
 PY="$VENV/bin/python"

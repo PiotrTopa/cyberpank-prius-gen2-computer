@@ -187,6 +187,14 @@ class BackendConfig:
     # can show/toggle it like the powerbox OUT rails. 0 disables the poll.
     gateway_usb_poll_s: float = 10.0
 
+    # ── MFD video board (Pi Zero 2W on the PPPS hub port) ────────────────────
+    # ACC-follower power manager for the VGA666 video board: port power on with
+    # ACC, grace period after key-off, clean SSH shutdown, then VBUS cut. All
+    # knobs live in backend.mfd_power.MfdPowerConfig and map to BACKEND_MFD_*
+    # env vars — see backend.__main__.
+    mfd_enabled: bool = False
+    mfd_config: Optional[object] = None    # MfdPowerConfig; None -> defaults
+
     # ── RS485 satellites (OUT2 rail power management + twin) ─────────────────
     # The satellite subsystem: OUT2 wake-lock power rule (rail on while ACC is
     # on or jobs are pending), the serialized job queue, periodic scheduler and
@@ -306,6 +314,9 @@ class BackendService:
         self._gwusb_last_poll: float = 0.0
         self._gwusb_loc: Optional[str] = None           # cached "HUB PORT" (e.g. "1-1.4 2")
 
+        # MFD video board power manager (backend.mfd_power).
+        self.mfd_power = None
+
     # ── composition ────────────────────────────────────────────────────────
 
     def build(self) -> None:
@@ -417,6 +428,28 @@ class BackendService:
         # Trip recording: tap ingress/egress and write rotating per-trip logs.
         if cfg.recording.enabled:
             self._wire_recording(twin)
+
+        # MFD video board (Pi Zero 2W): ACC-follower USB port power manager.
+        if cfg.mfd_enabled:
+            from .mfd_power import MfdPowerConfig, MfdPowerManager
+            from ..state.actions import SetMfdStatusAction
+
+            mfd_cfg = cfg.mfd_config or MfdPowerConfig()
+
+            def _publish_mfd(status: dict) -> None:
+                twin.store.dispatch(SetMfdStatusAction(
+                    state=status["state"],
+                    usb_power=status["usb_power"],
+                    reachable=status["reachable"],
+                ))
+
+            self.mfd_power = MfdPowerManager(mfd_cfg, publish=_publish_mfd)
+            logger.info(
+                "MFD power manager wired (hub=%s port=%s iface=%s board=%s "
+                "grace=%.0fs)",
+                mfd_cfg.hub, mfd_cfg.port, mfd_cfg.iface, mfd_cfg.board_ip,
+                mfd_cfg.grace_s,
+            )
 
         db = MetricsDatabase(cfg.db_path)
         sink = MetricsSink(
@@ -769,6 +802,7 @@ class BackendService:
                     self._powerbox_watchdog_tick()
                     self._gateway_watchdog_tick()
                     self._gateway_usb_power_tick()
+                    self._mfd_power_tick()
                     self._poco_power_tick()
                     self._chassis_fan_tick()
                     self._satellite_tick()
@@ -787,6 +821,16 @@ class BackendService:
     def stop(self) -> None:
         """Signal the engine loop to exit (safe to call from any thread)."""
         self._stop.set()
+
+    def _mfd_power_tick(self) -> None:
+        """Advance the MFD video-board power manager (ACC follower)."""
+        if self.mfd_power is None or self.twin is None:
+            return
+        acc = bool(self.twin.store.state.powerbox.acc_on)
+        try:
+            self.mfd_power.tick(acc)
+        except Exception:
+            logger.exception("MFD power tick failed")
 
     def _powerbox_heartbeat_tick(self) -> None:
         """Send the POCO->powerbox heartbeat (rolling counter) on cadence.

@@ -97,6 +97,7 @@ class ActionType(Enum):
     SET_AMBIENT_COLOR = auto()
     SET_POWER_CHART_TIME_BASE = auto()
     SET_GATEWAY_USB_POWER = auto()
+    SET_MFD_STATUS = auto()  # MFD video board power manager status (backend)
     
     # VFD Satellite actions (device 110)
     UPDATE_VFD_SATELLITE = auto()  # Update VFD computed state
@@ -1360,6 +1361,26 @@ class SetGatewayUsbPowerAction(Action):
     def __init__(self, on: bool, source: ActionSource = ActionSource.UI):
         super().__init__(ActionType.SET_GATEWAY_USB_POWER, source)
         self.on = on
+
+
+class SetMfdStatusAction(Action):
+    """Mirror the MFD video-board power manager status (backend.mfd_power).
+
+    ``state`` is the manager phase (off/booting/on/grace/shutting_down/...),
+    ``usb_power`` the last commanded hub-port power, ``reachable`` the ping
+    result. Observability only — the manager itself is the source of truth.
+    """
+    def __init__(
+        self,
+        state: str,
+        usb_power: "Optional[bool]" = None,
+        reachable: "Optional[bool]" = None,
+        source: ActionSource = ActionSource.INTERNAL,
+    ):
+        super().__init__(ActionType.SET_MFD_STATUS, source)
+        self.state = state
+        self.usb_power = usb_power
+        self.reachable = reachable
 
 
 class SetFanOverrideAction(Action):

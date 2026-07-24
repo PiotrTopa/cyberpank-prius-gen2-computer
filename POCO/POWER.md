@@ -365,21 +365,45 @@ Recovery / control is per **hub port** via [`uhubctl`](https://github.com/mvp/uh
 
 ### Port map (devices live on dedicated hub ports)
 
-| Hub port (`1-1`) | Device | by-id |
+| Hub port (`1-1`) | Device | by-id / address |
 |------------------|--------|-------|
 | **port 1** | built-in HID LED controller (ActionStar 2101:8501, internal) | — |
 | **port 2** | **powerbox** (12 V telemetry + ACC/ignition) | `usb-MicroPython_Board_in_FS_mode_503359277a7c699f-if00` |
-| **port 5** | **gateway** (CAN / AVC-LAN / RS485) | `usb-MicroPython_Board_in_FS_mode_50443405b862d21c-if00` |
+| **port 3** | **gateway** (CAN / AVC-LAN / RS485) | `usb-MicroPython_Board_in_FS_mode_50443405b862d21c-if00` |
+| **port 4** | Garmin GPS (mass storage) | — |
+| **port 5** | **MFD video board** (Pi Zero 2W, VGA666, USB-eth gadget) | `usb0` → 192.168.100.2 |
 
-Port 5's socket is the **only one with genuinely switchable VBUS** on this hub
-(ActionStar 2101:8500 "DUB-H4 rev D1"), so the gateway — whose USB PHY can
-hard-wedge with error -71 and needs real power cuts — lives there.
+Port 5's socket is the **only one with genuinely switchable VBUS (PPPS)** on
+this hub (ActionStar 2101:8500 "DUB-H4 rev D1"), so the MFD video board — an
+SD-card Linux system that must be power-managed cleanly with ACC — lives
+there. The gateway sits on a non-switching socket until the fully-PPPS
+replacement hub arrives: `prius-usb-power` commands against it are a harmless
+data-only noop, and all the proven gateway power-control code stays in place —
+**changing ports back is only a `BACKEND_USB_PORT_ROLES` /
+`BACKEND_MFD_PORT` edit in `/etc/prius/backend.env` + service restart.**
 
 The backend's USB discovery uses this topology as the **primary** strategy
 (`discover_roles_combined` → `discover_roles_by_port`, `DEFAULT_PORT_ROLES =
-{2: powerbox, 5: gateway}`): role is resolved purely from the physical port, so it
+{2: powerbox, 3: gateway}`): role is resolved purely from the physical port, so it
 binds the right board **even while it is silent/wedged** and is immune to ACM
 renumbering / replugging. `whoami` probing is only the fallback for unmapped ports.
+
+### MFD video board power management (`backend/mfd_power.py`)
+
+The Pi Zero 2W enumerates as a `cdc_ether` USB gadget (`usb0`); the host-side
+IP (192.168.100.1/24) must be re-applied after **every** enumeration. The
+backend's `MfdPowerManager` is an ACC follower:
+
+    OFF ──ACC on──▶ BOOTING ──iface+ping──▶ ON ──ACC off──▶ GRACE (10 min)
+     ▲                                       ▲                │
+     │                                       └────ACC on──────┘
+     └── VBUS cut ◀── POWERING_OFF ◀── SHUTTING_DOWN (ssh `sudo poweroff`) ◀──┘
+
+Configured entirely via `BACKEND_MFD_*` env vars in `/etc/prius/backend.env`
+(`ENABLED`, `HUB`, `PORT`, `IFACE`, `HOST_CIDR`, `IP`, `SSH_USER`, `GRACE_S`,
+`BOOT_TIMEOUT_S`, `SHUTDOWN_WAIT_S`). Clean shutdown uses root's SSH key
+(`/root/.ssh/id_ed25519`, authorized on the Pi as `piotr`). Status is mirrored
+into `connection.mfd_state` / `mfd_usb_power` / `mfd_reachable`.
 
 ### Hardware quirk: the hub reports "ganged"
 

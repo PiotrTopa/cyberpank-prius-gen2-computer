@@ -327,6 +327,11 @@ class ConnectionState:
     # None until first read; True = port powered, False = port cut.
     gateway_usb_power: Optional[bool] = None
     gateway_usb_power_desired: Optional[bool] = None
+    # MFD video board (Pi Zero 2W USB-ethernet gadget) power manager mirror
+    # (backend.mfd_power): manager phase, commanded hub-port power, ping result.
+    mfd_state: str = ""
+    mfd_usb_power: Optional[bool] = None
+    mfd_reachable: Optional[bool] = None
 
 
 

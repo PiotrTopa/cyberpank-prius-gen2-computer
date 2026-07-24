@@ -55,10 +55,11 @@ DEFAULT_PROBE_TIMEOUT = 3.0
 # works even when a device is wedged and silent. This is the primary discovery
 # strategy; whoami is the fallback.
 # Current hub (ActionStar 2101:8500 "DUB-H4 rev D1", 5 internal ports; port 1 is
-# the built-in HID LED controller): powerbox on port 2, gateway on port 5 — the
-# ONLY socket with genuinely switchable VBUS, so the gateway (whose USB PHY can
-# hard-wedge with error -71) gets real power-cut recovery.
-DEFAULT_PORT_ROLES: Dict[int, str] = {2: ROLE_POWERBOX, 5: ROLE_GATEWAY}
+# the built-in HID LED controller): powerbox on port 2, gateway on port 3, MFD
+# video board (Pi Zero 2W, non-serial) on port 5 — the ONLY socket with real
+# switchable VBUS (PPPS), which the MFD board needs for clean power management.
+# Override via BACKEND_USB_PORT_ROLES when ports move (e.g. new fully-PPPS hub).
+DEFAULT_PORT_ROLES: Dict[int, str] = {2: ROLE_POWERBOX, 3: ROLE_GATEWAY}
 
 
 def parse_hub_port(usbdev: str):
@@ -67,7 +68,7 @@ def parse_hub_port(usbdev: str):
     Examples::
 
         "1-1.2"   -> ("1-1", 2)       # powerbox: hub 1-1, port 2
-        "1-1.5"   -> ("1-1", 5)       # gateway:  hub 1-1, port 5
+        "1-1.3"   -> ("1-1", 3)       # gateway:  hub 1-1, port 3
         "1-1.3.2" -> ("1-1.3", 2)     # nested hub
         "1-1"     -> ("usb1", 1)      # device directly on a root hub
     """

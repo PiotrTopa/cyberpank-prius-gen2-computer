@@ -695,6 +695,19 @@ class Store:
             )
             affected.add(StateSlice.CONNECTION)
 
+        elif action.type == ActionType.SET_MFD_STATUS:
+            a = action  # type: SetMfdStatusAction
+            self._state = replace(
+                self._state,
+                connection=replace(
+                    self._state.connection,
+                    mfd_state=a.state,
+                    mfd_usb_power=a.usb_power,
+                    mfd_reachable=a.reachable,
+                ),
+            )
+            affected.add(StateSlice.CONNECTION)
+
         
         # AVC Input reducers (buttons and touch)
         elif action.type == ActionType.AVC_BUTTON_PRESS:

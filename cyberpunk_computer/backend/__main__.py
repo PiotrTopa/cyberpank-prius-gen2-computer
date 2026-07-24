@@ -29,6 +29,43 @@ def parse_port_roles(roles_str: str | None) -> dict[int, str] | None:
     return roles
 
 
+def _build_mfd():
+    """MFD video-board power manager config from BACKEND_MFD_* env vars.
+
+    Returns ``(enabled, MfdPowerConfig | None)``. Everything is env-driven so
+    moving the board to another hub port / address is a config-file edit:
+
+        BACKEND_MFD_ENABLED=1
+        BACKEND_MFD_HUB=1-1               # uhubctl hub location
+        BACKEND_MFD_PORT=5                # PPPS (switchable VBUS) port
+        BACKEND_MFD_IFACE=usb0            # gadget netdev on the host
+        BACKEND_MFD_HOST_CIDR=192.168.100.1/24
+        BACKEND_MFD_IP=192.168.100.2      # the Pi's static IP
+        BACKEND_MFD_SSH_USER=piotr
+        BACKEND_MFD_GRACE_S=600           # key-off grace before shutdown
+        BACKEND_MFD_BOOT_TIMEOUT_S=180
+        BACKEND_MFD_SHUTDOWN_WAIT_S=45
+    """
+    enabled = os.environ.get("BACKEND_MFD_ENABLED", "0").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    if not enabled:
+        return False, None
+    from .mfd_power import MfdPowerConfig
+    env = os.environ.get
+    return True, MfdPowerConfig(
+        hub=env("BACKEND_MFD_HUB", "1-1"),
+        port=int(env("BACKEND_MFD_PORT", "5")),
+        iface=env("BACKEND_MFD_IFACE", "usb0"),
+        host_cidr=env("BACKEND_MFD_HOST_CIDR", "192.168.100.1/24"),
+        board_ip=env("BACKEND_MFD_IP", "192.168.100.2"),
+        ssh_user=env("BACKEND_MFD_SSH_USER", "piotr"),
+        grace_s=float(env("BACKEND_MFD_GRACE_S", "600")),
+        boot_timeout_s=float(env("BACKEND_MFD_BOOT_TIMEOUT_S", "180")),
+        shutdown_wait_s=float(env("BACKEND_MFD_SHUTDOWN_WAIT_S", "45")),
+    )
+
+
 def _build_recording(args: argparse.Namespace) -> RecordingConfig:
     include = {tok.strip().lower() for tok in (args.record_include or "").split(",") if tok.strip()}
     if not include or "all" in include:
@@ -63,6 +100,7 @@ def _build_recording(args: argparse.Namespace) -> RecordingConfig:
 
 
 def _build_config(args: argparse.Namespace) -> BackendConfig:
+    mfd_enabled, mfd_config = _build_mfd()
     return BackendConfig(
         gateway_port=args.gateway_port,
         powerbox_port=args.powerbox_port,
@@ -96,6 +134,8 @@ def _build_config(args: argparse.Namespace) -> BackendConfig:
         fan_safety_temp=args.fan_safety_temp,
         fan_ema_alpha_up=args.fan_ema_alpha_up,
         fan_ema_alpha_down=args.fan_ema_alpha_down,
+        mfd_enabled=mfd_enabled,
+        mfd_config=mfd_config,
         verbose=args.verbose,
     )
 
@@ -128,7 +168,7 @@ def main() -> None:
     parser.add_argument(
         "--usb-port-roles",
         default=None,
-        help="comma-separated port:role mapping (e.g. 2:powerbox,5:gateway). Or use BACKEND_USB_PORT_ROLES.",
+        help="comma-separated port:role mapping (e.g. 2:powerbox,3:gateway). Or use BACKEND_USB_PORT_ROLES.",
     )
     parser.add_argument("--baudrate", type=int, default=1_000_000, help="serial baudrate")
     parser.add_argument("--api-host", default="0.0.0.0", help="API bind host")
