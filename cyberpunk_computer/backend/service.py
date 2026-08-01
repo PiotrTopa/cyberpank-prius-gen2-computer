@@ -616,9 +616,14 @@ class BackendService:
                         store.dispatch(SetGatewayUsbPowerAction(
                             action.on, source=ActionSource.UI))
                     elif pp is not None and ch == pp.mfd.relay_ch:
-                        logger.warning(
-                            "Ignoring manual relay toggle for MFD port (ch%d) — "
-                            "owned by the MFD power manager", ch)
+                        if self.mfd_power is not None:
+                            logger.warning(
+                                "Ignoring manual relay toggle for MFD port (ch%d) — "
+                                "owned by the MFD power manager", ch)
+                        else:
+                            # MFD manager disabled (e.g. bench work): manual
+                            # control with full sequencing + enforcement.
+                            pp.mfd.set(action.on)
                     else:
                         self.powerbox_commander.set_relay(ch, action.on)
                 elif type(action).__name__ == "SetReadyModeAction":
