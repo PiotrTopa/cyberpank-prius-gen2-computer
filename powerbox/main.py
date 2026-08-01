@@ -21,6 +21,7 @@ Inbound commands from the computer (device 0):
     {"id": 0, "d": {"a": "ping"}}    → {"msg":"PONG"}
     {"id": 0, "d": {"a": "hb", "n": 0-255}}   POCO heartbeat (rolling counter)
     {"id": 0, "d": {"a": "out", "ch": 2|3, "on": true|false}}  set OUT2/OUT3
+    {"id": 0, "d": {"a": "relay", "ch": 1-4, "on": true|false}}  USB-port relay
     {"id": 0, "d": {"a": "button", "ms": 3000}}   pulse the POCO power button
 
 The "whoami" identify reply lets the backend tell the powerbox apart from the
@@ -46,6 +47,15 @@ Hardware (RP2040 / Raspberry Pi Pico pinout):
              button (which triggers by shorting to GND). Drive LOW to "press";
              must be high-impedance (Pin.IN) at ALL other times. A ~3s press
              powers the POCO ON; a ~10s press forces a hard reboot.
+    I2C      PCF8574 GPIO expander (0x20-0x27 / 0x39-0x3F) driving a 4-relay
+             board that switches VBUS of USB-hub sockets 2-4 (socket 1 has
+             native per-port power switching instead). Relay inputs are
+             ACTIVE-LOW (pin LOW = relay energised; verified on-car
+             2026-08-01 by coil LED) with NO contacts (energised = port
+             powered). The expander keeps its output latch across MCU warm
+             reboots; on a true cold power-up it comes up 0xFF = all HIGH =
+             all coils released = ALL SWITCHED PORTS OFF (energy-optimal on
+             battery; the backend deliberately powers ports as needed).
 
 A bidirectional rolling-counter heartbeat (this board's STATUS "hb" out, the
 POCO's "hb" in) lets each side detect if the other died: if the POCO stops
@@ -64,7 +74,7 @@ from ina219 import INA219
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-VERSION = "1.6.0"
+VERSION = "1.9.0"
 
 # Device role — reported in the unified identify ("whoami") response and the
 # ready banner so the computer can discover which USB-CDC port is the powerbox
@@ -126,6 +136,22 @@ OUT2_PIN = 28
 OUT3_PIN = 27
 OUT2_BOOT_ON = True    # satellites powered at boot
 OUT3_BOOT_ON = True    # spare on
+
+# USB-port relays — a 4-relay board on a PCF8574 I2C expander switches VBUS of
+# the USB hub sockets that have no native per-port power switching. Relay
+# channel → PCF8574 pin. The relay board is ACTIVE-LOW with NO contacts:
+# driving the pin LOW energises the relay, which closes the contact and powers
+# the port. PCF8574 cold power-up state is 0xFF (all HIGH = all coils
+# released), so every switched port comes up OFF until deliberately enabled.
+# Empirical channel → socket map (on-car bring-up 2026-08-01):
+#   ch4 -> GATEWAY  (physical hub socket 2, internal port 1-1.2)
+#   ch3 -> MFD PI   (physical hub socket 3, internal port 1-1.3)
+#   ch2 -> RTL-SDR  (physical hub socket 4, internal port 1-1.4)
+#   ch1 -> spare / not wired to a socket
+RELAY_PIN_MAP = {1: 3, 2: 2, 3: 1, 4: 0}
+RELAY_CH_GATEWAY = 4
+RELAY_CH_MFD = 3
+RELAY_CH_SDR = 2
 
 # POCO power button — GP15 is soldered directly across the POCO's power button,
 # which triggers by being shorted to ground. We "press" it by driving GP15 LOW;
@@ -355,6 +381,9 @@ class PowerManager:
         self.out1 = out1
         self.out2 = out2
         self.out3 = out3
+        # PCF8574 relay expander (USB-port VBUS relays); attached after I2C
+        # setup, stays None when the expander is absent.
+        self.pcf = None
         self.state = "normal"
         now = time.ticks_ms()
         self.boot_ms = now
@@ -402,6 +431,35 @@ class PowerManager:
         elif ch == 3:
             self.out3.value(1 if on else 0)
 
+    def set_relay(self, ch, on) -> bool:
+        """Set USB-port relay ``ch`` (1-4). Returns False when unavailable.
+
+        Relays are ACTIVE-LOW with NO contacts: on => pin LOW => coil
+        energised => port powered. State is latched inside the PCF8574, so it
+        survives MCU warm reboots without re-commanding.
+        """
+        if self.pcf is None:
+            tx_error("RELAY", "no PCF8574 expander")
+            return False
+        pin = RELAY_PIN_MAP.get(ch)
+        if pin is None:
+            tx_error("RELAY", "bad channel %s" % ch)
+            return False
+        try:
+            self.pcf.pin(pin, 0 if on else 1)
+            return True
+        except Exception as e:
+            tx_error("RELAY_IO", str(e))
+            return False
+
+    def relay_states(self):
+        """Current relay states as [ch1, ch2, ch3, ch4] of 0/1 (1 = port
+        powered), read from the PCF8574 output latch. None without expander."""
+        if self.pcf is None:
+            return None
+        port = self.pcf.port()
+        return [0 if (port >> RELAY_PIN_MAP[ch]) & 1 else 1 for ch in (1, 2, 3, 4)]
+
     def request_button(self, ms):
         """Queue a power-button press (executed on the next tick)."""
         try:
@@ -440,7 +498,7 @@ class PowerManager:
         self.state = "dead"
 
     def _tx_status(self, now):
-        tx(ID_SYSTEM, {
+        payload = {
             "msg": "STATUS",
             "hb": self.hb_tx,
             "out1": self.out1.value(),
@@ -448,7 +506,11 @@ class PowerManager:
             "out3": self.out3.value(),
             "poco": 1 if self.poco_alive(now) else 0,
             "pm": self.state,
-        })
+        }
+        rly = self.relay_states()
+        if rly is not None:
+            payload["rly"] = rly
+        tx(ID_SYSTEM, payload)
         self.hb_tx = (self.hb_tx + 1) & 0xFF
 
     def tick(self, voltage):
@@ -595,6 +657,14 @@ def process_command(line: str, config: Config):
         except Exception:
             pass
 
+    elif action == "relay":
+        # Set a USB-port VBUS relay (ch 1-4 via the PCF8574 expander).
+        if _pm is not None:
+            ch = data.get("ch")
+            on = _truthy(data.get("on"))
+            if _pm.set_relay(ch, on):
+                tx_ack("relay_%s_%s" % (ch, "on" if on else "off"))
+
 
 def poll_stdin(config: Config):
     """Non-blocking read of any complete NDJSON lines from USB-CDC stdin."""
@@ -727,6 +797,26 @@ def main():
             tx(ID_SYSTEM, {"msg": "SENSOR_OK", "chip": "AHT20", "addr": "0x38"})
         except Exception as e:
             tx_error("AHT20_INIT", str(e))
+
+    # PCF8574 relay expander (USB-port VBUS relays). 0x20-0x27 is the plain
+    # PCF8574, 0x39-0x3F the PCF8574A (0x38 excluded — that's the AHT20).
+    pcf_addr = None
+    for d in devices:
+        if 0x20 <= d <= 0x27 or (0x39 <= d <= 0x3F):
+            pcf_addr = d
+            break
+    if pcf_addr is not None:
+        try:
+            import pcf8574
+            # The constructor reads the current output latch, so relay state is
+            # RETAINED across MCU warm reboots (no glitch on reflash/reset). On
+            # a true cold power-up the PCF8574 wakes at 0xFF = all coils
+            # released = all switched ports OFF; the backend deliberately
+            # powers ports (gateway with ACC, etc.) as needed.
+            _pm.pcf = pcf8574.PCF8574(i2c, address=pcf_addr)
+            tx(ID_SYSTEM, {"msg": "SENSOR_OK", "chip": "PCF8574", "addr": hex(pcf_addr)})
+        except Exception as e:
+            tx_error("PCF8574_INIT", str(e))
 
     # Telemetry loop
     config = Config()
