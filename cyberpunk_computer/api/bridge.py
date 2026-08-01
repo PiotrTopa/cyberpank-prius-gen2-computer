@@ -66,6 +66,16 @@ class StoreBridge:
                 # Loop is shutting down; drop the snapshot.
                 pass
 
+    def push_event(self, name: str, data: dict = None) -> None:
+        """Broadcast a discrete event to all connected clients. Thread-safe."""
+        envelope = {"type": "event", "ts": time.time(), "name": name, "data": data or {}}
+        loop = self._loop
+        if loop is not None:
+            try:
+                loop.call_soon_threadsafe(self._fanout, envelope)
+            except RuntimeError:
+                pass
+
     def drain_commands(self) -> int:
         """Dispatch all queued commands on the engine thread. Returns count."""
         count = 0

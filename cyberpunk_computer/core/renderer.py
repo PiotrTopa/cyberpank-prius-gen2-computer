@@ -51,7 +51,13 @@ class Renderer:
                 # Try normal SDL initialization
                 flags = pygame.FULLSCREEN if config.fullscreen else 0
                 self.window = pygame.display.set_mode(config.window_size, flags)
-                logger.info(f"Using SDL video driver: {pygame.display.get_driver()}")
+                
+                # In Pygame 2 / SDL 2, missing display might silently use 'offscreen'
+                if pygame.display.get_driver() == 'offscreen':
+                    logger.info("SDL silently fell back to 'offscreen' driver; enabling direct framebuffer output")
+                    self._setup_direct_framebuffer()
+                else:
+                    logger.info(f"Using SDL video driver: {pygame.display.get_driver()}")
         except pygame.error as e:
             # SDL video failed, fall back to dummy + direct FB
             logger.warning(f"SDL video initialization failed: {e}")

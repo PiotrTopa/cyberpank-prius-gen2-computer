@@ -232,11 +232,13 @@ class RemoteTwin:
         token: Optional[str] = None,
         poll_interval: float = 1.0,
     ) -> None:
+        self._event_callbacks: list = []
         self._client = BackendClient(
             host=host,
             port=port,
             token=token,
             on_state=self._on_state,
+            on_event=self._on_event,
             poll_interval=poll_interval,
         )
         self.store = RemoteStore(self._client)
@@ -246,6 +248,18 @@ class RemoteTwin:
     def _on_state(self, state_dict: dict) -> None:
         # Runs on the client thread: just enqueue; applied in update().
         self.store.enqueue_snapshot(state_dict)
+
+    def _on_event(self, name: str, data: dict) -> None:
+        """Called from the client thread on event envelopes."""
+        for cb in self._event_callbacks:
+            try:
+                cb(name, data)
+            except Exception:
+                logging.getLogger(__name__).exception("Event callback error")
+
+    def add_event_callback(self, callback) -> None:
+        """Register a callback for backend events: callback(name: str, data: dict)."""
+        self._event_callbacks.append(callback)
 
     def start(self) -> bool:
         self._client.start()
@@ -261,3 +275,4 @@ class RemoteTwin:
     @property
     def connected(self) -> bool:
         return self._client.connected
+
