@@ -52,7 +52,12 @@ def main() -> int:
         description="Remote pygame frontend for the CyberPunk Prius backend.",
     )
     parser.add_argument("--host", required=True, help="backend host (IP or name)")
-    parser.add_argument("--port", type=int, default=8080, help="backend API port")
+    parser.add_argument("--port", type=int, default=8080,
+                        help="backend HTTP API port (dashboard/REST; kept for reference)")
+    parser.add_argument("--pub-port", type=int, default=8081,
+                        help="backend ZMQ PUB port (state + events)")
+    parser.add_argument("--rep-port", type=int, default=8082,
+                        help="backend ZMQ REP port (commands)")
     parser.add_argument(
         "--token",
         default=None,
@@ -88,7 +93,8 @@ def main() -> int:
 
     twin = RemoteTwin(
         host=args.host,
-        port=args.port,
+        pub_port=args.pub_port,
+        rep_port=args.rep_port,
         token=args.token or os.environ.get("BACKEND_AUTH_TOKEN"),
         poll_interval=args.poll_interval,
     )
@@ -96,10 +102,39 @@ def main() -> int:
     app = Application(config)
 
     logger.info("CyberPunk Prius Gen 2 - MFD Frontend starting...")
-    logger.info("Backend: ws://%s:%d/api/v1/stream", args.host, args.port)
-    logger.info("Mode: %s, scale=%d, fullscreen=%s", "PRODUCTION" if args.production else "DEV", config.scale_factor, config.fullscreen)
+    logger.info("Backend: zmq SUB tcp://%s:%d, REQ tcp://%s:%d",
+                args.host, args.pub_port, args.host, args.rep_port)
+    logger.info("Mode: %s, scale=%d, fullscreen=%s, SDL_VIDEODRIVER=%s",
+                "PRODUCTION" if args.production else "DEV",
+                config.scale_factor, config.fullscreen,
+                os.environ.get("SDL_VIDEODRIVER", "(default)"))
 
     app.set_virtual_twin(twin)
+
+    # Headless proof-of-life heartbeat: with no display attached, this is the
+    # evidence the frontend fully works — render loop FPS + frames, link
+    # liveness, state frames applied, commands/events counted. INFO every 30 s.
+    import threading
+    import time as _time
+
+    def _stats_heartbeat() -> None:
+        last_frames = 0
+        while True:
+            _time.sleep(30)
+            try:
+                frames = getattr(app, "frame_count", 0)
+                fps = app.clock.get_fps() if getattr(app, "clock", None) else 0.0
+                logger.info(
+                    "FRONTEND ALIVE: frames=%d (+%d/30s, %.1f fps) link=%s %s",
+                    frames, frames - last_frames, fps,
+                    "UP" if twin.connected else "DOWN", twin.stats(),
+                )
+                last_frames = frames
+            except Exception:
+                logger.exception("stats heartbeat failed")
+
+    threading.Thread(target=_stats_heartbeat, name="stats-heartbeat",
+                     daemon=True).start()
 
     try:
         app.run()

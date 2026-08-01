@@ -113,6 +113,7 @@ class ActionType(Enum):
     SET_POCO_TELEMETRY = auto() # OUT1/2/3 + POCO heartbeat (powerbox STATUS)
     SET_OUT = auto()
     SET_RELAY = auto()                # USB-port VBUS relay (PCF8574 ch 1-4)
+    INPUT_EVENT = auto()              # human-interface event (frontend/satellite HID)
     SET_FAN_OVERRIDE = auto()   # manual chassis-fan override (None = auto)
 
     # RS485 satellite power management + twin (devices 100+)
@@ -1371,6 +1372,24 @@ class SetRelayAction(Action):
         super().__init__(ActionType.SET_RELAY, source)
         self.channel = channel
         self.on = on
+
+
+class InputEventAction(Action):
+    """A discrete human-interface event from any surface (MFD frontend
+    touch/keys, steering-wheel buttons via AVC, or a future force-feedback
+    satellite's controls).
+
+    Not reduced into state — it flows through middleware/rules: the backend
+    re-broadcasts it as an ``input`` event to every connected client (websocket
+    + ZMQ) and rules can react (e.g. enqueue a haptic-feedback command to a
+    satellite via EnqueueSatelliteCommandAction).
+    """
+    def __init__(self, device: str, event: str, value=None,
+                 source: ActionSource = ActionSource.UI):
+        super().__init__(ActionType.INPUT_EVENT, source)
+        self.device = device
+        self.event = event
+        self.value = value
 
 
 class SetGatewayUsbPowerAction(Action):

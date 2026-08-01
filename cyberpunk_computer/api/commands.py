@@ -180,6 +180,15 @@ def _build_set_relay(params: Dict[str, Any]) -> Action:
     return SetRelayAction(ch, on, source=ActionSource.UI)
 
 
+def _build_input_event(params: Dict[str, Any]) -> Action:
+    from ..state.actions import InputEventAction
+    device = str(_require(params, "device")).strip()
+    event = str(_require(params, "event")).strip()
+    if not device or len(device) > 64 or not event or len(event) > 64:
+        raise CommandError("'device' and 'event' must be short non-empty strings")
+    return InputEventAction(device, event, params.get("value"), source=ActionSource.UI)
+
+
 def _build_set_fan(params: Dict[str, Any]) -> Action:
     from ..state.actions import SetFanOverrideAction
     pct = _as_float(_require(params, "pct"), "pct", 0.0, 100.0)
@@ -260,6 +269,15 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
         "builder": _build_set_out,
         "description": "Set powerbox OUT2 or OUT3.",
         "params": {"channel": "int 2..3", "on": "bool"},
+    },
+    "input_event": {
+        "builder": _build_input_event,
+        "description": (
+            "Report a human-interface event (frontend touch/keys, satellite "
+            "controls). Re-broadcast to all clients as an 'input' event; rules "
+            "can react (e.g. force-feedback via satellite_send)."
+        ),
+        "params": {"device": "string", "event": "string", "value": "any (optional)"},
     },
     "set_relay": {
         "builder": _build_set_relay,

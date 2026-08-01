@@ -228,14 +228,17 @@ class RemoteTwin:
     def __init__(
         self,
         host: str,
-        port: int = 8080,
+        pub_port: int = 8081,
+        rep_port: int = 8082,
         token: Optional[str] = None,
         poll_interval: float = 1.0,
     ) -> None:
         self._event_callbacks: list = []
+        self._snapshots_applied = 0
         self._client = BackendClient(
             host=host,
-            port=port,
+            pub_port=pub_port,
+            rep_port=rep_port,
             token=token,
             on_state=self._on_state,
             on_event=self._on_event,
@@ -270,7 +273,21 @@ class RemoteTwin:
         self._client.stop()
 
     def update(self) -> int:
-        return self.store.apply_pending()
+        applied = self.store.apply_pending()
+        self._snapshots_applied += applied
+        return applied
+
+    def send_input_event(self, device: str, event: str, value=None) -> bool:
+        """Report a human-interface event to the backend (``input_event``
+        command). The backend re-broadcasts it as an ``input`` event to every
+        client and rules/middleware can react (e.g. drive a force-feedback
+        satellite via the satellite command queue)."""
+        return self._client.send_command(
+            "input_event", {"device": device, "event": event, "value": value})
+
+    def stats(self) -> dict:
+        """Proof-of-life counters for headless logging."""
+        return {**self._client.stats(), "snapshots_applied": self._snapshots_applied}
 
     @property
     def connected(self) -> bool:

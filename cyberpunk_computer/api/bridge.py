@@ -46,6 +46,14 @@ class StoreBridge:
         self._latest: Optional[Dict[str, Any]] = None
         self._latest_ts: float = 0.0
         self._throttle_s: float = 1.0
+        # Extra transports (e.g. ZmqServer) that want every event envelope.
+        # Sinks are called synchronously from push_event's calling thread and
+        # must be thread-safe + non-blocking (ZmqServer.enqueue_event is both).
+        self._event_sinks: list = []
+
+    def add_event_sink(self, sink) -> None:
+        """Register ``sink(envelope: dict)`` to receive every event envelope."""
+        self._event_sinks.append(sink)
 
     # ── engine (main) thread side ────────────────────────────────────────────
 
@@ -67,8 +75,14 @@ class StoreBridge:
                 pass
 
     def push_event(self, name: str, data: dict = None) -> None:
-        """Broadcast a discrete event to all connected clients. Thread-safe."""
+        """Broadcast a discrete event to all connected clients (websocket +
+        registered sinks such as the ZMQ publisher). Thread-safe."""
         envelope = {"type": "event", "ts": time.time(), "name": name, "data": data or {}}
+        for sink in self._event_sinks:
+            try:
+                sink(envelope)
+            except Exception:
+                logger.exception("Event sink failed for %s", name)
         loop = self._loop
         if loop is not None:
             try:

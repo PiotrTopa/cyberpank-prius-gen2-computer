@@ -480,17 +480,34 @@ class BackendService:
             pub_port=8081,
             rep_port=8082,
         )
-        
-        # Subscribe ZMQ server to state updates as well
+
+        # State: subscribe the ZMQ publisher to store updates (the server
+        # rate-limits internally). Events: every bridge.push_event envelope is
+        # mirrored onto the ZMQ PUB channel via the event sink.
         def _zmq_on_state(state):
-            now = time.time()
-            if now - zmq_srv._last_state_ts >= 1.0:
-                from ..api.serialization import serialize_state
-                envelope = {"type": "state", "ts": now, "state": serialize_state(state)}
-                zmq_srv.enqueue_state(envelope)
-                zmq_srv._last_state_ts = now
-                
+            from ..api.serialization import serialize_state
+            zmq_srv.enqueue_state(
+                {"type": "state", "ts": time.time(), "state": serialize_state(state)}
+            )
+
         self._unsubscribe_zmq = twin.store.subscribe(StateSlice.ALL, _zmq_on_state)
+        bridge.add_event_sink(zmq_srv.enqueue_event)
+
+        # Human-interface events (frontend touch/keys, satellite controls):
+        # re-broadcast every InputEventAction as an "input" event to all
+        # connected clients (websocket + ZMQ). Rules/middleware may also react
+        # to the action itself (e.g. haptic feedback via the satellite queue).
+        def _input_event_middleware(action, _store) -> None:
+            if type(action).__name__ == "InputEventAction":
+                logger.info("Input event: device=%s event=%s value=%r",
+                            action.device, action.event, action.value)
+                bridge.push_event("input", {
+                    "device": action.device,
+                    "event": action.event,
+                    "value": action.value,
+                })
+
+        twin.store.add_middleware(_input_event_middleware)
 
 
         self.twin = twin
