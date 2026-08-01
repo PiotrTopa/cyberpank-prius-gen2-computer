@@ -1,0 +1,36 @@
+#!/bin/sh
+# prius-deploy-mfd — push the MFD frontend code from the POCO to the Pi over
+# the USB gadget network (usb0, 192.168.100.2) and restart mfd.service.
+#
+# The POCO's ~/cyberpunk_computer/cyberpunk_computer/ is the staging copy
+# (rsynced there from the workstation over the VPN); the Pi runs the same
+# package via `python -m cyberpunk_computer.frontend` (unit: mfd.service,
+# venv: ~/cyberpunk_computer/.venv — remember new deps go into THAT venv).
+#
+# Run as root (root holds the key authorized on the Pi):
+#   sudo prius-deploy-mfd            # sync + restart
+#   sudo prius-deploy-mfd --dry-run  # show what would change
+#
+# Requires the Pi to be powered (MFD manager, or manual `set_relay ch3 on`
+# when BACKEND_MFD_ENABLED=0) and its gadget up (host side 192.168.100.1 —
+# the backend's MFD manager configures it; manually:
+#   ip addr add 192.168.100.1/24 dev usb0; ip link set usb0 up).
+set -eu
+
+PI="piotr@192.168.100.2"
+SRC="/home/user/cyberpunk_computer/cyberpunk_computer/"
+DST="cyberpunk_computer/cyberpunk_computer/"
+SSH="ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5"
+DRY=""
+[ "${1:-}" = "--dry-run" ] && DRY="--dry-run -v"
+
+[ -d "$SRC" ] || { echo "prius-deploy-mfd: source $SRC missing" >&2; exit 1; }
+$SSH "$PI" true || { echo "prius-deploy-mfd: Pi unreachable at 192.168.100.2 (powered? gadget up?)" >&2; exit 1; }
+
+# shellcheck disable=SC2086
+rsync -az --delete --exclude __pycache__ $DRY -e "$SSH" "$SRC" "$PI:$DST"
+[ -n "$DRY" ] && { echo "(dry run - nothing restarted)"; exit 0; }
+
+$SSH "$PI" "sudo systemctl restart mfd.service"
+echo "deployed; mfd.service restarted. Proof-of-life:"
+echo "  $SSH $PI 'journalctl -u mfd.service -n 20 --no-pager | grep -E \"ALIVE|link\"'"
