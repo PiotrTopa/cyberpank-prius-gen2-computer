@@ -69,6 +69,7 @@ class MfdPowerConfig:
     shutdown_wait_s: float = 45.0    # wait after `poweroff` before cutting VBUS
     tick_s: float = 5.0              # manager cadence within the backend loop
     ping_timeout_s: int = 2          # per-ping wait
+    enforce_interval_s: float = 60.0 # how often to verify hw port power matches desired state
 
 
 class MfdPowerManager:
@@ -87,6 +88,7 @@ class MfdPowerManager:
         spawner: Optional[Callable[[list], None]] = None,
         iface_exists: Optional[Callable[[str], bool]] = None,
         clock: Callable[[], float] = time.monotonic,
+        controller: Optional[object] = None,
     ) -> None:
         self.config = config
         self._publish = publish
@@ -94,6 +96,11 @@ class MfdPowerManager:
         self._spawn = spawner or self._default_spawner
         self._iface_exists = iface_exists or self._default_iface_exists
         self._clock = clock
+        # Port power controller (backend.port_power.RelayPortPower on the car:
+        # the Pi's VBUS goes through powerbox relay ch3, with data-off
+        # sequencing and lossy-command verification). Falls back to the legacy
+        # direct prius-usb-power calls when None (tests / old deployments).
+        self._controller = controller
 
         self._state = STATE_OFF
         self._powered: Optional[bool] = None   # last commanded port power
@@ -102,6 +109,7 @@ class MfdPowerManager:
         self._last_tick = 0.0
         self._last_published: Optional[tuple] = None
         self._reconciled = False  # startup: adopt whatever state the board is in
+        self._last_enforce = 0.0  # last time we verified hw port power
 
     # ── external effects (injectable) ────────────────────────────────────
 
@@ -120,6 +128,14 @@ class MfdPowerManager:
         return os.path.isdir(f"/sys/class/net/{iface}")
 
     def _set_port_power(self, on: bool) -> None:
+        if self._controller is not None:
+            try:
+                self._controller.set(on)
+                self._powered = on
+                logger.info("MFD board port power -> %s (controller)", "ON" if on else "OFF")
+            except Exception:
+                logger.exception("MFD port power %s failed (controller)", "on" if on else "off")
+            return
         loc = f"{self.config.hub} {self.config.port}"
         try:
             self._run(["sudo", "prius-usb-power", "on" if on else "off", loc])
@@ -127,6 +143,68 @@ class MfdPowerManager:
             logger.info("MFD board port power -> %s (%s)", "ON" if on else "OFF", loc)
         except Exception:
             logger.exception("MFD port power %s failed", "on" if on else "off")
+
+    def _query_hw_port_power(self) -> Optional[bool]:
+        """Ask uhubctl for the actual hardware power state of the MFD port.
+
+        Returns True if port power is on, False if off, None on error.
+        Parses lines like ``  Port 5: 0100 power`` or ``  Port 5: 0000 off``.
+        """
+        if self._controller is not None:
+            try:
+                return self._controller.read()
+            except Exception:
+                logger.debug("MFD controller read failed", exc_info=True)
+                return None
+        try:
+            r = self._run(
+                ["sudo", "prius-usb-power", "status"],
+                timeout=10,
+            )
+            if r.returncode != 0:
+                return None
+            hub_section = False
+            for line in r.stdout.splitlines():
+                # uhubctl groups output by hub; look for our hub.
+                if f"hub {self.config.hub}" in line.lower() or \
+                   f"Hub {self.config.hub}" in line or \
+                   f"location {self.config.hub}" in line.replace("-", "-"):
+                    hub_section = True
+                    continue
+                if hub_section and line.strip().startswith("Current"):
+                    # Next hub starts; stop scanning.
+                    hub_section = False
+                    continue
+                if hub_section and f"Port {self.config.port}:" in line:
+                    low = line.lower()
+                    if "power" in low:
+                        return True
+                    if "off" in low:
+                        return False
+        except Exception:
+            logger.debug("MFD hw port power query failed", exc_info=True)
+        return None
+
+    def _enforce_port_power(self) -> None:
+        """Re-apply desired port power if hardware state has drifted.
+
+        Hub resets (e.g. powerbox CDC recovery unbind/rebind of hub 1-1)
+        silently restore all ports to ON. This method detects that drift
+        and re-issues the uhubctl command.
+        """
+        if self._powered is None:
+            return  # no desired state yet
+        hw = self._query_hw_port_power()
+        if hw is None:
+            return  # query failed, skip this cycle
+        if hw == self._powered:
+            return  # hardware matches desired, all good
+        logger.warning(
+            "MFD port power DRIFT detected: desired=%s actual=%s — re-enforcing",
+            "ON" if self._powered else "OFF",
+            "ON" if hw else "OFF",
+        )
+        self._set_port_power(self._powered)
 
     def _configure_host_iface(self) -> None:
         """(Re)apply host-side IP config; idempotent, safe every tick."""
@@ -213,6 +291,12 @@ class MfdPowerManager:
             self._reconciled = True
             if self._iface_exists(cfg.iface):
                 logger.info("MFD power: adopting already-running board at startup")
+                # Assert port power (not just assume it): the gadget iface can
+                # be STALE (kernel keeps usb0 registered briefly after VBUS
+                # loss, or the backend restarted mid-teardown). Going through
+                # _set_port_power records desired=ON in the controller, whose
+                # enforcement then actually powers the port if reality differs.
+                self._set_port_power(True)
                 self._enter(STATE_ON if acc_on else STATE_GRACE,
                             None if acc_on else cfg.grace_s)
             elif not acc_on:
@@ -223,6 +307,11 @@ class MfdPowerManager:
             if acc_on:
                 self._set_port_power(True)
                 self._enter(STATE_BOOTING, cfg.boot_timeout_s)
+            elif self._powered is False and (now - self._last_enforce) >= cfg.enforce_interval_s:
+                # Periodically verify the hub hasn't been reset behind our back
+                # (e.g. by serial_io powerbox CDC recovery unbinding hub 1-1).
+                self._last_enforce = now
+                self._enforce_port_power()
 
         elif self._state == STATE_BOOTING:
             if self._iface_exists(cfg.iface):

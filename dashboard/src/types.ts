@@ -26,6 +26,10 @@ export interface Powerbox {
   poco_alive?: boolean | null;
   pm_state?: string;
   powerbox_hb?: number | null;
+  /** USB-port VBUS relay states [ch1..ch4], true = port powered.
+   *  ch4=gateway (socket 2), ch3=MFD Pi (socket 3), ch2=RTL-SDR (socket 4),
+   *  ch1=spare. From the powerbox STATUS "rly" telemetry (fw >= 1.7). */
+  relays?: (boolean | null)[] | null;
   last_update_time?: number | null;
   power_mode?: string;
 }
@@ -72,6 +76,10 @@ export interface Connection {
   gateway_uptime_s?: number | null;
   last_heartbeat_time?: number | null;
   gateway_usb_power?: boolean | null;
+  gateway_usb_power_desired?: boolean | null;
+  mfd_state?: string | null;
+  mfd_usb_power?: boolean | null;
+  mfd_reachable?: boolean | null;
 }
 
 export interface SatelliteNode {

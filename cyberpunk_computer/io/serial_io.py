@@ -356,22 +356,28 @@ class SerialPort(BidirectionalPort):
         self._last_reconnect_attempt = 0.0
 
     def force_reconnect(self, attempt: int = 1) -> None:
-        """Force the link down and trigger USB-level recovery.
+        """Force the link down and trigger USB-level recovery (escalating).
 
         Used by the backend's link-staleness watchdog to recover a *silently
         wedged* USB-CDC link.  The MicroPython RP2040 CDC wedge is a host/link
         level IN-endpoint stall: the board keeps running and a plain
         close/reopen of the tty does NOT reset the MCU or re-enumerate the
-        device on MicroPython, so it never clears the wedge.  The only thing
-        that reliably recovers the link is re-enumerating the device via a
-        parent-hub reset, so we escalate straight to the hub reset on the very
-        first attempt instead of wasting a full staleness cycle (~20 s) on a
-        reopen that cannot help.
+        device on MicroPython, so it never clears the wedge.
 
-        (A true VBUS power-cycle would be more forceful still, but it cold-boots
-        the bus-powered powerbox and would collapse the self-latched OUT1 rail
-        when ACC is off, killing the whole computer — hence the gentler
-        driver-level unbind/bind here.)
+        Recovery ladder (bring-up verified 2026-08-01):
+
+        1. **USBDEVFS_RESET** on the device — a ~1 s USB-level reset that
+           re-enumerates WITHOUT rebooting the MCU: the powerbox keeps running,
+           OUT1 stays latched and the PCF8574 relay states are untouched.
+           Reliably clears the CDC wedge; always tried first when the device is
+           still on the bus.
+
+        2. **Parent-hub unbind/bind** — the hammer, for when the device fell
+           off the bus or the whole hub went catatonic (EPROTO on everything).
+           CAUTION: with the powerbox on the hub's real-PPS port, the unbind
+           path drops port power, so this COLD-BOOTS the powerbox and releases
+           every USB-port relay (PCF wakes all-off). The backend's port-power
+           enforcement tick re-asserts the desired relay states afterwards.
 
         Safe to call from another thread; the reader loop owns the actual reopen.
         """
@@ -393,6 +399,17 @@ class SerialPort(BidirectionalPort):
             tty_name is not None
             and os.path.exists(f"/sys/class/tty/{tty_name}/device")
         )
+
+        # Rung 1: mild per-device reset — only useful while still enumerated.
+        if device_present and attempt <= 1:
+            if self._usbdevfs_reset(tty_name):
+                self._handle_disconnect()
+                self._last_reconnect_attempt = time.time()
+                return
+            logger.warning(
+                "USBDEVFS_RESET failed for %s — escalating to hub reset",
+                self.config.port,
+            )
 
         reason = "gone from bus" if not device_present else "wedged link"
         hub_id = self._find_parent_hub_id(tty_name)
@@ -432,6 +449,43 @@ class SerialPort(BidirectionalPort):
     # ------------------------------------------------------------------
     # USB hub helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _usbdevfs_reset(tty_name: str) -> bool:
+        """USB-level reset of the device behind ``tty_name`` (USBDEVFS_RESET).
+
+        Re-enumerates the device without any power interruption: the RP2040
+        firmware keeps running (no reboot, relays retained) while the host
+        rebuilds the wedged CDC endpoints. Returns True when the ioctl was
+        issued successfully.
+        """
+        import fcntl
+        import os
+
+        USBDEVFS_RESET = 21780
+
+        try:
+            iface = os.path.realpath(f"/sys/class/tty/{tty_name}/device")
+            usb_dev = os.path.dirname(iface)  # .../1-1.5
+            with open(os.path.join(usb_dev, "busnum")) as f:
+                bus = int(f.read().strip())
+            with open(os.path.join(usb_dev, "devnum")) as f:
+                dev = int(f.read().strip())
+        except (OSError, ValueError) as exc:
+            logger.warning("USBDEVFS_RESET: cannot resolve bus/dev for %s: %s",
+                           tty_name, exc)
+            return False
+
+        node = "/dev/bus/usb/%03d/%03d" % (bus, dev)
+        try:
+            with open(node, "wb") as f:
+                fcntl.ioctl(f, USBDEVFS_RESET)
+            logger.warning("USBDEVFS_RESET issued on %s (%s) — device "
+                           "re-enumerating, MCU untouched", node, tty_name)
+            return True
+        except OSError as exc:
+            logger.warning("USBDEVFS_RESET on %s failed: %s", node, exc)
+            return False
 
     # Cache the hub id so we can still reset it after the device disappears.
     _cached_hub_id: Optional[str] = None

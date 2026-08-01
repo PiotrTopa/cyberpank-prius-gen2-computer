@@ -516,6 +516,10 @@ class PowerboxState:
     poco_alive: Optional[bool] = None # powerbox sees a live POCO heartbeat
     pm_state: str = ""                # powerbox PM state: normal|shutdown|dead
     powerbox_hb: Optional[int] = None # powerbox's rolling heartbeat counter (0-255)
+    # USB-port VBUS relay states from the STATUS "rly" array (firmware >= 1.7).
+    # (ch1, ch2, ch3, ch4), True = port powered. ch4=gateway, ch3=MFD Pi,
+    # ch2=RTL-SDR, ch1=spare. None until first STATUS with relay data.
+    relays: Optional[tuple] = None
 
     last_update_time: float = 0.0
 

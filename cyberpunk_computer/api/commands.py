@@ -173,6 +173,13 @@ def _build_set_out(params: Dict[str, Any]) -> Action:
     return SetOutAction(ch, on, source=ActionSource.UI)
 
 
+def _build_set_relay(params: Dict[str, Any]) -> Action:
+    from ..state.actions import SetRelayAction
+    ch = _as_int(_require(params, "channel"), "channel", 1, 4)
+    on = _as_bool(_require(params, "on"), "on")
+    return SetRelayAction(ch, on, source=ActionSource.UI)
+
+
 def _build_set_fan(params: Dict[str, Any]) -> Action:
     from ..state.actions import SetFanOverrideAction
     pct = _as_float(_require(params, "pct"), "pct", 0.0, 100.0)
@@ -253,6 +260,16 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
         "builder": _build_set_out,
         "description": "Set powerbox OUT2 or OUT3.",
         "params": {"channel": "int 2..3", "on": "bool"},
+    },
+    "set_relay": {
+        "builder": _build_set_relay,
+        "description": (
+            "Set a USB-port VBUS relay: ch2 = RTL-SDR (socket 4), ch1 = spare. "
+            "ch4 (gateway) redirects to the gateway power path; ch3 (MFD Pi) is "
+            "owned by the MFD manager and is refused. Actual state is mirrored "
+            "in powerbox.relays from the STATUS telemetry."
+        ),
+        "params": {"channel": "int 1..4", "on": "bool"},
     },
     "set_fan": {
         "builder": _build_set_fan,

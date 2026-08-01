@@ -1043,6 +1043,8 @@ class Store:
                 kwargs["pm_state"] = action.pm_state
             if action.hb is not None:
                 kwargs["powerbox_hb"] = action.hb
+            if getattr(action, "relays", None) is not None:
+                kwargs["relays"] = tuple(action.relays)
             self._state = replace(
                 self._state,
                 powerbox=replace(self._state.powerbox, **kwargs),

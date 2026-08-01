@@ -112,6 +112,7 @@ class ActionType(Enum):
     SET_POWERBOX_POWER_STATUS = auto()
     SET_POCO_TELEMETRY = auto() # OUT1/2/3 + POCO heartbeat (powerbox STATUS)
     SET_OUT = auto()
+    SET_RELAY = auto()                # USB-port VBUS relay (PCF8574 ch 1-4)
     SET_FAN_OVERRIDE = auto()   # manual chassis-fan override (None = auto)
 
     # RS485 satellite power management + twin (devices 100+)
@@ -1285,6 +1286,7 @@ class SetPowerboxPowerStatusAction(Action):
     poco_alive: Optional[bool] = None
     pm_state: Optional[str] = None
     hb: Optional[int] = None
+    relays: Optional[tuple] = None    # USB-port relay states (ch1..ch4), 1=powered
 
     def __init__(
         self,
@@ -1294,6 +1296,7 @@ class SetPowerboxPowerStatusAction(Action):
         poco_alive: Optional[bool] = None,
         pm_state: Optional[str] = None,
         hb: Optional[int] = None,
+        relays: Optional[tuple] = None,
         source: ActionSource = ActionSource.GATEWAY,
     ):
         super().__init__(ActionType.SET_POWERBOX_POWER_STATUS, source)
@@ -1303,6 +1306,7 @@ class SetPowerboxPowerStatusAction(Action):
         self.poco_alive = poco_alive
         self.pm_state = pm_state
         self.hb = hb
+        self.relays = tuple(relays) if relays is not None else None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1356,8 +1360,21 @@ class SetOutAction(Action):
         self.on = on
 
 
+class SetRelayAction(Action):
+    """Set a USB-port VBUS relay (PCF8574 ch 1-4; ch2 = RTL-SDR, ch1 = spare).
+
+    Gateway (ch4) and MFD Pi (ch3) are owned by their managers — UI toggles for
+    those go through SetGatewayUsbPowerAction / the MFD manager instead. State
+    mirror comes from the powerbox STATUS ``rly`` telemetry (PowerboxState.relays).
+    """
+    def __init__(self, channel: int, on: bool, source: ActionSource = ActionSource.UI):
+        super().__init__(ActionType.SET_RELAY, source)
+        self.channel = channel
+        self.on = on
+
+
 class SetGatewayUsbPowerAction(Action):
-    """Toggle gateway USB port power (via uhubctl)."""
+    """Toggle gateway USB port power (powerbox relay ch4 via RelayPortPower)."""
     def __init__(self, on: bool, source: ActionSource = ActionSource.UI):
         super().__init__(ActionType.SET_GATEWAY_USB_POWER, source)
         self.on = on

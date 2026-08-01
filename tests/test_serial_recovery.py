@@ -104,11 +104,44 @@ class TestForceReconnect:
         port = SerialPort(cfg)
         return port
 
+    def test_device_present_tries_usbdevfs_reset_first(self, fake_sysfs):
+        """Rung 1: with the device still on the bus and attempt=1, the mild
+        USBDEVFS_RESET (re-enumerate WITHOUT rebooting the MCU / releasing
+        relays) is used and the hub reset is NOT touched."""
+        port = self._make_port(fake_sysfs)
+
+        orig_realpath = os.path.realpath
+
+        def patched_realpath(path):
+            if path == port.config.port:
+                return f"/dev/{fake_sysfs.tty_name}"
+            return orig_realpath(path)
+
+        orig_exists = os.path.exists
+
+        def patched_exists(path):
+            if path == f"/sys/class/tty/{fake_sysfs.tty_name}/device":
+                return True
+            return orig_exists(path)
+
+        with mock.patch("os.path.realpath", side_effect=patched_realpath):
+            with mock.patch("os.path.exists", side_effect=patched_exists):
+                with mock.patch.object(port, "_handle_disconnect") as mock_disc:
+                    with mock.patch.object(port, "_reset_usb_hub") as mock_hub:
+                        with mock.patch.object(
+                            port, "_usbdevfs_reset", return_value=True
+                        ) as mock_devreset:
+                            port.force_reconnect(attempt=1)
+
+                            mock_devreset.assert_called_once()
+                            mock_disc.assert_called_once()
+                            mock_hub.assert_not_called()
+
     def test_device_present_escalates_to_hub_reset(self, fake_sysfs):
-        """Even when the tty device node still exists, force_reconnect should
-        escalate straight to a hub reset: a MicroPython RP2040 CDC wedge is a
-        host/link-level stall that a plain close/reopen cannot clear, so the
-        device must be re-enumerated via the parent hub."""
+        """Rung 2: when USBDEVFS_RESET is unavailable/failed (or on later
+        attempts), force_reconnect escalates to a parent-hub reset: a
+        MicroPython RP2040 CDC wedge is a host/link-level stall that a plain
+        close/reopen cannot clear, so the device must be re-enumerated."""
         port = self._make_port(fake_sysfs)
         # Monkey-patch os.path.realpath to resolve our fake port name to
         # the fake sysfs tty name.
@@ -143,7 +176,10 @@ class TestForceReconnect:
             with mock.patch("os.path.exists", side_effect=patched_exists):
                 with mock.patch.object(port, "_handle_disconnect") as mock_disc:
                     with mock.patch.object(port, "_reset_usb_hub") as mock_hub:
-                        port.force_reconnect()
+                        with mock.patch.object(
+                            port, "_usbdevfs_reset", return_value=False
+                        ):
+                            port.force_reconnect(attempt=2)
 
                         mock_disc.assert_called_once()
                         mock_hub.assert_called_once()
@@ -183,11 +219,12 @@ class TestForceReconnect:
                         mock_disc.assert_called_once()
                         mock_hub.assert_called_once_with(fake_sysfs.hub_id)
 
-    def test_hub_gone_escalates_to_controller_reset(self, fake_sysfs):
+    def test_hub_gone_does_not_touch_controller(self, fake_sysfs):
         """When the device AND its parent hub have both vanished from the bus
-        (the signature of a dead USB host controller), force_reconnect should
-        escalate to a host-controller rebind rather than uselessly retrying a
-        hub reset on a device path that no longer exists."""
+        (the signature of a dead USB host controller), force_reconnect must NOT
+        attempt any reset: on SDM845, rebinding DWC3/xHCI cascades into the DRM
+        display subsystem and hard-hangs the kernel. It logs and waits for the
+        hardware watchdog path instead."""
         port = self._make_port(fake_sysfs)
         port._cached_hub_id = fake_sysfs.hub_id
         fake_sysfs.remove_device()
@@ -211,12 +248,10 @@ class TestForceReconnect:
             with mock.patch("os.path.exists", side_effect=patched_exists):
                 with mock.patch.object(port, "_handle_disconnect") as mock_disc:
                     with mock.patch.object(port, "_reset_usb_hub") as mock_hub:
-                        with mock.patch.object(port, "_reset_usb_controller") as mock_ctrl:
-                            port.force_reconnect()
+                        port.force_reconnect()
 
-                            mock_disc.assert_called_once()
-                            mock_hub.assert_not_called()
-                            mock_ctrl.assert_called_once()
+                        mock_disc.assert_called_once()
+                        mock_hub.assert_not_called()
 
     def test_hub_id_cached_on_first_lookup(self, fake_sysfs):
         """_find_parent_hub_id should cache the hub ID and return it even

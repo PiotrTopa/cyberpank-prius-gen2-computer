@@ -67,6 +67,7 @@ from .satellites import (
     command_job,
 )
 from ..api import ApiServer, StoreBridge
+from .zmq_server import ZmqServer
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +196,16 @@ class BackendConfig:
     mfd_enabled: bool = False
     mfd_config: Optional[object] = None    # MfdPowerConfig; None -> defaults
 
+    # ── USB hub port power (backend.port_power) ──────────────────────────────
+    # Topology of hub port power control: the powerbox's socket has native PPPS
+    # (uhubctl); gateway/MFD/SDR VBUS goes through powerbox relays with
+    # data-off sequencing and lossy-command verification against the "rly"
+    # STATUS telemetry. None -> PortPowerConfig() defaults (current car).
+    port_power_config: Optional[object] = None
+    # Cadence for the desired-vs-actual relay enforcement sweep. Also converges
+    # after a hub reset (which cold-boots the powerbox and releases all relays).
+    port_power_enforce_s: float = 15.0
+
     # ── RS485 satellites (OUT2 rail power management + twin) ─────────────────
     # The satellite subsystem: OUT2 wake-lock power rule (rail on while ACC is
     # on or jobs are pending), the serialized job queue, periodic scheduler and
@@ -268,6 +279,7 @@ class BackendService:
         self.sink: Optional[MetricsSink] = None
         self.bridge: Optional[StoreBridge] = None
         self.api: Optional[ApiServer] = None
+        self.zmq: Optional[ZmqServer] = None
         self.power_controller: Optional[PriusPowerController] = None
         self.powerbox_commander: Optional[PowerboxCommander] = None
         self.satellite_queue: Optional[SatelliteJobQueue] = None
@@ -309,13 +321,17 @@ class BackendService:
         self._fan_last_log_pct: float = -1.0  # edge-triggered logging
         self._fan_ema_temp: Optional[float] = None  # Simulated heatsink temp
 
-        # Gateway USB hub-port power control/telemetry (uhubctl via prius-usb-power).
+        # Gateway USB hub-port power telemetry mirror (relay ch4 via port_power).
         self._gateway_usb_target: Optional[str] = None  # stable by-id path of the gateway board
         self._gwusb_last_poll: float = 0.0
         self._gwusb_loc: Optional[str] = None           # cached "HUB PORT" (e.g. "1-1.4 2")
 
         # MFD video board power manager (backend.mfd_power).
         self.mfd_power = None
+
+        # USB hub port power controllers (backend.port_power.HubPortPower).
+        self.port_power = None
+        self._pp_enforce_last: float = 0.0
 
     # ── composition ────────────────────────────────────────────────────────
 
@@ -429,27 +445,8 @@ class BackendService:
         if cfg.recording.enabled:
             self._wire_recording(twin)
 
-        # MFD video board (Pi Zero 2W): ACC-follower USB port power manager.
-        if cfg.mfd_enabled:
-            from .mfd_power import MfdPowerConfig, MfdPowerManager
-            from ..state.actions import SetMfdStatusAction
-
-            mfd_cfg = cfg.mfd_config or MfdPowerConfig()
-
-            def _publish_mfd(status: dict) -> None:
-                twin.store.dispatch(SetMfdStatusAction(
-                    state=status["state"],
-                    usb_power=status["usb_power"],
-                    reachable=status["reachable"],
-                ))
-
-            self.mfd_power = MfdPowerManager(mfd_cfg, publish=_publish_mfd)
-            logger.info(
-                "MFD power manager wired (hub=%s port=%s iface=%s board=%s "
-                "grace=%.0fs)",
-                mfd_cfg.hub, mfd_cfg.port, mfd_cfg.iface, mfd_cfg.board_ip,
-                mfd_cfg.grace_s,
-            )
+        # (MFD power manager is wired later in build(), after the port power
+        # controllers exist — its VBUS goes through powerbox relay ch3.)
 
         db = MetricsDatabase(cfg.db_path)
         sink = MetricsSink(
@@ -467,6 +464,7 @@ class BackendService:
         # Provide the initial state immediately.
         bridge.on_state(twin.store.state)
 
+
         api = ApiServer(
             bridge,
             db,
@@ -475,12 +473,32 @@ class BackendService:
             auth_token=cfg.auth_token,
             log_level="debug" if cfg.verbose else "info",
         )
+        
+        zmq_srv = ZmqServer(
+            bridge=bridge,
+            host=cfg.api_host,
+            pub_port=8081,
+            rep_port=8082,
+        )
+        
+        # Subscribe ZMQ server to state updates as well
+        def _zmq_on_state(state):
+            now = time.time()
+            if now - zmq_srv._last_state_ts >= 1.0:
+                from ..api.serialization import serialize_state
+                envelope = {"type": "state", "ts": now, "state": serialize_state(state)}
+                zmq_srv.enqueue_state(envelope)
+                zmq_srv._last_state_ts = now
+                
+        self._unsubscribe_zmq = twin.store.subscribe(StateSlice.ALL, _zmq_on_state)
+
 
         self.twin = twin
         self.db = db
         self.sink = sink
         self.bridge = bridge
         self.api = api
+        self.zmq = zmq_srv
 
     def _wire_powerbox(self, twin: VirtualTwin) -> None:
         """Register powerbox ingress parsers and power-management rules.
@@ -512,6 +530,47 @@ class BackendService:
         self.power_controller = controller
         self.powerbox_commander = commander
 
+        # USB hub port power controllers. Relay commands go through the
+        # powerbox commander; verification reads the mirrored "rly" telemetry.
+        # Built even in replay mode (commander is log-only there) so the code
+        # paths stay uniform.
+        from .port_power import HubPortPower, PortPowerConfig
+        pp_cfg = cfg.port_power_config or PortPowerConfig()
+        self.port_power = HubPortPower.build(
+            pp_cfg,
+            send_relay=lambda ch, on: commander.set_relay(ch, on),
+            get_relays=lambda: (
+                self.twin.store.state.powerbox.relays if self.twin else None
+            ),
+        )
+
+        # MFD video board (Pi Zero 2W): ACC-follower USB port power manager.
+        # Its VBUS goes through powerbox relay ch3 (RelayPortPower handles the
+        # data-off sequencing + lossy-command verification).
+        if cfg.mfd_enabled:
+            from .mfd_power import MfdPowerConfig, MfdPowerManager
+            from ..state.actions import SetMfdStatusAction
+
+            mfd_cfg = cfg.mfd_config or MfdPowerConfig()
+
+            def _publish_mfd(status: dict) -> None:
+                twin.store.dispatch(SetMfdStatusAction(
+                    state=status["state"],
+                    usb_power=status["usb_power"],
+                    reachable=status["reachable"],
+                ))
+
+            self.mfd_power = MfdPowerManager(
+                mfd_cfg, publish=_publish_mfd,
+                controller=self.port_power.mfd,
+            )
+            logger.info(
+                "MFD power manager wired (relay ch%d, iface=%s board=%s "
+                "grace=%.0fs)",
+                pp_cfg.mfd_relay_ch, mfd_cfg.iface, mfd_cfg.board_ip,
+                mfd_cfg.grace_s,
+            )
+
         def _powerbox_middleware(action, store) -> None:
             from ..state.actions import ActionSource
             if getattr(action, "source", None) == ActionSource.UI and self.powerbox_commander:
@@ -525,6 +584,26 @@ class BackendService:
                             "manual:ui", acquire=action.on))
                     else:
                         self.powerbox_commander.set_out(action.channel, action.on)
+                elif type(action).__name__ == "SetRelayAction":
+                    # Manual USB-port relay control. Route through the port
+                    # power controllers (data-off sequencing + enforcement)
+                    # where one exists for the channel; raw command otherwise.
+                    pp = self.port_power
+                    ch = int(action.channel)
+                    if pp is not None and ch == pp.sdr.relay_ch:
+                        pp.sdr.set(action.on)
+                    elif pp is not None and ch == pp.gateway.relay_ch:
+                        # Keep desired-state bookkeeping consistent with the
+                        # UI path for the gateway.
+                        from ..state.actions import SetGatewayUsbPowerAction
+                        store.dispatch(SetGatewayUsbPowerAction(
+                            action.on, source=ActionSource.UI))
+                    elif pp is not None and ch == pp.mfd.relay_ch:
+                        logger.warning(
+                            "Ignoring manual relay toggle for MFD port (ch%d) — "
+                            "owned by the MFD power manager", ch)
+                    else:
+                        self.powerbox_commander.set_relay(ch, action.on)
                 elif type(action).__name__ == "SetReadyModeAction":
                     if action.on:
                         self.powerbox_commander.press_button(3000)
@@ -539,29 +618,16 @@ class BackendService:
                 return
             if type(action).__name__ != "SetGatewayUsbPowerAction":
                 return
-            import subprocess
-            state = "on" if action.on else "off"
-            # Target the gateway board by its stable by-id path, OR its cached physical
-            # hub location (e.g. "1-1 5") if it's already been located. We must use
-            # the cached location when turning it ON because the by-id symlink does
-            # not exist when the port is powered off! Fall back to the static
-            # hub/port-role config if neither is available yet.
-            target = (
-                self._gwusb_loc
-                or self._gateway_static_loc()
-                or self._gateway_usb_target
-            )
-            if not target:
-                logger.error("Cannot toggle gateway USB power: no gateway target resolved")
+            # Gateway VBUS goes through powerbox relay ch4 (data-off sequencing
+            # + verification inside RelayPortPower). The desired state recorded
+            # here is kept converged by _port_power_enforce_tick.
+            if self.port_power is None:
+                logger.error("Cannot toggle gateway USB power: no port power controllers")
                 return
             try:
-                subprocess.Popen(
-                    ["sudo", "prius-usb-power", state, target],
-                    start_new_session=True,
-                )
-                logger.info("Executed prius-usb-power %s for gateway (%s)", state, target)
-            except Exception as e:
-                logger.error("Failed to execute prius-usb-power: %s", e)
+                self.port_power.gateway.set(bool(action.on))
+            except Exception:
+                logger.exception("Gateway port power toggle failed")
 
         twin.store.add_middleware(_system_middleware)
 
@@ -778,6 +844,7 @@ class BackendService:
             self.recorder.start()
         self.sink.start()
         self.api.start()
+        self.zmq.start()
 
         # USB hotplug: re-discover + retarget serial ports on plug/unplug.
         if (
@@ -802,6 +869,7 @@ class BackendService:
                     self._powerbox_watchdog_tick()
                     self._gateway_watchdog_tick()
                     self._gateway_usb_power_tick()
+                    self._port_power_enforce_tick()
                     self._mfd_power_tick()
                     self._poco_power_tick()
                     self._chassis_fan_tick()
@@ -953,21 +1021,16 @@ class BackendService:
             )
 
     def _gateway_usb_power_tick(self) -> None:
-        """Poll the gateway's USB hub-port power state and mirror it into state.
+        """Mirror the gateway's actual VBUS state into the store.
 
-        The gateway board hangs off a uhubctl-controllable hub port. Unlike the
-        powerbox OUT rails (reported in the ~1 Hz STATUS heartbeat), the USB port
-        power has no telemetry channel, so we read ground truth from uhubctl (via
-        `prius-usb-power`) on a slow cadence and dispatch an INTERNAL-sourced
-        SetGatewayUsbPowerAction. INTERNAL (not UI) means this does NOT re-trigger
-        the _system_middleware that actually toggles the port -- it only reflects
-        state, so the UI can show it like OUT1/OUT2 and stays truthful even when
-        the port is toggled by ACC cycling or a manual CLI run.
-        """
-        import subprocess
-
+        Ground truth now comes for free from the powerbox STATUS "rly"
+        telemetry (relay ch4 = gateway VBUS) — no uhubctl subprocess polling.
+        Dispatches an INTERNAL-sourced SetGatewayUsbPowerAction when the mirror
+        drifts; INTERNAL does NOT re-trigger _system_middleware, it only
+        reflects state for the UI. Desired-state enforcement itself lives in
+        _port_power_enforce_tick (RelayPortPower.enforce)."""
         cfg = self.config
-        if self.twin is None or not self._gateway_usb_target:
+        if self.twin is None or self.port_power is None:
             return
         interval = getattr(cfg, "gateway_usb_poll_s", 10.0)
         if interval <= 0:
@@ -977,126 +1040,35 @@ class BackendService:
             return
         self._gwusb_last_poll = now
 
-        try:
-            powered = self._read_gateway_usb_power()
-        except Exception:
-            logger.debug("gateway USB power poll failed", exc_info=True)
-            return
+        powered = self.port_power.gateway.read()
         if powered is None:
             return
-
         conn_state = self.twin.store.state.connection
-        desired = conn_state.gateway_usb_power_desired
-
-        # Enforce desired state if it was explicitly set via UI and it mismatches reality
-        if desired is not None and desired != powered:
-            import subprocess
-            logger.warning(
-                "Gateway USB power mismatch (actual: %s, desired: %s). Enforcing desired state.", 
-                powered, desired
-            )
-            state_str = "on" if desired else "off"
-            target = self._gwusb_loc if self._gwusb_loc else self._gateway_usb_target
-            try:
-                subprocess.Popen(
-                    ["sudo", "prius-usb-power", state_str, target],
-                    start_new_session=True,
-                )
-            except Exception as e:
-                logger.error("Failed to enforce gateway USB power: %s", e)
-            # The action will be dispatched on the next poll when it actually takes effect
-            return
-
         if conn_state.gateway_usb_power != powered:
             from ..state.actions import SetGatewayUsbPowerAction, ActionSource
             self.twin.store.dispatch(
                 SetGatewayUsbPowerAction(powered, source=ActionSource.INTERNAL)
             )
 
-    def _gateway_static_loc(self) -> Optional[str]:
-        """Derive the gateway's "HUB PORT" from static config, or None.
+    def _port_power_enforce_tick(self) -> None:
+        """Converge relay-backed ports to their desired states.
 
-        Uses the configured (or default) hub location and port-role map, so the
-        gateway port can be controlled even when its device node is gone (port
-        powered off, PHY wedged) and no cached location exists.
-        """
-        from ..io.discovery import DEFAULT_PORT_ROLES, ROLE_GATEWAY
-
+        RelayPortPower records desired state on every set(); this sweep
+        re-issues the data+VBUS sequence whenever the powerbox "rly" telemetry
+        disagrees. This is what makes relay commands reliable over the lossy
+        CDC link, and what restores port states after a hub reset (which
+        cold-boots the powerbox and releases every relay)."""
         cfg = self.config
-        hub = getattr(cfg, "usb_hub", None)
-        if not hub:
-            return None
-        roles = getattr(cfg, "usb_port_roles", None) or DEFAULT_PORT_ROLES
-        for port, role in roles.items():
-            if role == ROLE_GATEWAY:
-                return f"{hub} {port}"
-        return None
-
-    def _read_gateway_usb_power(self) -> Optional[bool]:
-        """Return True/False for the gateway hub-port power, or None if unknown.
-
-        Resolves the gateway's "HUB PORT" via `prius-usb-power locate` (cached),
-        falling back to the static hub/port-role config when the device node is
-        absent (e.g. backend started while the gateway port was powered off —
-        without the fallback the port could never be turned back on). Then reads
-        `prius-usb-power status` and inspects the PORT_POWER bit
-        (0x0100) of that port's status word. On this hub a cut port reads `0000`
-        while a powered port reads `01xx`, so the power bit is authoritative.
-        """
-        import subprocess
-        import re
-
-        # Resolve (and cache) the gateway's hub location + port number.
-        if self._gwusb_loc is None:
-            out = ""
-            try:
-                out = subprocess.run(
-                    ["sudo", "prius-usb-power", "locate", self._gateway_usb_target],
-                    capture_output=True, text=True, timeout=10,
-                ).stdout.strip()
-            except Exception:
-                pass
-            if out and " " in out:
-                self._gwusb_loc = out
-            else:
-                # Device node absent (port powered off / PHY wedged): derive the
-                # location statically from the configured hub + port-role map.
-                self._gwusb_loc = self._gateway_static_loc()
-            if self._gwusb_loc is None:
-                return None
-        hub, _, port = self._gwusb_loc.partition(" ")
-        hub = hub.strip()
-        port = port.strip()
-        if not hub or not port:
-            return None
-
-        try:
-            status = subprocess.run(
-                ["sudo", "prius-usb-power", "status"],
-                capture_output=True, text=True, timeout=10,
-            ).stdout
-        except Exception:
-            return None
-
-        # Find the section for our hub, then the port line within it.
-        in_hub = False
-        for line in status.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("Current status for hub "):
-                # e.g. "Current status for hub 1-1.4 [1a40:0101 ...]"
-                m = re.search(r"hub\s+(\S+)\s", stripped + " ")
-                in_hub = bool(m and m.group(1) == hub)
-                continue
-            if in_hub and stripped.startswith(f"Port {port}:"):
-                m = re.search(r"Port\s+\d+:\s+([0-9a-fA-F]+)", stripped)
-                if not m:
-                    return None
-                flags = int(m.group(1), 16)
-                return bool(flags & 0x0100)  # PORT_POWER
-        # Hub/port not found in status: the cached location is likely stale (USB
-        # renumbered). Drop it so the next poll re-resolves from the by-id path.
-        self._gwusb_loc = None
-        return None
+        if self.port_power is None:
+            return
+        interval = getattr(cfg, "port_power_enforce_s", 15.0)
+        if interval <= 0:
+            return
+        now = time.time()
+        if (now - self._pp_enforce_last) < interval:
+            return
+        self._pp_enforce_last = now
+        self.port_power.enforce_all()
 
     # ── POCO thermal zone mapping ────────────────────────────────────────────
     # Zones on the Poco F1 (SDM845 / beryllium):
@@ -1355,9 +1327,9 @@ class BackendService:
             self._pb_recover_attempts = 0
         self._pb_recover_attempts += 1
         logger.warning(
-            "Powerbox auto-recovery: forcing serial reset (attempt #%d, link "
-            "stale %.1fs). Re-enumerating via parent-hub reset to clear the "
-            "wedged CDC link.",
+            "Powerbox auto-recovery: forcing link reset (attempt #%d, link "
+            "stale %.1fs). Ladder: USBDEVFS_RESET first (no MCU reboot, relays "
+            "kept), parent-hub reset on escalation.",
             self._pb_recover_attempts, age,
         )
         try:
@@ -1375,6 +1347,8 @@ class BackendService:
                 logger.exception("Error stopping USB monitor")
         if self.api is not None:
             self.api.stop()
+        if self.zmq:
+            self.zmq.stop()
         if self.recorder is not None:
             try:
                 self.recorder.stop()

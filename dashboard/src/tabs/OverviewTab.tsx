@@ -1,11 +1,12 @@
 import {
-  Battery, BatteryCharging, ChevronRight, Fuel, Gauge, Radio, Wind, Zap,
+  Battery, BatteryCharging, ChevronRight, Fuel, Gauge, Radio, Wind, Zap, Monitor,
 } from 'lucide-react';
 import type { AppState, SatelliteNode, Satellites } from '../types';
 import { fmtAge } from '../lib/format';
 import type { HistoryData } from '../hooks/useHistory';
 import { DataRow, Meter, Panel, StatusRow } from '../components/ui';
 import { SatellitesPanel } from '../components/SatellitesPanel';
+import { UsbHubPanel } from '../components/UsbHubPanel';
 
 export function OverviewTab({ state, hist, now, satNodes, satHolders, onOpenDebug }: {
   state: AppState;
@@ -20,6 +21,7 @@ export function OverviewTab({ state, hist, now, satNodes, satHolders, onOpenDebu
   const energy = state.energy;
   const climate = state.climate ?? {};
   const sats: Satellites = state.satellites ?? {};
+  const conn = state.connection ?? { connected: false };
 
   const v = pb.system_voltage;
   const powerW = pb.power_draw_w?.toFixed(2) ?? '--';
@@ -94,6 +96,14 @@ export function OverviewTab({ state, hist, now, satNodes, satHolders, onOpenDebu
         <DataRow label="PM State" value={(pb.pm_state || '—').toUpperCase()} />
         {pb.undervoltage && <StatusRow label="Under-voltage" on={true} onText="TRIPPED" />}
       </Panel>
+
+      <Panel title="MFD Video Node" code="MFD-01" icon={Monitor}>
+        <StatusRow label="Network Reachable" on={conn.mfd_reachable ?? false} onText="YES" offText="NO" />
+        <StatusRow label="USB Hub Power" on={conn.mfd_usb_power ?? false} onText="ON" offText="OFF" />
+        <DataRow label="PM State" value={(conn.mfd_state || '—').toUpperCase()} />
+      </Panel>
+
+      <UsbHubPanel state={state} />
 
       <SatellitesPanel sats={sats} nodes={satNodes} holders={satHolders} out2={pb.out2} now={now} />
     </div>

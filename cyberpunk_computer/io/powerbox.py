@@ -202,11 +202,18 @@ def parse_powerbox_system(data: dict) -> List[Action]:
         except (TypeError, ValueError):
             hb = None
         pm = data.get("pm")
+        # USB-port relay states (firmware >= 1.7.0): "rly": [ch1..ch4] of 0/1,
+        # 1 = port powered. Ground truth for RelayPortPower verification.
+        relays = None
+        rly = data.get("rly")
+        if isinstance(rly, (list, tuple)) and rly:
+            relays = tuple(bool(_coerce_bool(v)) for v in rly)
         return [SetPowerboxPowerStatusAction(
             out1=_b("out1"), out2=_b("out2"), out3=_b("out3"),
             poco_alive=_b("poco"),
             pm_state=str(pm) if pm is not None else None,
             hb=hb,
+            relays=relays,
         )]
 
     if msg in ("SHUTDOWN", "SUICIDE"):
@@ -296,6 +303,22 @@ def build_out_command(channel: int, on: bool) -> OutgoingCommand:
     )
 
 
+def build_relay_command(channel: int, on: bool) -> OutgoingCommand:
+    """Set a USB-port VBUS relay (ch 1-4 on the PCF8574 expander).
+
+    Channel map (bring-up 2026-08-01): ch4 = gateway (socket 2), ch3 = MFD Pi
+    (socket 3), ch2 = RTL-SDR (socket 4), ch1 = spare. The link is lossy —
+    callers must verify against the ``rly`` STATUS telemetry and retry
+    (see backend.port_power.RelayPortPower).
+    """
+    return OutgoingCommand(
+        device_id=POWERBOX_LOCAL_SYSTEM,
+        command_type="power",
+        payload={"a": "relay", "ch": int(channel), "on": bool(on)},
+        priority=50,
+    )
+
+
 def build_button_command(ms: int = 3000) -> OutgoingCommand:
     """Pulse the POCO power button: ~3000 ms = power on, ~10000 ms = force reboot."""
     return OutgoingCommand(
@@ -352,6 +375,10 @@ class PowerboxCommander:
     def set_out(self, channel: int, on: bool) -> bool:
         return self._send(build_out_command(channel, on),
                           "out%d=%s" % (channel, "on" if on else "off"), warn=True)
+
+    def set_relay(self, channel: int, on: bool) -> bool:
+        return self._send(build_relay_command(channel, on),
+                          "relay%d=%s" % (channel, "on" if on else "off"), warn=True)
 
     def press_button(self, ms: int = 3000) -> bool:
         return self._send(build_button_command(ms), "power-button %dms" % ms, warn=True)
