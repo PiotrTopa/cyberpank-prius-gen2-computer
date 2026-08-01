@@ -1,0 +1,18 @@
+[Unit]
+Description=CyberPunk Prius Gen 2 - MFD Frontend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=piotr
+WorkingDirectory=/home/piotr/cyberpunk_computer
+Environment="DISPLAY=:0"
+ExecStart=/home/piotr/cyberpunk_computer/.venv/bin/python -m cyberpunk_computer.frontend --host 192.168.100.1 --port 8081 --fullscreen --scale 1
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

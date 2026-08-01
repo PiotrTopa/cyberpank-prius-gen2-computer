@@ -148,20 +148,14 @@ class FramebufferOutput:
             # Convert surface to the correct format
             # Framebuffer is typically BGRA or BGR depending on bpp
             if self.bpp == 32:
-                # 32-bit: BGRA format
-                # pygame's get_buffer() returns RGBA, we need to swap
+                # 32-bit framebuffer wants BGRA. pygame does the channel
+                # swizzle in C — never per-byte in Python (a Python loop here
+                # cost ~200 ms/frame on the Pi Zero 2W = the whole frame
+                # budget; profiled 2026-08-01).
                 converted = surface.convert_alpha()
-                buffer = pygame.image.tobytes(converted, "RGBA")
-                
-                # Convert RGBA to BGRA
-                # This is faster using a bytearray view
-                arr = bytearray(buffer)
-                for i in range(0, len(arr), 4):
-                    # Swap R and B
-                    arr[i], arr[i+2] = arr[i+2], arr[i]
-                
+                buffer = pygame.image.tobytes(converted, "BGRA")
                 self.mmap.seek(0)
-                self.mmap.write(arr)
+                self.mmap.write(buffer)
                 
             elif self.bpp == 16:
                 # 16-bit: RGB565 format
