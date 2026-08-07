@@ -1,0 +1,11 @@
+[Unit]
+Description=HTTPS clock fallback when NTP (UDP 123) is blocked
+Documentation=file:///home/user/cyberpunk/POCO/SCRIPTS_AND_FILES.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/prius-clock-fallback
+StandardOutput=journal
+StandardError=journal

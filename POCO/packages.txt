@@ -49,3 +49,6 @@ vulkan-tools
 # --- Adreno 630 firmware ---
 firmware-qcom-adreno-a630
 firmware-qcom-adreno-a630-sqe
+
+# --- Clock fallback (mobile APNs that block NTP/UDP-123) ---
+htpdate

@@ -1,8 +1,12 @@
 [Unit]
 Description=CyberPunk Prius headless backend (virtual twin + metrics + network API)
 Documentation=file:///home/user/cyberpunk/POCO/SCRIPTS_AND_FILES.md
-After=network-online.target
-Wants=network-online.target
+# timesyncd restores an approximate clock from its saved clock file the
+# moment it starts (no internet needed) — ordering after it keeps early
+# journal lines and metrics DB rows from being stamped 1970 (the PMIC RTC
+# is not battery-persisted on this device).
+After=network-online.target systemd-timesyncd.service
+Wants=network-online.target systemd-timesyncd.service
 
 [Service]
 Type=simple

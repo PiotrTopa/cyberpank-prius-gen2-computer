@@ -1,0 +1,20 @@
+#!/bin/sh
+# Fallback time sync over HTTPS for uplinks that block NTP (UDP 123).
+#
+# The POCO's PMIC RTC is not battery-persisted (reads 1970 at every boot).
+# systemd-timesyncd restores an approximate clock from its saved clock file
+# and then steps to true time via NTP — but some mobile APNs block UDP 123,
+# leaving the clock stale and WireGuard down (the hub rejects handshakes
+# stamped earlier than the last one it has seen from us).
+#
+# This script is a no-op while timesyncd reports the clock synchronized;
+# otherwise it steps the clock from HTTPS Date headers (port 443, ~1 s
+# accuracy — plenty for WireGuard and the metrics DB; NTP still refines
+# later if it ever gets through). Driven by prius-clock-fallback.timer.
+
+synced=$(timedatectl show -p NTPSynchronized --value 2>/dev/null)
+if [ "$synced" = "yes" ]; then
+    exit 0
+fi
+
+exec htpdate -s https://www.google.com https://www.cloudflare.com
