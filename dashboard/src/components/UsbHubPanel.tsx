@@ -1,9 +1,48 @@
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Usb } from 'lucide-react';
 import type { AppState } from '../types';
 import { sendCommand } from '../lib/api';
 import { Btn, Dot, Panel } from './ui';
 import { cx } from '../lib/format';
+
+const power = (on: boolean | null) =>
+  on === null
+    ? { text: 'PWR ?', cls: 'text-slate-600' }
+    : on
+      ? { text: 'PWR ON', cls: 'text-hud-green' }
+      : { text: 'PWR OFF', cls: 'text-slate-500' };
+
+const SocketRow = ({ n, name, powered, right }: {
+  n: string;
+  name: string;
+  powered: boolean | null;
+  right?: ReactNode;
+}) => {
+  const p = power(powered);
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <span className="text-slate-500 text-xs uppercase tracking-wider">
+        <span className="text-slate-600">{n}</span> {name}
+      </span>
+      <div className="flex items-center gap-2">
+        {right}
+        <span className={cx('text-[0.65rem] tracking-wider', p.cls)}>{p.text}</span>
+      </div>
+    </div>
+  );
+};
+
+const LinkChip = ({ up, upText = 'LINK', downText = 'NO LINK' }: {
+  up?: boolean | null; upText?: string; downText?: string;
+}) => (
+  <span className={cx(
+    'flex items-center gap-1 text-[0.6rem] tracking-wider',
+    up ? 'text-hud-cyan' : 'text-slate-600',
+  )}>
+    <Dot tone={up ? 'cyan' : 'red'} pulse={!!up} />
+    {up ? upText : downText}
+  </span>
+);
 
 /**
  * USB hub socket map + live power/link statuses.
@@ -15,7 +54,7 @@ import { cx } from '../lib/format';
  * commanded value. The SDR port is the only manually-owned one, so it gets a
  * toggle (backend `set_relay` with desired-state enforcement).
  */
-export function UsbHubPanel({ state }: { state: AppState }) {
+export function UsbHubPanel({ state, now }: { state: AppState; now: number }) {
   const pb = state.powerbox;
   const conn = state.connection ?? { connected: false };
   const relays = pb.relays ?? [];
@@ -27,44 +66,18 @@ export function UsbHubPanel({ state }: { state: AppState }) {
   const sdrOn = relay(2);
   const telemetryLive = pb.connected ?? false;
 
-  const power = (on: boolean | null) =>
-    on === null
-      ? { text: 'PWR ?', cls: 'text-slate-600' }
-      : on
-        ? { text: 'PWR ON', cls: 'text-hud-green' }
-        : { text: 'PWR OFF', cls: 'text-slate-500' };
+  // SDR relay is desired-state with a 15 s enforcement tick on the backend.
+  // Pending is derived, not cleared by an effect: it expires when the mirrored
+  // `rly` telemetry converges or the deadline passes (`now` ticks at 1 Hz).
+  const [sdrCmd, setSdrCmd] = useState<{ want: boolean; until: number } | null>(null);
+  const sdrPending = sdrCmd !== null && sdrOn !== sdrCmd.want && now < sdrCmd.until;
 
-  const SocketRow = ({ n, name, powered, right }: {
-    n: string;
-    name: string;
-    powered: boolean | null;
-    right?: ReactNode;
-  }) => {
-    const p = power(powered);
-    return (
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-slate-500 text-xs uppercase tracking-wider">
-          <span className="text-slate-600">{n}</span> {name}
-        </span>
-        <div className="flex items-center gap-2">
-          {right}
-          <span className={cx('text-[0.65rem] tracking-wider', p.cls)}>{p.text}</span>
-        </div>
-      </div>
-    );
+  const toggleSdr = async () => {
+    const want = !sdrOn;
+    setSdrCmd({ want, until: now + 25000 });
+    const ok = await sendCommand('set_relay', { channel: 2, on: want });
+    if (!ok) setSdrCmd(null);
   };
-
-  const LinkChip = ({ up, upText = 'LINK', downText = 'NO LINK' }: {
-    up?: boolean | null; upText?: string; downText?: string;
-  }) => (
-    <span className={cx(
-      'flex items-center gap-1 text-[0.6rem] tracking-wider',
-      up ? 'text-hud-cyan' : 'text-slate-600',
-    )}>
-      <Dot tone={up ? 'cyan' : 'red'} pulse={!!up} />
-      {up ? upText : downText}
-    </span>
-  );
 
   return (
     <Panel title="USB Hub" code="USB-01" icon={Usb}
@@ -84,9 +97,9 @@ export function UsbHubPanel({ state }: { state: AppState }) {
       <SocketRow n="S4" name="RTL-SDR" powered={sdrOn}
         right={
           <Btn tone={sdrOn ? 'red' : 'green'} className="px-2 py-0.5 text-[0.6rem]"
-            disabled={!telemetryLive}
-            onClick={() => sendCommand('set_relay', { channel: 2, on: !sdrOn })}>
-            {sdrOn ? 'CUT' : 'POWER'}
+            disabled={!telemetryLive || sdrPending}
+            onClick={toggleSdr}>
+            {sdrPending ? 'WAIT…' : sdrOn ? 'CUT' : 'POWER'}
           </Btn>
         } />
       {conn.gateway_usb_power_desired != null

@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { LayoutDashboard, Power, SatelliteDish } from 'lucide-react';
 import type { AppState, SatelliteNode } from '../types';
 import { fmtAge } from '../lib/format';
@@ -14,18 +15,23 @@ export function ControlsTab({ state, connected, now, satNodes, manualHeld }: {
 }) {
   const pb = state.powerbox;
   const conn = state.connection;
+  const [holdBusy, setHoldBusy] = useState(false);
+
+  const setHold = async (on: boolean) => {
+    setHoldBusy(true);
+    await sendCommand('satellite_power_hold', { name: 'dash', on });
+    setHoldBusy(false);
+  };
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
       <Panel title="Remote Control" code="CTL-02" icon={Power}>
-        <button
-          className="w-full py-7 border border-dashed border-ink-500 text-slate-400 hover:text-hud-cyan hover:border-hud-cyan/50 transition-colors flex flex-col items-center justify-center gap-2"
-          onClick={() => alert('Remote start functionality to be added!')}
-        >
+        <div className="w-full py-7 border border-dashed border-ink-700 text-slate-600 flex flex-col items-center justify-center gap-2 cursor-not-allowed select-none">
           <Power size={26} />
           <span className="uppercase tracking-[0.22em] text-xs">Start Vehicle Remotely</span>
-        </button>
-        <p className="text-xs text-slate-600 text-center">Sends ACC wake via powerbox · coming soon</p>
+          <span className="uppercase tracking-[0.15em] text-[0.6rem] text-hud-amber">Not wired yet</span>
+        </div>
+        <p className="text-xs text-slate-600 text-center">Will send ACC wake via powerbox · coming soon</p>
       </Panel>
 
       <Panel title="Satellite Rail (OUT2)" code="CTL-03" icon={SatelliteDish} tone="green"
@@ -35,13 +41,13 @@ export function ControlsTab({ state, connected, now, satNodes, manualHeld }: {
           </Chip>
         }>
         <div className="flex gap-3">
-          <Btn className="flex-1 py-3" tone="green" active={manualHeld}
-            onClick={() => sendCommand('satellite_power_hold', { name: 'dash', on: true })}>
-            Hold ON
+          <Btn className="flex-1 py-3" tone="green" active={manualHeld} disabled={holdBusy}
+            onClick={() => setHold(true)}>
+            {holdBusy ? '…' : 'Hold ON'}
           </Btn>
-          <Btn className="flex-1 py-3" tone="red" disabled={!manualHeld}
-            onClick={() => sendCommand('satellite_power_hold', { name: 'dash', on: false })}>
-            Release
+          <Btn className="flex-1 py-3" tone="red" disabled={!manualHeld || holdBusy}
+            onClick={() => setHold(false)}>
+            {holdBusy ? '…' : 'Release'}
           </Btn>
         </div>
         <p className="text-xs text-slate-600 text-center">

@@ -1,6 +1,7 @@
 import type { ComponentType, ReactNode } from 'react';
 import { cx } from '../lib/format';
 import { TONE_BG, TONE_BORDER, TONE_TEXT, type Tone } from '../lib/tones';
+import { useToasts } from '../lib/toast';
 
 export type { Tone };
 
@@ -136,6 +137,27 @@ export const Meter = ({ label, value, unit, pct, tone = 'cyan' }: {
     </div>
   </div>
 );
+
+/** Command feedback stack (bottom-right); fed by lib/toast. */
+export const Toasts = () => {
+  const list = useToasts();
+  if (list.length === 0) return null;
+  return (
+    <div className="fixed bottom-4 right-4 z-[60] flex flex-col gap-2 items-end">
+      {list.map((t) => (
+        <div
+          key={t.id}
+          className={cx(
+            'bg-ink-900 border px-3 py-2 text-[0.7rem] uppercase tracking-wider flex items-center gap-2',
+            TONE_TEXT[t.tone], TONE_BORDER[t.tone],
+          )}
+        >
+          <Dot tone={t.tone} /> {t.text}
+        </div>
+      ))}
+    </div>
+  );
+};
 
 /** Bordered mono action button. */
 export const Btn = ({ tone = 'cyan', active, disabled, onClick, children, className, title }: {

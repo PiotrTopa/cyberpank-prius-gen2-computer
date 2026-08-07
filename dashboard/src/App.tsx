@@ -7,7 +7,7 @@ import type { Satellites, Tab, TimeRange } from './types';
 import { cx } from './lib/format';
 import { useAppStream, useNow } from './hooks/useAppStream';
 import { useHistory } from './hooks/useHistory';
-import { Chip, Dot, StatCard } from './components/ui';
+import { Chip, Dot, StatCard, Toasts } from './components/ui';
 import { DebugDrawer } from './components/DebugDrawer';
 import { OverviewTab } from './tabs/OverviewTab';
 import { TelemetryTab } from './tabs/TelemetryTab';
@@ -20,8 +20,11 @@ const TABS: [Tab, string, typeof LayoutDashboard][] = [
 ];
 
 export default function App() {
-  const { state, connected } = useAppStream();
+  const { state, connected, clockOffsetMs } = useAppStream();
   const now = useNow();
+  // Backend-clock "now" — the POCO has no reliable RTC/NTP, so ages computed
+  // against the raw viewer clock drift by whatever the skew happens to be.
+  const serverNow = now - clockOffsetMs;
   const [activeTab, setActiveTab] = useState<Tab>('dashboard');
   const [timeRange, setTimeRange] = useState<TimeRange>('1h');
   const [debugOpen, setDebugOpen] = useState(false);
@@ -61,7 +64,7 @@ export default function App() {
 
   const v = pb.system_voltage;
   const vState = v == null ? 'idle' : v < 11 ? 'danger' : v < 11.8 ? 'warn' : 'ok';
-  const pbAge = now / 1000 - (pb.last_update_time ?? 0);
+  const pbAge = serverNow / 1000 - (pb.last_update_time ?? 0);
   const pbFresh = pb.last_update_time != null && pbAge < 4;
   const cabin = pb.aht_t ?? state.climate?.inside_temp ?? undefined;
 
@@ -122,7 +125,7 @@ export default function App() {
           <StatCard
             icon={Thermometer} label="Cabin Temp" value={cabin?.toFixed(1)} unit="°C" tone="magenta"
             state={cabin == null ? 'idle' : cabin > 30 ? 'warn' : 'ok'}
-            sub={pb.aht_h != null ? `${pb.aht_h.toFixed(0)}% RH` : 'AHT20'}
+            sub={pb.aht_h != null ? `${pb.aht_h.toFixed(0)}% RH` : cabin == null ? 'SENSOR OFFLINE' : 'AHT20'}
           />
         </section>
 
@@ -147,14 +150,14 @@ export default function App() {
         {/* Content */}
         <div className="flex-1">
           {activeTab === 'dashboard' && (
-            <OverviewTab state={state} hist={hist} now={now}
+            <OverviewTab state={state} hist={hist} now={serverNow}
               satNodes={satNodes} satHolders={satHolders} onOpenDebug={() => setDebugOpen(true)} />
           )}
           {activeTab === 'charts' && (
             <TelemetryTab hist={hist} timeRange={timeRange} onTimeRange={setTimeRange} />
           )}
           {activeTab === 'controls' && (
-            <ControlsTab state={state} connected={connected} now={now}
+            <ControlsTab state={state} connected={connected} now={serverNow}
               satNodes={satNodes} manualHeld={manualHeld} />
           )}
         </div>
@@ -165,8 +168,10 @@ export default function App() {
         </footer>
       </div>
 
+      <Toasts />
+
       {debugOpen && (
-        <DebugDrawer pb={pb} conn={state.connection} state={state} now={now} onClose={() => setDebugOpen(false)} />
+        <DebugDrawer pb={pb} conn={state.connection} state={state} now={serverNow} onClose={() => setDebugOpen(false)} />
       )}
     </div>
   );

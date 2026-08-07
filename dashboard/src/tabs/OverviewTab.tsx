@@ -62,7 +62,10 @@ export function OverviewTab({ state, hist, now, satNodes, satHolders, onOpenDebu
         <DataRow label="Energy Used" value={pb.energy_mah?.toFixed(1)} unit="mAh" />
       </Panel>
 
-      <Panel title="Environment" code="ENV-01" icon={Wind} tone="magenta">
+      <Panel title="Environment" code="ENV-01" icon={Wind} tone="magenta"
+        right={pb.aht_t == null && pb.aht_h == null && pb.bmp_p == null
+          ? <span className="text-[0.6rem] text-hud-amber tracking-wider">SENSORS OFFLINE</span>
+          : undefined}>
         <DataRow label="Cabin Temp" value={pb.aht_t?.toFixed(1)} unit="°C" tone="magenta" />
         <DataRow label="Humidity" value={pb.aht_h?.toFixed(1)} unit="%" />
         <DataRow label="Pressure" value={pb.bmp_p ? (pb.bmp_p / 100).toFixed(1) : undefined} unit="hPa" />
@@ -98,12 +101,17 @@ export function OverviewTab({ state, hist, now, satNodes, satHolders, onOpenDebu
       </Panel>
 
       <Panel title="MFD Video Node" code="MFD-01" icon={Monitor}>
-        <StatusRow label="Network Reachable" on={conn.mfd_reachable ?? false} onText="YES" offText="NO" />
-        <StatusRow label="USB Hub Power" on={conn.mfd_usb_power ?? false} onText="ON" offText="OFF" />
+        <StatusRow label="Network Reachable" on={conn.mfd_reachable} onText="YES" offText="NO" />
+        <StatusRow label="USB Hub Power" on={conn.mfd_usb_power} onText="ON" offText="OFF" />
         <DataRow label="PM State" value={(conn.mfd_state || '—').toUpperCase()} />
+        {conn.mfd_reachable == null && conn.mfd_usb_power == null && (
+          <p className="text-[0.65rem] text-slate-600">
+            MFD manager disabled — port power truth in USB HUB
+          </p>
+        )}
       </Panel>
 
-      <UsbHubPanel state={state} />
+      <UsbHubPanel state={state} now={now} />
 
       <SatellitesPanel sats={sats} nodes={satNodes} holders={satHolders} out2={pb.out2} now={now} />
     </div>
