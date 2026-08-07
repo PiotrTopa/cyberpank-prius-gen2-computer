@@ -1007,6 +1007,17 @@ class Store:
             )
             affected.add(StateSlice.POWERBOX)
 
+        elif action.type == ActionType.SET_UNDERVOLTAGE_CONFIG:
+            self._state = replace(
+                self._state,
+                powerbox=replace(
+                    self._state.powerbox,
+                    uv_threshold=action.threshold,
+                    uv_recover=action.recover,
+                ),
+            )
+            affected.add(StateSlice.POWERBOX)
+
         elif action.type == ActionType.REQUEST_POWERBOX_SHUTDOWN:
             self._state = replace(
                 self._state,

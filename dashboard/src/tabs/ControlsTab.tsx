@@ -1,10 +1,41 @@
 import { useState } from 'react';
-import { LayoutDashboard, Power, SatelliteDish } from 'lucide-react';
+import { BatteryWarning, LayoutDashboard, Power, SatelliteDish } from 'lucide-react';
 import type { AppState, SatelliteNode } from '../types';
 import { fmtAge } from '../lib/format';
 import { sendCommand } from '../lib/api';
 import { Btn, Chip, DataRow, Panel, StatusRow } from '../components/ui';
 import { SatelliteNodeRow } from '../components/SatellitesPanel';
+
+/** Stepper row for a voltage threshold: −/＋ in 0.1 V steps around a draft value. */
+function VoltStepper({ label, value, draft, onDraft, lo, hi }: {
+  label: string;
+  value?: number | null;
+  draft: number | null;
+  onDraft: (v: number | null) => void;
+  lo: number;
+  hi: number;
+}) {
+  const shown = draft ?? value;
+  const step = (d: number) => {
+    if (shown == null) return;
+    const next = Math.round((shown + d) * 10) / 10;
+    if (next < lo || next > hi) return;
+    onDraft(next === value ? null : next);
+  };
+  return (
+    <div className="flex justify-between items-center gap-3">
+      <span className="text-slate-500 text-xs uppercase tracking-wider">{label}</span>
+      <div className="flex items-center gap-2">
+        <Btn className="px-2 py-0.5 text-[0.7rem]" disabled={shown == null} onClick={() => step(-0.1)}>−</Btn>
+        <span className={`text-base tnum w-14 text-center ${draft != null ? 'text-hud-amber' : 'text-slate-100'}`}>
+          {shown != null ? shown.toFixed(1) : '--'}
+          <span className="text-slate-600 text-[0.65rem] ml-0.5">V</span>
+        </span>
+        <Btn className="px-2 py-0.5 text-[0.7rem]" disabled={shown == null} onClick={() => step(0.1)}>＋</Btn>
+      </div>
+    </div>
+  );
+}
 
 export function ControlsTab({ state, connected, now, satNodes, manualHeld }: {
   state: AppState;
@@ -21,6 +52,26 @@ export function ControlsTab({ state, connected, now, satNodes, manualHeld }: {
     setHoldBusy(true);
     await sendCommand('satellite_power_hold', { name: 'dash', on });
     setHoldBusy(false);
+  };
+
+  // Undervoltage threshold drafts (null = tracking the live value).
+  const [uvThrDraft, setUvThrDraft] = useState<number | null>(null);
+  const [uvRecDraft, setUvRecDraft] = useState<number | null>(null);
+  const [uvBusy, setUvBusy] = useState(false);
+  const uvThr = uvThrDraft ?? pb.uv_threshold ?? null;
+  const uvRec = uvRecDraft ?? pb.uv_recover ?? null;
+  const uvDirty = uvThrDraft != null || uvRecDraft != null;
+  const uvValid = uvThr != null && uvRec != null && uvRec >= uvThr + 0.2;
+
+  const applyUv = async () => {
+    if (!uvValid || uvThr == null || uvRec == null) return;
+    setUvBusy(true);
+    const ok = await sendCommand('set_undervoltage', { threshold: uvThr, recover: uvRec });
+    if (ok) {
+      setUvThrDraft(null);
+      setUvRecDraft(null);
+    }
+    setUvBusy(false);
   };
 
   return (
@@ -69,6 +120,30 @@ export function ControlsTab({ state, connected, now, satNodes, manualHeld }: {
             ))}
           </div>
         )}
+      </Panel>
+
+      <Panel title="Power Protection" code="CTL-04" icon={BatteryWarning} tone="amber"
+        right={pb.undervoltage
+          ? <Chip tone="red">UV TRIPPED</Chip>
+          : <Chip tone={pb.uv_threshold != null ? 'green' : 'dim'}>{pb.uv_threshold != null ? 'ARMED' : 'N/A'}</Chip>}>
+        <VoltStepper label="Cut-off Below" value={pb.uv_threshold} draft={uvThrDraft} onDraft={setUvThrDraft} lo={9.0} hi={12.5} />
+        <VoltStepper label="Recover Above" value={pb.uv_recover} draft={uvRecDraft} onDraft={setUvRecDraft} lo={9.2} hi={13.0} />
+        {uvDirty && !uvValid && (
+          <p className="text-[0.65rem] text-hud-red text-center">recover must be ≥ cut-off + 0.2 V</p>
+        )}
+        <div className="flex gap-3">
+          <Btn className="flex-1 py-2" tone="amber" disabled={!uvDirty || !uvValid || uvBusy} onClick={applyUv}>
+            {uvBusy ? '…' : 'Apply'}
+          </Btn>
+          <Btn className="flex-1 py-2" disabled={!uvDirty || uvBusy}
+            onClick={() => { setUvThrDraft(null); setUvRecDraft(null); }}>
+            Revert
+          </Btn>
+        </div>
+        <p className="text-xs text-slate-600 text-center">
+          Cuts POCO power after 5 s below cut-off. Persists across restarts.
+          Firmware last-resort backstop stays at 10.0 V.
+        </p>
       </Panel>
 
       <Panel title="System Status" code="SYS-01" icon={LayoutDashboard} className="md:col-span-2">

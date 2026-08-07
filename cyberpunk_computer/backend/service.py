@@ -665,18 +665,49 @@ class BackendService:
         twin.rules_engine.register(
             PowerModeRule(apply_mode=controller.set_for_ignition)
         )
+
+        # Persisted UI overrides win over the CLI defaults; mirror the active
+        # values into the state so the dashboard can display and edit them.
+        from ..persistence import SettingsManager
+        from ..state.actions import SetUndervoltageConfigAction
+        power_settings = SettingsManager().settings.power
+        uv_threshold = power_settings.undervoltage_threshold or cfg.undervoltage_threshold
+        uv_recover = power_settings.undervoltage_recover or cfg.undervoltage_recover
+
         twin.rules_engine.register(
             UndervoltageProtectionRule(
                 request_shutdown=request_shutdown,
-                threshold=cfg.undervoltage_threshold,
-                recover_threshold=cfg.undervoltage_recover,
+                threshold=uv_threshold,
+                recover_threshold=uv_recover,
                 confirm_seconds=cfg.undervoltage_confirm_s,
                 grace_seconds=cfg.shutdown_grace_s,
             )
         )
+        twin.store.dispatch(SetUndervoltageConfigAction(uv_threshold, uv_recover))
+
+        def _uv_config_middleware(action, store) -> None:
+            from ..state.actions import ActionSource
+            if getattr(action, "source", None) != ActionSource.UI:
+                return
+            if type(action).__name__ != "SetUndervoltageConfigAction":
+                return
+            try:
+                sm = SettingsManager()
+                sm.settings.power.undervoltage_threshold = float(action.threshold)
+                sm.settings.power.undervoltage_recover = float(action.recover)
+                sm.save()
+                logger.info(
+                    "Undervoltage thresholds set from UI: trip %.2fV / recover %.2fV (persisted)",
+                    action.threshold, action.recover,
+                )
+            except Exception:
+                logger.exception("Failed to persist undervoltage thresholds")
+
+        twin.store.add_middleware(_uv_config_middleware)
+
         logger.info(
             "Powerbox computer-side wired (undervoltage<%.1fV, flag=%s)",
-            cfg.undervoltage_threshold, cfg.power_mode_flag,
+            uv_threshold, cfg.power_mode_flag,
         )
 
     def _wire_satellites(self, twin: VirtualTwin) -> None:

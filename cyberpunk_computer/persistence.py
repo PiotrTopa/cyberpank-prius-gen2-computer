@@ -118,6 +118,17 @@ class SatelliteSettings:
 
 
 @dataclass
+class PowerSettings:
+    """Persisted power-protection options (UI-configurable).
+
+    ``None`` means "use the backend CLI default" — only values the user has
+    explicitly set through the dashboard are stored here.
+    """
+    undervoltage_threshold: Optional[float] = None  # 12V trip threshold (V)
+    undervoltage_recover: Optional[float] = None    # 12V recovery threshold (V)
+
+
+@dataclass
 class UserSettings:
     """All user-configurable settings."""
     ambient: AmbientSettings = field(default_factory=AmbientSettings)
@@ -127,6 +138,7 @@ class UserSettings:
     display: DisplaySettings = field(default_factory=DisplaySettings)
     data_sources: DataSourceSettings = field(default_factory=DataSourceSettings)
     satellites: SatelliteSettings = field(default_factory=SatelliteSettings)
+    power: PowerSettings = field(default_factory=PowerSettings)
 
 
 def _safe_load(cls, data: dict):
@@ -199,6 +211,8 @@ class SettingsManager:
                 self.settings.data_sources = _safe_load(DataSourceSettings, data['data_sources'])
             if 'satellites' in data:
                 self.settings.satellites = _safe_load(SatelliteSettings, data['satellites'])
+            if 'power' in data:
+                self.settings.power = _safe_load(PowerSettings, data['power'])
             
             logger.info(f"Loaded settings from {self.settings_file}")
             return True
@@ -223,6 +237,8 @@ class SettingsManager:
                 'climate': asdict(self.settings.climate),
                 'display': asdict(self.settings.display),
                 'data_sources': asdict(self.settings.data_sources),
+                'satellites': asdict(self.settings.satellites),
+                'power': asdict(self.settings.power),
             }
             
             with open(self.settings_file, 'w') as f:

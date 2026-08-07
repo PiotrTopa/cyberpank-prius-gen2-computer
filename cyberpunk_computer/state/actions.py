@@ -107,6 +107,7 @@ class ActionType(Enum):
     SET_POWERBOX_IGNITION = auto()     # ACC + constant battery line
     SET_POWERBOX_CONNECTION = auto()   # powerbox link present/absent
     SET_POWERBOX_UNDERVOLTAGE = auto() # sustained under-voltage flag (rule)
+    SET_UNDERVOLTAGE_CONFIG = auto()   # runtime UV protection thresholds (UI)
     REQUEST_POWERBOX_SHUTDOWN = auto() # ask powerbox to cut POCO power (rule)
     SET_POWERBOX_POWER_MODE = auto()   # POCO CPU power profile (rule)
     SET_POWERBOX_POWER_STATUS = auto()
@@ -1251,6 +1252,18 @@ class SetPowerboxUndervoltageAction(Action):
     def __init__(self, undervoltage: bool, source: ActionSource = ActionSource.INTERNAL):
         super().__init__(ActionType.SET_POWERBOX_UNDERVOLTAGE, source)
         self.undervoltage = undervoltage
+
+
+@dataclass
+class SetUndervoltageConfigAction(Action):
+    """Set the runtime under-voltage protection thresholds (UI-configurable)."""
+    threshold: float = 10.5
+    recover: float = 11.0
+
+    def __init__(self, threshold: float, recover: float, source: ActionSource = ActionSource.INTERNAL):
+        super().__init__(ActionType.SET_UNDERVOLTAGE_CONFIG, source)
+        self.threshold = threshold
+        self.recover = recover
 
 
 @dataclass

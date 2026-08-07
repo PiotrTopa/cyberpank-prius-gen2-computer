@@ -20,6 +20,8 @@ export interface Powerbox {
   undervoltage?: boolean;
   shutdown_requested?: boolean;
   shutdown_reason?: string;
+  uv_threshold?: number | null;
+  uv_recover?: number | null;
   out1?: boolean | null;
   out2?: boolean | null;
   out3?: boolean | null;

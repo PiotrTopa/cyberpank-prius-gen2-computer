@@ -505,6 +505,9 @@ class PowerboxState:
     undervoltage: bool = False        # voltage sustained below the cut threshold
     shutdown_requested: bool = False  # computer asked the powerbox to cut POCO power
     shutdown_reason: str = ""
+    # Active protection thresholds (UI-configurable, persisted; None until wired)
+    uv_threshold: Optional[float] = None  # trip below this (V)
+    uv_recover: Optional[float] = None    # flag clears above this (V)
     power_mode: str = "low"           # POCO CPU power profile (low|full)
 
     # Power-management GPIO mirror (from the powerbox STATUS heartbeat).

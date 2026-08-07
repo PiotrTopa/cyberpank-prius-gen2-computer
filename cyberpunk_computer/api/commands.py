@@ -200,6 +200,15 @@ def _build_fan_auto(params: Dict[str, Any]) -> Action:
     return SetFanOverrideAction(None, source=ActionSource.UI)
 
 
+def _build_set_undervoltage(params: Dict[str, Any]) -> Action:
+    from ..state.actions import SetUndervoltageConfigAction
+    threshold = _as_float(_require(params, "threshold"), "threshold", 9.0, 12.5)
+    recover = _as_float(_require(params, "recover"), "recover", 9.2, 13.0)
+    if recover < threshold + 0.2:
+        raise CommandError("'recover' must be at least 0.2 V above 'threshold' (hysteresis)")
+    return SetUndervoltageConfigAction(threshold, recover, source=ActionSource.UI)
+
+
 def _build_satellite_power_hold(params: Dict[str, Any]) -> Action:
     from ..state.actions import SatellitePowerHoldAction
     name = str(_require(params, "name")).strip()
@@ -298,6 +307,18 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
         "builder": _build_fan_auto,
         "description": "Clear the chassis fan override and return to automatic control.",
         "params": {},
+    },
+    "set_undervoltage": {
+        "builder": _build_set_undervoltage,
+        "description": (
+            "Set the 12 V under-voltage protection thresholds. Applies "
+            "immediately and persists across restarts (user_settings.json). "
+            "The firmware keeps its own last-resort backstop at 10.0 V."
+        ),
+        "params": {
+            "threshold": "float 9.0..12.5 (V, trip after sustained 5 s below)",
+            "recover": "float 9.2..13.0 (V, must be >= threshold + 0.2)",
+        },
     },
     "satellite_power_hold": {
         "builder": _build_satellite_power_hold,

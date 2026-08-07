@@ -141,20 +141,25 @@ class UndervoltageProtectionRule(StateRule):
 
         now = self._clock()
 
+        # Live thresholds: the state (UI-configurable, persisted) overrides the
+        # constructor values, so a dashboard change applies on the next tick.
+        threshold = pb.uv_threshold if pb.uv_threshold is not None else self._threshold
+        recover_threshold = pb.uv_recover if pb.uv_recover is not None else self._recover_threshold
+
         # Track sustained low voltage -> trip.
-        if voltage < self._threshold:
+        if voltage < threshold:
             self._above_since = None
             if self._below_since is None:
                 self._below_since = now
             elapsed = now - self._below_since
             if elapsed >= self._confirm_seconds and not self._shutdown_latched:
-                self._trip(store, voltage)
+                self._trip(store, voltage, threshold)
             elif elapsed >= self._confirm_seconds and not self._undervoltage_active:
                 self._set_flag(store, True)
         else:
             self._below_since = None
             # Track sustained recovery -> clear flag (latch stays until reboot).
-            if voltage >= self._recover_threshold:
+            if voltage >= recover_threshold:
                 if self._above_since is None:
                     self._above_since = now
                 if (now - self._above_since) >= self._recover_seconds and self._undervoltage_active:
@@ -168,9 +173,9 @@ class UndervoltageProtectionRule(StateRule):
         self._undervoltage_active = active
         store.dispatch(SetPowerboxUndervoltageAction(active))
 
-    def _trip(self, store: Store, voltage: float) -> None:
+    def _trip(self, store: Store, voltage: float, threshold: float) -> None:
         self._shutdown_latched = True
-        reason = f"undervoltage {voltage:.2f}V < {self._threshold:.2f}V"
+        reason = f"undervoltage {voltage:.2f}V < {threshold:.2f}V"
         logger.warning("Under-voltage protection tripped: %s", reason)
         self._set_flag(store, True)
         store.dispatch(RequestPowerboxShutdownAction(reason))
