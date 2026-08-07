@@ -186,7 +186,7 @@ POCO_BTN_FORCE_MS = 35000     # forced hard power-cycle hold (POCO F1: ~30-40 s)
 POCO_FORCE_COOLDOWN_MS = 300000 # after a forced hard power-cycle, wait this long (disk checks etc)
 
 # Firmware-local under-voltage backstop. The backend's UndervoltageProtectionRule
-# (11.0 V / 5 s) normally handles low voltage gracefully by sending an "off"
+# (10.5 V / 5 s) normally handles low voltage gracefully by sending an "off"
 # command. This is the LAST-RESORT backstop for when the backend is dead: if the
 # rail sits below SUICIDE_VOLTAGE for SUICIDE_CONFIRM_MS we start the
 # shutdown->suicide sequence ourselves. Set well below the backend threshold so

@@ -93,8 +93,8 @@ class UndervoltageProtectionRule(StateRule):
     def __init__(
         self,
         request_shutdown: Callable[[str], None],
-        threshold: float = 11.0,
-        recover_threshold: float = 11.5,
+        threshold: float = 10.5,
+        recover_threshold: float = 11.0,
         confirm_seconds: float = 5.0,
         recover_seconds: float = 5.0,
         grace_seconds: int = 30,

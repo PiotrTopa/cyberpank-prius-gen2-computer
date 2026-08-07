@@ -258,13 +258,13 @@ def main() -> None:
     parser.add_argument(
         "--undervoltage-threshold",
         type=float,
-        default=11.0,
+        default=10.5,
         help="12V trip threshold in volts",
     )
     parser.add_argument(
         "--undervoltage-recover",
         type=float,
-        default=11.5,
+        default=11.0,
         help="12V recovery threshold in volts (hysteresis)",
     )
     parser.add_argument(
