@@ -631,6 +631,8 @@ class BackendService:
                         self.powerbox_commander.press_button(3000)
                     else:
                         self.powerbox_commander.press_button(10000)
+                elif type(action).__name__ == "PowerboxI2cScanAction":
+                    self.powerbox_commander.request_i2c_scan()
 
         twin.store.add_middleware(_powerbox_middleware)
 

@@ -108,6 +108,7 @@ class ActionType(Enum):
     SET_POWERBOX_CONNECTION = auto()   # powerbox link present/absent
     SET_POWERBOX_UNDERVOLTAGE = auto() # sustained under-voltage flag (rule)
     SET_UNDERVOLTAGE_CONFIG = auto()   # runtime UV protection thresholds (UI)
+    POWERBOX_I2C_SCAN = auto()         # request a live I2C bus rescan (diagnostic)
     REQUEST_POWERBOX_SHUTDOWN = auto() # ask powerbox to cut POCO power (rule)
     SET_POWERBOX_POWER_MODE = auto()   # POCO CPU power profile (rule)
     SET_POWERBOX_POWER_STATUS = auto()
@@ -1252,6 +1253,15 @@ class SetPowerboxUndervoltageAction(Action):
     def __init__(self, undervoltage: bool, source: ActionSource = ActionSource.INTERNAL):
         super().__init__(ActionType.SET_POWERBOX_UNDERVOLTAGE, source)
         self.undervoltage = undervoltage
+
+
+@dataclass
+class PowerboxI2cScanAction(Action):
+    """Request a live I2C bus rescan from the powerbox (diagnostic; the
+    result lands in the journal as an I2C_SCAN system message)."""
+
+    def __init__(self, source: ActionSource = ActionSource.INTERNAL):
+        super().__init__(ActionType.POWERBOX_I2C_SCAN, source)
 
 
 @dataclass

@@ -216,6 +216,13 @@ def parse_powerbox_system(data: dict) -> List[Action]:
             relays=relays,
         )]
 
+    if msg in ("I2C_OK", "I2C_SCAN", "SENSOR_OK", "IDLE"):
+        # Boot/diagnostic messages (bus scan results, per-chip detection).
+        # Surface them in the journal — invaluable for bench wiring work.
+        logger.info("Powerbox %s: %s", msg,
+                    {k: v for k, v in data.items() if k != "msg"})
+        return []
+
     if msg in ("SHUTDOWN", "SUICIDE"):
         # Powerbox is tearing down power. Reflect the state machine so the
         # dashboard/operator can see it; the rail states follow in STATUS.
@@ -319,6 +326,21 @@ def build_relay_command(channel: int, on: bool) -> OutgoingCommand:
     )
 
 
+def build_i2c_scan_command() -> OutgoingCommand:
+    """Ask the firmware for a live I2C bus rescan (fw >= 1.9.1).
+
+    The reply is an ID_SYSTEM ``I2C_SCAN`` message with the ACKing addresses,
+    logged to the journal by :func:`parse_powerbox_system`. Diagnostic only —
+    device binding still happens at firmware boot.
+    """
+    return OutgoingCommand(
+        device_id=POWERBOX_LOCAL_SYSTEM,
+        command_type="power",
+        payload={"a": "i2c_scan"},
+        priority=50,
+    )
+
+
 def build_button_command(ms: int = 3000) -> OutgoingCommand:
     """Pulse the POCO power button: ~3000 ms = power on, ~10000 ms = force reboot."""
     return OutgoingCommand(
@@ -382,6 +404,9 @@ class PowerboxCommander:
 
     def press_button(self, ms: int = 3000) -> bool:
         return self._send(build_button_command(ms), "power-button %dms" % ms, warn=True)
+
+    def request_i2c_scan(self) -> bool:
+        return self._send(build_i2c_scan_command(), "i2c_scan", warn=True)
 
     def set_fan(self, pin: int, duty: int, freq: int = 25000) -> bool:
         return self._send(build_fan_command(pin, duty, freq),

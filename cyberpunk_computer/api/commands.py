@@ -200,6 +200,11 @@ def _build_fan_auto(params: Dict[str, Any]) -> Action:
     return SetFanOverrideAction(None, source=ActionSource.UI)
 
 
+def _build_powerbox_i2c_scan(params: Dict[str, Any]) -> Action:
+    from ..state.actions import PowerboxI2cScanAction
+    return PowerboxI2cScanAction(source=ActionSource.UI)
+
+
 def _build_set_undervoltage(params: Dict[str, Any]) -> Action:
     from ..state.actions import SetUndervoltageConfigAction
     threshold = _as_float(_require(params, "threshold"), "threshold", 9.0, 12.5)
@@ -306,6 +311,16 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
     "fan_auto": {
         "builder": _build_fan_auto,
         "description": "Clear the chassis fan override and return to automatic control.",
+        "params": {},
+    },
+    "powerbox_i2c_scan": {
+        "builder": _build_powerbox_i2c_scan,
+        "description": (
+            "Diagnostic: ask the powerbox firmware (>=1.9.1) for a live I2C "
+            "bus rescan. The ACKing addresses are logged in the backend "
+            "journal as 'Powerbox I2C_SCAN'. Device binding still happens at "
+            "firmware boot — after fixing wiring, cold-boot the powerbox."
+        ),
         "params": {},
     },
     "set_undervoltage": {

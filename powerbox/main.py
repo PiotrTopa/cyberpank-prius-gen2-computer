@@ -74,7 +74,7 @@ from ina219 import INA219
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-VERSION = "1.9.0"
+VERSION = "1.9.1"
 
 # Device role — reported in the unified identify ("whoami") response and the
 # ready banner so the computer can discover which USB-CDC port is the powerbox
@@ -305,6 +305,7 @@ def setup_i2c():
             tx(ID_SYSTEM, {
                 "msg": "I2C_OK",
                 "pins": "SDA=0,SCL=1",
+                "addrs": [hex(d) for d in devices],
             })
             return i2c, devices
     except Exception:
@@ -318,6 +319,7 @@ def setup_i2c():
             tx(ID_SYSTEM, {
                 "msg": "I2C_OK",
                 "pins": "SDA=1,SCL=0(soft)",
+                "addrs": [hex(d) for d in devices],
             })
             return i2c, devices
     except Exception:
@@ -573,12 +575,13 @@ class PowerManager:
 
 class Config:
     """Mutable runtime configuration, adjustable via inbound commands."""
-    __slots__ = ("interval_ms", "shutdown_requested", "shutdown_grace_s")
+    __slots__ = ("interval_ms", "shutdown_requested", "shutdown_grace_s", "i2c")
 
     def __init__(self):
         self.interval_ms = DEFAULT_INTERVAL_MS
         self.shutdown_requested = False
         self.shutdown_grace_s = 0
+        self.i2c = None  # bus handle for the on-demand i2c_scan diagnostic
 
 
 def process_command(line: str, config: Config):
@@ -664,6 +667,18 @@ def process_command(line: str, config: Config):
             on = _truthy(data.get("on"))
             if _pm.set_relay(ch, on):
                 tx_ack("relay_%s_%s" % (ch, "on" if on else "off"))
+
+    elif action == "i2c_scan":
+        # Live bus rescan (wiring diagnostic). Detection/binding of devices
+        # still only happens at boot — this just reports who ACKs right now.
+        if config.i2c is None:
+            tx_error("I2C_SCAN", "no bus")
+        else:
+            try:
+                tx(ID_SYSTEM, {"msg": "I2C_SCAN",
+                               "addrs": [hex(d) for d in config.i2c.scan()]})
+            except Exception as e:
+                tx_error("I2C_SCAN", str(e))
 
 
 def poll_stdin(config: Config):
@@ -820,6 +835,7 @@ def main():
 
     # Telemetry loop
     config = Config()
+    config.i2c = i2c
     total_mah = 0.0
     last_time = time.ticks_ms()
     error_streak = 0
