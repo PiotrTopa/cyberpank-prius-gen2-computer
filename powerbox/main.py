@@ -29,7 +29,9 @@ gateway over USB (both share ids 1/2), so it can bind each role to its stable
 /dev/serial/by-id path regardless of /dev/ttyACM* enumeration order.
 
 Hardware (RP2040 / Raspberry Pi Pico pinout):
-    GP0/GP1  I2C (INA219 current/voltage monitor + optional BMP280/AHT20).
+    GP0/GP1  I2C0: INA219 @0x40 (current/voltage), BMP280 @0x77 (box inside),
+             BMP280 @0x76 (outside box / cabin), AHT20 @0x38 (box inside),
+             PCF8574 @0x20 (USB-port VBUS relays).
              All three OUTn power rails are downstream of the INA219 shunt, so
              its current/coulomb count is the WHOLE-computer draw.
     GP11     ACC / ignition sense — INVERTED logic (active-low):
@@ -792,11 +794,9 @@ def main():
         except Exception as e:
             tx_error("INA219_INIT", str(e))
 
-    # BMP280: up to two units. 0x77 (SDO high) is the PRIMARY — the original
-    # sensor, mounted INSIDE the computer box (chassis air; keeps bmp_t/bmp_p
-    # metric history consistent). 0x76 (SDO low) is the SECONDARY, mounted
-    # OUTSIDE the box (cabin ambient), reported as bmp2_t/bmp2_p (added
-    # 2026-08-09).
+    # BMP280 ×2: 0x77 (SDO high) is mounted INSIDE the computer box (chassis
+    # air) → bmp_t/bmp_p (original sensor — key names kept for metric history);
+    # 0x76 (SDO low) is OUTSIDE the box (cabin ambient) → bmp2_t/bmp2_p.
     for addr in (0x77, 0x76):
         if addr not in devices:
             continue
@@ -903,7 +903,7 @@ def main():
             else:
                 last_time = time.ticks_ms()
 
-            # Read BMP280 (primary @0x77, secondary @0x76)
+            # Read BMP280s (0x77 = box inside, 0x76 = outside box)
             if bmp is not None:
                 payload["bmp_t"] = round(bmp.temperature, 2)
                 payload["bmp_p"] = round(bmp.pressure, 2)
