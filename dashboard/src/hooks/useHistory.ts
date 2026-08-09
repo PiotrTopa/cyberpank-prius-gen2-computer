@@ -69,7 +69,7 @@ export function useHistory(timeRange: TimeRange): HistoryData {
 
       const [voltRes, tempRes, pbPowerRes, pb1h, pb5m, pocoPowerRes, poco1h, poco5m] = await Promise.all([
         fetch(`${API_URL}/metrics?signal=powerbox_voltage&res=auto${fromStr}`),
-        fetch(`${API_URL}/metrics?signal=powerbox_aht_t&res=auto${fromStr}`),
+        fetch(`${API_URL}/metrics?signal=powerbox_bmp2_t&res=auto${fromStr}`),
         fetch(`${API_URL}/metrics?signal=powerbox_power&res=auto${fromStr}`),
         fetch(`${API_URL}/metrics?signal=powerbox_power&res=1m&from=${nowS - 3600}`),
         fetch(`${API_URL}/metrics?signal=powerbox_power&res=raw&from=${nowS - 300}`),
