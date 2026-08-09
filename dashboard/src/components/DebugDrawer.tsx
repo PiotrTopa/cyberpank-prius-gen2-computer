@@ -112,8 +112,9 @@ export function DebugDrawer({ pb, conn, state, now, onClose }: {
             <Row k="current_draw">{pb.current_draw_a != null ? (pb.current_draw_a * 1000).toFixed(1) : '--'} mA</Row>
             <Row k="power_draw">{pb.power_draw_w != null ? pb.power_draw_w.toFixed(2) : '--'} W</Row>
             <Row k="energy_mah">{pb.energy_mah?.toFixed(3) ?? '--'} mAh</Row>
-            <Row k="bmp_t / bmp_p">{pb.bmp_t?.toFixed(2) ?? '--'} °C · {pb.bmp_p ? (pb.bmp_p / 100).toFixed(1) : '--'} hPa</Row>
-            <Row k="aht_t / aht_h">{pb.aht_t?.toFixed(2) ?? '--'} °C · {pb.aht_h?.toFixed(1) ?? '--'} %</Row>
+            <Row k="bmp_t / bmp_p (box inside)">{pb.bmp_t?.toFixed(2) ?? '--'} °C · {pb.bmp_p ? (pb.bmp_p / 100).toFixed(1) : '--'} hPa</Row>
+            <Row k="bmp2_t / bmp2_p (outside box)">{pb.bmp2_t?.toFixed(2) ?? '--'} °C · {pb.bmp2_p ? (pb.bmp2_p / 100).toFixed(1) : '--'} hPa</Row>
+            <Row k="aht_t / aht_h (box inside)">{pb.aht_t?.toFixed(2) ?? '--'} °C · {pb.aht_h?.toFixed(1) ?? '--'} %</Row>
             <Row k="acc_on · GP11 (ignition)">
               <span className={pb.acc_on ? 'text-hud-green' : 'text-slate-400'}>{pb.acc_on ? 'ON' : 'OFF'}</span>
             </Row>

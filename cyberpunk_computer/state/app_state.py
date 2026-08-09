@@ -494,13 +494,16 @@ class PowerboxState:
     fan_duty_pct: float = 0.0                 # current fan duty cycle (0-100%)
     fan_override_pct: Optional[float] = None  # manual override (None = automatic)
 
-    # Environmental telemetry (bmp = primary BMP280 @0x77, bmp2 = secondary @0x76)
-    bmp_t: Optional[float] = None
-    bmp_p: Optional[float] = None
-    bmp2_t: Optional[float] = None
-    bmp2_p: Optional[float] = None
-    aht_t: Optional[float] = None
-    aht_h: Optional[float] = None
+    # Environmental telemetry. Physical placement:
+    #   bmp  = BMP280 @0x77 INSIDE the computer box (chassis air, near POCO/Pi)
+    #   bmp2 = BMP280 @0x76 OUTSIDE the box (cabin ambient reference)
+    #   aht  = AHT20 on the powerbox board — also INSIDE the box
+    bmp_t: Optional[float] = None     # box inside temperature (°C)
+    bmp_p: Optional[float] = None     # box inside pressure (Pa)
+    bmp2_t: Optional[float] = None    # outside-box / cabin ambient temperature (°C)
+    bmp2_p: Optional[float] = None    # outside-box pressure (Pa)
+    aht_t: Optional[float] = None     # box inside temperature, AHT20 (°C)
+    aht_h: Optional[float] = None     # box inside relative humidity (%)
     energy_mah: Optional[float] = None
 
     # Rule-computed protection state

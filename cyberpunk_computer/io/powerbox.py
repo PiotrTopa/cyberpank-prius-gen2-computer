@@ -103,8 +103,9 @@ def parse_power_telemetry(data: dict) -> List[Action]:
         v / volt / voltage     bus voltage in volts   (or mv / mvolt in millivolts)
         i / cur / current      current in amps         (or ma / mcur in milliamps)
         p / pwr / power         power in watts          (or mw / mpwr in milliwatts)
-        bmp_t, bmp_p           BMP280 temperature (C), pressure (Pa)
-        aht_t, aht_h           AHT20 temperature (C), relative humidity (%)
+        bmp_t, bmp_p           BMP280 @0x77 box-inside temperature (C), pressure (Pa)
+        bmp2_t, bmp2_p         BMP280 @0x76 outside-box temperature (C), pressure (Pa)
+        aht_t, aht_h           AHT20 box-inside temperature (C), relative humidity (%)
     """
     voltage = _coerce_float(data.get("v", data.get("voltage", data.get("volt"))))
     if voltage is None:

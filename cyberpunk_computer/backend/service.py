@@ -229,8 +229,15 @@ class BackendConfig:
     satellite_poll_payload: str = '{"a":"status"}'
 
     # ── Chassis fan control ──────────────────────────────────────────────────
-    # PWM fan on powerbox GPIO 14. Driven automatically based on the delta
-    # between POCO core temperature and cabin temperature (AHT20).
+    # PWM fan on powerbox GPIO 14. Two cooperating controllers, final duty is
+    # the max of both:
+    #   1. POCO controller — delta between POCO die temp (max CPU/GPU) and the
+    #      outside-of-box ambient (BMP2 @0x76; falls back to the in-box AHT20
+    #      when BMP2 is absent, matching the historical behaviour).
+    #   2. Box-purge controller — delta between box-inside air (BMP1 @0x77,
+    #      AHT20 fallback) and outside ambient (BMP2). Purges heat trapped in
+    #      the box so passively-cooled boards (MFD Pi Zero 2W, RP2040s) don't
+    #      cook even when the POCO itself is idle/cool.
     chassis_fan_enabled: bool = True
     chassis_fan_pin: int = 14             # powerbox GPIO pin driving the fan
     chassis_fan_freq: int = 25000         # PWM frequency in Hz
@@ -251,9 +258,17 @@ class BackendConfig:
     fan_low_ramp_range: float = 30.0      # ramp from 50C to 80C
     # Safety: absolute POCO temp override (fan at 100% regardless of delta)
     fan_safety_temp: float = 80.0         # °C
-    # Fallback: no cabin temp — use absolute POCO thresholds
+    # Fallback: no ambient temp at all — use absolute POCO thresholds
     fan_fallback_start_temp: float = 50.0 # °C
     fan_fallback_stop_temp: float = 45.0  # °C
+    # Box-purge controller: run the fan when the box interior is significantly
+    # hotter than the cabin (BMP1 inside vs BMP2 outside). Requires BMP2.
+    fan_box_start_delta: float = 8.0      # start purging when inside-outside > this (°C)
+    fan_box_stop_delta: float = 5.0       # stop when delta falls below this (°C)
+    fan_box_min_temp: float = 35.0        # AND box inside > this (°C) — no purge when box is cold
+    fan_box_stop_temp: float = 32.0       # release latch when box inside < this (°C)
+    fan_box_max_pct: float = 60.0         # purge is a background job — cap the noise
+    fan_box_ramp_range: float = 10.0      # ramp duty over delta from stop_delta upward
 
     # Asymmetric EMA filter for the simulated heatsink temperature. The raw die
     # sensor (max CPU/GPU) spikes fast under load, but the physical heatsink has
@@ -317,6 +332,7 @@ class BackendService:
         # Chassis fan controller state.
         self._fan_last_tick: float = 0.0
         self._fan_active: bool = False      # hysteresis latch
+        self._fan_box_active: bool = False  # box-purge hysteresis latch
         self._fan_last_duty: int = -1       # last sent duty (avoid re-sending same value)
         self._fan_last_log_pct: float = -1.0  # edge-triggered logging
         self._fan_ema_temp: Optional[float] = None  # Simulated heatsink temp
@@ -1195,10 +1211,17 @@ class BackendService:
     def _chassis_fan_tick(self) -> None:
         """Intelligent chassis fan controller.
 
-        Drives a PWM fan on powerbox GPIO ``chassis_fan_pin`` based on the
-        temperature differential between the POCO (max of CPU/GPU) and the
-        cabin (AHT20 on the powerbox). Two profiles (full/low) are selected by
-        the current power mode. Hysteresis prevents oscillation.
+        Drives a PWM fan on powerbox GPIO ``chassis_fan_pin``. Two cooperating
+        controllers share the fan; the final duty is the max of both:
+
+        1. POCO: differential between the POCO die (max CPU/GPU, EMA-filtered)
+           and the outside-of-box ambient (BMP2 @0x76, AHT20 fallback). Two
+           profiles (full/low) selected by the current power mode.
+        2. Box purge: differential between box-inside air (BMP1 @0x77, AHT20
+           fallback) and outside ambient (BMP2) — cools the passively-cooled
+           boards in the box (MFD Pi Zero 2W, RP2040s).
+
+        Both controllers use hysteresis to prevent oscillation.
         """
         cfg = self.config
         if not cfg.chassis_fan_enabled or not cfg.powerbox_enabled:
@@ -1229,87 +1252,110 @@ class BackendService:
         if not pb.connected:
             return
 
-        # Determine the hottest POCO temperature (max of CPU and GPU).
+        # ── Controller 1: POCO die vs outside ambient ────────────────────────
+        # Ambient reference is the outside-of-box BMP2 (@0x76); fall back to
+        # the in-box AHT20 (historical behaviour) when BMP2 is absent.
+        ambient_temp = pb.bmp2_t if pb.bmp2_t is not None else pb.aht_t
+
+        poco_duty_pct = 0.0
         poco_temps = [t for t in (pb.poco_core_temp, pb.poco_gpu_temp) if t is not None]
-        if not poco_temps:
-            # No thermal data → safe default: fan off.
-            self._set_fan_duty(0)
-            self._fan_ema_temp = None
-            return
-        poco_max_raw = max(poco_temps)
+        if poco_temps:
+            poco_max_raw = max(poco_temps)
 
-        # Safety override: absolute raw temperature too high (ignore EMA delay).
-        if poco_max_raw >= cfg.fan_safety_temp:
-            self._set_fan_duty(65535)  # 100%
-            self._fan_ema_temp = poco_max_raw  # Keep EMA updated
-            self._publish_poco_ema_temp(self._fan_ema_temp, 100.0)
-            return
+            # Safety override: absolute raw temperature too high (ignore EMA delay).
+            if poco_max_raw >= cfg.fan_safety_temp:
+                self._set_fan_duty(65535)  # 100%
+                self._fan_ema_temp = poco_max_raw  # Keep EMA updated
+                self._publish_poco_ema_temp(self._fan_ema_temp, 100.0)
+                return
 
-        # Asymmetric EMA (Simulated Heatsink Temperature)
-        if self._fan_ema_temp is None:
-            self._fan_ema_temp = poco_max_raw
-        else:
-            if poco_max_raw > self._fan_ema_temp:
-                self._fan_ema_temp += cfg.fan_ema_alpha_up * (poco_max_raw - self._fan_ema_temp)
+            # Asymmetric EMA (Simulated Heatsink Temperature)
+            if self._fan_ema_temp is None:
+                self._fan_ema_temp = poco_max_raw
             else:
-                self._fan_ema_temp += cfg.fan_ema_alpha_down * (poco_max_raw - self._fan_ema_temp)
+                if poco_max_raw > self._fan_ema_temp:
+                    self._fan_ema_temp += cfg.fan_ema_alpha_up * (poco_max_raw - self._fan_ema_temp)
+                else:
+                    self._fan_ema_temp += cfg.fan_ema_alpha_down * (poco_max_raw - self._fan_ema_temp)
 
-        poco_max = self._fan_ema_temp
+            poco_max = self._fan_ema_temp
 
-        cabin_temp = pb.aht_t  # may be None if sensor not available
+            # Select profile based on power mode.
+            is_full = pb.power_mode == "full"
+            if is_full:
+                start_temp = cfg.fan_full_start_temp
+                stop_temp = cfg.fan_full_stop_temp
+                start_delta = cfg.fan_full_start_delta
+                stop_delta = cfg.fan_full_stop_delta
+                max_pct = cfg.fan_full_max_pct
+                ramp_range = cfg.fan_full_ramp_range
+            else:
+                start_temp = cfg.fan_low_start_temp
+                stop_temp = cfg.fan_low_stop_temp
+                start_delta = cfg.fan_low_start_delta
+                stop_delta = cfg.fan_low_stop_delta
+                max_pct = cfg.fan_low_max_pct
+                ramp_range = cfg.fan_low_ramp_range
 
-        # Select profile based on power mode.
-        is_full = pb.power_mode == "full"
-        if is_full:
-            start_temp = cfg.fan_full_start_temp
-            stop_temp = cfg.fan_full_stop_temp
-            start_delta = cfg.fan_full_start_delta
-            stop_delta = cfg.fan_full_stop_delta
-            max_pct = cfg.fan_full_max_pct
-            ramp_range = cfg.fan_full_ramp_range
+            if ambient_temp is not None:
+                # Normal mode: differential + absolute-based.
+                delta_t = poco_max - ambient_temp
+            else:
+                # Fallback: no ambient sensor — absolute POCO temp, ignore delta constraints
+                delta_t = 999.0
+                start_delta = 0.0
+                stop_delta = 0.0
+                start_temp = cfg.fan_fallback_start_temp
+                stop_temp = cfg.fan_fallback_stop_temp
+
+            # Hysteresis: once active, stay active until temp/delta drops below stop thresholds.
+            if self._fan_active:
+                if poco_max < stop_temp or delta_t < stop_delta:
+                    self._fan_active = False
+            else:
+                if poco_max > start_temp and delta_t >= start_delta:
+                    self._fan_active = True
+
+            if self._fan_active:
+                # Linear ramp from start_temp to start_temp+ramp_range based on absolute temp.
+                t = (poco_max - start_temp) / max(ramp_range, 0.1)
+                poco_duty_pct = max(0.0, min(max_pct, t * max_pct))
         else:
-            start_temp = cfg.fan_low_start_temp
-            stop_temp = cfg.fan_low_stop_temp
-            start_delta = cfg.fan_low_start_delta
-            stop_delta = cfg.fan_low_stop_delta
-            max_pct = cfg.fan_low_max_pct
-            ramp_range = cfg.fan_low_ramp_range
+            # No POCO thermal data — the POCO controller stands down, but the
+            # box-purge controller below can still run the fan.
+            self._fan_ema_temp = None
+            self._fan_active = False
 
-        if cabin_temp is not None:
-            # Normal mode: differential + absolute-based.
-            delta_t = poco_max - cabin_temp
+        # ── Controller 2: box purge (inside vs outside the box) ─────────────
+        # Protects passively-cooled hardware inside the box (MFD Pi Zero 2W,
+        # RP2040s) when the box air runs hot relative to the cabin.
+        box_duty_pct = 0.0
+        box_inside = pb.bmp_t if pb.bmp_t is not None else pb.aht_t
+        box_outside = pb.bmp2_t
+        box_delta: Optional[float] = None
+        if box_inside is not None and box_outside is not None:
+            box_delta = box_inside - box_outside
+            if self._fan_box_active:
+                if box_delta < cfg.fan_box_stop_delta or box_inside < cfg.fan_box_stop_temp:
+                    self._fan_box_active = False
+            else:
+                if box_delta >= cfg.fan_box_start_delta and box_inside >= cfg.fan_box_min_temp:
+                    self._fan_box_active = True
+            if self._fan_box_active:
+                t = (box_delta - cfg.fan_box_stop_delta) / max(cfg.fan_box_ramp_range, 0.1)
+                box_duty_pct = max(0.0, min(cfg.fan_box_max_pct, t * cfg.fan_box_max_pct))
         else:
-            # Fallback: no cabin sensor — use absolute POCO temp, ignore delta constraints
-            delta_t = 999.0
-            start_delta = 0.0
-            stop_delta = 0.0
-            start_temp = cfg.fan_fallback_start_temp
-            stop_temp = cfg.fan_fallback_stop_temp
+            self._fan_box_active = False
 
-        # Hysteresis: once active, stay active until temp/delta drops below stop thresholds.
-        if self._fan_active:
-            if poco_max < stop_temp or delta_t < stop_delta:
-                self._fan_active = False
-        else:
-            if poco_max > start_temp and delta_t >= start_delta:
-                self._fan_active = True
-
-        if not self._fan_active:
-            self._set_fan_duty(0)
-            # Publish idle state so the dashboard's simulated temp stays fresh.
-            self._publish_poco_ema_temp(self._fan_ema_temp, 0.0)
-            return
-
-        # Linear ramp from start_temp to start_temp+ramp_range based on absolute temp.
-        t = (poco_max - start_temp) / max(ramp_range, 0.1)
-        duty_pct = max(0.0, min(max_pct, t * max_pct))
+        # ── Merge: the fan serves whichever controller wants more airflow ───
+        duty_pct = max(poco_duty_pct, box_duty_pct)
         # Minimum duty when active: 15% (fan needs a minimum to spin up).
-        if duty_pct > 0 and duty_pct < 15.0:
+        if 0.0 < duty_pct < 15.0:
             duty_pct = 15.0
         duty_raw = int(duty_pct / 100.0 * 65535)
         self._set_fan_duty(duty_raw)
 
-        # Update fan duty for dashboard visibility (EMA temp already published above).
+        # Publish duty (and EMA temp when available) for dashboard visibility.
         if self.twin and self.twin.store:
             from ..state.actions import SetPocoTelemetryAction
             self.twin.store.dispatch(SetPocoTelemetryAction(
@@ -1348,15 +1394,17 @@ class BackendService:
                 (duty_pct == 0) != (self._fan_last_log_pct == 0):
             self._fan_last_log_pct = duty_pct
             pb = self.twin.store.state.powerbox if self.twin else None
-            poco_t = max(t for t in (getattr(pb, 'poco_core_temp', None),
-                                     getattr(pb, 'poco_gpu_temp', None))
-                         if t is not None) if pb else None
-            cabin_t = getattr(pb, 'aht_t', None) if pb else None
+            poco_temps = [t for t in (getattr(pb, 'poco_core_temp', None),
+                                      getattr(pb, 'poco_gpu_temp', None))
+                          if t is not None] if pb else []
+            poco_t = max(poco_temps) if poco_temps else None
+            box_t = getattr(pb, 'bmp_t', None) if pb else None
+            out_t = getattr(pb, 'bmp2_t', None) if pb else None
+            _f = lambda v: "%.1f°C" % v if v is not None else "N/A"
             logger.info(
-                "Chassis fan → %.0f%% (poco=%.1f°C cabin=%s mode=%s)",
+                "Chassis fan → %.0f%% (poco=%s box=%s outside=%s mode=%s)",
                 duty_pct,
-                poco_t if poco_t is not None else -1,
-                "%.1f°C" % cabin_t if cabin_t is not None else "N/A",
+                _f(poco_t), _f(box_t), _f(out_t),
                 getattr(pb, 'power_mode', '?') if pb else '?',
             )
         if self.powerbox_commander:

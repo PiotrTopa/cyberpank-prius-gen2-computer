@@ -1189,11 +1189,11 @@ class SetPowerboxTelemetryAction(Action):
     voltage: Optional[float] = None  # bus voltage = Prius 12 V aux battery (V)
     current: Optional[float] = None  # computer current draw (A)
     power: Optional[float] = None    # computer power consumption (W)
-    bmp_t: Optional[float] = None
+    bmp_t: Optional[float] = None    # BMP280 @0x77 — box inside temperature
     bmp_p: Optional[float] = None
-    bmp2_t: Optional[float] = None   # secondary BMP280 @0x76
+    bmp2_t: Optional[float] = None   # BMP280 @0x76 — outside-box / cabin ambient
     bmp2_p: Optional[float] = None
-    aht_t: Optional[float] = None
+    aht_t: Optional[float] = None    # AHT20 on powerbox — box inside
     aht_h: Optional[float] = None
     energy_mah: Optional[float] = None
 

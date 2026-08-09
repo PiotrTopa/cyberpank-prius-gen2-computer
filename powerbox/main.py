@@ -792,9 +792,11 @@ def main():
         except Exception as e:
             tx_error("INA219_INIT", str(e))
 
-    # BMP280: up to two units. 0x77 (SDO high) is the PRIMARY (the original
-    # sensor — keeps bmp_t/bmp_p metric history consistent); 0x76 (SDO low)
-    # is the SECONDARY, reported as bmp2_t/bmp2_p (added 2026-08-09).
+    # BMP280: up to two units. 0x77 (SDO high) is the PRIMARY — the original
+    # sensor, mounted INSIDE the computer box (chassis air; keeps bmp_t/bmp_p
+    # metric history consistent). 0x76 (SDO low) is the SECONDARY, mounted
+    # OUTSIDE the box (cabin ambient), reported as bmp2_t/bmp2_p (added
+    # 2026-08-09).
     for addr in (0x77, 0x76):
         if addr not in devices:
             continue

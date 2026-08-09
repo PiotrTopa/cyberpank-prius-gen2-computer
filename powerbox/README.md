@@ -163,7 +163,7 @@ model + the host-side staleness watchdog that detects a silent USB-CDC link stal
 
 | GP | Function | Direction | Notes |
 |----|----------|-----------|-------|
-| GP0 | I2C0 SDA | — | INA219 (+ optional BMP280/AHT20). Falls back to `SDA=GP1/SCL=GP0` SoftI2C if swapped. |
+| GP0 | I2C0 SDA | — | INA219 (+ optional BMP280s/AHT20). Falls back to `SDA=GP1/SCL=GP0` SoftI2C if swapped. |
 | GP1 | I2C0 SCL | — | |
 | GP11 | ACC / ignition sense | IN (PULL_UP) | Inverted: ACC ON = LOW (0), ACC OFF = HIGH (1). |
 | GP15 | POCO power button | IN (high-Z) / OUT-LOW pulse | Soldered across the phone button; drive LOW = press, never HIGH. |
@@ -175,6 +175,18 @@ All three OUTn rails are wired **downstream of the INA219 shunt**, so the
 measured current/`mah` is the total computer draw. If your MOSFET drivers are
 active-low, invert the `value=` in `setup_power_pins()` (the firmware assumes
 active-high).
+
+### Environmental sensors (I2C0)
+
+| Sensor | Addr | Placement | Telemetry keys |
+|--------|------|-----------|----------------|
+| BMP280 #1 (primary) | `0x77` (SDO high) | **Inside** the computer box, near the POCO — chassis air temperature | `bmp_t`, `bmp_p` |
+| BMP280 #2 (secondary, added 2026-08-09) | `0x76` (SDO low) | **Outside** the box — cabin ambient reference | `bmp2_t`, `bmp2_p` |
+| AHT20 | `0x38` | On the powerbox board — **inside** the box | `aht_t`, `aht_h` |
+
+The backend's chassis-fan controller uses `bmp2_t` as the ambient reference
+for the POCO delta and runs a box-purge loop on `bmp_t − bmp2_t` to protect
+the passively-cooled boards inside the box (MFD Pi Zero 2W, RP2040s).
 
 ## Infrastructure Configuration (`prius`)
 

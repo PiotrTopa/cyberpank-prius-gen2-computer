@@ -79,12 +79,12 @@ SIGNALS: List[Signal] = [
     Signal("powerbox_power", "W", lambda s: s.powerbox.power_draw_w, "Computer power consumption (INA219)"),
     Signal("poco_power", "W", lambda s: s.powerbox.poco_power_w, "POCO internal power consumption"),
     Signal("powerbox_energy", "mAh", lambda s: s.powerbox.energy_mah, "Computer accumulated energy (INA219)"),
-    Signal("powerbox_bmp_t", "°C", lambda s: s.powerbox.bmp_t, "Computer BMP280 temperature"),
-    Signal("powerbox_bmp_p", "Pa", lambda s: s.powerbox.bmp_p, "Computer BMP280 pressure"),
-    Signal("powerbox_bmp2_t", "°C", lambda s: s.powerbox.bmp2_t, "Secondary BMP280 (0x76) temperature"),
-    Signal("powerbox_bmp2_p", "Pa", lambda s: s.powerbox.bmp2_p, "Secondary BMP280 (0x76) pressure"),
-    Signal("powerbox_aht_t", "°C", lambda s: s.powerbox.aht_t, "Computer AHT20 temperature"),
-    Signal("powerbox_aht_h", "%", lambda s: s.powerbox.aht_h, "Computer AHT20 humidity"),
+    Signal("powerbox_bmp_t", "°C", lambda s: s.powerbox.bmp_t, "Box inside temperature (BMP280 @0x77)"),
+    Signal("powerbox_bmp_p", "Pa", lambda s: s.powerbox.bmp_p, "Box inside pressure (BMP280 @0x77)"),
+    Signal("powerbox_bmp2_t", "°C", lambda s: s.powerbox.bmp2_t, "Outside-box ambient temperature (BMP280 @0x76)"),
+    Signal("powerbox_bmp2_p", "Pa", lambda s: s.powerbox.bmp2_p, "Outside-box ambient pressure (BMP280 @0x76)"),
+    Signal("powerbox_aht_t", "°C", lambda s: s.powerbox.aht_t, "Box inside temperature (AHT20 on powerbox)"),
+    Signal("powerbox_aht_h", "%", lambda s: s.powerbox.aht_h, "Box inside humidity (AHT20 on powerbox)"),
     Signal("powerbox_acc", "", lambda s: 1.0 if s.powerbox.acc_on else 0.0, "Ignition/ACC sense via powerbox GP11"),
 ]
 

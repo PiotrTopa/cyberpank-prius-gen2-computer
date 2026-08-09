@@ -63,18 +63,14 @@ export function OverviewTab({ state, hist, now, satNodes, satHolders, onOpenDebu
       </Panel>
 
       <Panel title="Environment" code="ENV-01" icon={Wind} tone="magenta"
-        right={pb.aht_t == null && pb.aht_h == null && pb.bmp_p == null
+        right={pb.aht_t == null && pb.aht_h == null && pb.bmp_p == null && pb.bmp2_t == null
           ? <span className="text-[0.6rem] text-hud-amber tracking-wider">SENSORS OFFLINE</span>
           : undefined}>
-        <DataRow label="Cabin Temp" value={pb.aht_t?.toFixed(1)} unit="°C" tone="magenta" />
-        <DataRow label="Humidity" value={pb.aht_h?.toFixed(1)} unit="%" />
-        <DataRow label="Pressure" value={pb.bmp_p ? (pb.bmp_p / 100).toFixed(1) : undefined} unit="hPa" />
-        {(pb.bmp2_t != null || pb.bmp2_p != null) && (
-          <>
-            <DataRow label="BMP2 Temp" value={pb.bmp2_t?.toFixed(1)} unit="°C" />
-            <DataRow label="BMP2 Pressure" value={pb.bmp2_p != null ? (pb.bmp2_p / 100).toFixed(1) : undefined} unit="hPa" />
-          </>
-        )}
+        <DataRow label="Cabin Temp" value={pb.bmp2_t?.toFixed(1)} unit="°C" tone="magenta" />
+        <DataRow label="Pressure" value={(pb.bmp2_p ?? pb.bmp_p) != null ? ((pb.bmp2_p ?? pb.bmp_p)! / 100).toFixed(1) : undefined} unit="hPa" />
+        <DataRow label="Box Temp" value={pb.bmp_t?.toFixed(1)} unit="°C" />
+        <DataRow label="Box Temp (AHT)" value={pb.aht_t?.toFixed(1)} unit="°C" />
+        <DataRow label="Box Humidity" value={pb.aht_h?.toFixed(1)} unit="%" />
         <DataRow label="Outside" value={climate.outside_temp?.toFixed?.(1)} unit="°C" />
       </Panel>
 
@@ -84,6 +80,12 @@ export function OverviewTab({ state, hist, now, satNodes, satHolders, onOpenDebu
         <DataRow label="POCO GPU" value={pb.poco_gpu_temp?.toFixed(1)} unit="°C"
           tone={pb.poco_gpu_temp && pb.poco_gpu_temp > 60 ? 'amber' : 'cyan'} />
         <DataRow label="Simulated Temp" value={pb.poco_ema_temp?.toFixed(1)} unit="°C" tone="cyan" />
+        <DataRow label="Box Inside" value={pb.bmp_t?.toFixed(1)} unit="°C"
+          tone={pb.bmp_t && pb.bmp_t > 45 ? 'amber' : 'cyan'} />
+        <DataRow label="Box ΔT (in−out)"
+          value={pb.bmp_t != null && pb.bmp2_t != null ? (pb.bmp_t - pb.bmp2_t).toFixed(1) : undefined}
+          unit="°C"
+          tone={pb.bmp_t != null && pb.bmp2_t != null && pb.bmp_t - pb.bmp2_t > 8 ? 'amber' : 'cyan'} />
         <DataRow label="Chassis Fan" value={pb.fan_duty_pct?.toFixed(0)} unit="%" tone="cyan" />
       </Panel>
 

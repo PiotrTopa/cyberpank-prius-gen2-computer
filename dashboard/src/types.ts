@@ -12,10 +12,13 @@ export interface Powerbox {
   poco_gpu_temp?: number | null;
   poco_ema_temp?: number | null;
   fan_duty_pct?: number | null;
+  /** BMP280 @0x77 — INSIDE the computer box (chassis air) */
   bmp_t?: number;
   bmp_p?: number;
+  /** BMP280 @0x76 — OUTSIDE the box (cabin ambient) */
   bmp2_t?: number | null;
   bmp2_p?: number | null;
+  /** AHT20 on the powerbox board — inside the box */
   aht_t?: number;
   aht_h?: number;
   energy_mah?: number;
