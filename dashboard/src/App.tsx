@@ -66,7 +66,7 @@ export default function App() {
   const vState = v == null ? 'idle' : v < 11 ? 'danger' : v < 11.8 ? 'warn' : 'ok';
   const pbAge = serverNow / 1000 - (pb.last_update_time ?? 0);
   const pbFresh = pb.last_update_time != null && pbAge < 4;
-  const cabin = pb.aht_t ?? state.climate?.inside_temp ?? undefined;
+  const cabin = pb.bmp2_t ?? state.climate?.inside_temp ?? undefined;
 
   const clockStr = new Date(now).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
