@@ -69,6 +69,12 @@ export function OverviewTab({ state, hist, now, satNodes, satHolders, onOpenDebu
         <DataRow label="Cabin Temp" value={pb.aht_t?.toFixed(1)} unit="°C" tone="magenta" />
         <DataRow label="Humidity" value={pb.aht_h?.toFixed(1)} unit="%" />
         <DataRow label="Pressure" value={pb.bmp_p ? (pb.bmp_p / 100).toFixed(1) : undefined} unit="hPa" />
+        {(pb.bmp2_t != null || pb.bmp2_p != null) && (
+          <>
+            <DataRow label="BMP2 Temp" value={pb.bmp2_t?.toFixed(1)} unit="°C" />
+            <DataRow label="BMP2 Pressure" value={pb.bmp2_p != null ? (pb.bmp2_p / 100).toFixed(1) : undefined} unit="hPa" />
+          </>
+        )}
         <DataRow label="Outside" value={climate.outside_temp?.toFixed?.(1)} unit="°C" />
       </Panel>
 

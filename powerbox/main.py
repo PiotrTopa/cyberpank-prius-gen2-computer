@@ -74,7 +74,7 @@ from ina219 import INA219
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-VERSION = "1.9.1"
+VERSION = "1.10.0"
 
 # Device role — reported in the unified identify ("whoami") response and the
 # ready banner so the computer can discover which USB-CDC port is the powerbox
@@ -777,6 +777,7 @@ def main():
 
     ina = None
     bmp = None
+    bmp2 = None
     aht = None
 
     ina_addr = None
@@ -791,18 +792,22 @@ def main():
         except Exception as e:
             tx_error("INA219_INIT", str(e))
 
-    bmp_addr = None
-    for d in devices:
-        if d in (0x76, 0x77):
-            bmp_addr = d
-            break
-    if bmp_addr is not None:
+    # BMP280: up to two units. 0x77 (SDO high) is the PRIMARY (the original
+    # sensor — keeps bmp_t/bmp_p metric history consistent); 0x76 (SDO low)
+    # is the SECONDARY, reported as bmp2_t/bmp2_p (added 2026-08-09).
+    for addr in (0x77, 0x76):
+        if addr not in devices:
+            continue
         try:
             import bmp280
-            bmp = bmp280.BMP280(i2c, addr=bmp_addr)
-            tx(ID_SYSTEM, {"msg": "SENSOR_OK", "chip": "BMP280", "addr": hex(bmp_addr)})
+            unit = bmp280.BMP280(i2c, addr=addr)
+            tx(ID_SYSTEM, {"msg": "SENSOR_OK", "chip": "BMP280", "addr": hex(addr)})
+            if addr == 0x77:
+                bmp = unit
+            else:
+                bmp2 = unit
         except Exception as e:
-            tx_error("BMP280_INIT", str(e))
+            tx_error("BMP280_INIT", "%s@%s" % (str(e), hex(addr)))
 
     # AHT20 (address 0x38)
     if 0x38 in devices:
@@ -896,10 +901,13 @@ def main():
             else:
                 last_time = time.ticks_ms()
 
-            # Read BMP280
+            # Read BMP280 (primary @0x77, secondary @0x76)
             if bmp is not None:
                 payload["bmp_t"] = round(bmp.temperature, 2)
                 payload["bmp_p"] = round(bmp.pressure, 2)
+            if bmp2 is not None:
+                payload["bmp2_t"] = round(bmp2.temperature, 2)
+                payload["bmp2_p"] = round(bmp2.pressure, 2)
 
             # Read AHT20
             if aht is not None:

@@ -936,6 +936,10 @@ class Store:
                 kwargs["bmp_t"] = action.bmp_t
             if action.bmp_p is not None:
                 kwargs["bmp_p"] = action.bmp_p
+            if action.bmp2_t is not None:
+                kwargs["bmp2_t"] = action.bmp2_t
+            if action.bmp2_p is not None:
+                kwargs["bmp2_p"] = action.bmp2_p
             if action.aht_t is not None:
                 kwargs["aht_t"] = action.aht_t
             if action.aht_h is not None:

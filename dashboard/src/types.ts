@@ -14,6 +14,8 @@ export interface Powerbox {
   fan_duty_pct?: number | null;
   bmp_t?: number;
   bmp_p?: number;
+  bmp2_t?: number | null;
+  bmp2_p?: number | null;
   aht_t?: number;
   aht_h?: number;
   energy_mah?: number;

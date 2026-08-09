@@ -494,9 +494,11 @@ class PowerboxState:
     fan_duty_pct: float = 0.0                 # current fan duty cycle (0-100%)
     fan_override_pct: Optional[float] = None  # manual override (None = automatic)
 
-    # Environmental telemetry
+    # Environmental telemetry (bmp = primary BMP280 @0x77, bmp2 = secondary @0x76)
     bmp_t: Optional[float] = None
     bmp_p: Optional[float] = None
+    bmp2_t: Optional[float] = None
+    bmp2_p: Optional[float] = None
     aht_t: Optional[float] = None
     aht_h: Optional[float] = None
     energy_mah: Optional[float] = None

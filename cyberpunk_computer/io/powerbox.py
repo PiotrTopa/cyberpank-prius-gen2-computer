@@ -126,15 +126,19 @@ def parse_power_telemetry(data: dict) -> List[Action]:
 
     bmp_t = _coerce_float(data.get("bmp_t"))
     bmp_p = _coerce_float(data.get("bmp_p"))
+    bmp2_t = _coerce_float(data.get("bmp2_t"))
+    bmp2_p = _coerce_float(data.get("bmp2_p"))
     aht_t = _coerce_float(data.get("aht_t"))
     aht_h = _coerce_float(data.get("aht_h"))
     energy_mah = _coerce_float(data.get("mah"))
 
-    if voltage is None and current is None and power is None and bmp_t is None and aht_t is None and energy_mah is None:
+    if (voltage is None and current is None and power is None and bmp_t is None
+            and bmp2_t is None and aht_t is None and energy_mah is None):
         return []
     return [SetPowerboxTelemetryAction(
         voltage=voltage, current=current, power=power,
-        bmp_t=bmp_t, bmp_p=bmp_p, aht_t=aht_t, aht_h=aht_h, energy_mah=energy_mah
+        bmp_t=bmp_t, bmp_p=bmp_p, bmp2_t=bmp2_t, bmp2_p=bmp2_p,
+        aht_t=aht_t, aht_h=aht_h, energy_mah=energy_mah
     )]
 
 

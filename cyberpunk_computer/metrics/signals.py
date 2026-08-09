@@ -81,6 +81,8 @@ SIGNALS: List[Signal] = [
     Signal("powerbox_energy", "mAh", lambda s: s.powerbox.energy_mah, "Computer accumulated energy (INA219)"),
     Signal("powerbox_bmp_t", "°C", lambda s: s.powerbox.bmp_t, "Computer BMP280 temperature"),
     Signal("powerbox_bmp_p", "Pa", lambda s: s.powerbox.bmp_p, "Computer BMP280 pressure"),
+    Signal("powerbox_bmp2_t", "°C", lambda s: s.powerbox.bmp2_t, "Secondary BMP280 (0x76) temperature"),
+    Signal("powerbox_bmp2_p", "Pa", lambda s: s.powerbox.bmp2_p, "Secondary BMP280 (0x76) pressure"),
     Signal("powerbox_aht_t", "°C", lambda s: s.powerbox.aht_t, "Computer AHT20 temperature"),
     Signal("powerbox_aht_h", "%", lambda s: s.powerbox.aht_h, "Computer AHT20 humidity"),
     Signal("powerbox_acc", "", lambda s: 1.0 if s.powerbox.acc_on else 0.0, "Ignition/ACC sense via powerbox GP11"),
