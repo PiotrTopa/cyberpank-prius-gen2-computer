@@ -12,6 +12,8 @@ export interface Powerbox {
   poco_gpu_temp?: number | null;
   poco_ema_temp?: number | null;
   fan_duty_pct?: number | null;
+  /** Manual fan override in % (null/undefined = automatic control) */
+  fan_override_pct?: number | null;
   /** BMP280 @0x77 — INSIDE the computer box (chassis air) */
   bmp_t?: number;
   bmp_p?: number;

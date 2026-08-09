@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { BatteryWarning, LayoutDashboard, Power, SatelliteDish } from 'lucide-react';
+import { BatteryWarning, Fan, LayoutDashboard, Power, SatelliteDish } from 'lucide-react';
 import type { AppState, SatelliteNode } from '../types';
 import { fmtAge } from '../lib/format';
 import { sendCommand } from '../lib/api';
@@ -58,6 +58,17 @@ export function ControlsTab({ state, connected, now, satNodes, manualHeld }: {
   const [uvThrDraft, setUvThrDraft] = useState<number | null>(null);
   const [uvRecDraft, setUvRecDraft] = useState<number | null>(null);
   const [uvBusy, setUvBusy] = useState(false);
+  const [fanBusy, setFanBusy] = useState(false);
+
+  // Fan override: null = auto, 0 = forced off, 100 = forced on.
+  const fanOverride = pb.fan_override_pct ?? null;
+  const fanMode: 'off' | 'on' | 'auto' = fanOverride == null ? 'auto' : fanOverride === 0 ? 'off' : 'on';
+  const setFanMode = async (mode: 'off' | 'on' | 'auto') => {
+    setFanBusy(true);
+    if (mode === 'auto') await sendCommand('fan_auto');
+    else await sendCommand('set_fan', { pct: mode === 'on' ? 100 : 0 });
+    setFanBusy(false);
+  };
   const uvThr = uvThrDraft ?? pb.uv_threshold ?? null;
   const uvRec = uvRecDraft ?? pb.uv_recover ?? null;
   const uvDirty = uvThrDraft != null || uvRecDraft != null;
@@ -120,6 +131,32 @@ export function ControlsTab({ state, connected, now, satNodes, manualHeld }: {
             ))}
           </div>
         )}
+      </Panel>
+
+      <Panel title="Chassis Fan" code="CTL-05" icon={Fan} tone="cyan"
+        right={
+          <Chip tone={fanMode === 'auto' ? 'green' : fanMode === 'on' ? 'cyan' : 'red'}>
+            {fanMode === 'auto' ? `AUTO · ${pb.fan_duty_pct?.toFixed(0) ?? '--'}%` : fanMode === 'on' ? 'FORCED ON' : 'FORCED OFF'}
+          </Chip>
+        }>
+        <div className="flex gap-3">
+          <Btn className="flex-1 py-3" tone="red" active={fanMode === 'off'} disabled={fanBusy}
+            onClick={() => setFanMode('off')}>
+            {fanBusy ? '…' : 'Off'}
+          </Btn>
+          <Btn className="flex-1 py-3" tone="cyan" active={fanMode === 'on'} disabled={fanBusy}
+            onClick={() => setFanMode('on')}>
+            {fanBusy ? '…' : 'On'}
+          </Btn>
+          <Btn className="flex-1 py-3" tone="green" active={fanMode === 'auto'} disabled={fanBusy}
+            onClick={() => setFanMode('auto')}>
+            {fanBusy ? '…' : 'Auto'}
+          </Btn>
+        </div>
+        <p className="text-xs text-slate-600 text-center">
+          Auto = POCO-delta + box-purge controllers (BMP1 in-box vs BMP2 outside).
+          Off/On pin the fan at 0%/100% until Auto is restored.
+        </p>
       </Panel>
 
       <Panel title="Power Protection" code="CTL-04" icon={BatteryWarning} tone="amber"
