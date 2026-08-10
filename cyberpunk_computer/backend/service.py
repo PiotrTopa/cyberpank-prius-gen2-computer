@@ -183,6 +183,17 @@ class BackendConfig:
     # only arms once a heartbeat has been seen, so it never falsely disconnects a
     # pre-2.28.0 gateway that does not heartbeat. 0 disables.
     gateway_stale_s: float = 8.0
+    # Gateway link auto-recovery: when heartbeats have been stale for
+    # gateway_recover_stale_s AND the gateway VBUS relay (ch4) is actually ON
+    # (i.e. it *should* be alive — not an ACC power-save cut), cold power-cycle
+    # its relay to reboot the wedged MCU (USB resets don't — the firmware/CDC
+    # TX stays dead; verified 2026-08-09: only a VBUS cycle restored GW_HB).
+    # Two-phase and non-blocking: VBUS off, then back on after
+    # gateway_recover_off_s. Rate-limited by gateway_recover_cooldown_s.
+    gateway_auto_recover: bool = True
+    gateway_recover_stale_s: float = 30.0   # stale age before cycling (> watchdog's 8 s)
+    gateway_recover_off_s: float = 5.0      # VBUS off duration
+    gateway_recover_cooldown_s: float = 120.0  # min spacing between cycles
 
     # Cadence for polling the gateway's USB hub-port power via uhubctl so the UI
     # can show/toggle it like the powerbox OUT rails. 0 disables the poll.
@@ -341,6 +352,10 @@ class BackendService:
         self._gateway_usb_target: Optional[str] = None  # stable by-id path of the gateway board
         self._gwusb_last_poll: float = 0.0
         self._gwusb_loc: Optional[str] = None           # cached "HUB PORT" (e.g. "1-1.4 2")
+
+        # Gateway link auto-recovery (cold VBUS cycle via relay ch4).
+        self._gw_recover_off_at: Optional[float] = None  # VBUS-off timestamp; None = not mid-cycle
+        self._gw_recover_last: float = 0.0               # last cycle start (cooldown)
 
         # MFD video board power manager (backend.mfd_power).
         self.mfd_power = None
@@ -939,6 +954,7 @@ class BackendService:
                     self._powerbox_heartbeat_tick()
                     self._powerbox_watchdog_tick()
                     self._gateway_watchdog_tick()
+                    self._gateway_recover_tick()
                     self._gateway_usb_power_tick()
                     self._port_power_enforce_tick()
                     self._mfd_power_tick()
@@ -1090,6 +1106,66 @@ class BackendService:
             logger.info(
                 "Gateway link RECOVERED: heartbeat resumed (age %.1fs).", age,
             )
+
+    def _gateway_recover_tick(self) -> None:
+        """Auto-recover a wedged gateway by cold-cycling its VBUS relay (ch4).
+
+        The gateway CDC link occasionally wedges: the board stays enumerated
+        (USB resets re-attach ttyACM but don't reboot the MCU) yet GW_HB
+        heartbeats never resume. The only known fix is a VBUS cut, which
+        cold-boots the gateway MCU (verified manually 2026-08-09).
+
+        Trip conditions (all must hold):
+        - heartbeats stale for >= gateway_recover_stale_s (well past the 8 s
+          UI watchdog, so ACC transitions / brief hiccups don't cycle power);
+        - the gateway VBUS relay is actually ON per the powerbox "rly" mirror
+          (an ACC power-save cut legitimately silences the gateway — skip);
+        - nobody has deliberately requested the port off (desired != False);
+        - cooldown since the previous cycle has elapsed.
+
+        The cycle is two-phase and non-blocking: VBUS off now, back on after
+        gateway_recover_off_s on a later tick. RelayPortPower handles the hub
+        data-off sequencing on both edges, and desired-state enforcement
+        converges the ON command if the lossy CDC link drops it.
+        """
+        cfg = self.config
+        if not cfg.gateway_auto_recover or self.port_power is None or self.twin is None:
+            return
+        gw = self.port_power.gateway
+        now = time.time()
+
+        # Phase 2: mid-cycle — re-power once the off window has elapsed.
+        if self._gw_recover_off_at is not None:
+            if now - self._gw_recover_off_at >= cfg.gateway_recover_off_s:
+                self._gw_recover_off_at = None
+                logger.warning("Gateway recovery: VBUS back ON (relay ch%d)", gw.relay_ch)
+                gw.set(True)
+            return
+
+        if not self._gw_stale:
+            return
+        conn = self.twin.store.state.connection
+        last = conn.last_heartbeat_time
+        if not last:
+            return
+        age = now - last
+        if age < cfg.gateway_recover_stale_s:
+            return
+        if now - self._gw_recover_last < cfg.gateway_recover_cooldown_s:
+            return
+        if gw.desired is False:
+            return  # operator/rule wants the port off — don't fight it
+        if gw.read() is not True:
+            return  # VBUS already off (ACC power-save) or state unknown
+        self._gw_recover_last = now
+        logger.warning(
+            "Gateway link stale %.0fs with VBUS on — cold power-cycling relay "
+            "ch%d to reboot the wedged MCU (off %.0fs, cooldown %.0fs)",
+            age, gw.relay_ch, cfg.gateway_recover_off_s,
+            cfg.gateway_recover_cooldown_s,
+        )
+        gw.set(False)
+        self._gw_recover_off_at = now
 
     def _gateway_usb_power_tick(self) -> None:
         """Mirror the gateway's actual VBUS state into the store.
