@@ -80,9 +80,26 @@ other times it is **high-impedance** (`Pin.IN`) and is **never driven HIGH**.
 * `~10000 ms` press → force a hard reboot.
 
 If the POCO's heartbeat is lost while it *should* be running (past the
-`POCO_BOOT_GRACE_MS` 60 s boot grace, and a `POCO_WAKE_COOLDOWN_MS` 60 s cooldown
-since the last press), the firmware pulses GP26 ~3 s to wake it. Waking is
-disabled during/after a shutdown so we never fight our own poweroff.
+`POCO_BOOT_GRACE_MS` **20 s** boot grace, and a `POCO_WAKE_COOLDOWN_MS` 5 min
+cooldown since the last press), the firmware pulses GP26 ~3 s to wake it. Waking
+is disabled during/after a shutdown so we never fight our own poweroff.
+
+The boot grace is short (20 s) because on a **cold** rail-up the POCO stays OFF
+and needs a press to boot — the grace only needs to give an *already-running*
+backend time to prove itself via heartbeat (sent every 2 s). A genuinely-off
+POCO therefore gets its first wake press ~20 s after power, not 60 s.
+
+#### Cold-boot event log (`getlog`, fw ≥ 1.15.0)
+
+The prius-backend that logs powerbox messages runs **on the POCO**, which is off
+during a cold boot — so nothing records what the firmware did until the phone is
+already up. To close that blind spot the firmware keeps an **in-RAM ring buffer**
+of power events (boot, every button press with reason + voltage + wake-tries +
+boot-age, shutdown, suicide). The RP2040 stays powered across the whole cold
+boot, so the timeline survives. Send `{"a":"getlog"}` (System id 0) to dump it as
+a `PMLOG` message; the backend auto-fetches it once the link comes up, so a cold
+boot's wake sequence lands in the journal automatically. Each event is also echoed
+live as a `PMEVENT` message.
 
 ### Bidirectional heartbeat
 
@@ -107,6 +124,7 @@ A rolling "automotive" counter lets each side detect if the other died:
 | Interval | `{"a":"set_interval","ms":1000}` | Telemetry cadence. |
 | Identify | `{"a":"whoami"}` | IDENT reply. |
 | Ping | `{"a":"ping"}` | PONG. |
+| Get event log | `{"a":"getlog"}` | Dump the power-event ring buffer as `PMLOG` (cold-boot timeline). |
 | Reset mAh | `{"a":"reset_mah"}` | Zero the coulomb counter. |
 
 ## Reliability — USB-CDC write model
