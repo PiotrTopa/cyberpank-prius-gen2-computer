@@ -221,6 +221,41 @@ def parse_powerbox_system(data: dict) -> List[Action]:
             relays=relays,
         )]
 
+    if msg == "PMLOG":
+        # Firmware power-event timeline (fw >= 1.15.0): boot / button presses /
+        # shutdown / suicide with uptime + voltage. The single most useful
+        # cold-boot diagnostic — it's the record of what the firmware did while
+        # the POCO (and this logger) were OFF. Log each event on its own line.
+        events = data.get("events") or []
+        now_ms = data.get("now_ms")
+        logger.info("Powerbox PMLOG: %d events, fw=%s, now_ms=%s",
+                    len(events), data.get("ver"), now_ms)
+        for ev in events:
+            try:
+                age_s = (int(now_ms) - int(ev.get("t_ms", 0))) / 1000.0 \
+                    if now_ms is not None else None
+            except (TypeError, ValueError):
+                age_s = None
+            logger.info("Powerbox PMLOG   %s: %s%s",
+                        ev.get("ev"),
+                        {k: v for k, v in ev.items() if k not in ("ev", "t_ms")},
+                        (" (%.1fs ago)" % age_s) if age_s is not None else "")
+        return []
+
+    if msg == "PMEVENT":
+        # Live echo of a single power event as it happens (fw >= 1.15.0).
+        logger.info("Powerbox PMEVENT: %s",
+                    {k: v for k, v in data.items() if k != "msg"})
+        return []
+
+    if msg in ("POCO_BTN", "INTERRUPTED"):
+        # Power-button actuation (wake ladder / manual press) and REPL drops.
+        # Invaluable for cold-boot debugging: shows EXACTLY when and how long
+        # the firmware pressed the POCO power button.
+        logger.info("Powerbox %s: %s", msg,
+                    {k: v for k, v in data.items() if k != "msg"})
+        return []
+
     if msg in ("I2C_OK", "I2C_SCAN", "SENSOR_OK", "IDLE", "FAN"):
         # Boot/diagnostic messages (bus scan results, per-chip detection,
         # applied fan PWM readback). Surface them in the journal — invaluable
@@ -347,6 +382,21 @@ def build_i2c_scan_command() -> OutgoingCommand:
     )
 
 
+def build_pmlog_command() -> OutgoingCommand:
+    """Ask the firmware to dump its power-event ring buffer (fw >= 1.15.0).
+
+    The reply is an ID_SYSTEM ``PMLOG`` message carrying the boot / button /
+    shutdown / suicide timeline the host could not observe live (it was OFF
+    during the cold boot). Logged by :func:`parse_powerbox_system`.
+    """
+    return OutgoingCommand(
+        device_id=POWERBOX_LOCAL_SYSTEM,
+        command_type="power",
+        payload={"a": "getlog"},
+        priority=15,
+    )
+
+
 def build_button_command(ms: int = 3000) -> OutgoingCommand:
     """Pulse the POCO power button: ~3000 ms = power on, ~10000 ms = force reboot."""
     return OutgoingCommand(
@@ -413,6 +463,9 @@ class PowerboxCommander:
 
     def request_i2c_scan(self) -> bool:
         return self._send(build_i2c_scan_command(), "i2c_scan", warn=True)
+
+    def request_pmlog(self) -> bool:
+        return self._send(build_pmlog_command(), "getlog", warn=True)
 
     def set_fan(self, pin: int, duty: int, freq: int = 25000) -> bool:
         return self._send(build_fan_command(pin, duty, freq),

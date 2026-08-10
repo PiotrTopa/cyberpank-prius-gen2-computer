@@ -332,6 +332,7 @@ class BackendService:
         # POCO->powerbox heartbeat (rolling counter + send cadence).
         self._pb_hb_counter: int = 0
         self._pb_hb_last: float = 0.0
+        self._pb_pmlog_fetched: bool = False
 
         # Powerbox link staleness watchdog: latched True once a stall is
         # detected, cleared when fresh frames resume (edge-triggered logging).
@@ -1021,6 +1022,13 @@ class BackendService:
         self._pb_hb_last = now
         self._pb_hb_counter = (self._pb_hb_counter + 1) & 0xFF
         self.powerbox_commander.send_heartbeat(self._pb_hb_counter)
+        # One-shot: fetch the firmware power-event log shortly after the link is
+        # up. After a cold boot the POCO/backend was OFF while the powerbox did
+        # its wake sequence — this pulls that timeline into the journal so the
+        # cold-boot behaviour is finally observable.
+        if not self._pb_pmlog_fetched:
+            self._pb_pmlog_fetched = True
+            self.powerbox_commander.request_pmlog()
 
     def _powerbox_watchdog_tick(self) -> None:
         """Flip powerbox.connected -> False when the link goes silent, and

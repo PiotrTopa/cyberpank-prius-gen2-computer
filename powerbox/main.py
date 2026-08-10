@@ -76,7 +76,7 @@ from ina219 import INA219
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-VERSION = "1.14.0"
+VERSION = "1.15.0"
 
 # Device role — reported in the unified identify ("whoami") response and the
 # ready banner so the computer can discover which USB-CDC port is the powerbox
@@ -183,7 +183,14 @@ HEARTBEAT_TX_MS = 2000
 POCO_HB_TIMEOUT_MS = 15000
 # At cold boot the POCO needs time to power on and start its backend before it
 # can heartbeat — don't treat it as dead (or press its button) during this grace.
-POCO_BOOT_GRACE_MS = 60000
+# The POCO stays OFF on a cold rail-up (confirmed on-bench 2026-08-10) and needs
+# a button press to boot, so this grace is really just "how long to wait for an
+# ALREADY-running POCO to prove itself (heartbeat) before we conclude it's off
+# and press". A running backend heartbeats every HEARTBEAT_TX_MS (2 s); 20 s is
+# ~10 heartbeat windows — comfortably covers a warm RP2040 reboot + USB-CDC
+# re-enumeration — while getting a genuinely-off POCO pressed ~40 s sooner than
+# the old 60 s (which read as "cold boot does nothing").
+POCO_BOOT_GRACE_MS = 20000
 # After a power-button press, wait this long before pressing again. MUST exceed
 # the POCO's worst-case boot -> first heartbeat time (~3-5 min: pmOS boot +
 # backend start), or the ladder kills a booting phone before it can ever report
@@ -263,6 +270,39 @@ def tx_ident():
 def tx_ack(action: str):
     """Send a command acknowledgement on the system channel."""
     tx(ID_SYSTEM, {"ack": action})
+
+
+# ─── Power-event log (RAM ring buffer) ────────────────────────────────────────
+#
+# The host that logs powerbox messages (the POCO's prius-backend) is OFF during
+# a cold boot — so nothing records what the firmware does until AFTER the POCO
+# is already up. That made cold-boot power-on undebuggable. This in-RAM ring
+# buffer records the key power events (boot, every button press with reason +
+# voltage, shutdown, suicide, under-voltage trip) with their uptime timestamp.
+# The RP2040 stays powered across the whole cold boot, so once the POCO comes up
+# the backend can fetch the log ("getlog") and see the full timeline. Kept in
+# RAM (not flash) to avoid flash wear and brown-out FS corruption during the
+# power-unstable cold-boot window.
+_evlog = []
+EVLOG_MAX = 48
+
+
+def log_event(kind, **fields):
+    """Append a power event to the RAM ring buffer (and echo it live via tx)."""
+    ev = {"t_ms": time.ticks_ms(), "ev": kind}
+    ev.update(fields)
+    _evlog.append(ev)
+    if len(_evlog) > EVLOG_MAX:
+        del _evlog[0]
+    # Live echo too (invisible during a cold boot when the host is off, but
+    # useful once the link is up).
+    tx(ID_SYSTEM, dict(ev, msg="PMEVENT"))
+
+
+def tx_pmlog():
+    """Dump the whole power-event ring buffer as one PMLOG system message."""
+    tx(ID_SYSTEM, {"msg": "PMLOG", "now_ms": time.ticks_ms(),
+                   "ver": VERSION, "events": list(_evlog)})
 
 
 def _truthy(value) -> bool:
@@ -425,6 +465,8 @@ class PowerManager:
         self.shutdown_grace_s = SHUTDOWN_GRACE_S
         # Under-voltage backstop timer.
         self.low_since = None
+        # Last INA219 bus voltage seen in tick() (for event-log context).
+        self.last_voltage = None
 
     # -- inbound from POCO ----------------------------------------------------
     def on_poco_hb(self, n):
@@ -493,8 +535,12 @@ class PowerManager:
             ms = 12000
         self.pending_button_ms = ms
 
-    def _press_button(self, ms):
-        tx(ID_SYSTEM, {"msg": "POCO_BTN", "ms": ms})
+    def _press_button(self, ms, reason="cmd"):
+        boot_age = time.ticks_diff(time.ticks_ms(), self.boot_ms)
+        log_event("btn", ms=ms, why=reason, wt=self.wake_tries,
+                  boot_s=boot_age // 1000, sp=1 if self.seen_poco else 0,
+                  v=self.last_voltage)
+        tx(ID_SYSTEM, {"msg": "POCO_BTN", "ms": ms, "why": reason})
         Pin(POCO_BTN_PIN, Pin.OUT, value=0)   # short to GND = press
         wdt_sleep_ms(ms)                      # feeds the WDT during the hold
         Pin(POCO_BTN_PIN, Pin.IN, pull=None)  # release -> high-impedance, pulls off
@@ -508,9 +554,12 @@ class PowerManager:
         self.poco_should_run = False          # don't fight our own shutdown
         self.shutdown_t0 = time.ticks_ms()
         self.shutdown_grace_s = grace_s if grace_s and grace_s > 0 else SHUTDOWN_GRACE_S
+        log_event("shutdown", why=reason, grace_s=self.shutdown_grace_s,
+                  v=self.last_voltage)
         tx(ID_SYSTEM, {"msg": "SHUTDOWN", "reason": reason, "grace_s": self.shutdown_grace_s})
 
     def _suicide(self, reason):
+        log_event("suicide", why=reason, v=self.last_voltage)
         tx(ID_SYSTEM, {"msg": "SUICIDE", "reason": reason})
         # Cut the master latch. With ACC also gone this powers the whole computer
         # (POCO + this RP2040 + hub) off. If ACC is still energising the rail we
@@ -539,6 +588,8 @@ class PowerManager:
 
         ``voltage`` is the INA219 bus voltage (V), or None when unavailable.
         """
+        if voltage is not None:
+            self.last_voltage = voltage
         if self.state == "dead":
             # Keep STATUS heartbeats flowing (the rail may still be energised
             # by ACC): the backend/operator can see pm="dead" + out1=0 instead
@@ -560,7 +611,7 @@ class PowerManager:
         if self.pending_button_ms:
             ms = self.pending_button_ms
             self.pending_button_ms = 0
-            self._press_button(ms)
+            self._press_button(ms, reason="cmd")
             now = time.ticks_ms()
 
         # 3) Under-voltage backstop (only with a real reading, only while normal).
@@ -599,7 +650,7 @@ class PowerManager:
                 self.wake_tries = 0
             elif past_boot and cooled:
                 if self.wake_tries < POCO_WAKE_SHORT_TRIES:
-                    self._press_button(POCO_BTN_PRESS_MS)
+                    self._press_button(POCO_BTN_PRESS_MS, reason="wake")
                     self.wake_tries += 1
                 else:
                     # Frozen-SoC recovery: long forced power-cycle. It leaves
@@ -607,7 +658,7 @@ class PowerManager:
                     # by the rest of it), so restart the ladder with SHORT
                     # presses — otherwise repeated force presses boot-and-kill
                     # the phone forever (observed on-bench 2026-08-10).
-                    self._press_button(POCO_BTN_FORCE_MS)
+                    self._press_button(POCO_BTN_FORCE_MS, reason="force")
                     self.wake_tries = 0
 
 
@@ -660,6 +711,11 @@ def process_command(line: str, config: Config):
 
     elif action in ("whoami", "identify", "id"):
         tx_ident()
+
+    elif action in ("getlog", "pmlog"):
+        # Dump the power-event ring buffer — the cold-boot timeline the host
+        # could not see live (it was OFF at the time).
+        tx_pmlog()
 
     elif action == "hb":
         # POCO heartbeat (rolling counter) — keeps the watchdog's "POCO alive"
@@ -772,6 +828,7 @@ def main():
     # set OUT2/OUT3 defaults and leave the POCO button high-impedance.
     out1, out2, out3 = setup_power_pins()
     _pm = PowerManager(out1, out2, out3)
+    log_event("boot", ver=VERSION)
 
     # Banner — will be parsed by the computer's parse_powerbox_system()
     tx(ID_SYSTEM, {"msg": "POWERBOX_READY", "ver": VERSION, "role": ROLE})
