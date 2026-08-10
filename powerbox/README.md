@@ -70,10 +70,10 @@ shutdown→suicide path below.
 3. **Suicide** — when the POCO is confirmed down (its heartbeat stops) **or** the
    grace timeout elapses, OUT1 goes LOW and the board enters `dead` state.
 
-### POCO power button (GP15)
+### POCO power button (GP26)
 
-GP15 is soldered directly across the POCO's power button (which triggers by being
-shorted to ground). The firmware "presses" it by driving GP15 **LOW**; at all
+GP26 (ADC0) is soldered directly across the POCO's power button (which triggers by being
+shorted to ground). The firmware "presses" it by driving GP26 **LOW**; at all
 other times it is **high-impedance** (`Pin.IN`) and is **never driven HIGH**.
 
 * `~3000 ms` press → power the POCO **ON** from off.
@@ -81,7 +81,7 @@ other times it is **high-impedance** (`Pin.IN`) and is **never driven HIGH**.
 
 If the POCO's heartbeat is lost while it *should* be running (past the
 `POCO_BOOT_GRACE_MS` 60 s boot grace, and a `POCO_WAKE_COOLDOWN_MS` 60 s cooldown
-since the last press), the firmware pulses GP15 ~3 s to wake it. Waking is
+since the last press), the firmware pulses GP26 ~3 s to wake it. Waking is
 disabled during/after a shutdown so we never fight our own poweroff.
 
 ### Bidirectional heartbeat
@@ -103,7 +103,7 @@ A rolling "automotive" counter lets each side detect if the other died:
 | Shutdown | `{"a":"off","grace_s":30}` | Begin shutdown → suicide. |
 | Heartbeat | `{"a":"hb","n":0-255}` | Keep "POCO alive" fresh. |
 | Set rail | `{"a":"out","ch":2|3,"on":true}` | Toggle OUT2/OUT3 (OUT1 rejected). |
-| Power button | `{"a":"button","ms":3000}` | Pulse GP15 (wake / force reboot). |
+| Power button | `{"a":"button","ms":3000}` | Pulse GP26 (wake / force reboot). |
 | Interval | `{"a":"set_interval","ms":1000}` | Telemetry cadence. |
 | Identify | `{"a":"whoami"}` | IDENT reply. |
 | Ping | `{"a":"ping"}` | PONG. |
@@ -166,7 +166,7 @@ model + the host-side staleness watchdog that detects a silent USB-CDC link stal
 | GP0 | I2C0 SDA | — | INA219 @0x40, BMP280 @0x77 (box inside), BMP280 @0x76 (outside), AHT20 @0x38, PCF8574 @0x20 (relays). Falls back to `SDA=GP1/SCL=GP0` SoftI2C if swapped. |
 | GP1 | I2C0 SCL | — | |
 | GP11 | ACC / ignition sense | IN (PULL_UP) | Inverted: ACC ON = LOW (0), ACC OFF = HIGH (1). |
-| GP15 | POCO power button | IN (high-Z) / OUT-LOW pulse | Soldered across the phone button; drive LOW = press, never HIGH. |
+| GP26 | POCO power button | IN (high-Z, pulls off) / OUT-LOW pulse | Soldered across the phone button; drive LOW = press, never HIGH. ADC pad: resets floating (GP15 reset pull-down phantom-pressed the button — moved 2026-08-10). |
 | GP27 | OUT3 spare MOSFET | OUT | Active-high. Default OFF. |
 | GP28 | OUT2 RS485 satellite power MOSFET | OUT | Active-high. Default ON. |
 | GP29 | OUT1 master rail MOSFET | OUT | Active-high. Latched HIGH at boot; LOW = suicide. `computer_power = OUT1 OR ACC`. |

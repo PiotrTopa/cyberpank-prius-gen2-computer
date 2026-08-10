@@ -45,7 +45,7 @@ Hardware (RP2040 / Raspberry Pi Pico pinout):
     GP28     OUT2 — RS485 satellite power MOSFET (active-high). Controllable so
              satellites can run while the Prius is off. Default ON at boot.
     GP27     OUT3 — spare power MOSFET (active-high). Unused; default OFF.
-    GP15     POCO power button — soldered directly across the phone's power
+    GP26     POCO power button — soldered directly across the phone's power
              button (which triggers by shorting to GND). Drive LOW to "press";
              must be high-impedance (Pin.IN) at ALL other times. A ~3s press
              powers the POCO ON; a ~10s press forces a hard reboot.
@@ -76,7 +76,7 @@ from ina219 import INA219
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-VERSION = "1.13.0"
+VERSION = "1.14.0"
 
 # Device role — reported in the unified identify ("whoami") response and the
 # ready banner so the computer can discover which USB-CDC port is the powerbox
@@ -155,12 +155,20 @@ RELAY_CH_GATEWAY = 4
 RELAY_CH_MFD = 3
 RELAY_CH_SDR = 2
 
-# POCO power button — GP15 is soldered directly across the POCO's power button,
-# which triggers by being shorted to ground. We "press" it by driving GP15 LOW;
-# at ALL other times it MUST be high-impedance (Pin.IN), never driven HIGH, or we
-# would fight the phone's button circuit. A ~3s press powers the POCO ON from off
+# POCO power button — GP26 is soldered directly across the POCO's power button,
+# which triggers by being shorted to ground. We "press" it by driving GP26 LOW;
+# at ALL other times it MUST be high-impedance, never driven HIGH, or we would
+# fight the phone's button circuit. A ~3s press powers the POCO ON from off
 # (a ~10s press forces a hard reboot).
-POCO_BTN_PIN = 15
+#
+# WHY GP26 (ADC0) and not a plain digital pin: RP2040 digital pads (GP0-25)
+# power up with their internal ~50-80k PULL-DOWN ENABLED and keep it through
+# the bootloader/safe-boot window and after every WDT reset — on GP15 that
+# phantom-pressed the phone's button from the instant of power-on (3 s
+# force-boot loop, diagnosed on-bench 2026-08-10). The ADC pads (GP26-29)
+# reset with input disabled and NO pulls — truly floating — so the button is
+# untouched no matter what state the firmware is in.
+POCO_BTN_PIN = 26
 POCO_BTN_PRESS_MS = 3000      # power-on hold (POCO F1: ~2-3 s)
 
 # Bidirectional heartbeat (powerbox <-> POCO). We emit a rolling "automotive"
@@ -368,7 +376,8 @@ def setup_power_pins():
     out1 = Pin(OUT1_PIN, Pin.OUT, value=1)                       # LATCH master rail HIGH
     out2 = Pin(OUT2_PIN, Pin.OUT, value=1 if OUT2_BOOT_ON else 0)
     out3 = Pin(OUT3_PIN, Pin.OUT, value=1 if OUT3_BOOT_ON else 0)
-    Pin(POCO_BTN_PIN, Pin.IN)                                    # high-Z = not pressed
+    # Button pin high-Z with pulls explicitly OFF (never rely on reset state).
+    Pin(POCO_BTN_PIN, Pin.IN, pull=None)                         # high-Z = not pressed
     return out1, out2, out3
 
 
@@ -488,7 +497,7 @@ class PowerManager:
         tx(ID_SYSTEM, {"msg": "POCO_BTN", "ms": ms})
         Pin(POCO_BTN_PIN, Pin.OUT, value=0)   # short to GND = press
         wdt_sleep_ms(ms)                      # feeds the WDT during the hold
-        Pin(POCO_BTN_PIN, Pin.IN)             # release -> high-impedance
+        Pin(POCO_BTN_PIN, Pin.IN, pull=None)  # release -> high-impedance, pulls off
         self.last_btn_ms = time.ticks_ms()
 
     # -- shutdown / suicide ---------------------------------------------------
