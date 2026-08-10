@@ -35,15 +35,18 @@ class FakeGateway:
         return self.powered
 
 
-def make_service(hb_age_s=60.0, stale=True, powered=True, desired=None):
+def make_service(hb_age_s=60.0, stale=True, powered=True, desired=None, hb_seen=True):
     svc = BackendService.__new__(BackendService)
     svc.config = BackendConfig()
     svc._gw_stale = stale
     svc._gw_recover_off_at = None
     svc._gw_recover_last = 0.0
+    svc._gw_recover_epoch = time.time() - hb_age_s
+    svc._gw_recover_attempts = 0
     gw = FakeGateway(powered=powered, desired=desired)
     svc.port_power = types.SimpleNamespace(gateway=gw)
-    conn = types.SimpleNamespace(last_heartbeat_time=time.time() - hb_age_s)
+    last_hb = (time.time() - hb_age_s) if hb_seen else None
+    conn = types.SimpleNamespace(last_heartbeat_time=last_hb)
     svc.twin = types.SimpleNamespace(
         store=types.SimpleNamespace(state=types.SimpleNamespace(connection=conn))
     )
@@ -107,3 +110,44 @@ def test_watchdog_not_latched():
     svc, gw = make_service(stale=False)
     svc._gateway_recover_tick()
     assert gw.calls == []
+
+
+def test_no_heartbeat_ever_recovers_from_epoch():
+    # Gateway wedged before the backend started: no HB this boot, watchdog
+    # never armed — recovery must still trip, measured from backend start.
+    svc, gw = make_service(hb_age_s=60.0, stale=False, hb_seen=False)
+    svc._gateway_recover_tick()
+    assert gw.calls == [False]
+
+
+def test_no_heartbeat_ever_fresh_epoch_waits():
+    svc, gw = make_service(hb_age_s=5.0, stale=False, hb_seen=False)
+    svc._gateway_recover_tick()
+    assert gw.calls == []
+
+
+def test_backoff_doubles_and_heartbeat_resets_it():
+    # HB long gone (before any cycle) so it never resets the backoff here.
+    svc, gw = make_service(hb_age_s=4000.0)
+    cfg = svc.config
+
+    def cycle():
+        svc._gateway_recover_tick()          # off
+        svc._gw_recover_off_at = time.time() - cfg.gateway_recover_off_s - 1
+        svc._gateway_recover_tick()          # on
+
+    cycle()
+    assert svc._gw_recover_attempts == 1
+    # Base cooldown elapsed but backoff (2x) not: no new cycle.
+    svc._gw_recover_last = time.time() - cfg.gateway_recover_cooldown_s - 1
+    svc._gateway_recover_tick()
+    assert svc._gw_recover_attempts == 1
+    # Doubled cooldown elapsed: second attempt fires.
+    svc._gw_recover_last = time.time() - 2 * cfg.gateway_recover_cooldown_s - 1
+    cycle()
+    assert svc._gw_recover_attempts == 2
+    # A heartbeat newer than the last cycle resets the backoff.
+    svc.twin.store.state.connection.last_heartbeat_time = time.time() - 60.0
+    svc._gw_recover_last = time.time() - 130.0
+    svc._gateway_recover_tick()  # 60s stale again; attempts reset then increment
+    assert svc._gw_recover_attempts == 1
