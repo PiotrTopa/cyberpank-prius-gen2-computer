@@ -76,7 +76,7 @@ from ina219 import INA219
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-VERSION = "1.12.0"
+VERSION = "1.13.0"
 
 # Device role — reported in the unified identify ("whoami") response and the
 # ready banner so the computer can discover which USB-CDC port is the powerbox
@@ -176,16 +176,19 @@ POCO_HB_TIMEOUT_MS = 15000
 # At cold boot the POCO needs time to power on and start its backend before it
 # can heartbeat — don't treat it as dead (or press its button) during this grace.
 POCO_BOOT_GRACE_MS = 60000
-# After a power-button press, wait this long before pressing again (lets the POCO
-# finish booting; avoids a press storm / accidental power-off).
-POCO_WAKE_COOLDOWN_MS = 60000
+# After a power-button press, wait this long before pressing again. MUST exceed
+# the POCO's worst-case boot -> first heartbeat time (~3-5 min: pmOS boot +
+# backend start), or the ladder kills a booting phone before it can ever report
+# alive — proven on-bench 2026-08-10: with 60 s the t=180 s force press
+# hard-killed the booting POCO in a permanent loop.
+POCO_WAKE_COOLDOWN_MS = 300000
 # Wake escalation: a 3 s press only powers ON a POCO that is OFF. A POCO whose
 # SoC has FROZEN (kernel hang — observed 2x on 2026-07-10) ignores short presses;
-# only a long (~10 s+) forced power-cycle recovers it. After this many short
-# wake presses with no heartbeat recovery, escalate to a long press.
+# only a long (~35 s) forced power-cycle recovers it. After this many short
+# wake presses with no heartbeat recovery, one force press fires and the ladder
+# restarts with short presses (a force press leaves an OFF phone off).
 POCO_WAKE_SHORT_TRIES = 2
 POCO_BTN_FORCE_MS = 35000     # forced hard power-cycle hold (POCO F1: ~30-40 s)
-POCO_FORCE_COOLDOWN_MS = 300000 # after a forced hard power-cycle, wait this long (disk checks etc)
 
 # Firmware-local under-voltage backstop. The backend's UndervoltageProtectionRule
 # (10.5 V / 5 s) normally handles low voltage gracefully by sending an "off"
@@ -576,20 +579,27 @@ class PowerManager:
                 self._suicide("poco_down" if poco_down else "grace_timeout")
         elif self.state == "normal" and self.poco_should_run:
             # Wake a dead POCO with the power button (after boot grace + cooldown).
-            # Escalate: short presses power ON an off POCO; if those don't bring
-            # the heartbeat back the SoC is likely FROZEN, and only a long
-            # (~12 s) forced power-cycle recovers it.
+            # Ladder: short 3 s presses power ON an off POCO; if those never
+            # bring the heartbeat back the SoC is likely FROZEN and only a long
+            # forced power-cycle recovers it. The cooldown (5 min) exceeds the
+            # POCO's boot -> first-heartbeat time so a booting phone is never
+            # pressed again before it can report alive.
             past_boot = time.ticks_diff(now, self.boot_ms) >= POCO_BOOT_GRACE_MS
-            current_cooldown = POCO_FORCE_COOLDOWN_MS if self.wake_tries > POCO_WAKE_SHORT_TRIES else POCO_WAKE_COOLDOWN_MS
-            cooled = time.ticks_diff(now, self.last_btn_ms) >= current_cooldown
+            cooled = time.ticks_diff(now, self.last_btn_ms) >= POCO_WAKE_COOLDOWN_MS
             if self.poco_alive(now):
                 self.wake_tries = 0
             elif past_boot and cooled:
                 if self.wake_tries < POCO_WAKE_SHORT_TRIES:
                     self._press_button(POCO_BTN_PRESS_MS)
+                    self.wake_tries += 1
                 else:
+                    # Frozen-SoC recovery: long forced power-cycle. It leaves
+                    # the phone OFF (it boots ~3 s into the hold and is killed
+                    # by the rest of it), so restart the ladder with SHORT
+                    # presses — otherwise repeated force presses boot-and-kill
+                    # the phone forever (observed on-bench 2026-08-10).
                     self._press_button(POCO_BTN_FORCE_MS)
-                self.wake_tries += 1
+                    self.wake_tries = 0
 
 
 # ─── Command Processing ──────────────────────────────────────────────────────
