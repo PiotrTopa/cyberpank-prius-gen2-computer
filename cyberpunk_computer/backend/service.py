@@ -252,7 +252,14 @@ class BackendConfig:
     #      cook even when the POCO itself is idle/cool.
     chassis_fan_enabled: bool = True
     chassis_fan_pin: int = 14             # powerbox GPIO pin driving the fan
-    chassis_fan_freq: int = 25000         # PWM frequency in Hz
+    # PWM frequency. The chassis fan is a 2-wire BLDC: its internal commutation
+    # electronics lose power in the PWM off-gaps above a few hundred Hz — at
+    # 500 Hz it buzzes and barely spins, ≥2 kHz it stalls entirely (coil buzz
+    # only), 25 kHz dead silent AND dead still. Low-frequency PWM is the
+    # correct drive for it: the rotor+electronics ride through slow gaps.
+    # Characterized on-car 2026-08-10: 15 Hz = quietest (no grind, no pulsing,
+    # smooth down to 20% duty); 30 Hz good; 100 Hz audible grind.
+    chassis_fan_freq: int = 15            # PWM frequency in Hz
     chassis_fan_tick_s: float = 2.0       # control loop cadence (seconds)
     # "full" power-mode profile (ACC on, heavy load)
     fan_full_start_temp: float = 50.0     # start fanning when poco_max > this (°C)
@@ -346,6 +353,7 @@ class BackendService:
         self._fan_active: bool = False      # hysteresis latch
         self._fan_box_active: bool = False  # box-purge hysteresis latch
         self._fan_last_duty: int = -1       # last sent duty (avoid re-sending same value)
+        self._fan_last_freq: int = -1       # last sent PWM frequency (Hz)
         self._fan_last_log_pct: float = -1.0  # edge-triggered logging
         self._fan_ema_temp: Optional[float] = None  # Simulated heatsink temp
 
@@ -1340,11 +1348,13 @@ class BackendService:
 
         # Manual override: pin the fan to a fixed duty regardless of temperature.
         # Set via the `set_fan` API command (SetFanOverrideAction); cleared with
-        # `fan_auto`. Bypasses the automatic controller entirely.
+        # `fan_auto`. Bypasses the automatic controller entirely. An optional
+        # frequency override rides along for driver/noise characterization.
         override = getattr(pb, "fan_override_pct", None)
         if override is not None:
             pct = max(0.0, min(100.0, float(override)))
-            self._set_fan_duty(int(pct / 100.0 * 65535))
+            self._set_fan_duty(int(pct / 100.0 * 65535),
+                               freq=getattr(pb, "fan_override_freq", None))
             temps = [t for t in (pb.poco_core_temp, pb.poco_gpu_temp) if t is not None]
             if temps:
                 self._publish_poco_ema_temp(max(temps), pct)
@@ -1480,11 +1490,18 @@ class BackendService:
             fan_duty_pct=fan_duty_pct,
         ))
 
-    def _set_fan_duty(self, duty_raw: int) -> None:
-        """Send the fan duty to the powerbox, de-duplicating unchanged values."""
+    def _set_fan_duty(self, duty_raw: int, freq: Optional[int] = None) -> None:
+        """Send the fan duty to the powerbox, de-duplicating unchanged values.
+
+        ``freq`` overrides the configured PWM frequency (manual tuning); a
+        frequency change always forces a re-send even if the duty is unchanged.
+        """
+        eff_freq = int(freq) if freq else self.config.chassis_fan_freq
+        freq_changed = eff_freq != self._fan_last_freq
+        self._fan_last_freq = eff_freq
         # Add a 1% (approx 655 units) deadband to prevent serial spam from EMA noise.
-        # Always send if turning exactly ON or exactly OFF.
-        if self._fan_last_duty != -1:
+        # Always send if turning exactly ON or exactly OFF, or on a freq change.
+        if self._fan_last_duty != -1 and not freq_changed:
             if abs(duty_raw - self._fan_last_duty) < 655 and (duty_raw == 0) == (self._fan_last_duty == 0):
                 return
                 
@@ -1509,7 +1526,7 @@ class BackendService:
                 getattr(pb, 'power_mode', '?') if pb else '?',
             )
         if self.powerbox_commander:
-            self.powerbox_commander.set_fan(self.config.chassis_fan_pin, duty_raw, self.config.chassis_fan_freq)
+            self.powerbox_commander.set_fan(self.config.chassis_fan_pin, duty_raw, eff_freq)
 
     def _maybe_recover_powerbox(self, pb, age: float) -> None:
         """Force a powerbox serial reset to clear a wedged link, if enabled.

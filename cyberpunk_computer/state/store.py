@@ -975,7 +975,11 @@ class Store:
             # Manual fan override; pct=None clears it (back to automatic).
             self._state = replace(
                 self._state,
-                powerbox=replace(self._state.powerbox, fan_override_pct=action.pct),
+                powerbox=replace(
+                    self._state.powerbox,
+                    fan_override_pct=action.pct,
+                    fan_override_freq=getattr(action, "freq", None),
+                ),
             )
             affected.add(StateSlice.POWERBOX)
 

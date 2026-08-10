@@ -188,6 +188,12 @@ The backend's chassis-fan controller uses `bmp2_t` as the ambient reference
 for the POCO delta and runs a box-purge loop on `bmp_t − bmp2_t` to protect
 the passively-cooled boards inside the box (MFD Pi Zero 2W, RP2040s).
 
+The chassis fan (PWM MOSFET on GP14) is a **2-wire BLDC**: its internal
+commutation electronics lose power in the PWM off-gaps above a few hundred
+Hz — 500 Hz buzzes and barely spins, ≥2 kHz stalls (coil buzz only), 25 kHz
+silent and motionless. Drive it with **low-frequency PWM**; 15 Hz measured
+quietest on-car (2026-08-10), smooth from 20 % to 100 % duty.
+
 ## Infrastructure Configuration (`prius`)
 
 The `prius` host has been configured to remotely manage and program the RP2040 without needing physical access:

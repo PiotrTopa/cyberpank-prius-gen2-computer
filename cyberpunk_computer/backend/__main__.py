@@ -181,7 +181,11 @@ def main() -> None:
     parser.add_argument("--db", default="data/metrics.db", help="metrics SQLite path")
     parser.add_argument("--tick-hz", type=float, default=50.0, help="engine loop rate")
     parser.add_argument(
-        "--chassis-fan-freq", type=int, default=25000, help="PWM frequency for the chassis fan (Hz)"
+        "--chassis-fan-freq", type=int, default=15,
+        help="PWM frequency for the chassis fan in Hz. The 2-wire BLDC fan's "
+             "internal commutation dies above a few hundred Hz (coil buzz, no "
+             "rotation ≥2 kHz) — low-frequency PWM is the correct drive; 15 Hz "
+             "measured quietest (characterized on-car 2026-08-10)."
     )
 
     # Replay (run off a recorded NDJSON log instead of the live gateway)

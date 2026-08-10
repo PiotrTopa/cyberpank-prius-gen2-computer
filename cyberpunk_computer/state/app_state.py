@@ -493,6 +493,7 @@ class PowerboxState:
     # Chassis fan state (PWM on powerbox GPIO 14)
     fan_duty_pct: float = 0.0                 # current fan duty cycle (0-100%)
     fan_override_pct: Optional[float] = None  # manual override (None = automatic)
+    fan_override_freq: Optional[int] = None   # manual PWM frequency override (Hz)
 
     # Environmental telemetry. Physical placement:
     #   bmp  = BMP280 @0x77 INSIDE the computer box (chassis air, near POCO/Pi)

@@ -221,9 +221,10 @@ def parse_powerbox_system(data: dict) -> List[Action]:
             relays=relays,
         )]
 
-    if msg in ("I2C_OK", "I2C_SCAN", "SENSOR_OK", "IDLE"):
-        # Boot/diagnostic messages (bus scan results, per-chip detection).
-        # Surface them in the journal — invaluable for bench wiring work.
+    if msg in ("I2C_OK", "I2C_SCAN", "SENSOR_OK", "IDLE", "FAN"):
+        # Boot/diagnostic messages (bus scan results, per-chip detection,
+        # applied fan PWM readback). Surface them in the journal — invaluable
+        # for bench wiring / PWM characterization work.
         logger.info("Powerbox %s: %s", msg,
                     {k: v for k, v in data.items() if k != "msg"})
         return []

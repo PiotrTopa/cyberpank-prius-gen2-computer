@@ -1449,14 +1449,18 @@ class SetMfdStatusAction(Action):
 
 
 class SetFanOverrideAction(Action):
-    """Manually override the chassis fan duty.
+    """Manually override the chassis fan duty (and optionally PWM frequency).
 
     ``pct`` in 0..100 pins the fan to that duty regardless of temperature;
     ``pct=None`` clears the override and returns the fan to automatic control.
+    ``freq`` (Hz) pins the PWM frequency while the override is active — used
+    for driver/noise characterization; None keeps the configured frequency.
     """
-    def __init__(self, pct: Optional[float], source: ActionSource = ActionSource.UI):
+    def __init__(self, pct: Optional[float], freq: Optional[int] = None,
+                 source: ActionSource = ActionSource.UI):
         super().__init__(ActionType.SET_FAN_OVERRIDE, source)
         self.pct = pct
+        self.freq = freq
 
 
 # ─────────────────────────────────────────────────────────────────────────────

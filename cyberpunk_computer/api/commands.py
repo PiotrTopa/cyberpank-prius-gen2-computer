@@ -192,7 +192,10 @@ def _build_input_event(params: Dict[str, Any]) -> Action:
 def _build_set_fan(params: Dict[str, Any]) -> Action:
     from ..state.actions import SetFanOverrideAction
     pct = _as_float(_require(params, "pct"), "pct", 0.0, 100.0)
-    return SetFanOverrideAction(pct, source=ActionSource.UI)
+    freq = None
+    if params.get("freq") is not None:
+        freq = int(_as_float(params["freq"], "freq", 8.0, 100000.0))
+    return SetFanOverrideAction(pct, freq=freq, source=ActionSource.UI)
 
 
 def _build_fan_auto(params: Dict[str, Any]) -> Action:

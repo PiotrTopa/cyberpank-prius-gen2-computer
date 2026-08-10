@@ -76,7 +76,7 @@ from ina219 import INA219
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-VERSION = "1.10.0"
+VERSION = "1.11.0"
 
 # Device role — reported in the unified identify ("whoami") response and the
 # ready banner so the computer can discover which USB-CDC port is the powerbox
@@ -650,17 +650,23 @@ def process_command(line: str, config: Config):
         pin_num = data.get("pin")
         duty = data.get("duty", 0)
         try:
-            freq = data.get("freq", 25000)
+            freq = data.get("freq", 15)  # 2-wire BLDC: low-freq PWM (see backend)
             if not hasattr(config, "_pwm_channels"):
                 config._pwm_channels = {}
             if pin_num not in config._pwm_channels:
                 pwm = machine.PWM(Pin(pin_num))
                 config._pwm_channels[pin_num] = pwm
-            config._pwm_channels[pin_num].freq(int(freq))
-            config._pwm_channels[pin_num].duty_u16(int(duty))
+            pwm = config._pwm_channels[pin_num]
+            pwm.freq(int(freq))
+            pwm.duty_u16(int(duty))
+            # Report the ACTUAL applied settings (the RP2040 quantizes the
+            # frequency) so the host can verify the PWM really took effect.
+            tx(ID_SYSTEM, {"msg": "FAN", "pin": pin_num,
+                           "freq": pwm.freq(), "duty": pwm.duty_u16()})
             tx_ack("fan")
-        except Exception:
-            pass
+        except Exception as e:
+            tx_error("FAN_PWM", "%s pin=%s freq=%s duty=%s"
+                     % (str(e), pin_num, data.get("freq"), duty))
 
     elif action == "relay":
         # Set a USB-port VBUS relay (ch 1-4 via the PCF8574 expander).
