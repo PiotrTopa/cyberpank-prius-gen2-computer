@@ -101,6 +101,27 @@ a `PMLOG` message; the backend auto-fetches it once the link comes up, so a cold
 boot's wake sequence lands in the journal automatically. Each event is also echoed
 live as a `PMEVENT` message.
 
+#### Status LED (RP2040-Zero onboard WS2812, GP16)
+
+The board's onboard WS2812 RGB LED (GP16) is driven as a live diagnostic — the
+**only** observable firmware output during a cold boot, when the POCO (USB host)
+is off and nothing can be logged. Point a camera at it. Colour key (all dim):
+
+| LED | Meaning |
+|-----|---------|
+| white→blue flash | power-on / reset signature. **Repeating every few seconds = reset loop** (e.g. WDT). |
+| green blink | `normal`, POCO **alive** (healthy heartbeat, loop running). |
+| amber solid | `normal`, POCO **not** alive — armed to press the wake button. |
+| **red solid** | a power-button press is happening **right now** (GP26 driven low). |
+| magenta | shutdown in progress. |
+| red solid (after suicide) | `dead` — OUT1 low. |
+
+A cold-boot recording therefore shows exactly what the firmware does: a single
+boot flash then amber→red(press)→green means it woke the phone; a **dark** LED
+means the RP2040 has no power; a **repeating** boot flash means it is reset-looping.
+The boot event in `getlog` also carries `rc` (`machine.reset_cause()`): `1`=power-on,
+`3`=watchdog/soft reset.
+
 ### Bidirectional heartbeat
 
 A rolling "automotive" counter lets each side detect if the other died:

@@ -76,7 +76,7 @@ from ina219 import INA219
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-VERSION = "1.15.0"
+VERSION = "1.16.0"
 
 # Device role — reported in the unified identify ("whoami") response and the
 # ready banner so the computer can discover which USB-CDC port is the powerbox
@@ -351,6 +351,63 @@ def wdt_sleep_ms(total_ms):
     feed_wdt()
 
 
+# ─── Status LED (RP2040-Zero onboard WS2812 on GP16) ──────────────────────────
+#
+# The Waveshare RP2040-Zero has a single addressable WS2812 RGB LED on GP16
+# (otherwise unused here). We drive it as a live status indicator — the ONLY
+# way to see what the firmware does during a cold boot, when the USB host (the
+# POCO) is OFF and nothing can be logged. A camera can record it. Colours are
+# deliberately dim (WS2812 is very bright). Colour key:
+#   boot flash  white->blue  — a RESET LOOP shows this flashing every ~8 s
+#   green blink  normal, POCO alive (healthy heartbeat)
+#   amber solid  normal, POCO NOT alive — armed to press the wake button
+#   RED solid    a power-button press is happening RIGHT NOW (GP26 driven low)
+#   magenta      shutdown in progress
+#   red solid    dead (suicided, OUT1 low)
+#   blue solid   running without I2C sensors (no INA/BMP)
+LED_PIN = 16
+LED_ALIVE = (0, 14, 0)
+LED_WAIT = (16, 10, 0)
+LED_PRESS = (70, 0, 0)
+LED_SHUTDOWN = (14, 0, 14)
+LED_DEAD = (18, 0, 0)
+LED_NOSENSOR = (0, 0, 16)
+_np = None
+
+
+def setup_led():
+    """Best-effort init of the onboard WS2812. Stays None if unavailable."""
+    global _np
+    try:
+        import neopixel
+        _np = neopixel.NeoPixel(Pin(LED_PIN), 1)
+        _np[0] = (0, 0, 0)
+        _np.write()
+    except Exception:
+        _np = None
+
+
+def set_led(r, g, b):
+    if _np is None:
+        return
+    try:
+        _np[0] = (r, g, b)
+        _np.write()
+    except Exception:
+        pass
+
+
+def led_boot_flash():
+    """Distinct power-on/reset signature (white -> blue -> off). Recorded on a
+    cold boot this proves the firmware started; if it repeats every few seconds
+    the board is in a reset loop (e.g. WDT), which is itself the diagnosis."""
+    set_led(30, 30, 30)
+    time.sleep_ms(150)
+    set_led(0, 0, 40)
+    time.sleep_ms(150)
+    set_led(0, 0, 0)
+
+
 # ─── I2C Setup ────────────────────────────────────────────────────────────────
 
 def setup_i2c():
@@ -541,9 +598,11 @@ class PowerManager:
                   boot_s=boot_age // 1000, sp=1 if self.seen_poco else 0,
                   v=self.last_voltage)
         tx(ID_SYSTEM, {"msg": "POCO_BTN", "ms": ms, "why": reason})
+        set_led(*LED_PRESS)                   # RED = pressing NOW (visible on camera)
         Pin(POCO_BTN_PIN, Pin.OUT, value=0)   # short to GND = press
         wdt_sleep_ms(ms)                      # feeds the WDT during the hold
         Pin(POCO_BTN_PIN, Pin.IN, pull=None)  # release -> high-impedance, pulls off
+        set_led(0, 0, 0)                       # brief dark blip so a repeat press is countable
         self.last_btn_ms = time.ticks_ms()
 
     # -- shutdown / suicide ---------------------------------------------------
@@ -583,6 +642,19 @@ class PowerManager:
         tx(ID_SYSTEM, payload)
         self.hb_tx = (self.hb_tx + 1) & 0xFF
 
+    def _update_led(self, now):
+        """Reflect the current PM state on the onboard LED (dim). Green blinks
+        when the POCO is alive (proves the loop is running); amber steady means
+        'armed to wake'; red means dead."""
+        if self.state == "dead":
+            set_led(*LED_DEAD)
+        elif self.state == "shutdown":
+            set_led(*LED_SHUTDOWN)
+        elif self.poco_alive(now):
+            set_led(*(LED_ALIVE if (self.hb_tx & 1) else (0, 0, 0)))  # blink green
+        else:
+            set_led(*LED_WAIT)  # amber = normal, no POCO heartbeat, will press
+
     def tick(self, voltage):
         """Run the power state machine for one main-loop iteration.
 
@@ -598,6 +670,7 @@ class PowerManager:
             if time.ticks_diff(now, self.last_hb_tx_ms) >= HEARTBEAT_TX_MS:
                 self.last_hb_tx_ms = now
                 self._tx_status(now)
+            self._update_led(now)
             return
 
         now = time.ticks_ms()
@@ -606,6 +679,7 @@ class PowerManager:
         if time.ticks_diff(now, self.last_hb_tx_ms) >= HEARTBEAT_TX_MS:
             self.last_hb_tx_ms = now
             self._tx_status(now)
+            self._update_led(now)
 
         # 2) Execute a queued power-button press.
         if self.pending_button_ms:
@@ -823,12 +897,22 @@ def main():
     # for power. (Do NOT drop back to 48 MHz without re-checking the link.)
     machine.freq(96000000)
 
+    # Status LED first — the earliest possible visual proof the firmware ran.
+    # On a cold boot (POCO/USB host OFF) this is the ONLY observable output.
+    setup_led()
+    led_boot_flash()
+
     # Latch the master power rail (OUT1 HIGH) FIRST — before anything that could
     # take time — so the computer holds power even if ACC drops during boot. Also
     # set OUT2/OUT3 defaults and leave the POCO button high-impedance.
     out1, out2, out3 = setup_power_pins()
     _pm = PowerManager(out1, out2, out3)
-    log_event("boot", ver=VERSION)
+    # Reset cause helps tell a clean power-on apart from a WDT reset loop.
+    try:
+        _rc = machine.reset_cause()
+    except Exception:
+        _rc = None
+    log_event("boot", ver=VERSION, rc=_rc)
 
     # Banner — will be parsed by the computer's parse_powerbox_system()
     tx(ID_SYSTEM, {"msg": "POWERBOX_READY", "ver": VERSION, "role": ROLE})
