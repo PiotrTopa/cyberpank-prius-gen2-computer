@@ -85,6 +85,8 @@ class MfdPowerManager:
     (phase / port power / reachability) changes.
     """
 
+    PUBLISH_REFRESH_S = 30.0  # periodic status republish (keeps ping ages fresh)
+
     def __init__(
         self,
         config: MfdPowerConfig,
@@ -113,6 +115,7 @@ class MfdPowerManager:
         self._deadline: Optional[float] = None  # phase timeout (grace/boot/halt)
         self._last_tick = 0.0
         self._last_published: Optional[tuple] = None
+        self._last_publish_t: float = 0.0
         self._reconciled = False  # startup: adopt whatever state the board is in
         self._last_enforce = 0.0  # last time we verified hw port power
         # Health/debug telemetry (published to the dashboard).
@@ -274,11 +277,16 @@ class MfdPowerManager:
         }
 
     def _emit(self) -> None:
+        # Publish on any observable change, plus a periodic refresh so slowly
+        # moving telemetry (last_ok_ping) doesn't go stale in the store/UI.
         key = (self._state, self._powered, self._reachable,
                self._power_cycles, self._last_boot_s)
-        if key == self._last_published:
+        now = self._clock()
+        if key == self._last_published and \
+                (now - self._last_publish_t) < self.PUBLISH_REFRESH_S:
             return
         self._last_published = key
+        self._last_publish_t = now
         if self._publish is not None:
             try:
                 self._publish(self.status())
