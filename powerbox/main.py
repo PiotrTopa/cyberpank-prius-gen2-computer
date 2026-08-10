@@ -76,7 +76,7 @@ from ina219 import INA219
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-VERSION = "1.11.0"
+VERSION = "1.12.0"
 
 # Device role — reported in the unified identify ("whoami") response and the
 # ready banner so the computer can discover which USB-CDC port is the powerbox
@@ -198,6 +198,11 @@ SUICIDE_CONFIRM_MS = 20000
 # Default grace before suicide once a shutdown begins (POCO OS shutdown window),
 # used when no grace is supplied with the "off" command.
 SHUTDOWN_GRACE_S = 30
+# Floor before a heartbeat-loss suicide. The POCO's heartbeats come from its
+# backend service, which stops at the START of an OS halt — hb loss (15 s)
+# does NOT mean the POCO has finished powering off. Never cut power sooner
+# than this after a shutdown begins, so the OS halt can complete (eMMC safety).
+SHUTDOWN_MIN_HOLD_MS = 25000
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -523,6 +528,13 @@ class PowerManager:
         ``voltage`` is the INA219 bus voltage (V), or None when unavailable.
         """
         if self.state == "dead":
+            # Keep STATUS heartbeats flowing (the rail may still be energised
+            # by ACC): the backend/operator can see pm="dead" + out1=0 instead
+            # of a mysteriously silent board. No wake/suicide logic runs.
+            now = time.ticks_ms()
+            if time.ticks_diff(now, self.last_hb_tx_ms) >= HEARTBEAT_TX_MS:
+                self.last_hb_tx_ms = now
+                self._tx_status(now)
             return
 
         now = time.ticks_ms()
@@ -551,9 +563,16 @@ class PowerManager:
 
         # 4) State machine.
         if self.state == "shutdown":
+            elapsed = time.ticks_diff(now, self.shutdown_t0)
             poco_down = not self.poco_alive(now)
-            timed_out = time.ticks_diff(now, self.shutdown_t0) >= self.shutdown_grace_s * 1000
-            if poco_down or timed_out:
+            timed_out = elapsed >= self.shutdown_grace_s * 1000
+            # Heartbeat loss only means the POCO's backend stopped — the OS
+            # halt is still in flight. Hold power at least SHUTDOWN_MIN_HOLD_MS
+            # (or the full grace when it's shorter) before acting on poco_down.
+            min_hold = SHUTDOWN_MIN_HOLD_MS
+            if self.shutdown_grace_s * 1000 < min_hold:
+                min_hold = self.shutdown_grace_s * 1000
+            if (poco_down and elapsed >= min_hold) or timed_out:
                 self._suicide("poco_down" if poco_down else "grace_timeout")
         elif self.state == "normal" and self.poco_should_run:
             # Wake a dead POCO with the power button (after boot grace + cooldown).
