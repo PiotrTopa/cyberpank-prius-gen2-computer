@@ -617,6 +617,10 @@ class BackendService:
                     state=status["state"],
                     usb_power=status["usb_power"],
                     reachable=status["reachable"],
+                    state_since=status.get("state_since"),
+                    last_ok_ping=status.get("last_ok_ping"),
+                    power_cycles=status.get("power_cycles"),
+                    last_boot_s=status.get("last_boot_s"),
                 ))
 
             self.mfd_power = MfdPowerManager(

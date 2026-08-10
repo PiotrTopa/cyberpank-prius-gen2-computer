@@ -1440,12 +1440,20 @@ class SetMfdStatusAction(Action):
         state: str,
         usb_power: "Optional[bool]" = None,
         reachable: "Optional[bool]" = None,
+        state_since: "Optional[float]" = None,
+        last_ok_ping: "Optional[float]" = None,
+        power_cycles: "Optional[int]" = None,
+        last_boot_s: "Optional[float]" = None,
         source: ActionSource = ActionSource.INTERNAL,
     ):
         super().__init__(ActionType.SET_MFD_STATUS, source)
         self.state = state
         self.usb_power = usb_power
         self.reachable = reachable
+        self.state_since = state_since
+        self.last_ok_ping = last_ok_ping
+        self.power_cycles = power_cycles
+        self.last_boot_s = last_boot_s
 
 
 class SetFanOverrideAction(Action):

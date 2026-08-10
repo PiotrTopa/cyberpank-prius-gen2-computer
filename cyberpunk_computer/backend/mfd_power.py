@@ -70,6 +70,11 @@ class MfdPowerConfig:
     tick_s: float = 5.0              # manager cadence within the backend loop
     ping_timeout_s: int = 2          # per-ping wait
     enforce_interval_s: float = 60.0 # how often to verify hw port power matches desired state
+    # ON-state watchdog: the Pi's cdc_ether gadget can enumerate and then come
+    # up with a dead TX queue (NETDEV WATCHDOG: transmit queue timed out) —
+    # host-side USBDEVFS_RESET does NOT fix it; only a VBUS cycle does. If the
+    # board stays unreachable in ON for this long, power-cycle it. 0 disables.
+    unreachable_recover_s: float = 45.0
 
 
 class MfdPowerManager:
@@ -110,6 +115,13 @@ class MfdPowerManager:
         self._last_published: Optional[tuple] = None
         self._reconciled = False  # startup: adopt whatever state the board is in
         self._last_enforce = 0.0  # last time we verified hw port power
+        # Health/debug telemetry (published to the dashboard).
+        self._state_since: float = time.time()      # wall clock of last state change
+        self._last_ok_ping: Optional[float] = None  # wall clock of last good ping
+        self._unreachable_since: Optional[float] = None  # monotonic, ON-state watchdog
+        self._power_cycles: int = 0                 # boot-timeout + watchdog cycles
+        self._boot_started: Optional[float] = None  # monotonic, boot duration measure
+        self._last_boot_s: Optional[float] = None   # last power-on -> reachable time
 
     # ── external effects (injectable) ────────────────────────────────────
 
@@ -254,10 +266,16 @@ class MfdPowerManager:
                 max(0.0, self._deadline - self._clock())
                 if self._deadline is not None else None
             ),
+            # Health/debug telemetry (wall-clock timestamps; UI derives ages).
+            "state_since": self._state_since,
+            "last_ok_ping": self._last_ok_ping,
+            "power_cycles": self._power_cycles,
+            "last_boot_s": self._last_boot_s,
         }
 
     def _emit(self) -> None:
-        key = (self._state, self._powered, self._reachable)
+        key = (self._state, self._powered, self._reachable,
+               self._power_cycles, self._last_boot_s)
         if key == self._last_published:
             return
         self._last_published = key
@@ -270,8 +288,19 @@ class MfdPowerManager:
     def _enter(self, state: str, deadline_in: Optional[float] = None) -> None:
         if state != self._state:
             logger.info("MFD power: %s -> %s", self._state, state)
+            self._state_since = time.time()
         self._state = state
         self._deadline = (self._clock() + deadline_in) if deadline_in is not None else None
+
+    def _power_cycle(self, reason: str, into_state: str = STATE_BOOTING) -> None:
+        """Cut and restore the board's VBUS, counting the cycle for telemetry."""
+        self._power_cycles += 1
+        logger.warning("MFD power-cycle #%d: %s", self._power_cycles, reason)
+        self._set_port_power(False)
+        self._set_port_power(True)
+        self._boot_started = self._clock()
+        self._unreachable_since = None
+        self._enter(into_state, self.config.boot_timeout_s)
 
     # ── state machine ─────────────────────────────────────────────────────
 
@@ -304,8 +333,10 @@ class MfdPowerManager:
 
         if self._state == STATE_OFF:
             self._reachable = None
+            self._unreachable_since = None
             if acc_on:
                 self._set_port_power(True)
+                self._boot_started = now
                 self._enter(STATE_BOOTING, cfg.boot_timeout_s)
             elif self._powered is False and (now - self._last_enforce) >= cfg.enforce_interval_s:
                 # Periodically verify the hub hasn't been reset behind our back
@@ -318,18 +349,16 @@ class MfdPowerManager:
                 self._configure_host_iface()
                 if self._ping():
                     self._reachable = True
+                    self._last_ok_ping = time.time()
+                    if self._boot_started is not None:
+                        self._last_boot_s = round(now - self._boot_started, 1)
                     self._enter(STATE_ON)
             if self._state == STATE_BOOTING and now >= (self._deadline or 0):
                 # Boot never completed: power-cycle and try again. Also covers
                 # the board being physically absent — we just keep retrying at
                 # boot_timeout cadence, which is harmless.
-                logger.warning(
-                    "MFD board did not come up within %.0fs; power-cycling",
-                    cfg.boot_timeout_s,
-                )
-                self._set_port_power(False)
-                self._set_port_power(True)
-                self._enter(STATE_BOOTING, cfg.boot_timeout_s)
+                self._power_cycle(
+                    "board did not come up within %.0fs" % cfg.boot_timeout_s)
             if not acc_on:
                 # Key went away mid-boot: let it finish booting, then the
                 # ON handler moves it to GRACE next tick.
@@ -346,7 +375,22 @@ class MfdPowerManager:
                 logger.info("MFD board %s (%s)",
                             "reachable" if reachable else "UNREACHABLE", cfg.board_ip)
             self._reachable = reachable
-            if not acc_on:
+            if reachable:
+                self._last_ok_ping = time.time()
+                self._unreachable_since = None
+            else:
+                # Unreachable-in-ON watchdog: a dead cdc_ether TX queue only
+                # recovers with a VBUS cycle (USBDEVFS_RESET verified useless
+                # 2026-08-10). Give the link unreachable_recover_s to come
+                # back on its own, then cycle.
+                if self._unreachable_since is None:
+                    self._unreachable_since = now
+                elif (cfg.unreachable_recover_s > 0 and
+                        now - self._unreachable_since >= cfg.unreachable_recover_s):
+                    self._power_cycle(
+                        "board unreachable for %.0fs in ON (dead gadget?)"
+                        % (now - self._unreachable_since))
+            if not acc_on and self._state == STATE_ON:
                 self._enter(STATE_GRACE, cfg.grace_s)
 
         elif self._state == STATE_GRACE:

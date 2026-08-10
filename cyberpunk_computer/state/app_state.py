@@ -332,6 +332,11 @@ class ConnectionState:
     mfd_state: str = ""
     mfd_usb_power: Optional[bool] = None
     mfd_reachable: Optional[bool] = None
+    # MFD health/debug telemetry (backend.mfd_power; wall-clock timestamps)
+    mfd_state_since: Optional[float] = None   # when the manager entered mfd_state
+    mfd_last_ok_ping: Optional[float] = None  # last successful ping of the Pi
+    mfd_power_cycles: int = 0                 # boot-timeout + watchdog VBUS cycles
+    mfd_last_boot_s: Optional[float] = None   # last power-on -> reachable duration
 
 
 

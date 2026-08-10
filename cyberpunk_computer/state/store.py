@@ -704,6 +704,10 @@ class Store:
                     mfd_state=a.state,
                     mfd_usb_power=a.usb_power,
                     mfd_reachable=a.reachable,
+                    mfd_state_since=getattr(a, "state_since", None),
+                    mfd_last_ok_ping=getattr(a, "last_ok_ping", None),
+                    mfd_power_cycles=getattr(a, "power_cycles", None) or 0,
+                    mfd_last_boot_s=getattr(a, "last_boot_s", None),
                 ),
             )
             affected.add(StateSlice.CONNECTION)

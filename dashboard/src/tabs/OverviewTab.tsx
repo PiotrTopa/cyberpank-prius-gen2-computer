@@ -108,10 +108,19 @@ export function OverviewTab({ state, hist, now, satNodes, satHolders, onOpenDebu
         {pb.undervoltage && <StatusRow label="Under-voltage" on={true} onText="TRIPPED" />}
       </Panel>
 
-      <Panel title="MFD Video Node" code="MFD-01" icon={Monitor}>
+      <Panel title="MFD Video Node" code="MFD-01" icon={Monitor}
+        right={
+          <span className={`text-[0.65rem] tracking-wider ${conn.mfd_reachable ? 'text-hud-green' : 'text-hud-amber'}`}>
+            {(conn.mfd_state || '—').toUpperCase()}
+          </span>
+        }>
         <StatusRow label="Network Reachable" on={conn.mfd_reachable} onText="YES" offText="NO" />
         <StatusRow label="USB Hub Power" on={conn.mfd_usb_power} onText="ON" offText="OFF" />
-        <DataRow label="PM State" value={(conn.mfd_state || '—').toUpperCase()} />
+        <DataRow label="In State For" value={conn.mfd_state_since ? fmtAge(conn.mfd_state_since, now) : undefined} />
+        <DataRow label="Last OK Ping" value={conn.mfd_last_ok_ping ? fmtAge(conn.mfd_last_ok_ping, now) : undefined} />
+        <DataRow label="Last Boot Took" value={conn.mfd_last_boot_s?.toFixed(0)} unit="s" />
+        <DataRow label="Power Cycles" value={conn.mfd_power_cycles?.toString()}
+          tone={(conn.mfd_power_cycles ?? 0) > 0 ? 'amber' : undefined} />
         {conn.mfd_reachable == null && conn.mfd_usb_power == null && (
           <p className="text-[0.65rem] text-slate-600">
             MFD manager disabled — port power truth in USB HUB

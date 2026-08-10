@@ -89,6 +89,11 @@ export interface Connection {
   mfd_state?: string | null;
   mfd_usb_power?: boolean | null;
   mfd_reachable?: boolean | null;
+  /** MFD health/debug (backend.mfd_power; wall-clock timestamps) */
+  mfd_state_since?: number | null;
+  mfd_last_ok_ping?: number | null;
+  mfd_power_cycles?: number | null;
+  mfd_last_boot_s?: number | null;
 }
 
 export interface SatelliteNode {
