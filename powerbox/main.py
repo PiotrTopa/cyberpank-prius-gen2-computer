@@ -76,7 +76,7 @@ from ina219 import INA219
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-VERSION = "1.17.0"
+VERSION = "1.18.0"
 
 # Device role — reported in the unified identify ("whoami") response and the
 # ready banner so the computer can discover which USB-CDC port is the powerbox
@@ -191,6 +191,20 @@ POCO_HB_TIMEOUT_MS = 15000
 # re-enumeration — while getting a genuinely-off POCO pressed ~40 s sooner than
 # the old 60 s (which read as "cold boot does nothing").
 POCO_BOOT_GRACE_MS = 20000
+# Cold-boot resilience: a wake press can brownout/glitch-reset THIS MCU (the
+# GP26 press node is electrically coupled to the phone's power rail — proven
+# on-bench 2026-08-10: GP26 disconnected = no reset, connected = reset right at
+# the press). A reset wipes RAM state (boot_ms, last_btn, seen_poco), so without
+# persistence the firmware would re-press ~POCO_BOOT_GRACE_MS later and kill the
+# still-booting phone: a press->reset->re-press loop. We therefore persist a
+# "wake press issued, POCO not yet confirmed alive" marker in FLASH (survives a
+# brownout/power-glitch reset) and, when we boot with that marker set, wait this
+# much longer before pressing again — long enough for the phone (already booting
+# from the earlier press) to come up and heartbeat, after which we clear the
+# marker and never press. One press per cycle, never a double-tap on a booting
+# phone. Must exceed POCO boot -> first heartbeat (~30-90 s).
+POST_PRESS_BOOT_GRACE_MS = 120000
+BOOT_MARKER_FILE = "pmboot.dat"
 # After a power-button press, wait this long before pressing again. MUST exceed
 # the POCO's worst-case boot -> first heartbeat time (~3-5 min: pmOS boot +
 # backend start), or the ladder kills a booting phone before it can ever report
@@ -333,6 +347,26 @@ def tx_pmlog():
     """Dump the whole power-event ring buffer as one PMLOG system message."""
     tx(ID_SYSTEM, {"msg": "PMLOG", "now_ms": time.ticks_ms(),
                    "ver": VERSION, "events": list(_evlog)})
+
+
+def read_boot_marker():
+    """True if a wake press was issued before the last reset and the POCO never
+    confirmed alive. Persisted in flash so it survives a brownout/glitch reset
+    caused by the press itself (see POST_PRESS_BOOT_GRACE_MS)."""
+    try:
+        with open(BOOT_MARKER_FILE, "rb") as f:
+            return f.read(1) == b"\x01"
+    except Exception:
+        return False
+
+
+def write_boot_marker(pending):
+    """Set/clear the persistent 'boot in progress after a wake press' marker."""
+    try:
+        with open(BOOT_MARKER_FILE, "wb") as f:
+            f.write(b"\x01" if pending else b"\x00")
+    except Exception:
+        pass
 
 
 def _truthy(value) -> bool:
@@ -535,6 +569,13 @@ class PowerManager:
         self.state = "normal"
         now = time.ticks_ms()
         self.boot_ms = now
+        # Cold-boot resilience: if we booted with the persistent press marker set,
+        # a wake press was issued before this reset and the POCO hasn't confirmed
+        # alive — wait much longer before pressing again so the still-booting phone
+        # can come up (see POST_PRESS_BOOT_GRACE_MS). Otherwise use the normal grace.
+        self.boot_marker_pending = read_boot_marker()
+        self.boot_grace_ms = (POST_PRESS_BOOT_GRACE_MS if self.boot_marker_pending
+                              else POCO_BOOT_GRACE_MS)
         # Our outbound rolling heartbeat counter (carried in STATUS).
         self.hb_tx = 0
         self.last_hb_tx_ms = now
@@ -567,6 +608,12 @@ class PowerManager:
         # A heartbeat is proof the host has the port open and is draining it —
         # open the outbound-write gate immediately (don't wait for the next tick).
         set_host_present(True)
+        # The POCO is alive: clear the persistent boot marker so a later, clean
+        # reset returns to the normal (short) boot grace. Write flash only on the
+        # transition to avoid wearing it on every heartbeat.
+        if self.boot_marker_pending:
+            write_boot_marker(False)
+            self.boot_marker_pending = False
 
     def poco_alive(self, now=None):
         if not self.seen_poco:
@@ -630,6 +677,12 @@ class PowerManager:
         log_event("btn", ms=ms, why=reason, wt=self.wake_tries,
                   boot_s=boot_age // 1000, sp=1 if self.seen_poco else 0,
                   v=self.last_voltage)
+        # A wake/force press may brownout/glitch-reset this MCU. Persist a marker
+        # BEFORE driving the pin so that, if we reset, the next boot waits long
+        # enough for the phone to come up instead of re-pressing and killing it.
+        if reason in ("wake", "force") and not self.boot_marker_pending:
+            write_boot_marker(True)
+            self.boot_marker_pending = True
         tx(ID_SYSTEM, {"msg": "POCO_BTN", "ms": ms, "why": reason})
         set_led(*LED_PRESS)                   # RED = pressing NOW (visible on camera)
         Pin(POCO_BTN_PIN, Pin.OUT, value=0)   # short to GND = press
@@ -755,7 +808,7 @@ class PowerManager:
             # forced power-cycle recovers it. The cooldown (5 min) exceeds the
             # POCO's boot -> first-heartbeat time so a booting phone is never
             # pressed again before it can report alive.
-            past_boot = time.ticks_diff(now, self.boot_ms) >= POCO_BOOT_GRACE_MS
+            past_boot = time.ticks_diff(now, self.boot_ms) >= self.boot_grace_ms
             cooled = time.ticks_diff(now, self.last_btn_ms) >= POCO_WAKE_COOLDOWN_MS
             if self.poco_alive(now):
                 self.wake_tries = 0
