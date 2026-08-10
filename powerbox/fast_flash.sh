@@ -5,12 +5,17 @@
 # every transfer EPROTOs, and even the hub's port-power control stops acting.
 # A driver unbind/bind of the hub heals it. So, all inside one healthy window:
 #   1. heal:  unbind/bind hub 1-1
-#   2. cut:   real VBUS off/on on port 5 (verified by node disappearance)
-#   3. catch: spam Ctrl-C through the 3 s safe-boot => REPL, no WDT, quiet link
+#   2. cut:   real VBUS off/on on port 5 (verified by DEVNUM CHANGE — while
+#             VBUS is off the kernel keeps the stale device node, so "node
+#             disappears" is the WRONG check; the proof of a real cut is a
+#             new devnum after re-power)
+#   3. catch: spam Ctrl-C through the 3 s safe-boot => REPL, no WDT, quiet
+#             link (reopen the tty by devnum — the pre-cut handle is stale)
 #   4. flash: cp pcf8574.py + main.py, verify, reset
 # Run on prius as user (sudo -n available). Caller restarts the hb daemon.
 set -u
 BYID=/dev/serial/by-id/usb-MicroPython_Board_in_FS_mode_503359277a7c699f-if00
+SYSDEV=/sys/bus/usb/devices/1-1.5
 M="$HOME/.local/bin/mpremote"
 
 echo "== 1 heal: hub 1-1 unbind/bind =="
@@ -23,38 +28,52 @@ while [ $i -lt 40 ] && [ ! -e "$BYID" ]; do sleep 0.5; i=$((i+1)); done
 echo "healed: $(readlink -f "$BYID")"
 sleep 1
 
-echo "== 2 cut: VBUS off p5 (expect node gone) =="
+echo "== 2 cut: VBUS off/on p5 (verify by devnum change) =="
+DEVNUM_BEFORE="$(cat "$SYSDEV/devnum" 2>/dev/null || echo '?')"
 sudo -n uhubctl -f -l 1-1 -p 5 -a off 2>&1 | grep -E "Port 5|Sent"
-i=0
-while [ $i -lt 20 ] && [ -e "$BYID" ]; do sleep 0.3; i=$((i+1)); done
-if [ -e "$BYID" ]; then echo "WARN: node never disappeared - cut ineffective"; else echo "node gone: real cut confirmed"; fi
-sleep 2
+sleep 3
 sudo -n uhubctl -f -l 1-1 -p 5 -a on 2>&1 | grep -E "Port 5|Sent"
+i=0
+DEVNUM_AFTER="$DEVNUM_BEFORE"
+while [ $i -lt 40 ]; do
+    DEVNUM_AFTER="$(cat "$SYSDEV/devnum" 2>/dev/null || echo "$DEVNUM_BEFORE")"
+    [ "$DEVNUM_AFTER" != "$DEVNUM_BEFORE" ] && break
+    sleep 0.25; i=$((i+1))
+done
+if [ "$DEVNUM_AFTER" = "$DEVNUM_BEFORE" ]; then
+    echo "WARN: devnum unchanged ($DEVNUM_BEFORE) - cut ineffective, falling through"
+else
+    echo "devnum $DEVNUM_BEFORE -> $DEVNUM_AFTER: real cut confirmed, MCU cold-booted"
+fi
 
 echo "== 3 catch safe-boot REPL =="
 sudo -n python3 - "$BYID" <<'PY'
 import serial, sys, time, os
 byid = sys.argv[1]
 t0 = time.time(); s = None; node = None
-while time.time() - t0 < 20:
-    node = os.path.realpath(byid)
-    if os.path.exists(node) and os.path.exists(byid):
-        try:
-            s = serial.Serial(node, 115200, timeout=0.05); break
-        except Exception:
-            pass
-    time.sleep(0.1)
-if s is None:
-    print("FATAL: device never re-enumerated"); raise SystemExit(1)
-print("port open at t=%.1fs; node=%s" % (time.time() - t0, node))
-end = time.time() + 5
+# The board is mid-re-enumeration: keep (re)opening the CURRENT node and spam
+# Ctrl-C. Reopen on any error — a handle from before re-enumeration is stale.
 buf = b""
+end = time.time() + 15
 while time.time() < end:
     try:
-        s.write(b"\r\x03"); buf += s.read(300)
+        if s is None:
+            node = os.path.realpath(byid)
+            s = serial.Serial(node, 115200, timeout=0.05)
+            print("port open at t=%.1fs; node=%s" % (time.time() - t0, node))
+        s.write(b"\r\x03")
+        buf += s.read(300)
+        if b">>>" in buf[-40:]:
+            break
     except Exception:
-        pass
-    time.sleep(0.05)
+        try:
+            if s: s.close()
+        except Exception:
+            pass
+        s = None
+        time.sleep(0.1)
+if s is None:
+    print("FATAL: device never became openable"); raise SystemExit(1)
 s.close()
 print("tail:", buf[-150:])
 print("REPL_CAUGHT" if b">>>" in buf else "REPL_UNCONFIRMED")
