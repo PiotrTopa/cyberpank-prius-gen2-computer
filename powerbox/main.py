@@ -76,7 +76,7 @@ from ina219 import INA219
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-VERSION = "1.16.0"
+VERSION = "1.17.0"
 
 # Device role — reported in the unified identify ("whoami") response and the
 # ready banner so the computer can discover which USB-CDC port is the powerbox
@@ -224,33 +224,63 @@ SHUTDOWN_MIN_HOLD_MS = 25000
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
-# USB-CDC TX error counter.  If sys.stdout.write() throws repeatedly (host
-# gone for good), we reset the MCU after 20 consecutive errors so it can
-# start fresh when the host eventually re-opens the port.
+# USB-CDC TX error counter (diagnostic only — TX failures never reset the MCU;
+# see the cold-boot note on tx() below).
 _tx_errors = 0
+
+# Host-presence gate for outbound writes.
+#
+# The POCO (our USB host) is OFF on a cold boot while we are trying to power it
+# on, and *during the phone's own boot* its USB attaches before Linux opens the
+# ACM — a window where the CDC IN endpoint is connected but nobody is draining
+# it. A blocking sys.stdout.write() then stalls until the 8 s WDT resets us; the
+# reset makes us re-press the power button ~20 s later, killing the still-booting
+# phone. That is a press→reset→re-press loop that never lets the POCO come up
+# (root cause of the on-bench cold-boot failure, LED reset loop 2026-08-10).
+#
+# So we only write once the host has PROVEN it is present and draining — i.e. a
+# recent POCO heartbeat (see PowerManager.poco_alive / on_poco_hb). While the
+# host is absent we drop outbound frames: nobody is listening anyway, and the
+# in-RAM event log (getlog/PMLOG) still records what happened for later readout.
+# Inbound reads (poll_stdin) are unaffected, so the very first heartbeat flips
+# the gate open and normal telemetry resumes. Discovery is topology/port-based
+# and the backend heartbeats unconditionally, so gating TX cannot deadlock it.
+_host_present = False
+
+
+def set_host_present(present):
+    """Open/close the outbound-write gate. Called from the power state machine
+    as the POCO's heartbeat liveness changes."""
+    global _host_present, _tx_errors
+    present = bool(present)
+    if present != _host_present:
+        _host_present = present
+        if present:
+            _tx_errors = 0
+
 
 def tx(device_id: int, payload: dict):
     """Send an NDJSON message to the host via USB-CDC (stdout).
 
-    Writes directly — if the CDC TX FIFO is full the call blocks until the
-    host drains it.  This is the same approach the gateway firmware uses and
-    avoids the select.poll(POLLOUT) "sticky not-ready" bug that caused
-    permanent silent frame drops.
-
-    The hardware watchdog (8 s) guarantees the MCU resets if a write blocks
-    longer than that (e.g. host crashed and never drains), so the firmware
-    can never deadlock permanently.
+    Gated on host presence (``_host_present``): dropped when the POCO host is
+    not draining the port. This prevents a blocking write from stalling the
+    loop and tripping the WDT during a cold boot — which would create a
+    press→reset→re-press loop that kills the very phone we're booting. When the
+    host IS present the write is direct/blocking (same as the gateway firmware),
+    which avoids the select.poll(POLLOUT) "sticky not-ready" frame-drop bug.
     """
     global _tx_errors
+    if not _host_present:
+        return
     try:
         msg = json.dumps({"id": device_id, "d": payload})
         sys.stdout.write(msg + "\n")
         _tx_errors = 0  # reset on success
     except Exception:
+        # Never machine.reset() on a TX failure: on a cold boot the host is
+        # *supposed* to be absent while we power it on, and a self-reset here is
+        # exactly what created the press→reset→re-press loop. Just count it.
         _tx_errors += 1
-        if _tx_errors > 20:
-            import machine
-            machine.reset()
 
 
 def tx_error(code: str, detail: str = ""):
@@ -534,6 +564,9 @@ class PowerManager:
         if n != self.last_poco_n:
             self.last_poco_n = n
             self.last_poco_change_ms = now
+        # A heartbeat is proof the host has the port open and is draining it —
+        # open the outbound-write gate immediately (don't wait for the next tick).
+        set_host_present(True)
 
     def poco_alive(self, now=None):
         if not self.seen_poco:
@@ -662,6 +695,10 @@ class PowerManager:
         """
         if voltage is not None:
             self.last_voltage = voltage
+        # Drive the outbound-write gate from POCO liveness: TX is suppressed until
+        # the host is present+draining, so a cold-boot wake press can't stall a
+        # write and WDT-reset us into a re-press loop (see tx()/set_host_present).
+        set_host_present(self.poco_alive())
         if self.state == "dead":
             # Keep STATUS heartbeats flowing (the rail may still be energised
             # by ACC): the backend/operator can see pm="dead" + out1=0 instead

@@ -155,13 +155,21 @@ port open / is actively draining it, the small (~64–256 B) CDC TX FIFO fills a
 next write blocks forever, deadlocking the firmware. A no-drainer gap can occur when
 the backend restarts or when something opens → writes → closes the CDC port.
 
-The firmware guards every `tx()` with a **non-blocking** write-readiness probe —
-`select.poll()` registered on `sys.stdout` for `POLLOUT`, checked with `poll(0)`. If
-the link can't accept the write, the line is **dropped** instead of blocking.
-Telemetry is periodic, so a dropped sample is harmless and the firmware never wedges,
-regardless of whether a host is draining. See the `tx()` / `_host_writable()` helpers
-in `main.py`. The board survives a backend-stopped gap (no reset loop) and auto-resumes
-when the backend reconnects. A `WDT_TIMEOUT_MS = 8000` watchdog is a last-resort backstop.
+The firmware guards every `tx()` with a **host-presence gate** (`_host_present`):
+outbound frames are written only once the POCO host has proven it is present and
+draining the port — i.e. a recent POCO heartbeat (`poco_alive`). While the host is
+absent, frames are **dropped** instead of blocking. This matters most on a **cold
+boot**: the POCO is off while the firmware powers it on, and during the phone's own
+boot its USB attaches *before* Linux opens the ACM — a connected-but-not-drained
+window where a blocking write would stall until the 8 s WDT reset the MCU. That reset
+made the firmware re-press the power button ~20 s later, killing the still-booting
+phone: a press→reset→re-press loop (observed on-bench 2026-08-10, LED reset loop).
+Gating TX on host presence removes that stall entirely. Inbound reads are unaffected,
+so the first heartbeat re-opens the gate and telemetry resumes; a TX failure now only
+increments a diagnostic counter and **never** resets the MCU. Discovery is
+topology/port-based and the backend heartbeats unconditionally, so gating TX can't
+deadlock the link. See the `tx()` / `set_host_present()` helpers in `main.py`. A
+`WDT_TIMEOUT_MS = 8000` watchdog remains a last-resort backstop for a genuine hang.
 
 Host-side, two measures keep the link clean:
 * **Port-based discovery** — the backend resolves roles from the physical hub port
