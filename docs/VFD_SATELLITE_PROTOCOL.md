@@ -157,6 +157,28 @@ Clear display state (on startup, mode change, etc.)
 
 ---
 
+## Message Type: Clock Sync (`"K"`)
+
+Syncs the satellite's on-board RTC (local time). The backend sends this once
+a minute; the satellite keeps time itself between syncs. Used by the idle
+(parked) screen, which shows a small date + clock in the top-right corner.
+
+```json
+{
+  "id": 110,
+  "d": {
+    "t": "K",
+    "y": 2026, "mo": 8, "d": 12,   // Date
+    "h": 23, "mi": 45, "s": 30     // Local time ("s" optional)
+  }
+}
+```
+
+Does not switch display modes. Until the first sync the idle screen shows
+`--:--`.
+
+---
+
 ## Canvas Mode Messages (`"T"`, `"D"`, `"B"`)
 
 Beyond the dashboard, the VFD supports a free-form **canvas mode** so the host

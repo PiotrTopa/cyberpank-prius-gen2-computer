@@ -26,8 +26,10 @@ from typing import Optional
 
 from ..io import (
     DEVICE_POWERBOX_BASE,
+    DEVICE_VFD,
     ExecutionMode,
     MultiInputPort,
+    OutgoingCommand,
     RecordingConfig,
     SerialConfig,
     SerialPort,
@@ -351,6 +353,7 @@ class BackendService:
 
         # Chassis fan controller state.
         self._fan_last_tick: float = 0.0
+        self._vfd_clock_last: float = 0.0
         self._fan_active: bool = False      # hysteresis latch
         self._fan_box_active: bool = False  # box-purge hysteresis latch
         self._fan_last_duty: int = -1       # last sent duty (avoid re-sending same value)
@@ -862,6 +865,29 @@ class BackendService:
             sorted(desired_configs) or "none",
         )
 
+    def _vfd_clock_tick(self) -> None:
+        """Sync the VFD satellite's RTC (drives its idle clock screen).
+
+        Sends a "K" time-sync message once a minute; the satellite keeps
+        time itself between syncs, and a reboot re-syncs within a minute.
+        """
+        if self.twin is None:
+            return
+        now = time.time()
+        if now - self._vfd_clock_last < 60.0:
+            return
+        self._vfd_clock_last = now
+        lt = time.localtime(now)
+        self.twin.egress.send_command(OutgoingCommand(
+            device_id=DEVICE_VFD,
+            command_type="K",
+            payload={
+                "t": "K",
+                "y": lt.tm_year, "mo": lt.tm_mon, "d": lt.tm_mday,
+                "h": lt.tm_hour, "mi": lt.tm_min, "s": lt.tm_sec,
+            },
+        ))
+
     def _satellite_tick(self) -> None:
         """Advance the satellite queue/scheduler/supervisor (engine loop)."""
         if self.satellite_queue is None:
@@ -976,6 +1002,7 @@ class BackendService:
                     self._mfd_power_tick()
                     self._poco_power_tick()
                     self._chassis_fan_tick()
+                    self._vfd_clock_tick()
                     self._satellite_tick()
                     if self.recorder is not None:
                         self.recorder.tick()
