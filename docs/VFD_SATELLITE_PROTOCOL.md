@@ -157,6 +157,55 @@ Clear display state (on startup, mode change, etc.)
 
 ---
 
+## Canvas Mode Messages (`"T"`, `"D"`, `"B"`)
+
+Beyond the dashboard, the VFD supports a free-form **canvas mode** so the host
+can show anything. Any `T`/`D`/`B` message switches the display to canvas mode
+(pausing the dashboard); an `R` message switches back. The framebuffer persists
+between canvas messages, allowing incremental drawing.
+
+### Message Type: Text (`"T"`)
+
+```json
+{"id":110,"d":{"t":"T","x":10,"y":10,"s":"Hello VFD!","f":8,"c":1,"clr":true}}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `x`, `y` | int | 0, 0 | Text position |
+| `s` | string or list | — | Text; a list renders one line per entry |
+| `f` | int | 8 | Font height: 8 (8×8 framebuf) or 5 (3×5 mini) |
+| `c` | int | 1 | Color (1 = on, 0 = off) |
+| `clr` | bool | false | Clear framebuffer first |
+
+### Message Type: Draw (`"D"`)
+
+```json
+{"id":110,"d":{"t":"D","clr":true,"ops":[
+  ["rect",0,0,256,48,1],
+  ["fcirc",128,24,10,1],
+  ["txt",8,8,"CANVAS",1]
+],"ack":true}}
+```
+
+Ops (color always last): `["fill",c]`, `["px",x,y,c]`,
+`["line",x0,y0,x1,y1,c]`, `["hl",x,y,w,c]`, `["vl",x,y,h,c]`,
+`["rect",x,y,w,h,c]`, `["frect",x,y,w,h,c]`, `["circ",cx,cy,r,c]`,
+`["fcirc",cx,cy,r,c]`, `["txt",x,y,s,c]`.
+
+With `"ack":true` the VFD responds `{"res":"OK","t":"D","ops":<count>}`.
+
+### Message Type: Bitmap (`"B"`)
+
+```json
+{"id":110,"d":{"t":"B","x":0,"y":0,"w":16,"h":16,"b64":"<base64>"}}
+```
+
+Raw 1bpp bitmap, MSB-first rows, row stride padded to whole bytes,
+base64 encoded. Invalid payloads get `{"err":"BAD_BITMAP"}`.
+
+---
+
 ## VFD → Host Messages
 
 The VFD can send status/acknowledgment messages back.
