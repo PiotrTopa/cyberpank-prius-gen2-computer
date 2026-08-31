@@ -126,6 +126,7 @@ def _build_config(args: argparse.Namespace) -> BackendConfig:
         shutdown_grace_s=args.shutdown_grace,
         local_poweroff_on_undervoltage=args.local_poweroff,
         powerbox_auto_recover=args.powerbox_auto_recover,
+        powerbox_stale_s=args.powerbox_stale_s,
         chassis_fan_freq=args.chassis_fan_freq,
         fan_full_start_delta=args.fan_full_start_delta,
         fan_full_stop_delta=args.fan_full_stop_delta,
@@ -287,6 +288,14 @@ def main() -> None:
         "--local-poweroff",
         action="store_true",
         help="also run 'systemctl poweroff' locally when under-voltage trips",
+    )
+    parser.add_argument(
+        "--powerbox-stale-s",
+        type=float,
+        default=15.0,
+        help="seconds without a powerbox frame before the link is declared "
+             "wedged and recovery starts (telemetry streams at 1 Hz; lower = "
+             "faster wedge detection, shorter telemetry blackouts)",
     )
     parser.add_argument(
         "--powerbox-auto-recover",
