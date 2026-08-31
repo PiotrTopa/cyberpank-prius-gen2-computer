@@ -170,8 +170,17 @@ class BackendConfig:
     # hardware mod is in place.
     powerbox_auto_recover: bool = False
     # Minimum spacing between recovery attempts (s). Prevents a permanently dead
-    # link from being reset in a tight loop while it re-enumerates.
+    # link from being reset in a tight loop while it re-enumerates. The spacing
+    # doubles with each consecutive failed attempt (see
+    # powerbox_recover_max_cooldown_s) and resets as soon as frames resume.
     powerbox_recover_cooldown_s: float = 20.0
+    # Ceiling for the doubling above. A flat 20 s retry forever is actively
+    # harmful: each escalation resets the parent hub, which re-enables every
+    # data port and cold-boots the powerbox, which triggers the next round of
+    # relay/data drift enforcement — a storm that keeps the link wedged rather
+    # than recovering it (2026-08-31: 137 enumerations / 39 failures in 14 min,
+    # attempt #23 and climbing). Back off instead, and let a human look.
+    powerbox_recover_max_cooldown_s: float = 600.0
     # Whether a tripped under-voltage also powers the POCO off locally. Off by
     # default; the powerbox is expected to cut the rail. Enable on the target.
     local_poweroff_on_undervoltage: bool = False
@@ -605,6 +614,11 @@ class BackendService:
             get_relays=lambda: (
                 self.twin.store.state.powerbox.relays if self.twin else None
             ),
+            # The ``rly`` mirror is only meaningful while frames are arriving.
+            # A wedged USB-CDC link freezes it, and enforcing drift against a
+            # frozen mirror re-issues relay commands forever (see
+            # port_power.RelayPortPower.enforce).
+            telemetry_fresh=self._powerbox_telemetry_fresh,
         )
 
         # MFD video board (Pi Zero 2W): ACC-follower USB port power manager.
@@ -1567,6 +1581,24 @@ class BackendService:
         if self.powerbox_commander:
             self.powerbox_commander.set_fan(self.config.chassis_fan_pin, duty_raw, eff_freq)
 
+    def _powerbox_telemetry_fresh(self) -> bool:
+        """True while the mirrored powerbox STATUS fields can be trusted.
+
+        Same criterion as the staleness watchdog: no frame for
+        ``powerbox_stale_s`` means the USB-CDC link is wedged, so every mirrored
+        field — ``relays`` included — is frozen at its last value. Port power
+        enforcement consults this before treating the ``rly`` mirror as truth.
+        """
+        if self.twin is None:
+            return True  # replay / no twin: nothing better to go on
+        stale_s = self.config.powerbox_stale_s
+        if stale_s <= 0:
+            return True
+        last = self.twin.store.state.powerbox.last_update_time
+        if last <= 0:
+            last = self._start_time
+        return (time.time() - last) <= stale_s
+
     def _maybe_recover_powerbox(self, pb, age: float) -> None:
         """Force a powerbox serial reset to clear a wedged link, if enabled.
 
@@ -1580,17 +1612,24 @@ class BackendService:
             return
             
         now = time.time()
-        if (now - self._pb_recover_last) < cfg.powerbox_recover_cooldown_s:
-            return
-        self._pb_recover_last = now
         if self._pb_recover_attempts < 0:
             self._pb_recover_attempts = 0
+        # Exponential backoff: 20s, 40s, 80s … capped. Resets to the base
+        # spacing the moment frames resume (see _powerbox_watchdog_tick).
+        cooldown = cfg.powerbox_recover_cooldown_s * (2 ** self._pb_recover_attempts)
+        cooldown = min(cooldown, cfg.powerbox_recover_max_cooldown_s)
+        if (now - self._pb_recover_last) < cooldown:
+            return
+        self._pb_recover_last = now
         self._pb_recover_attempts += 1
         logger.warning(
             "Powerbox auto-recovery: forcing link reset (attempt #%d, link "
-            "stale %.1fs). Ladder: USBDEVFS_RESET first (no MCU reboot, relays "
-            "kept), parent-hub reset on escalation.",
+            "stale %.1fs, next attempt in >=%.0fs). Ladder: USBDEVFS_RESET "
+            "first (no MCU reboot, relays kept), parent-hub reset on "
+            "escalation.",
             self._pb_recover_attempts, age,
+            min(cfg.powerbox_recover_cooldown_s * (2 ** self._pb_recover_attempts),
+                cfg.powerbox_recover_max_cooldown_s),
         )
         try:
             self._powerbox_serial.force_reconnect(attempt=self._pb_recover_attempts)

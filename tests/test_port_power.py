@@ -70,13 +70,16 @@ class TestUhubctlPortPower:
 
 
 class TestRelayPortPower:
-    def _make(self, relays_holder, sent, uhub_calls, clock_holder):
+    def _make(self, relays_holder, sent, uhub_calls, clock_holder,
+              fresh_holder=None):
         return RelayPortPower(
             "sdr", relay_ch=2, hub="1-1", data_port=4,
             send_relay=lambda ch, on: (sent.append((ch, on)), True)[1],
             get_relays=lambda: relays_holder["v"],
             runner=_runner_recorder(uhub_calls),
             clock=lambda: clock_holder["t"],
+            telemetry_fresh=(None if fresh_holder is None
+                             else lambda: fresh_holder["v"]),
         )
 
     def test_off_sequence_data_first(self):
@@ -120,6 +123,33 @@ class TestRelayPortPower:
         relays["v"] = (0, 1, 0, 0)  # command landed
         clockh["t"] = 12.0
         c.enforce()          # converged -> no more sends
+        assert len(sent) == 2
+
+    def test_enforce_suspends_vbus_drift_while_telemetry_stale(self):
+        """A wedged powerbox link must not drive endless relay re-issues.
+
+        The ``rly`` mirror freezes at its last value while the USB-CDC link is
+        wedged, but commands still go out — so an ungated enforce() re-issues
+        forever (relay chatter + enumeration storm, 2026-08-31).
+        """
+        relays = {"v": (0, 0, 0, 0)}   # mirror frozen at all-off
+        sent, uhub, clockh = [], [], {"t": 0.0}
+        fresh = {"v": True}
+        c = self._make(relays, sent, uhub, clockh, fresh_holder=fresh)
+        c.set(True)
+        assert len(sent) == 1
+
+        # Link wedges: mirror can no longer be trusted -> no re-issue, ever.
+        fresh["v"] = False
+        for t in (6.0, 12.0, 60.0, 600.0):
+            clockh["t"] = t
+            c.enforce()
+        assert len(sent) == 1, "stale telemetry must not trigger re-application"
+
+        # Frames resume and confirm the command never landed -> converge again.
+        fresh["v"] = True
+        clockh["t"] = 700.0
+        c.enforce()
         assert len(sent) == 2
 
     def test_enforce_noop_without_desired_or_telemetry(self):

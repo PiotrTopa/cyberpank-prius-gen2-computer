@@ -169,6 +169,7 @@ class RelayPortPower:
         runner: Optional[Callable] = None,
         enforce_min_interval_s: float = 5.0,
         clock: Callable[[], float] = time.monotonic,
+        telemetry_fresh: Optional[Callable[[], bool]] = None,
     ) -> None:
         self.name = name
         self.relay_ch = relay_ch
@@ -181,6 +182,13 @@ class RelayPortPower:
         self._enforce_min_s = enforce_min_interval_s
         self._clock = clock
         self._last_apply = 0.0
+        # Is the mirrored ``rly`` telemetry currently trustworthy? When the
+        # powerbox USB-CDC link wedges, the mirror freezes at its last value and
+        # enforce() would otherwise read it as ground truth forever (see
+        # enforce()). Defaults to "always fresh" so callers that don't wire a
+        # link-health probe keep the previous behaviour.
+        self._telemetry_fresh = telemetry_fresh or (lambda: True)
+        self._stale_logged = False
 
     @property
     def desired(self) -> Optional[bool]:
@@ -257,12 +265,39 @@ class RelayPortPower:
           the unpowered-zombie bus poisoning, so the data-off MUST be
           re-applied (diagnosed the hard way 2026-08-01: zombie gateway →
           poisoning → more hub resets → more zombies).
+
+        VBUS drift is only actionable while the powerbox telemetry is FRESH.
+        A wedged USB-CDC link freezes the ``rly`` mirror at its last value
+        (typically all-off after a cold boot) while commands still go out fine,
+        so an ungated enforce() re-issues relay commands forever against a
+        mirror that can never update — audible relay chatter, coil inrush on the
+        5 V rail the hub shares, and an enumeration storm that keeps the link
+        wedged. That self-sustaining oscillation cost an afternoon on
+        2026-08-31; when we cannot verify, we do not re-issue.
         """
         if self._desired is None:
             return
         if (self._clock() - self._last_apply) < self._enforce_min_s:
             return  # give the last attempt time to land / telemetry to update
-        actual = self.read()
+        fresh = True
+        try:
+            fresh = bool(self._telemetry_fresh())
+        except Exception:  # a broken probe must not disable enforcement
+            logger.debug("telemetry freshness probe failed (%s)", self.name,
+                         exc_info=True)
+        if not fresh and not self._stale_logged:
+            self._stale_logged = True
+            logger.warning(
+                "Relay port %s: powerbox telemetry stale — suspending VBUS "
+                "drift enforcement (mirror unverifiable; re-issuing would only "
+                "churn the bus). Data-port enforcement continues.", self.name,
+            )
+        elif fresh and self._stale_logged:
+            self._stale_logged = False
+            logger.info("Relay port %s: telemetry fresh again — VBUS drift "
+                        "enforcement resumed.", self.name)
+        # Unverifiable mirror -> treat VBUS state as unknown rather than as truth.
+        actual = self.read() if fresh else None
         vbus_drift = actual is not None and actual != self._desired
         data_drift = False
         if not vbus_drift and self._desired is False:
@@ -292,11 +327,13 @@ class HubPortPower:
         send_relay: Callable[[int, bool], bool],
         get_relays: Callable[[], Optional[Sequence]],
         runner: Optional[Callable] = None,
+        telemetry_fresh: Optional[Callable[[], bool]] = None,
     ) -> "HubPortPower":
         def relay(name: str, ch: int, data_port: int) -> RelayPortPower:
             return RelayPortPower(
                 name, ch, config.hub, data_port,
                 send_relay=send_relay, get_relays=get_relays, runner=runner,
+                telemetry_fresh=telemetry_fresh,
             )
         return cls(
             powerbox=UhubctlPortPower(config.hub, config.powerbox_port, runner=runner),
