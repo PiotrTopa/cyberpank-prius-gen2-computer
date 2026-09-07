@@ -139,7 +139,11 @@ def main() -> int:
 
     def _handle_signal(signum: int, _frame: object) -> None:
         logger.info("Signal %d received, stopping frontend...", signum)
-        app.running = False
+        try:
+            twin.stop()
+        except Exception:
+            pass
+        os._exit(0)
 
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)

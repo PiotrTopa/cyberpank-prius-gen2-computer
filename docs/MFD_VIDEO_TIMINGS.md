@@ -112,6 +112,7 @@ Type=simple
 User=piotr
 WorkingDirectory=/home/piotr/cyberpunk_computer
 Environment="PYTHONUNBUFFERED=1"
+Environment="SDL_NO_SIGNAL_HANDLERS=1"
 Environment="SDL_VIDEODRIVER=dummy"
 Environment="SDL_FBDEV=/dev/fb0"
 Environment="SDL_NOMOUSE=1"
