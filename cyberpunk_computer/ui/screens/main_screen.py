@@ -1374,9 +1374,9 @@ class MainScreen(Screen):
         
         # Draw touch indicator if recent touch event
         touch_age = current_time - self._last_touch_time
-        if self._last_touch_time > 0 and touch_age < self._touch_display_duration:
+        if self._last_touch_time > 0 and 0 <= touch_age < self._touch_display_duration:
             # Calculate alpha fade (1.0 -> 0.0)
-            alpha = 1.0 - (touch_age / self._touch_display_duration)
+            alpha = max(0.0, min(1.0, 1.0 - (touch_age / self._touch_display_duration)))
             
             # Map touch coordinates (0-255) to center area
             # Touch area is in center: center_x to center_x + center_width
@@ -1418,9 +1418,9 @@ class MainScreen(Screen):
         
         # Draw button text if recent button event
         button_age = current_time - self._last_button_time
-        if self._last_button_time > 0 and button_age < self._button_display_duration:
+        if self._last_button_time > 0 and 0 <= button_age < self._button_display_duration:
             # Calculate alpha fade
-            alpha = 1.0 - (button_age / self._button_display_duration)
+            alpha = max(0.0, min(1.0, 1.0 - (button_age / self._button_display_duration)))
             color = (int(255 * alpha), int(200 * alpha), 0)  # Yellow/orange with fade
             
             btn_font = get_font(12, "title")

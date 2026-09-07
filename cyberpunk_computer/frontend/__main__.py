@@ -16,6 +16,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
+import signal
 import sys
 
 from ..config import Config
@@ -135,6 +136,13 @@ def main() -> int:
 
     threading.Thread(target=_stats_heartbeat, name="stats-heartbeat",
                      daemon=True).start()
+
+    def _handle_signal(signum: int, _frame: object) -> None:
+        logger.info("Signal %d received, stopping frontend...", signum)
+        app.running = False
+
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
 
     try:
         app.run()
