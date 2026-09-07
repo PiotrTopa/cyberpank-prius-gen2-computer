@@ -167,28 +167,26 @@ class FramebufferOutput:
                 )
             
             # Convert surface to the correct format
-            # Framebuffer is typically BGRA or BGR depending on bpp
+            # Framebuffer expects BGRA (32bpp, verified on this hardware).
+            # To re-enable R+B phosphor gain correction, change _gain below
+            # from 1.0 to e.g. 1.15 and the numpy LUT path will activate.
             if self.bpp == 32:
-                # 32-bit framebuffer wants BGRA with R+B gain correction
-                # to compensate for MFD green-biased phosphor response.
-                # Strategy: get the BGRA flat buffer from pygame (pure C, ~2ms),
-                # then apply a precomputed LUT to the B [0::4] and R [2::4]
-                # byte slices via numpy fancy-indexing (~2ms more).
-                # Total ~4ms/frame — fits in the 33ms Pi Zero 2W budget.
-                try:
-                    import numpy as np
-                    converted = surface.convert_alpha()
-                    # Get flat BGRA bytes in C (fast pygame path)
-                    raw = pygame.image.tobytes(converted, "BGRA")
-                    # View as writable uint8 array — no copy
-                    arr = np.frombuffer(raw, dtype=np.uint8).copy()
-                    # Apply gain LUT to B (offset 0) and R (offset 2); leave G alone
-                    lut_rb = _get_gain_lut(1.3)
-                    arr[0::4] = lut_rb[arr[0::4]]  # B
-                    arr[2::4] = lut_rb[arr[2::4]]  # R
-                    buffer = arr.tobytes()
-                except ImportError:
-                    # numpy not available: fall back to plain BGRA copy (no gain)
+                _gain = 1.0  # ← set > 1.0 to boost R+B channels vs G
+                if _gain != 1.0:
+                    try:
+                        import numpy as np
+                        converted = surface.convert_alpha()
+                        raw = pygame.image.tobytes(converted, "BGRA")
+                        arr = np.frombuffer(raw, dtype=np.uint8).copy()
+                        lut_rb = _get_gain_lut(_gain)
+                        arr[0::4] = lut_rb[arr[0::4]]  # B channel
+                        arr[2::4] = lut_rb[arr[2::4]]  # R channel
+                        buffer = arr.tobytes()
+                    except ImportError:
+                        converted = surface.convert_alpha()
+                        buffer = pygame.image.tobytes(converted, "BGRA")
+                else:
+                    # Fast path: pure C, no numpy, no copies (~2ms on Pi Zero 2W)
                     converted = surface.convert_alpha()
                     buffer = pygame.image.tobytes(converted, "BGRA")
                 self.mmap.seek(0)
