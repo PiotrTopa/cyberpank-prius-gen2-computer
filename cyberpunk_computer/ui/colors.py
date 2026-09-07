@@ -143,14 +143,16 @@ THEMES = {
 }
 
 # Current active theme
-_current_theme = Theme.VFD
+_current_theme = Theme.SYNTHWAVE
 
 
 def set_theme(theme: Theme) -> None:
     """Set the active color theme."""
-    global _current_theme, COLORS
+    global _current_theme
     _current_theme = theme
-    COLORS = _build_color_dict(THEMES[theme])
+    new_colors = _build_color_dict(THEMES[theme])
+    COLORS.clear()
+    COLORS.update(new_colors)
 
 
 def get_theme() -> Theme:
@@ -216,8 +218,8 @@ def _build_color_dict(palette: ColorPalette) -> Dict[str, RGB]:
     }
 
 
-# Initialize default COLORS dict
-COLORS: Dict[str, RGB] = _build_color_dict(VFD_PALETTE)
+# Initialize default COLORS dict (must match _current_theme above)
+COLORS: Dict[str, RGB] = _build_color_dict(SYNTHWAVE_PALETTE)
 
 # Colors with alpha channel
 COLORS_ALPHA: Dict[str, RGBA] = {
