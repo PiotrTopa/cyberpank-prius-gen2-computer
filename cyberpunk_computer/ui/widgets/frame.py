@@ -30,10 +30,7 @@ class Frame(Widget):
     TITLE_HEIGHT = 22
     BORDER_WIDTH = 1
     PADDING = 4
-    TITLE_FONT_SIZE = 14
-    
-    # Animation
-    _global_time: float = 0.0  # Shared animation time
+    TITLE_FONT_SIZE = 12
     
     def __init__(
         self,
@@ -95,15 +92,14 @@ class Frame(Widget):
     def update(self, dt: float) -> None:
         """Update frame and children."""
         super().update(dt)
-        Frame._global_time += dt  # Shared animation timer
         if self._title_widget:
             self._title_widget.update(dt)
         for child in self._children:
             child.update(dt)
-    
+
     def _get_pulse(self, speed: float = 1.0) -> float:
         """Get a pulsing value 0.0-1.0 for animations."""
-        t = (Frame._global_time + self._anim_offset) * speed
+        t = (time.monotonic() + self._anim_offset) * speed
         return (math.sin(t * math.pi * 2) + 1) / 2
     
     def render(self, surface: pygame.Surface) -> None:
@@ -182,13 +178,20 @@ class Frame(Widget):
             1
         )
         
-        # Draw title text (using Interceptor Bold for headers)
+        # Draw title text, clipped so it never runs under the title widget
         if self.title:
             font = get_title_font(self.TITLE_FONT_SIZE)
             title_surface = font.render(self.title.upper(), True, title_color)
             title_x = self.rect.x + self.PADDING + 2
             title_y = self.rect.y + (self.TITLE_HEIGHT - title_surface.get_height()) // 2
-            surface.blit(title_surface, (title_x, title_y))
+            if self._title_widget:
+                avail = self._title_widget.rect.x - 4 - title_x
+            else:
+                avail = self.rect.right - self.PADDING - title_x
+            surface.blit(
+                title_surface, (title_x, title_y),
+                area=pygame.Rect(0, 0, max(0, avail), title_surface.get_height())
+            )
         
         # Draw title widget (right side of title bar)
         if self._title_widget:
@@ -211,7 +214,7 @@ class Frame(Widget):
         """Draw cyberpunk corner accents for focused state."""
         # Longer, more dramatic corner lines
         length = 10 + int(intensity * 4)  # Dynamic length
-        pulse = self._get_pulse(0.)
+        pulse = self._get_pulse(0.15)
         
         # Bright accent color with pulse
         accent_color = lerp_color(color, COLORS["cyan"], intensity * 0.5 + pulse * 0.3)

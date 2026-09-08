@@ -92,10 +92,16 @@ class FramebufferOutput:
             # Read bits per pixel
             with open(f"{sysfs_base}/bits_per_pixel", "r") as f:
                 self.bpp = int(f.read().strip())
-            
-            # Calculate line length (bytes per line)
-            self.line_length = self.width * (self.bpp // 8)
-            
+
+            # Read the real line length (stride) — the GPU may pad rows
+            # beyond width*bytes_per_pixel; assuming packed rows would
+            # progressively shear the image.
+            try:
+                with open(f"{sysfs_base}/stride", "r") as f:
+                    self.line_length = int(f.read().strip())
+            except (FileNotFoundError, ValueError):
+                self.line_length = self.width * (self.bpp // 8)
+
             # Calculate total buffer size
             buffer_size = self.height * self.line_length
             
@@ -189,15 +195,13 @@ class FramebufferOutput:
                     # Fast path: pure C, no numpy, no copies (~2ms on Pi Zero 2W)
                     converted = surface.convert_alpha()
                     buffer = pygame.image.tobytes(converted, "BGRA")
-                self.mmap.seek(0)
-                self.mmap.write(buffer)
-                
+                self._write_rows(buffer, self.width * 4)
+
             elif self.bpp == 16:
                 # 16-bit: RGB565 format
                 converted = surface.convert(16)
                 buffer = pygame.image.tobytes(converted, "RGB")
-                self.mmap.seek(0)
-                self.mmap.write(buffer)
+                self._write_rows(buffer, self.width * 2)
             else:
                 logger.error(f"Unsupported bit depth: {self.bpp}")
                 return False
@@ -208,6 +212,18 @@ class FramebufferOutput:
             logger.error(f"Failed to blit to framebuffer: {e}")
             return False
     
+    def _write_rows(self, buffer: bytes, row_bytes: int) -> None:
+        """Write packed pixel rows into the framebuffer, honoring stride."""
+        if self.line_length == row_bytes:
+            # No row padding: single contiguous write
+            self.mmap.seek(0)
+            self.mmap.write(buffer)
+            return
+        for y in range(self.height):
+            dst = y * self.line_length
+            src = y * row_bytes
+            self.mmap[dst:dst + row_bytes] = buffer[src:src + row_bytes]
+
     def clear(self, color: Tuple[int, int, int] = (0, 0, 0)) -> None:
         """
         Clear the framebuffer to a solid color.
@@ -222,20 +238,14 @@ class FramebufferOutput:
             if self.bpp == 32:
                 # BGRA format
                 pixel = bytes([color[2], color[1], color[0], 255])
-                row = pixel * self.width
-                self.mmap.seek(0)
-                for _ in range(self.height):
-                    self.mmap.write(row)
+                self._write_rows(pixel * self.width * self.height, self.width * 4)
             elif self.bpp == 16:
                 # RGB565 format
                 r = (color[0] >> 3) & 0x1F
                 g = (color[1] >> 2) & 0x3F
                 b = (color[2] >> 3) & 0x1F
                 pixel = struct.pack('<H', (r << 11) | (g << 5) | b)
-                row = pixel * self.width
-                self.mmap.seek(0)
-                for _ in range(self.height):
-                    self.mmap.write(row)
+                self._write_rows(pixel * self.width * self.height, self.width * 2)
         except Exception as e:
             logger.error(f"Failed to clear framebuffer: {e}")
     

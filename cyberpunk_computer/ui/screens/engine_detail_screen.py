@@ -27,7 +27,7 @@ class EngineDetailScreen(Screen):
     HEADER_HEIGHT = 22
     RPM_BAR_HEIGHT = 28
     NUM_PAGES = 4
-    PAGE_LABELS = ["ENGINE", "TEMPS", "FUEL CHARTS", "TEMP CHARTS"]
+    PAGE_LABELS = ["OVERVIEW", "TEMPS", "FUEL CHARTS", "TEMP CHARTS"]
 
     def __init__(self, size: Tuple[int, int], app=None, store: Optional[Store] = None):
         super().__init__(size, app)
@@ -144,7 +144,7 @@ class EngineDetailScreen(Screen):
 
         # Page label centered
         label = self.PAGE_LABELS[self._page]
-        s = font.render(f"ENGINE \u2022 {label}", True, COLORS["cyan"])
+        s = font.render(f"ENGINE / {label}", True, COLORS["cyan"])
         surface.blit(s, ((self.width - s.get_width()) // 2,
                          (self.HEADER_HEIGHT - s.get_height()) // 2))
 
@@ -257,7 +257,8 @@ class EngineDetailScreen(Screen):
         """Engine data readouts: fuel flow and tank levels."""
         y0 = self.HEADER_HEIGHT + self.RPM_BAR_HEIGHT + 14
         pad_x = 12
-        col_w = self.width // 2 - pad_x
+        # Column width leaves pad_x margin on both sides of each column
+        col_w = self.width // 2 - pad_x * 2
 
         font_label = get_mono_font(11)
         font_value = get_mono_font(14)

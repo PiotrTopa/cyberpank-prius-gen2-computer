@@ -46,44 +46,35 @@ class PaginationControl(Widget):
         """Handle input events."""
         if not self.visible:
             return False
-        
-        # We need to import InputEvent locally to avoid circular imports or just use the values passed
-        # Assuming event is an InputEvent enum member
-        
-        # Check by name/value since we might not have the Enum imported easily here
-        # But actually we can just import it inside the method or rely on the fact that
-        # the event passed IS the enum member.
-        
-        # Simple string check for robustness, or import if preferred.
-        event_name = getattr(event, "name", str(event))
-        
-        if event_name == "PRESS_LIGHT": # Enter
+
+        from ...input.manager import InputEvent as IE
+
+        if event == IE.PRESS_LIGHT:  # Enter toggles page-switch mode
             if self.focused:
                 self.active_edit = not self.active_edit
                 self._dirty = True
                 return True
-        
+
         if self.active_edit:
-            if event_name == "ROTATE_LEFT": # Left / Up
+            if event == IE.ROTATE_LEFT:
                 if self.current_page > 0:
                     self.current_page -= 1
                     if self._on_change:
                         self._on_change(self.current_page)
                     self._dirty = True
                 return True
-            elif event_name == "ROTATE_RIGHT": # Right / Down
+            elif event == IE.ROTATE_RIGHT:
                 if self.current_page < self.num_pages - 1:
                     self.current_page += 1
                     if self._on_change:
                         self._on_change(self.current_page)
                     self._dirty = True
                 return True
-            # Consume BACK if active to exit edit mode?
-            elif event_name == "BACK":
-                 self.active_edit = False
-                 self._dirty = True
-                 return True
-                 
+            elif event == IE.BACK:  # Exit page-switch mode
+                self.active_edit = False
+                self._dirty = True
+                return True
+
         return False
         
     def render(self, surface: pygame.Surface) -> None:

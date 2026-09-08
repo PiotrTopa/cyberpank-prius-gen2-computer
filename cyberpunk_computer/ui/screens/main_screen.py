@@ -13,7 +13,6 @@ from .audio_screen import AudioScreen
 from .climate_screen import ClimateScreen
 from .lights_screen import LightsScreen
 from .ambient_screen import AmbientScreen
-from .engine_screen import EngineScreen
 from ..widgets.base import Rect
 from ..widgets.frame import Frame
 from ..widgets.controls import VolumeBar, ToggleSwitch, ValueDisplay, ModeIcon, StatusIcon
@@ -22,7 +21,7 @@ from ..widgets.pagination import PaginationControl
 # VFD widget removed - now runs as separate satellite app (device 110)
 # See vfd_satellite/ and docs/VFD_SATELLITE_PROTOCOL.md
 from ..colors import COLORS
-from ..fonts import get_font
+from ..fonts import get_font, get_title_font, get_tiny_font, get_mono_font
 from ...persistence import get_settings, save_settings
 from ...state.actions import (
     ActionSource, SetVolumeAction, SetBassAction, SetMidAction, SetTrebleAction,
@@ -87,8 +86,7 @@ class MainScreen(Screen):
         self._ambient_saturation = 100
         self._ambient_brightness = 80
         
-        # AVC bridge and store
-        self._avc_bridge = None
+        # State store
         self._store = None
         
         # Editing mode states
@@ -117,11 +115,7 @@ class MainScreen(Screen):
         self._last_button_time = 0.0
         self._touch_display_duration = 1.0  # How long to show touch indicator
         self._button_display_duration = 2.0  # How long to show button text
-        
-        # AVC-LAN byte debug display (for flow arrow correlation)
-        self._avc_110_490_bytes = [0] * 8  # Last 0x110→0x490 message bytes
-        self._avc_a00_258_bytes = [0] * 32  # Last 0xA00→0x258 message bytes (SOC/flow data)
-        
+
         # Create frames (order of creation doesn't affect focus order)
         self._create_left_panels()
         self._create_right_panels()
@@ -172,7 +166,8 @@ class MainScreen(Screen):
                 12
             ),
             value=self._volume,
-            segments=10
+            segments=10,
+            show_value=False  # numeric value already shown by the VOL label above
         )
         self._audio_frame.add_child(self._volume_bar)
         
@@ -383,22 +378,12 @@ class MainScreen(Screen):
         self.add_widget(self._lights_frame)
         
         # Battery frame (bottom right)
-        batt_title_rect = Rect(
-            x + self.SIDE_PANEL_WIDTH - 46, self.FRAME_HEIGHT * 2 + 4, 40, 14
-        )
-        self._batt_toggle = ToggleSwitch(
-            batt_title_rect,
-            state=False,
-            on_text="HV",
-            off_text="OFF"
-        )
         self._battery_frame = Frame(
             Rect(x, self.FRAME_HEIGHT * 2, self.SIDE_PANEL_WIDTH, self.FRAME_HEIGHT),
             title="BATTERY",
             focusable=True,
             on_action=self._on_battery_action,
-            on_select=self._on_battery_select,
-            title_widget=self._batt_toggle
+            on_select=self._on_battery_action
         )
         
         content = self._battery_frame.content_rect
@@ -457,13 +442,6 @@ class MainScreen(Screen):
         self._battery_frame.add_child(self._batt_soc_display)
         
         self.add_widget(self._battery_frame)
-    
-    def _update_center_widgets(self) -> None:
-        """Update center area widgets with current state."""
-        # Update connection indicator
-        if self._avc_bridge:
-             connected = self._avc_bridge.is_connected
-             self._connection_indicator.set_connected(connected)
     
     # Bottom bar height for cruise + pagination
     BOTTOM_BAR_HEIGHT = 16
@@ -531,22 +509,6 @@ class MainScreen(Screen):
         # Page visibility is handled in render()
 
     
-    def set_avc_bridge(self, bridge) -> None:
-        """
-        Connect AVC-LAN UI bridge for live updates.
-        
-        Args:
-            bridge: AVCUIBridge instance
-        """
-        self._avc_bridge = bridge
-        
-        # Subscribe to state changes
-        bridge.subscribe("audio", self._on_avc_audio_update)
-        bridge.subscribe("climate", self._on_avc_climate_update)
-        bridge.subscribe("vehicle", self._on_avc_vehicle_update)
-        bridge.subscribe("energy", self._on_avc_energy_update)
-        bridge.subscribe("connection", self._on_avc_connection_update)
-    
     def set_store(self, store) -> None:
         """
         Connect state store for live updates.
@@ -561,174 +523,96 @@ class MainScreen(Screen):
         # Subscribe to all state changes
         store.subscribe(StateSlice.ALL, self._on_store_update)
     
+    # Gear enum -> display letter
+    _GEAR_LETTERS = {
+        "PARK": "P", "REVERSE": "R", "NEUTRAL": "N", "DRIVE": "D", "B": "B",
+    }
+
+    def _gear_letter(self, gear) -> str:
+        return self._GEAR_LETTERS.get(getattr(gear, "name", ""), "P")
+
     def _on_store_update(self, state) -> None:
         """Handle state update from Store."""
-        # Update audio
+        # Audio
         self._volume = state.audio.volume
-        if hasattr(self, '_volume_bar') and self._volume_bar:
-            self._volume_bar.set_value(state.audio.volume)
-        if hasattr(self, '_volume_label') and self._volume_label:
-            self._volume_label.set_value(str(state.audio.volume))
-        
-        # Update climate state variables
+        self._volume_bar.set_value(state.audio.volume)
+        self._volume_label.set_value(str(state.audio.volume))
+
+        # Climate
         self._temp_target = f"{state.climate.target_temp:.0f}"
-        if state.climate.inside_temp is not None:
-            self._temp_in = f"{state.climate.inside_temp:.0f}"
-        else:
-            self._temp_in = "N/A"
-        if state.climate.outside_temp is not None:
-            self._temp_out = f"{state.climate.outside_temp:.0f}"
-        else:
-            self._temp_out = "N/A"
+        self._temp_in = (
+            f"{state.climate.inside_temp:.0f}"
+            if state.climate.inside_temp is not None else "N/A"
+        )
+        self._temp_out = (
+            f"{state.climate.outside_temp:.0f}"
+            if state.climate.outside_temp is not None else "N/A"
+        )
         self._climate_ac = state.climate.ac_on
         self._climate_auto = state.climate.auto_mode
-        self._climate_recirc = getattr(state.climate, 'recirculation', False)
-        
-        # Update climate display widgets
-        if hasattr(self, '_temp_target_display') and self._temp_target_display:
-            self._temp_target_display.set_value(self._temp_target)
-        if hasattr(self, '_temp_in_display') and self._temp_in_display:
-            self._temp_in_display.set_value(self._temp_in)
-        if hasattr(self, '_temp_out_display') and self._temp_out_display:
-            self._temp_out_display.set_value(self._temp_out)
-        if hasattr(self, '_ac_icon') and self._ac_icon:
-            self._ac_icon.set_active(self._climate_ac)
-        if hasattr(self, '_auto_icon') and self._auto_icon:
-            self._auto_icon.set_active(self._climate_auto)
-        if hasattr(self, '_recirc_icon') and self._recirc_icon:
-            self._recirc_icon.set_active(self._climate_recirc)
-            
-        # Update Gear
-        if hasattr(self, '_gear_display') and self._gear_display:
-            from ...state.app_state import GearPosition
-            gear = state.vehicle.gear
-            text = "P"
-            if gear == GearPosition.PARK: text = "P"
-            elif gear == GearPosition.REVERSE: text = "R"
-            elif gear == GearPosition.NEUTRAL: text = "N"
-            elif gear == GearPosition.DRIVE: text = "D"
-            elif gear == GearPosition.B: text = "B"
-            self._gear_display.set_value(text)
+        self._climate_recirc = state.climate.recirculation
 
-        # Update Engine Telemetry
-        if hasattr(self, '_rpm_display') and self._rpm_display:
-             rpm_val = state.vehicle.rpm
-             val = str(int(rpm_val)) if rpm_val is not None else "0"
-             self._rpm_display.set_value(val)
-        if hasattr(self, '_ice_temp_display') and self._ice_temp_display:
-             val = str(int(state.vehicle.ice_coolant_temp)) if state.vehicle.ice_coolant_temp is not None else "--"
-             self._ice_temp_display.set_value(val)
-        if hasattr(self, '_inverter_temp_display') and self._inverter_temp_display:
-             v = state.vehicle
-             hybrid_temps = [t for t in (
-                 v.converter_temp, v.mg1_inverter_temp, v.mg2_inverter_temp,
-                 v.mg1_motor_temp, v.mg2_motor_temp,
-             ) if t is not None]
-             val = str(int(max(hybrid_temps))) if hybrid_temps else "--"
-             self._inverter_temp_display.set_value(val)
-        if hasattr(self, '_speed_display') and self._speed_display:
-             val = str(int(state.vehicle.speed_kmh)) if state.vehicle.speed_kmh is not None else "0"
-             self._speed_display.set_value(val)
-        
+        self._temp_target_display.set_value(self._temp_target)
+        self._temp_in_display.set_value(self._temp_in)
+        self._temp_out_display.set_value(self._temp_out)
+        self._ac_icon.set_active(self._climate_ac)
+        self._auto_icon.set_active(self._climate_auto)
+        self._recirc_icon.set_active(self._climate_recirc)
 
+        # Gear / speed (top bar, hidden on the home page)
+        self._gear_display.set_value(self._gear_letter(state.vehicle.gear))
+        speed = state.vehicle.speed_kmh
+        self._speed_display.set_value(str(int(speed)) if speed is not None else "0")
 
-        if hasattr(self, '_fuel_display') and self._fuel_display:
-             consumption = state.vehicle.instant_consumption
-             unit = state.vehicle.consumption_unit
-             
-             # If consumption is effectively 0, show placeholder to match previous behavior
-             if consumption > 0.0:
-                 val = f"{consumption:.1f}"
-             else:
-                 val = "--.-"
+        # Engine telemetry
+        rpm_val = state.vehicle.rpm
+        self._rpm_display.set_value(str(int(rpm_val)) if rpm_val is not None else "0")
+        ice_t = state.vehicle.ice_coolant_temp
+        self._ice_temp_display.set_value(str(int(ice_t)) if ice_t is not None else "--")
 
-             self._fuel_display.set_value(val)
-             self._fuel_display.set_label(unit)
+        v = state.vehicle
+        hybrid_temps = [t for t in (
+            v.converter_temp, v.mg1_inverter_temp, v.mg2_inverter_temp,
+            v.mg1_motor_temp, v.mg2_motor_temp,
+        ) if t is not None]
+        self._inverter_temp_display.set_value(
+            str(int(max(hybrid_temps))) if hybrid_temps else "--")
 
-             
-        # Update Battery Telemetry
-        if hasattr(self, '_batt_power_display') and self._batt_power_display:
-             power_kw = state.energy.battery_power_kw
-             if power_kw is not None:
-                 # Show sign: + for discharge, - for charge
-                 val = f"{power_kw:+.1f}" if abs(power_kw) >= 0.1 else "0.0"
-             else:
-                 val = "--.-"
-             self._batt_power_display.set_value(val)
-        if hasattr(self, '_batt_volt_display') and self._batt_volt_display:
-             val = f"{state.energy.hv_battery_voltage:.0f}" if state.energy.hv_battery_voltage is not None else "---"
-             self._batt_volt_display.set_value(val)
-        if hasattr(self, '_batt_curr_display') and self._batt_curr_display:
-             val = f"{state.energy.hv_battery_current:.0f}" if state.energy.hv_battery_current is not None else "--"
-             self._batt_curr_display.set_value(val)
-        if hasattr(self, '_batt_temp_display') and self._batt_temp_display:
-             val = str(int(state.energy.battery_temp)) if state.energy.battery_temp is not None else "--"
-             self._batt_temp_display.set_value(val)
-        if hasattr(self, '_batt_soc_display') and self._batt_soc_display:
-             soc_pct = int(state.energy.battery_soc * 100)
-             val = str(soc_pct) if state.energy.battery_soc > 0 else "--"
-             self._batt_soc_display.set_value(val)
-        
-        # Update connection
-        if hasattr(self, '_connection_indicator') and self._connection_indicator:
-            self._connection_indicator.set_connected(state.connection.connected)
-        
-        # VFD Energy Monitor removed - handled by VFDDisplayRule and satellite app
-        # See: VFDDisplayRule in state/rules/vfd_display.py
-        
-        # Update AVC Input visualization (touch and button events)
-        if hasattr(state, 'input'):
-            if state.input.last_touch_time > self._last_touch_time:
-                self._last_touch_x = state.input.last_touch_x
-                self._last_touch_y = state.input.last_touch_y
-                self._last_touch_time = state.input.last_touch_time
-            if state.input.last_button_time > self._last_button_time:
-                self._last_button_name = state.input.last_button_name
-                self._last_button_time = state.input.last_button_time
-        
-        self._dirty = True
-        
-    def _on_avc_audio_update(self, state) -> None:
-        """Handle audio state update from AVC-LAN."""
-        self._volume = state.volume
-        
-        # Update volume bar in audio frame
-        if hasattr(self, '_volume_bar') and self._volume_bar:
-            self._volume_bar.set_value(state.volume)
-        self._dirty = True
-        
-    def _on_avc_climate_update(self, state) -> None:
-        """Handle climate state update from AVC-LAN."""
-        self._temp_target = f"{state.target_temp:.0f}"
-        self._climate_ac = state.ac_on
-        self._climate_auto = state.auto_mode
-        self._climate_recirc = state.recirculation
-        
-        if state.inside_temp is not None:
-            self._temp_in = f"{state.inside_temp:.0f}"
+        consumption = v.instant_consumption
+        self._fuel_display.set_value(
+            f"{consumption:.1f}" if consumption > 0.0 else "--.-")
+        self._fuel_display.set_label(v.consumption_unit)
+
+        # Battery telemetry
+        power_kw = state.energy.battery_power_kw
+        if power_kw is not None:
+            # Show sign: + for discharge, - for charge
+            val = f"{power_kw:+.1f}" if abs(power_kw) >= 0.1 else "0.0"
         else:
-            self._temp_in = "N/A"
-        if state.outside_temp is not None:
-            self._temp_out = f"{state.outside_temp:.0f}"
-        else:
-            self._temp_out = "N/A"
-        self._dirty = True
-        
-    def _on_avc_vehicle_update(self, state) -> None:
-        """Handle vehicle state update from AVC-LAN."""
-        # Vehicle state updates can be handled here if needed
-        self._dirty = True
-        
-    def _on_avc_energy_update(self, state) -> None:
-        """Handle energy state update from AVC-LAN."""
-        # Energy state updates can be handled here if needed
-        self._dirty = True
-        
-    def _on_avc_connection_update(self, state) -> None:
-        """Handle connection state update."""
-        if state.connected:
-            self._connection_indicator.on_message_received()
-        self._connection_indicator.set_connected(state.connected)
+            val = "--.-"
+        self._batt_power_display.set_value(val)
+
+        volt = state.energy.hv_battery_voltage
+        self._batt_volt_display.set_value(f"{volt:.0f}" if volt is not None else "---")
+        curr = state.energy.hv_battery_current
+        self._batt_curr_display.set_value(f"{curr:.0f}" if curr is not None else "--")
+        batt_t = state.energy.battery_temp
+        self._batt_temp_display.set_value(str(int(batt_t)) if batt_t is not None else "--")
+        soc = state.energy.battery_soc
+        self._batt_soc_display.set_value(str(int(soc * 100)) if soc > 0 else "--")
+
+        # Connection
+        self._connection_indicator.set_connected(state.connection.connected)
+
+        # AVC input visualization (touch and button events)
+        if state.input.last_touch_time > self._last_touch_time:
+            self._last_touch_x = state.input.last_touch_x
+            self._last_touch_y = state.input.last_touch_y
+            self._last_touch_time = state.input.last_touch_time
+        if state.input.last_button_time > self._last_button_time:
+            self._last_button_name = state.input.last_button_name
+            self._last_button_time = state.input.last_button_time
+
         self._dirty = True
     
     def update(self, dt: float) -> None:
@@ -778,13 +662,18 @@ class MainScreen(Screen):
     
     def render(self, surface: pygame.Surface) -> None:
         """Render the main screen."""
+        # The home page draws its own large gear/speed readout; the small
+        # top-bar duplicates are only useful on the other pages.
+        on_home = self._current_page == 0
+        self._gear_display.visible = not on_home
+        self._speed_display.visible = not on_home
+
         # Render all widgets
         super().render(surface)
-        
-        # Draw center area placeholder
+
         center_x = self.SIDE_PANEL_WIDTH
         center_width = self.width - self.SIDE_PANEL_WIDTH * 2
-        
+
         # Subtle border for center area
         pygame.draw.rect(
             surface,
@@ -792,23 +681,19 @@ class MainScreen(Screen):
             (center_x, 0, center_width, self.height),
             1
         )
-        
+
         # Render page-specific content
-        if self._current_page == 0:
-            # Page 1: VFD Energy Monitor
-            self._render_vfd_page(surface, center_x, center_width)
-        elif self._current_page == 1:
-            # Page 2: Vehicle Dynamics
+        if self._current_page == 1:
             self._render_dynamics_page(surface, center_x, center_width)
         else:
-            # Fallback
-            self._render_default_page(surface, center_x, center_width)
-        
+            self._render_home_page(surface, center_x, center_width)
+
         # Render bottom status bar (cruise control + pagination)
         self._render_bottom_bar(surface, center_x, center_width)
-        
-        # Render AVC Input visualization (touch and button events)
-        self._render_avc_input_visualization(surface, center_x, center_width)
+
+        # Render AVC input visualization (dev/debug aid only)
+        if self.app and getattr(self.app, "config", None) and self.app.config.dev_mode:
+            self._render_avc_input_visualization(surface, center_x, center_width)
     
     def _render_bottom_bar(
         self, surface: pygame.Surface, center_x: int, center_width: int
@@ -878,28 +763,137 @@ class MainScreen(Screen):
             status_surf = font.render("ON", True, COLORS["green_bright"])
             surface.blit(status_surf, (x, text_y))
     
-    def _render_vfd_page(self, surface: pygame.Surface, center_x: int, center_width: int) -> None:
-        """Render Page 1: VFD moved to satellite - show default page."""
-        # VFD display has been moved to separate satellite app.
-        # Just show the default page content here.
-        self._render_default_page(surface, center_x, center_width)
-    
-    def _render_default_page(self, surface: pygame.Surface, center_x: int, center_width: int) -> None:
-        """Render default page with logo placeholder."""
-        cr = self._content_rect
-        # Center logo/title (placeholder)
-        font = get_font(16, "title")
-        title = "CYBERPUNK"
-        title_surf = font.render(title, True, COLORS["cyan_dim"])
-        title_x = center_x + (center_width - title_surf.get_width()) // 2
-        title_y = cr.y + cr.height // 2 - 20
-        surface.blit(title_surf, (title_x, title_y))
-        
-        font_small = get_font(10)
-        subtitle = "PRIUS GEN2"
-        sub_surf = font_small.render(subtitle, True, COLORS["text_secondary"])
-        sub_x = center_x + (center_width - sub_surf.get_width()) // 2
-        surface.blit(sub_surf, (sub_x, title_y + 20))
+    # Battery power range shown on the home page power bar (kW).
+    HOME_POWER_RANGE_KW = 25.0
+
+    def _render_home_page(self, surface: pygame.Surface, center_x: int, center_width: int) -> None:
+        """Render Page 1: drive dashboard (speed, gear, power flow, SOC, fuel)."""
+        state = self._store.state if self._store else None
+        mid_x = center_x + center_width // 2
+
+        # ── Speed (unit drawn beside the digits) ──
+        speed = 0
+        if state and state.vehicle.speed_kmh is not None:
+            speed = int(state.vehicle.speed_kmh)
+        font_speed = get_title_font(24)
+        speed_surf = font_speed.render(str(speed), True, COLORS["text_highlight"])
+        unit_surf = get_tiny_font(8).render("km/h", True, COLORS["text_secondary"])
+        speed_y = 34
+        speed_x = mid_x - (speed_surf.get_width() + 4 + unit_surf.get_width()) // 2
+        surface.blit(speed_surf, (speed_x, speed_y))
+        surface.blit(
+            unit_surf,
+            (speed_x + speed_surf.get_width() + 4,
+             speed_y + speed_surf.get_height() - unit_surf.get_height() - 4)
+        )
+
+        # ── Gear strip: P R N D B ──
+        gear_letter = self._gear_letter(state.vehicle.gear) if state else "P"
+        font_gear = get_mono_font(14)
+        gears = ["P", "R", "N", "D", "B"]
+        step = 26
+        gx = mid_x - (step * (len(gears) - 1)) // 2
+        gy = speed_y + speed_surf.get_height() + 18
+        for g in gears:
+            active = g == gear_letter
+            color = COLORS["cyan_bright"] if active else COLORS["text_dim"]
+            g_surf = font_gear.render(g, True, color)
+            g_rect = g_surf.get_rect(center=(gx, gy))
+            if active:
+                box = g_rect.inflate(8, 4)
+                pygame.draw.rect(surface, COLORS["cyan_dark"], box)
+                pygame.draw.rect(surface, COLORS["cyan_mid"], box, 1)
+            surface.blit(g_surf, g_rect)
+            gx += step
+
+        # ── Battery power bar: charge (left) <- 0 -> discharge (right) ──
+        bar_y = gy + 28
+        bar_w = center_width - 48
+        bar_x = center_x + (center_width - bar_w) // 2
+        bar_h = 10
+        power_kw = state.energy.battery_power_kw if state else None
+
+        pygame.draw.rect(surface, COLORS["bg_panel"], (bar_x, bar_y, bar_w, bar_h))
+        pygame.draw.rect(surface, COLORS["border_normal"], (bar_x, bar_y, bar_w, bar_h), 1)
+        half_w = bar_w // 2
+        if power_kw is not None and abs(power_kw) >= 0.1:
+            frac = max(-1.0, min(1.0, power_kw / self.HOME_POWER_RANGE_KW))
+            fill = int(abs(frac) * (half_w - 2))
+            if frac >= 0:  # discharge: battery -> wheels
+                pygame.draw.rect(
+                    surface, COLORS["cyan_mid"],
+                    (bar_x + half_w, bar_y + 2, fill, bar_h - 4))
+            else:  # charge / regen
+                pygame.draw.rect(
+                    surface, COLORS["green_bright"],
+                    (bar_x + half_w - fill, bar_y + 2, fill, bar_h - 4))
+        # Center zero marker
+        pygame.draw.line(
+            surface, COLORS["text_secondary"],
+            (bar_x + half_w, bar_y - 2), (bar_x + half_w, bar_y + bar_h + 1))
+
+        font_tiny = get_tiny_font(8)
+        chg_surf = font_tiny.render("CHG", True, COLORS["text_secondary"])
+        surface.blit(chg_surf, (bar_x, bar_y + bar_h + 3))
+        pwr_surf = font_tiny.render("PWR", True, COLORS["text_secondary"])
+        surface.blit(pwr_surf, (bar_x + bar_w - pwr_surf.get_width(), bar_y + bar_h + 3))
+        kw_text = f"{power_kw:+.1f} kW" if power_kw is not None else "--.- kW"
+        kw_surf = font_tiny.render(kw_text, True, COLORS["text_value"])
+        surface.blit(kw_surf, (mid_x - kw_surf.get_width() // 2, bar_y + bar_h + 3))
+
+        # ── SOC bar (8 segments, mirrors the factory MFD bars) ──
+        soc_y = bar_y + bar_h + 24
+        soc = state.energy.battery_soc if state else 0.0
+        soc_pct = int(soc * 100)
+        lbl_surf = font_tiny.render("SOC", True, COLORS["text_secondary"])
+        surface.blit(lbl_surf, (bar_x, soc_y + 1))
+        seg_area_x = bar_x + 24
+        seg_area_w = bar_w - 24 - 30
+        self._draw_segment_bar(
+            surface, seg_area_x, soc_y, seg_area_w, 9, 8, soc,
+            fill_color=self._soc_color(soc_pct))
+        pct_surf = font_tiny.render(f"{soc_pct}%", True, COLORS["text_value"])
+        surface.blit(pct_surf, (bar_x + bar_w - pct_surf.get_width(), soc_y + 1))
+
+        # ── Fuel levels ──
+        if state:
+            fuel_y = soc_y + 22
+            active_fuel = getattr(state.vehicle.active_fuel, "name", "OFF")
+            for label, liters, x_pos in (
+                ("PET", state.vehicle.fuel_level, bar_x),
+                ("LPG", state.vehicle.lpg_level, mid_x + 12),
+            ):
+                is_active = active_fuel.startswith(label[:1] if label == "PET" else label)
+                color = COLORS["text_value"] if is_active else COLORS["text_dim"]
+                text = f"{label} {liters}L"
+                f_surf = font_tiny.render(text, True, color)
+                surface.blit(f_surf, (x_pos, fuel_y))
+
+    @staticmethod
+    def _soc_color(soc_pct: int):
+        """Color for SOC level: green when healthy, amber low, red critical."""
+        if soc_pct >= 45:
+            return COLORS["green_bright"]
+        if soc_pct >= 30:
+            return COLORS["yellow"]
+        return COLORS["red_bright"]
+
+    @staticmethod
+    def _draw_segment_bar(
+        surface, x, y, width, height, segments, fraction, fill_color
+    ) -> None:
+        """Draw a segmented level bar (replaces block-glyph text bars)."""
+        gap = 2
+        seg_w = (width - gap * (segments - 1)) / segments
+        filled = round(fraction * segments)
+        for i in range(segments):
+            seg_x = int(x + i * (seg_w + gap))
+            rect = pygame.Rect(seg_x, y, int(seg_w), height)
+            if i < filled:
+                pygame.draw.rect(surface, fill_color, rect)
+            else:
+                pygame.draw.rect(surface, COLORS["bg_panel"], rect)
+                pygame.draw.rect(surface, COLORS["border_normal"], rect, 1)
     
     def _render_dynamics_page(self, surface: pygame.Surface, center_x: int, center_width: int) -> None:
         """Render Page 2: Vehicle Dynamics dashboard.
@@ -1031,19 +1025,13 @@ class MainScreen(Screen):
         lbl = font_label.render("LIGHTS", True, COLORS["text_secondary"])
         surface.blit(lbl, (right_x, ry))
         hl_state = dyn.headlight_state
-        if hl_state == "HIGH":
-            hl_color = COLORS["blue_bright"]
-            hl_icon = "\u2588\u2588 HIGH"  # Full block + HIGH
-        elif hl_state == "LOW":
-            hl_color = COLORS["green_bright"]
-            hl_icon = "\u2593\u2593 LOW"   # Medium shade + LOW
-        elif hl_state == "PARK":
-            hl_color = COLORS["yellow"]
-            hl_icon = "\u2592\u2592 PARK"  # Light shade + PARK
-        else:
-            hl_color = COLORS["text_dim"]
-            hl_icon = "\u2591\u2591 OFF"   # Lightest shade + OFF
-        val_surf = font_value.render(hl_icon, True, hl_color)
+        hl_colors = {
+            "HIGH": COLORS["blue_bright"],
+            "LOW": COLORS["green_bright"],
+            "PARK": COLORS["yellow"],
+        }
+        hl_color = hl_colors.get(hl_state, COLORS["text_dim"])
+        val_surf = font_value.render(hl_state, True, hl_color)
         surface.blit(val_surf, (right_x + col_width - val_surf.get_width(), ry))
         ry += row_h
         
@@ -1077,15 +1065,17 @@ class MainScreen(Screen):
         lbl = font_label.render("SOC BAR", True, COLORS["text_secondary"])
         surface.blit(lbl, (right_x, ry))
         bars = dyn.soc_bars
-        bar_text = "\u2588" * bars + "\u2591" * (8 - bars)  # Filled + empty blocks
         if bars >= 6:
             bar_color = COLORS["green_bright"]
         elif bars >= 3:
             bar_color = COLORS["yellow"]
         else:
             bar_color = COLORS["red_bright"]
-        val_surf = font_value.render(f"{bar_text} {bars}", True, bar_color)
-        surface.blit(val_surf, (right_x + col_width - val_surf.get_width(), ry))
+        cnt_surf = font_value.render(str(bars), True, bar_color)
+        cnt_x = right_x + col_width - cnt_surf.get_width()
+        surface.blit(cnt_surf, (cnt_x, ry))
+        self._draw_segment_bar(
+            surface, cnt_x - 60, ry + 2, 54, 8, 8, bars / 8.0, bar_color)
         ry += row_h
         
         # EV Mode
@@ -1100,262 +1090,9 @@ class MainScreen(Screen):
         
         # Warning Triangle
         if dyn.warning_triangle:
-            lbl = font_label.render("\u26a0 WARNING", True, COLORS["red_bright"])
+            lbl = font_label.render("! WARNING", True, COLORS["red_bright"])
             surface.blit(lbl, (right_x, ry))
         ry += row_h
-    
-    def _render_ev_page(self, surface: pygame.Surface, center_x: int, center_width: int) -> None:
-        """Render Page 4: EV / Battery dashboard.
-        
-        Shows:
-        - Hybrid system temperatures (MG1/MG2 inverter, motor, converter, ICE, HV batt)
-        - MG1/MG2/ICE RPMs with solicited vs unsolicited comparison
-        - HV battery details (SOC, delta SOC, voltage, current, power, temp)
-        """
-        if not self._store:
-            self._render_default_page(surface, center_x, center_width)
-            return
-        
-        state = self._store.state
-        v = state.vehicle
-        e = state.energy
-        
-        font_label = get_font(8)
-        font_value = get_font(11, "mono")
-        font_title = get_font(10, "title")
-        font_small = get_font(7)
-        
-        cr = self._content_rect
-        pad = 6
-        col_width = (center_width - pad * 3) // 2
-        left_x = center_x + pad
-        right_x = center_x + pad * 2 + col_width
-        y = cr.y + 2
-        row_h = 13
-        
-        # ─── LEFT COLUMN: Temperatures ───
-        
-        title_surf = font_title.render("TEMPERATURES", True, COLORS["cyan_bright"])
-        surface.blit(title_surf, (left_x, y))
-        y += row_h + 2
-        
-        temps = [
-            ("MG1 INV", v.mg1_inverter_temp),
-            ("MG2 INV", v.mg2_inverter_temp),
-            ("MG1 MOT", v.mg1_motor_temp),
-            ("MG2 MOT", v.mg2_motor_temp),
-            ("CONVERT", v.converter_temp),
-            ("ICE CLT", v.ice_coolant_temp),
-            ("HV BATT", e.battery_temp),
-        ]
-        
-        for label_text, temp_val in temps:
-            lbl = font_label.render(label_text, True, COLORS["text_secondary"])
-            surface.blit(lbl, (left_x, y))
-            
-            if temp_val is not None:
-                val_str = f"{int(temp_val)}°C"
-                if temp_val < 40:
-                    color = COLORS["green_bright"]
-                elif temp_val < 70:
-                    color = COLORS["text_value"]
-                elif temp_val < 90:
-                    color = COLORS["yellow"]
-                else:
-                    color = COLORS["red_bright"]
-            else:
-                val_str = "--°C"
-                color = COLORS["text_dim"]
-            
-            val_surf = font_value.render(val_str, True, color)
-            surface.blit(val_surf, (left_x + col_width - val_surf.get_width(), y))
-            y += row_h
-        
-        # ─── RIGHT COLUMN: Motors + Battery ───
-        
-        ry = cr.y + 2
-        title_surf = font_title.render("MOTORS", True, COLORS["cyan_bright"])
-        surface.blit(title_surf, (right_x, ry))
-        ry += row_h + 2
-        
-        motors = [
-            ("MG1 GEN", v.mg1_rpm),
-            ("MG2 MOT", v.mg2_rpm),
-        ]
-        
-        for label_text, rpm_val in motors:
-            lbl = font_label.render(label_text, True, COLORS["text_secondary"])
-            surface.blit(lbl, (right_x, ry))
-            
-            if rpm_val is not None:
-                val_str = f"{int(rpm_val)} rpm"
-                color = COLORS["green_bright"] if abs(rpm_val) > 0 else COLORS["text_dim"]
-            else:
-                val_str = "-- rpm"
-                color = COLORS["text_dim"]
-            
-            val_surf = font_value.render(val_str, True, color)
-            surface.blit(val_surf, (right_x + col_width - val_surf.get_width(), ry))
-            ry += row_h
-        
-        # ICE RPM
-        lbl = font_label.render("ICE RPM", True, COLORS["text_secondary"])
-        surface.blit(lbl, (right_x, ry))
-        ice_rpm = v.rpm
-        
-        if ice_rpm is not None and ice_rpm > 0:
-            val_str = f"{int(ice_rpm)}"
-            color = COLORS["green_bright"]
-            if ice_rpm > 3500:
-                color = COLORS["red_bright"]
-            elif ice_rpm > 2000:
-                color = COLORS["yellow"]
-        else:
-            val_str = "0"
-            color = COLORS["text_dim"]
-        
-        val_surf = font_value.render(val_str, True, color)
-        surface.blit(val_surf, (right_x + col_width - val_surf.get_width(), ry))
-        ry += row_h
-        ry += row_h  # Keep spacing consistent
-        
-        # ─── HV BATTERY section ───
-        
-        title_surf = font_title.render("HV BATTERY", True, COLORS["cyan_bright"])
-        surface.blit(title_surf, (right_x, ry))
-        ry += row_h + 2
-        
-        # SOC + Delta SOC
-        lbl = font_label.render("SOC", True, COLORS["text_secondary"])
-        surface.blit(lbl, (right_x, ry))
-        soc_pct = int(e.battery_soc * 100) if e.battery_soc > 0 else None
-        if soc_pct is not None:
-            soc_str = f"{soc_pct}%"
-            soc_color = COLORS["green_bright"] if soc_pct >= 40 else COLORS["yellow"]
-        else:
-            soc_str = "--%"
-            soc_color = COLORS["text_dim"]
-        val_surf = font_value.render(soc_str, True, soc_color)
-        surface.blit(val_surf, (right_x + 50, ry))
-        
-        # Delta SOC on same line
-        if e.battery_delta_soc is not None:
-            dsoc_str = f"\u0394{e.battery_delta_soc:.2f}"
-        else:
-            dsoc_str = "\u0394--"
-        dsoc_surf = font_small.render(dsoc_str, True, COLORS["text_dim"])
-        surface.blit(dsoc_surf, (right_x + col_width - dsoc_surf.get_width(), ry))
-        ry += row_h
-        
-        # Voltage / Current / Power
-        v_str = f"{e.hv_battery_voltage:.0f}V" if e.hv_battery_voltage is not None else "---V"
-        a_str = f"{e.hv_battery_current:.0f}A" if e.hv_battery_current is not None else "--A"
-        p_str = f"{e.battery_power_kw:+.1f}kW" if e.battery_power_kw is not None else "--kW"
-        line_surf = font_value.render(f"{v_str} {a_str} {p_str}", True, COLORS["text_value"])
-        surface.blit(line_surf, (right_x, ry))
-        ry += row_h
-        
-        # Battery temp with min/max
-        if e.battery_temp is not None:
-            temp_str = f"{int(e.battery_temp)}°C"
-            temp_color = COLORS["green_bright"] if e.battery_temp < 40 else COLORS["yellow"]
-        else:
-            temp_str = "--°C"
-            temp_color = COLORS["text_dim"]
-        lbl = font_label.render("TEMP", True, COLORS["text_secondary"])
-        surface.blit(lbl, (right_x, ry))
-        val_surf = font_value.render(temp_str, True, temp_color)
-        surface.blit(val_surf, (right_x + 50, ry))
-        
-        # Min/max range
-        min_t = f"{int(e.battery_min_cell_temp)}" if e.battery_min_cell_temp is not None else "--"
-        max_t = f"{int(e.battery_max_cell_temp)}" if e.battery_max_cell_temp is not None else "--"
-        range_surf = font_small.render(f"({min_t}/{max_t})", True, COLORS["text_dim"])
-        surface.blit(range_surf, (right_x + col_width - range_surf.get_width(), ry))
-        ry += row_h
-        
-        # Fan speed (0-6)
-        lbl = font_label.render("FAN", True, COLORS["text_secondary"])
-        surface.blit(lbl, (right_x, ry))
-        if e.battery_fan_speed is not None:
-            fan_spd = e.battery_fan_speed
-            fan_str = f"{fan_spd}"
-            if fan_spd == 0:
-                fan_color = COLORS["text_dim"]
-            elif fan_spd <= 2:
-                fan_color = COLORS["green_bright"]
-            elif fan_spd <= 4:
-                fan_color = COLORS["yellow"]
-            else:
-                fan_color = COLORS["red_bright"]
-            # Draw bar indicator
-            bar_x = right_x + 50
-            for i in range(6):
-                bar_color = fan_color if i < fan_spd else COLORS["text_dim"]
-                bar_rect = pygame.Rect(bar_x + i * 10, ry + 3, 7, 8)
-                pygame.draw.rect(surface, bar_color, bar_rect)
-        else:
-            fan_str = "--"
-            fan_color = COLORS["text_dim"]
-        val_surf = font_value.render(fan_str, True, fan_color)
-        surface.blit(val_surf, (right_x + col_width - val_surf.get_width(), ry))
-        ry += row_h
-    
-    def _render_avc_lan_debug(
-        self,
-        surface: pygame.Surface,
-        center_x: int,
-        center_width: int
-    ) -> None:
-        """
-        Render AVC-LAN byte values for manual correlation with driving state.
-        
-        Shows:
-        - 0x110→0x490 bytes (MFD status - flow arrows)
-        - 0xA00→0x258 bytes (SOC/energy data)
-        """
-        font_small = get_font(8, "mono")
-        font_label = get_font(9)
-        
-        # Position in top-right of center area
-        debug_x = center_x + center_width - 200
-        debug_y = 5
-        
-        # Draw semi-transparent background
-        bg_rect = pygame.Rect(debug_x - 5, debug_y - 2, 195, 58)
-        bg_surface = pygame.Surface((bg_rect.width, bg_rect.height), pygame.SRCALPHA)
-        bg_surface.fill((0, 0, 0, 180))
-        surface.blit(bg_surface, (bg_rect.x, bg_rect.y))
-        
-        # Title
-        title_surf = font_label.render("AVC-LAN DEBUG", True, COLORS["cyan_bright"])
-        surface.blit(title_surf, (debug_x, debug_y))
-        debug_y += 12
-        
-        # 0x110→0x490 (MFD Status - Flow Arrows)
-        label_surf = font_label.render("110→490:", True, COLORS["text_secondary"])
-        surface.blit(label_surf, (debug_x, debug_y))
-        
-        # Show bytes in hex
-        bytes_text = " ".join(f"{b:02X}" for b in self._avc_110_490_bytes)
-        bytes_surf = font_small.render(bytes_text, True, COLORS["green_bright"])
-        surface.blit(bytes_surf, (debug_x + 50, debug_y))
-        debug_y += 11
-        
-        # Highlight key discriminating bytes
-        key_bytes_text = f"[1]={self._avc_110_490_bytes[1]:02X} [2]={self._avc_110_490_bytes[2]:02X} [3]={self._avc_110_490_bytes[3]:02X} [5]={self._avc_110_490_bytes[5]:02X}"
-        key_surf = font_small.render(key_bytes_text, True, COLORS["yellow"])
-        surface.blit(key_surf, (debug_x + 50, debug_y))
-        debug_y += 13
-        
-        # 0xA00→0x258 (SOC/Energy) - show first 8 bytes
-        label_surf = font_label.render("A00→258:", True, COLORS["text_secondary"])
-        surface.blit(label_surf, (debug_x, debug_y))
-        
-        bytes_text = " ".join(f"{b:02X}" for b in self._avc_a00_258_bytes[:8])
-        bytes_surf = font_small.render(bytes_text, True, COLORS["green_bright"])
-        surface.blit(bytes_surf, (debug_x + 50, debug_y))
-        debug_y += 11
     
     def _render_avc_input_visualization(
         self, 
@@ -1783,9 +1520,3 @@ class MainScreen(Screen):
             store=self._store
         )
         self.app.push_screen(battery_screen)
-
-    def _on_battery_select(self) -> None:
-        """Handle battery frame light press (disabled switch — no-op)."""
-        # Placeholder: battery switch is always disabled.
-        # Visual toggle is shown in the frame but cannot be changed.
-        pass

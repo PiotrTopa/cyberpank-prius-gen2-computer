@@ -41,7 +41,7 @@ class EngineMenuScreen(Screen):
     """
 
     HEADER_HEIGHT = 26
-    ITEM_HEIGHT = 32
+    ITEM_HEIGHT = 28
     SIDE_MARGIN = 16
 
     def __init__(
@@ -59,6 +59,7 @@ class EngineMenuScreen(Screen):
         self._items: List[_MenuEntry] = [
             _MenuEntry("DATA SOURCES", "Select which CAN PIDs to fetch", "data_sources"),
             _MenuEntry("CHART SETTINGS", "Graph time base configuration", "chart_settings"),
+            _MenuEntry("EV / HYBRID", "Hybrid temps, motor RPMs, block dV", "ev"),
             _MenuEntry("ERROR CODES", "OBD-II diagnostic trouble codes", "dtc"),
             _MenuEntry("SOLICITED MONITOR", "Live solicited CAN PID values", "solicited"),
             _MenuEntry("AVC-LAN MONITOR", "Live AVC-LAN bus sniffer", "avc"),
@@ -120,6 +121,15 @@ class EngineMenuScreen(Screen):
                 (self.width, self.height),
                 self.app,
                 initial_timebase=self._initial_timebase,
+            )
+            self.app.push_screen(screen)
+
+        elif item.action_key == "ev":
+            from .ev_screen import EVScreen
+            screen = EVScreen(
+                (self.width, self.height),
+                self.app,
+                store=self._store,
             )
             self.app.push_screen(screen)
 
@@ -204,9 +214,9 @@ class EngineMenuScreen(Screen):
             # Description
             desc_color = COLORS["text_tertiary"]
             desc_surf = font_desc.render(item.description, True, desc_color)
-            surface.blit(desc_surf, (item_rect.x + 18, y + 18))
+            surface.blit(desc_surf, (item_rect.x + 18, y + 16))
 
-            y += self.ITEM_HEIGHT + 4
+            y += self.ITEM_HEIGHT + 3
 
     def _render_footer(self, surface: pygame.Surface) -> None:
         font = get_mono_font(10)

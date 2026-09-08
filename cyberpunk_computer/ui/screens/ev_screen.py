@@ -46,21 +46,14 @@ class EVScreen(Screen):
 
     HEADER_HEIGHT = 24
     SECTION_PAD = 6
-    LINE_HEIGHT = 22
+    LINE_HEIGHT = 18
     COL_DIVIDER_X = 220  # Left column width
-
-    # Bottom button bar
-    _BTN_BACK = 0
-    _BTN_BATTERY = 1
-    _BTN_LABELS = ("BACK", "BATTERY")
-    _BTN_COUNT = 2
 
     def __init__(self, size: Tuple[int, int], app=None, store: Optional[Store] = None):
         """Initialize EV screen."""
         super().__init__(size, app)
         self._store = store
         self._last_activity = time.time()
-        self._focused_btn: int = self._BTN_BACK
 
         # Temperature values
         self._mg1_inv_temp: Optional[float] = None
@@ -149,27 +142,14 @@ class EVScreen(Screen):
             self.app.pop_screen()
 
     def handle_input(self, event) -> bool:
-        """Handle input — bottom button bar navigation."""
-        if event == IE.BACK:
+        """Handle input: light press = back, strong press = battery detail."""
+        if event in (IE.BACK, IE.PRESS_LIGHT):
             self._exit_screen()
             return True
-        if event == IE.ROTATE_LEFT:
-            self._focused_btn = (self._focused_btn - 1) % self._BTN_COUNT
-            return True
-        if event == IE.ROTATE_RIGHT:
-            self._focused_btn = (self._focused_btn + 1) % self._BTN_COUNT
-            return True
-        if event in (IE.PRESS_LIGHT, IE.PRESS_STRONG):
-            self._activate_focused_button()
+        if event == IE.PRESS_STRONG:
+            self._open_battery_screen()
             return True
         return False
-
-    def _activate_focused_button(self) -> None:
-        """Activate the currently focused button."""
-        if self._focused_btn == self._BTN_BACK:
-            self._exit_screen()
-        elif self._focused_btn == self._BTN_BATTERY:
-            self._open_battery_screen()
 
     def _open_battery_screen(self) -> None:
         """Push the detailed battery health screen."""
@@ -193,47 +173,13 @@ class EVScreen(Screen):
         self._render_right_column(surface)
         self._render_divider(surface)
         self._render_delta_v_chart(surface)
-        self._render_footer(surface)
 
     def _render_header(self, surface: pygame.Surface) -> None:
         """Render title bar."""
         pygame.draw.rect(surface, COLORS["bg_panel"], (0, 0, self.width, self.HEADER_HEIGHT))
 
-    def _render_footer(self, surface: pygame.Surface) -> None:
-        """Render bottom button bar with [BACK] [BATTERY]."""
-        font = get_mono_font(10)
-        bar_h = 22
-        bar_y = self.height - bar_h
-
-        # Dark bar background
-        pygame.draw.rect(surface, COLORS["bg_panel"], (0, bar_y, self.width, bar_h))
-        pygame.draw.line(surface, COLORS["border_dim"], (0, bar_y), (self.width, bar_y))
-
-        # Draw buttons evenly spaced
-        btn_width = 80
-        total_btns_width = btn_width * self._BTN_COUNT + 16 * (self._BTN_COUNT - 1)
-        start_x = (self.width - total_btns_width) // 2
-
-        for i, label in enumerate(self._BTN_LABELS):
-            bx = start_x + i * (btn_width + 16)
-            by = bar_y + 3
-            bw = btn_width
-            bh = bar_h - 6
-            is_focused = (i == self._focused_btn)
-
-            if is_focused:
-                pygame.draw.rect(surface, COLORS["cyan"], (bx, by, bw, bh))
-                text_color = COLORS["bg_dark"]
-            else:
-                pygame.draw.rect(surface, COLORS["border_dim"], (bx, by, bw, bh), 1)
-                text_color = COLORS["text_tertiary"]
-
-            s = font.render(label, True, text_color)
-            surface.blit(s, (bx + (bw - s.get_width()) // 2, by + (bh - s.get_height()) // 2))
-
         font = get_title_font(14)
-        title = "EV / BATTERY"
-        s = font.render(title, True, COLORS["cyan"])
+        s = font.render("EV / BATTERY", True, COLORS["cyan"])
         surface.blit(s, ((self.width - s.get_width()) // 2, (self.HEADER_HEIGHT - s.get_height()) // 2))
 
         # EV mode indicator
@@ -342,8 +288,7 @@ class EVScreen(Screen):
             color = COLORS["text_tertiary"]
         val_surf = font_value.render(val_str, True, color)
         surface.blit(val_surf, (value_x, y + 1))
-        y += self.LINE_HEIGHT
-        y += self.LINE_HEIGHT - 6  # Keep spacing consistent
+        y += self.LINE_HEIGHT + 10  # Section gap
 
         # ── BATTERY section ──
         s = font_section.render("HV BATTERY", True, COLORS["cyan"])
@@ -421,13 +366,6 @@ class EVScreen(Screen):
         state_surf = font_small.render(state_str, True, state_color)
         surface.blit(state_surf, (x0 + 4, y + 2))
 
-    def _render_footer(self, surface: pygame.Surface) -> None:
-        """Render footer hint."""
-        font = get_mono_font(10)
-        hint = "[PRESS] BACK"
-        s = font.render(hint, True, COLORS["text_secondary"])
-        surface.blit(s, ((self.width - s.get_width()) // 2, self.height - s.get_height() - 3))
-
     def _render_delta_v_chart(self, surface: pygame.Surface) -> None:
         """Render deltaV bar chart showing per-block voltage deviation from mean.
         
@@ -447,7 +385,11 @@ class EVScreen(Screen):
         )
         
         font_tiny = get_mono_font(9)
-        
+
+        # Input hints (always visible)
+        hint_surf = font_tiny.render("[PRESS] BACK  [HOLD] BATT", True, COLORS["text_tertiary"])
+        surface.blit(hint_surf, (self.width - hint_surf.get_width() - 8, chart_y))
+
         if self._block_voltages is None or len(self._block_voltages) < 2:
             label = font_tiny.render("\u0394V  NO DATA", True, COLORS["text_tertiary"])
             surface.blit(label, (chart_x, chart_y + (CHART_HEIGHT - label.get_height()) // 2))
@@ -465,15 +407,11 @@ class EVScreen(Screen):
         label_str = f"\u0394V {delta_v:.2f}V"
         label_surf = font_tiny.render(label_str, True, COLORS["cyan"])
         surface.blit(label_surf, (chart_x, chart_y))
-
-        # Hint: hold for detail screen
-        hint_surf = font_tiny.render("[HOLD] DETAIL", True, COLORS["text_tertiary"])
-        surface.blit(hint_surf, (self.width - hint_surf.get_width() - 8, chart_y))
         
-        # Bar area
+        # Bar area (between the ΔV label and the input hints)
         label_w = label_surf.get_width() + 6
         bar_area_x = chart_x + label_w
-        bar_area_w = chart_w - label_w
+        bar_area_w = chart_w - label_w - hint_surf.get_width() - 12
         bar_area_y = chart_y + 2
         bar_area_h = CHART_HEIGHT - 4
         

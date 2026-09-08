@@ -11,6 +11,7 @@ import logging
 
 from ..config import Config
 from ..ui.colors import COLORS
+from ..ui.fonts import get_font
 from ..ui.screens.main_screen import MainScreen
 from ..input.manager import InputManager, InputEvent
 from .renderer import Renderer
@@ -523,7 +524,7 @@ class Application:
     def _render_fps(self, surface: pygame.Surface) -> None:
         """Render FPS counter."""
         fps = self.clock.get_fps()
-        font = pygame.font.Font(None, 16)
+        font = get_font(10, "mono")
         fps_text = font.render(f"FPS: {fps:.1f}", True, COLORS["text_secondary"])
         surface.blit(fps_text, (5, 5))
     
@@ -561,7 +562,7 @@ class Application:
         icon = state_icons.get(state, "?")
         
         # Render overlay text
-        font = pygame.font.Font(None, 16)
+        font = get_font(10, "mono")
         text = f"{icon} {current_str}/{total_str}"
         text_surface = font.render(text, True, COLORS["text_secondary"])
         
