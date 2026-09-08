@@ -775,10 +775,12 @@ class MainScreen(Screen):
         speed = 0
         if state and state.vehicle.speed_kmh is not None:
             speed = int(state.vehicle.speed_kmh)
-        font_speed = get_title_font(24)
+        # Terminus, not Orbitron: Orbitron's slashed zero and tight tracking
+        # are illegible as large 1-bit digits on the panel
+        font_speed = get_mono_font(32)
         speed_surf = font_speed.render(str(speed), True, COLORS["text_highlight"])
         unit_surf = get_tiny_font(8).render("km/h", True, COLORS["text_secondary"])
-        speed_y = 34
+        speed_y = 30
         speed_x = mid_x - (speed_surf.get_width() + 4 + unit_surf.get_width()) // 2
         surface.blit(speed_surf, (speed_x, speed_y))
         surface.blit(

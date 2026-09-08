@@ -314,8 +314,8 @@ class StatusIcon(Widget):
         else:
             color = COLORS["inactive"]
         
-        # Text
-        font = get_mono_font(11)
+        # Text (14 = Terminus; the pixel font is too thin on the panel)
+        font = get_mono_font(14)
         text_surf = font.render(self.label, True, color)
         text_x = self.rect.x + (self.rect.width - text_surf.get_width()) // 2
         text_y = self.rect.y + (self.rect.height - text_surf.get_height()) // 2

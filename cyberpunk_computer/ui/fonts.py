@@ -167,12 +167,16 @@ class FontManager:
             font_name = "tiny" if size < TINY_FONT_THRESHOLD else "mono"
 
         if font_name in ("mono", "standard"):
-            if size < TERMINUS_MIN_SIZE:
-                # Terminus drops strokes below 14px without AA
+            if size >= TERMINUS_MIN_SIZE - 2:
+                # 12/13px requests round UP to 14: Terminus drops strokes
+                # below 14px without AA, and the 04B pixel font is too thin
+                # for value readouts on the real panel.
+                size = max(size, TERMINUS_MIN_SIZE)
+                if size % 2:
+                    # Terminus only hints cleanly on even pixel sizes
+                    size -= 1
+            else:
                 font_name = "tiny"
-            elif size % 2:
-                # Terminus only hints cleanly on even pixel sizes
-                size -= 1
         elif font_name in ("title", "header", "display"):
             size = max(size, TITLE_MIN_SIZE)
 

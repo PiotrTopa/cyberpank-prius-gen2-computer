@@ -14,25 +14,32 @@ from typing import Optional, Tuple
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Channel gain LUT cache
+# Channel equalizer (MFD panel color balance)
+#
+# The Prius MFD's green phosphor dominates through the VGA666 resistor DAC,
+# so the default output gains push red and blue up 25%. Override per channel
+# with MFD_GAIN_R / MFD_GAIN_G / MFD_GAIN_B (floats; 1.0 = passthrough).
+# Applied via 256-byte translate LUTs — pure C, no numpy needed.
 # ---------------------------------------------------------------------------
-_gain_lut_cache: dict = {}
+# Calibrated on the real panel 2026-09-08: R=1.25 read orange/red on the
+# dark purple panel backgrounds; 1.10 balances. Tune via the mfd.service
+# drop-in (systemctl edit mfd.service) rather than here.
+DEFAULT_GAINS = {"MFD_GAIN_R": 1.10, "MFD_GAIN_G": 1.0, "MFD_GAIN_B": 1.25}
 
 
-def _get_gain_lut(gain: float):
-    """Return a precomputed uint8 LUT that applies *gain* to [0..255] values.
-
-    The LUT is built once per unique gain value and cached.  Applying it via
-    numpy fancy-indexing (``lut[array]``) is O(N) in C without any Python loop.
-    """
+def _gain_from_env(name: str) -> float:
     try:
-        import numpy as np
-    except ImportError:
+        return float(os.environ.get(name, DEFAULT_GAINS[name]))
+    except ValueError:
+        logger.warning(f"Invalid {name}, using default {DEFAULT_GAINS[name]}")
+        return DEFAULT_GAINS[name]
+
+
+def _build_gain_lut(gain: float):
+    """256-byte translation table applying *gain*, or None for passthrough."""
+    if abs(gain - 1.0) < 1e-3:
         return None
-    if gain not in _gain_lut_cache:
-        indices = np.arange(256, dtype=np.float32)
-        _gain_lut_cache[gain] = np.clip(indices * gain, 0, 255).astype(np.uint8)
-    return _gain_lut_cache[gain]
+    return bytes(min(255, int(i * gain + 0.5)) for i in range(256))
 
 
 class FramebufferOutput:
@@ -63,6 +70,18 @@ class FramebufferOutput:
         self.bpp = 0  # bits per pixel
         self.line_length = 0  # bytes per line (may include padding)
         self._initialized = False
+
+        # Channel equalizer LUTs (None = passthrough for that channel)
+        self._lut_r = _build_gain_lut(_gain_from_env("MFD_GAIN_R"))
+        self._lut_g = _build_gain_lut(_gain_from_env("MFD_GAIN_G"))
+        self._lut_b = _build_gain_lut(_gain_from_env("MFD_GAIN_B"))
+        if self._lut_r or self._lut_g or self._lut_b:
+            logger.info(
+                "Channel equalizer active: R=%s G=%s B=%s",
+                _gain_from_env("MFD_GAIN_R"),
+                _gain_from_env("MFD_GAIN_G"),
+                _gain_from_env("MFD_GAIN_B"),
+            )
     
     def initialize(self) -> bool:
         """
@@ -174,27 +193,10 @@ class FramebufferOutput:
             
             # Convert surface to the correct format
             # Framebuffer expects BGRA (32bpp, verified on this hardware).
-            # To re-enable R+B phosphor gain correction, change _gain below
-            # from 1.0 to e.g. 1.15 and the numpy LUT path will activate.
             if self.bpp == 32:
-                _gain = 1.0  # ← set > 1.0 to boost R+B channels vs G
-                if _gain != 1.0:
-                    try:
-                        import numpy as np
-                        converted = surface.convert_alpha()
-                        raw = pygame.image.tobytes(converted, "BGRA")
-                        arr = np.frombuffer(raw, dtype=np.uint8).copy()
-                        lut_rb = _get_gain_lut(_gain)
-                        arr[0::4] = lut_rb[arr[0::4]]  # B channel
-                        arr[2::4] = lut_rb[arr[2::4]]  # R channel
-                        buffer = arr.tobytes()
-                    except ImportError:
-                        converted = surface.convert_alpha()
-                        buffer = pygame.image.tobytes(converted, "BGRA")
-                else:
-                    # Fast path: pure C, no numpy, no copies (~2ms on Pi Zero 2W)
-                    converted = surface.convert_alpha()
-                    buffer = pygame.image.tobytes(converted, "BGRA")
+                converted = surface.convert_alpha()
+                buffer = pygame.image.tobytes(converted, "BGRA")
+                buffer = self._equalize_bgra(buffer)
                 self._write_rows(buffer, self.width * 4)
 
             elif self.bpp == 16:
@@ -212,6 +214,23 @@ class FramebufferOutput:
             logger.error(f"Failed to blit to framebuffer: {e}")
             return False
     
+    def _equalize_bgra(self, buffer: bytes):
+        """Apply per-channel gain LUTs to a BGRA buffer (panel equalizer).
+
+        Strided slice + bytes.translate run in C: ~3-4 ms per 480x240 frame
+        on a Pi Zero 2W, well within the 30 fps budget.
+        """
+        if not (self._lut_r or self._lut_g or self._lut_b):
+            return buffer
+        arr = bytearray(buffer)
+        if self._lut_b:
+            arr[0::4] = arr[0::4].translate(self._lut_b)
+        if self._lut_g:
+            arr[1::4] = arr[1::4].translate(self._lut_g)
+        if self._lut_r:
+            arr[2::4] = arr[2::4].translate(self._lut_r)
+        return arr
+
     def _write_rows(self, buffer: bytes, row_bytes: int) -> None:
         """Write packed pixel rows into the framebuffer, honoring stride."""
         if self.line_length == row_bytes:
@@ -236,8 +255,9 @@ class FramebufferOutput:
         
         try:
             if self.bpp == 32:
-                # BGRA format
-                pixel = bytes([color[2], color[1], color[0], 255])
+                # BGRA format (equalized like the blit path)
+                pixel = bytes(self._equalize_bgra(
+                    bytes([color[2], color[1], color[0], 255])))
                 self._write_rows(pixel * self.width * self.height, self.width * 4)
             elif self.bpp == 16:
                 # RGB565 format

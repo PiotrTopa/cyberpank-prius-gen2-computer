@@ -84,7 +84,7 @@ VFD_PALETTE = ColorPalette(
     
     # Others
     highlight=(255, 255, 255),
-    inactive=(80, 120, 130),
+    inactive=(110, 150, 160),  # brightened 2026-09-08: too dim on the MFD panel
 )
 
 # Amber Theme - Classic amber monochrome

@@ -143,7 +143,7 @@ class Frame(Widget):
             )
             
             title_color = lerp_color(
-                COLORS["text_secondary"],
+                COLORS["cyan_mid"],
                 COLORS["cyan"],
                 focus_t
             )
@@ -188,10 +188,11 @@ class Frame(Widget):
                 avail = self._title_widget.rect.x - 4 - title_x
             else:
                 avail = self.rect.right - self.PADDING - title_x
-            surface.blit(
-                title_surface, (title_x, title_y),
-                area=pygame.Rect(0, 0, max(0, avail), title_surface.get_height())
-            )
+            area = pygame.Rect(0, 0, max(0, avail), title_surface.get_height())
+            # Double-blit with 1px offset: faux-bold keeps 1-bit Orbitron
+            # legible on the panel without growing into the title widget
+            surface.blit(title_surface, (title_x, title_y), area=area)
+            surface.blit(title_surface, (title_x + 1, title_y), area=area)
         
         # Draw title widget (right side of title bar)
         if self._title_widget:
