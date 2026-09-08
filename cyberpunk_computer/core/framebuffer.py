@@ -21,10 +21,12 @@ logger = logging.getLogger(__name__)
 # with MFD_GAIN_R / MFD_GAIN_G / MFD_GAIN_B (floats; 1.0 = passthrough).
 # Applied via 256-byte translate LUTs — pure C, no numpy needed.
 # ---------------------------------------------------------------------------
-# Calibrated on the real panel 2026-09-08: R=1.25 read orange/red on the
-# dark purple panel backgrounds; 1.10 balances. Tune via the mfd.service
-# drop-in (systemctl edit mfd.service) rather than here.
-DEFAULT_GAINS = {"MFD_GAIN_R": 1.10, "MFD_GAIN_G": 1.0, "MFD_GAIN_B": 1.25}
+# 2026-09-08: the "green cast" turned out to be dpi_output_format=0x06
+# (RGB666 config 2) scrambling bit lanes into the config-1-wired VGA666 —
+# fixed in /boot/firmware/config.txt (now 0x05). With that fixed the panel
+# measures neutral, so the equalizer defaults to passthrough. Tune via the
+# mfd.service drop-in (MFD_GAIN_R/G/B) if a residual tint shows up.
+DEFAULT_GAINS = {"MFD_GAIN_R": 1.0, "MFD_GAIN_G": 1.0, "MFD_GAIN_B": 1.0}
 
 
 def _gain_from_env(name: str) -> float:
