@@ -7,10 +7,20 @@ Wants=network-online.target
 Type=simple
 User=piotr
 WorkingDirectory=/home/piotr/cyberpunk_computer
-Environment="DISPLAY=:0"
-ExecStart=/home/piotr/cyberpunk_computer/.venv/bin/python -m cyberpunk_computer.frontend --host 192.168.100.1 --port 8081 --fullscreen --scale 1
+Environment="PYTHONUNBUFFERED=1"
+Environment="SDL_NO_SIGNAL_HANDLERS=1"
+Environment="SDL_VIDEODRIVER=dummy"
+Environment="SDL_FBDEV=/dev/fb0"
+Environment="SDL_NOMOUSE=1"
+Environment="SDL_AUDIODRIVER=dummy"
+Environment="FRAMEBUFFER=/dev/fb0"
+ExecStartPre=/bin/sh -c '> /var/log/cyberpunk_computer/app.log'
+# Poco over the usb0 gadget link (192.168.100.1). The Zero 2 W card used the Poco Wi-Fi AP (10.42.0.1);
+# the Zero v1.3 (since 2026-10-14) has no Wi-Fi.
+ExecStart=/home/piotr/cyberpunk_computer/.venv/bin/python -m cyberpunk_computer.frontend --host 192.168.100.1 --fullscreen --scale 1 --production
 Restart=always
 RestartSec=5
+TimeoutStopSec=10
 StandardOutput=journal
 StandardError=journal
 

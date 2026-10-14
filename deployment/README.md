@@ -121,7 +121,8 @@ deployment/
 
 ## VGA666 Display Setup
 
-The RPI must have VGA666 overlay configured in `/boot/firmware/config.txt`:
+The RPI must have the VGA666 overlay configured in `/boot/firmware/config.txt` — the authoritative copy
+is `cyberpunk-prius-gateway/raspberry_pi_config/zero13-image/config.txt` (as running, 2026-10-14):
 
 ```ini
 # Disable KMS (required for VGA666 DPI mode)
@@ -129,9 +130,12 @@ disable_fw_kms_setup=1
 
 # VGA666 overlay with custom 15kHz timings for Prius MFD
 dtoverlay=vga666
-dpi_output_format=0x06
+enable_dpi_lcd=1
+display_default_lcd=1
+dpi_group=2
 dpi_mode=87
-dpi_timings=480 1 32 48 80 240 1 3 10 6 0 0 0 60 0 9600000 1
+dpi_output_format=0x05      # NOT 0x06 — 0x06 scrambles the colour bit lanes (fixed 2026-09-08)
+dpi_timings=480 1 24 46 60 240 1 4 3 15 0 0 0 60 0 9600000 1
 ```
 
 The application uses direct framebuffer output (memory-mapped `/dev/fb0`) instead

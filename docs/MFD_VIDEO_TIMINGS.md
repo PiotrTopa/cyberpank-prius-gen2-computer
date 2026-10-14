@@ -80,20 +80,30 @@ dpi_timings=480 1 24 46 60 240 1 4 3 15 0 0 0 60 0 9600000 1
 
 ## 5. Persistent Pi Configuration (`/boot/firmware/config.txt`)
 
-On the Raspberry Pi Zero 2W, verify `/boot/firmware/config.txt` contains:
+As running on the card (verified 2026-10-14 when the config was copied to the Pi Zero v1.3 image;
+full file in `cyberpunk-prius-gateway/raspberry_pi_config/zero13-image/config.txt`):
 
 ```ini
 # DPI Display configuration for Prius Gen 2 MFD (VGA666 RGB DAC)
-dtoverlay=vga666-6bpc
+disable_fw_kms_setup=1          # no vc4-kms-v3d: the app writes the firmware framebuffer /dev/fb0
+max_framebuffers=2
+dtoverlay=vga666
 enable_dpi_lcd=1
 display_default_lcd=1
 dpi_group=2
 dpi_mode=87
-dpi_output_format=0x00017
+dpi_output_format=0x05          # RGB666 config 1 — the VGA666 is wired for config 1 (see below)
 dpi_timings=480 1 24 46 60 240 1 4 3 15 0 0 0 60 0 9600000 1
-framebuffer_width=480
-framebuffer_height=240
 ```
+
+`cmdline.txt` carries `fbcon=map:99 logo.nologo` (keeps the console off fb0) and
+`modules-load=dwc2,g_ether net.ifnames=0` (USB Ethernet gadget `usb0`).
+
+**`dpi_output_format` must be `0x05`.** `0x06` (RGB666 config 2) lands the DPI bit lanes on the wrong
+DAC rungs: gray51 renders saturated green, gray128 blue, gray204 pink, the G ramp black — the "green
+cast" chased with software gains until the photo-based calibration of 2026-09-08 found the real cause
+(commit cfca489). Earlier versions of this section listed `vga666-6bpc` + `0x00017`; that was never
+what the card ran.
 
 ---
 

@@ -371,7 +371,7 @@ Recovery / control is per **hub port** via [`uhubctl`](https://github.com/mvp/uh
 | **port 2** | **powerbox** (12 V telemetry + ACC/ignition) | `usb-MicroPython_Board_in_FS_mode_503359277a7c699f-if00` |
 | **port 3** | **gateway** (CAN / AVC-LAN / RS485) | `usb-MicroPython_Board_in_FS_mode_50443405b862d21c-if00` |
 | **port 4** | Garmin GPS (mass storage) | — |
-| **port 5** | **MFD video board** (Pi Zero 2W, VGA666, USB-eth gadget) | `usb0` → 192.168.100.2 |
+| **port 5** | **MFD video board** (Pi Zero v1.3 since 2026-10-14, was Zero 2W; VGA666, USB-eth gadget) | `usb0` → 192.168.100.2 |
 
 Port 5's socket is the **only one with genuinely switchable VBUS (PPPS)** on
 this hub (ActionStar 2101:8500 "DUB-H4 rev D1"), so the MFD video board — an
