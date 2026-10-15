@@ -192,8 +192,8 @@ cyberpunk-prius-gen2-computer/
 │   │   ├── actions.py           # Action definitions
 │   │   └── rules.py             # Rules engine
 │   └── comm/                    # Protocol decoders
-│       ├── avc_decoder.py       # AVC-LAN protocol
-│       ├── avc_commands.py      # AVC-LAN commands
+│       ├── avc/                 # AVC-LAN (fw 3.x): decoder, touch calibration, nav emulator, climate remote — see docs/AVC_BACKEND.md
+│       ├── avc_decoder.py       # LEGACY fw 2.x decoder (avc_monitor_screen only)
 │       └── can_decoder.py       # CAN bus decoder
 ├── powerbox/                    # RP2040 Powerbox firmware
 │   ├── main.py                  # NDJSON firmware
