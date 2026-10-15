@@ -50,10 +50,10 @@ class AudioState:
     """
     Audio system state.
     
-    Based on Toyota Prius Gen 2 audio specifications (Flerchinger document):
+    UI/state values only (no AVC-LAN audio path, see io/egress.py):
     - Volume: 0-63 (6-bit)
-    - Bass/Mid/Treble: -5 to +5 (protocol: 0x0B-0x15, center=0x10)
-    - Balance/Fader: -7 to +7 (protocol: 0x09-0x17, center=0x10)
+    - Bass/Mid/Treble: -5 to +5
+    - Balance/Fader: -7 to +7
     """
     volume: int = 25
     muted: bool = False
@@ -359,18 +359,15 @@ class ConnectionState:
 @dataclass(frozen=True)
 class DebugState:
     """Debug and Analysis state."""
-    last_avc_input: str = ""  # Last detected button/touch
     last_can_message: str = ""
-    avc_input_count: int = 0
 
 
 @dataclass(frozen=True)
 class InputState:
     """
-    AVC-LAN input state (buttons and touch).
-    
-    Tracks the last detected button press and touch event
-    for debugging and UI visualization.
+    AVC-LAN input events (display buttons and touch, via io/avc_ingest.py).
+
+    Tracks the last button press and touch event for UI visualization.
     """
     # Last button press
     last_button_code: int = 0
@@ -388,10 +385,6 @@ class InputState:
     # Recent button history (for debugging)
     # Note: For immutable state, we track just the last few raw codes
     recent_buttons: tuple = ()  # Up to 5 recent button codes
-    
-    # AVC-LAN debug bytes (for manual correlation)
-    last_avc_110_490_bytes: tuple = (0, 0, 0, 0, 0, 0, 0, 0)  # MFD status/flow arrows
-    last_avc_a00_258_bytes: tuple = tuple([0] * 32)  # SOC/energy broadcast
     
     @property
     def touch_active(self) -> bool:

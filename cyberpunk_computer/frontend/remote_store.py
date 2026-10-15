@@ -215,9 +215,6 @@ class _IngressShim:
         # The frontend has no raw message stream; keep for API compatibility.
         self._log_callbacks.append(callback)
 
-    def set_analysis_mode(self, enabled: bool) -> None:
-        pass
-
     def set_solicited_debug(self, enabled: bool) -> None:
         pass
 

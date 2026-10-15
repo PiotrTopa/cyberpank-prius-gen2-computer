@@ -111,18 +111,10 @@ class AudioScreen(Screen):
     """
     Audio settings screen.
     
-    Shows a scrollable list of audio settings based on real Prius Gen 2 AVC-LAN:
-    
-    Based on Flerchinger document "AN IN-DEPTH LOOK AT THE TOYOTA AVC-LAN":
-    - Volume: Uses increment/decrement commands (step 1-4)
-    - Bass:   0x0B to 0x15 (protocol), displayed as -5 to +5
-    - Mid:    0x0B to 0x15 (protocol), displayed as -5 to +5
-    - Treble: 0x0B to 0x15 (protocol), displayed as -5 to +5
-    - Balance: 0x09 (L7) to 0x17 (R7), center=0x10, displayed as -7 to +7
-    - Fader:  0x09 (F7) to 0x17 (R7), center=0x10, displayed as -7 to +7
-    
-    Commands are sent to DSP-Amp (0x440) from Audio H/U (0x190 on Prius):
-    Format: [00 25 74 XX YY] where XX is param code, YY is value.
+    Shows a scrollable list of audio settings (volume 0-63, bass/mid/treble
+    -5..+5, balance/fader -7..+7). These are UI/state values only: the stock
+    head unit is removed and the aftermarket radio is not on the AVC-LAN
+    (AVC_MAP.md), so there is no bus path for audio (see io/egress.py).
     """
     
     # Layout constants
@@ -135,28 +127,23 @@ class AudioScreen(Screen):
         """Initialize audio screen."""
         super().__init__(size, app)
         
-        # Build menu items with correct Prius Gen 2 AVC-LAN ranges
-        # Based on Flerchinger document specifications
         self.items: List[MenuItem] = [
             # Volume: 0-63 (Toyota uses 6-bit volume), step 1
-            # Note: AVC-LAN uses volume_up/down commands with step size 1-4
             MenuItem("VOLUME", initial_volume, 0, 63, 1),
             
-            # Bass: -5 to +5 (protocol: 0x0B to 0x15, center 0x10)
+            # Bass: -5 to +5
             MenuItem("BASS", 0, -5, 5, 1),
             
-            # Mid: -5 to +5 (protocol: 0x0B to 0x15, center 0x10)  
+            # Mid: -5 to +5  
             MenuItem("MID", 0, -5, 5, 1),
             
-            # Treble: -5 to +5 (protocol: 0x0B to 0x15, center 0x10)
+            # Treble: -5 to +5
             MenuItem("TREBLE", 0, -5, 5, 1),
             
             # Balance: -7 (full left) to +7 (full right), center 0
-            # Protocol: 0x09 to 0x17, center 0x10
             MenuItem("BALANCE", 0, -7, 7, 1),
             
             # Fader: -7 (full front) to +7 (full rear), center 0
-            # Protocol: 0x09 to 0x17, center 0x10
             MenuItem("FADER", 0, -7, 7, 1),
         ]
         
@@ -167,7 +154,7 @@ class AudioScreen(Screen):
         # Inactivity tracking
         self._last_activity = time.time()
         
-        # AVC-LAN callback (set by app to send commands to vehicle)
+        # Value-change callback (set by the main screen; dispatches actions)
         self._on_value_changed = None
     
     @property
@@ -205,8 +192,6 @@ class AudioScreen(Screen):
     def _notify_value_changed(self, item_label: str, value: Any) -> None:
         """
         Notify that a value was changed by user.
-        
-        This triggers AVC-LAN command generation.
         
         Args:
             item_label: The item that changed (VOLUME, BASS, etc.)

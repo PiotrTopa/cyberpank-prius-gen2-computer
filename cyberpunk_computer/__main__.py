@@ -340,11 +340,6 @@ def main() -> int:
     3         Toggle RS485/Satellite messages
     0         Toggle ALL sources on/off
     
-    --- Analysis Mode ---
-    A         Toggle ANALYSIS mode (detailed reverse-engineering output)
-              Shows: Button presses, Touch events, Energy packets
-              (A00->258), ICE status (210->490)
-    
     ESC       Exit application
     ===================================================================
 """)

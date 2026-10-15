@@ -94,9 +94,6 @@ class Application:
         self._verbose_sat = True   # Show RS485/Satellite messages
         self._verbose_sys = True   # Show SYSTEM messages (TX_ACK, etc.)
         
-        # Developer analysis mode - detailed logging for reverse engineering
-        self._analysis_mode = False
-        
         # Jump mode state (for entering row numbers)
         self._jump_mode = False
         self._jump_buffer = ""
@@ -246,13 +243,11 @@ class Application:
         # Show logging filter status
         v_in = "ON" if self._verbose_in else "OFF"
         v_out = "ON" if self._verbose_out else "OFF"
-        analysis = "ON" if self._analysis_mode else "OFF"
         print(f"\n  Verbose logging:    IN={v_in}, OUT={v_out}")
         avc = "ON" if self._verbose_avc else "OFF"
         can = "ON" if self._verbose_can else "OFF"
         sat = "ON" if self._verbose_sat else "OFF"
         print(f"  Source filters:     AVC-LAN={avc}, CAN={can}, RS485={sat}")
-        print(f"  Analysis mode:      {analysis}")
         
         print("===================================================================\n")
     
@@ -483,17 +478,6 @@ class Application:
                     status = "ON" if self._verbose_avc else "OFF"
                     print(f"[LOG] All message sources: {status}")
                     self._print_source_filter_status()
-                    continue
-                elif event.key == pygame.K_a:
-                    # A = toggle analysis mode for reverse engineering
-                    self._analysis_mode = not self._analysis_mode
-                    status = "ON" if self._analysis_mode else "OFF"
-                    print(f"[DEV] Analysis mode: {status}")
-                    if self._analysis_mode:
-                        print("      Logging: Button presses, Touch events, Energy packets (A00->258)")
-                        print("      Press A again to disable")
-                    if self._virtual_twin:
-                        self._virtual_twin.ingress.set_analysis_mode(self._analysis_mode)
                     continue
             
             # Mouse -> pointer model (scale-aware; window may be 2x/4x)

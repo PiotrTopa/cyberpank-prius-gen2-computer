@@ -129,7 +129,6 @@ class ActionType(Enum):
     AVC_BUTTON_PRESS = auto()
     AVC_BUTTON_RELEASE = auto()
     AVC_TOUCH_EVENT = auto()
-    AVC_DEBUG_BYTES = auto()  # Raw AVC-LAN bytes for manual correlation
     SET_AVC_CLIMATE = auto()       # climate ECU status/setpoint from AVC (1C6->110 E0 5D F3/F5)
     SET_AVC_BATTERY_INFO = auto()  # battery bars / EV mode from AVC (E4 5F B8)
     SET_AVC_STATE = auto()         # AVC link/display state (screen, lights, touch, nav emulation)
@@ -359,11 +358,8 @@ class SetICERunningAction(Action):
     """
     Set ICE (Internal Combustion Engine) running state.
     
-    Detected from AVC-LAN messages 110->490 or 210->490:
-    - Pattern 'C8' in byte[2] indicates ICE running
-    - Pattern 'C1' in byte[2] indicates ICE stopped
-    
-    Note: For precise ICE status, CAN bus data is preferred.
+    Source: AVC-LAN energy monitor (``1C6->110 00 E4 5F B9`` engine flag)
+    while fresh, CAN engine RPM otherwise (io/ingress.py).
     """
     running: bool = False
     
@@ -964,17 +960,14 @@ class SetConnectionStateAction(Action):
 @dataclass
 class UpdateDebugInfoAction(Action):
     """Update debug/analysis information."""
-    last_avc_input: Optional[str] = None
     last_can_message: Optional[str] = None
     
     def __init__(
         self, 
-        last_avc_input: Optional[str] = None,
         last_can_message: Optional[str] = None,
         source: ActionSource = ActionSource.INTERNAL
     ):
         super().__init__(ActionType.UPDATE_DEBUG_INFO, source)
-        self.last_avc_input = last_avc_input
         self.last_can_message = last_can_message
 
 
@@ -985,20 +978,9 @@ class UpdateDebugInfoAction(Action):
 @dataclass
 class AVCButtonPressAction(Action):
     """
-    Physical button press detected from AVC-LAN (040 → 200).
-    
-    Button press messages contain 5 bytes:
-    - byte[0]: Command type (0x28 = press, 0x2A = release)
-    - byte[1]: Modifier (usually 0x00)
-    - byte[2-3]: Button code (varies by button)
-    - byte[4]: Suffix/device ID
-    
-    Common button codes observed:
-    - 60 44 62: Most frequent (likely status/heartbeat)
-    - C1 04 62: Climate/AC related
-    - 00 05 22: Menu/Info buttons
-    - 61 84 62: Audio related
-    - 30 A4 62: Navigation/Map
+    Display hardware/info button from AVC-LAN (``110->178 00 25 58 84/80``,
+    comm.avc ``NavButton``; see docs/AVC_BACKEND.md).
+    ``button_name`` is the decoded key; ``is_press`` False on release.
     """
     button_code: int = 0           # Combined code (byte2 << 8 | byte3)
     modifier: int = 0              # Modifier byte
@@ -1029,21 +1011,13 @@ class AVCButtonPressAction(Action):
 @dataclass
 class AVCTouchEventAction(Action):
     """
-    Touch screen event detected from AVC-LAN (000 → 114).
-    
-    Touch messages contain coordinate and event type data.
-    The exact format varies but common patterns:
-    - Short messages (2-4 bytes): Status/tap events
-    - Long messages (8+ bytes): Coordinate data
-    
-    Touch coordinate system (estimated from analysis):
-    - X: 0-255 (left to right)
-    - Y: 0-255 (top to bottom)
+    Display touch from AVC-LAN (``110->178 00 21 24 78 X Y X Y``, comm.avc
+    ``Touch``). ``x``/``y`` are calibrated panel pixels (0..479, 0..239).
     """
-    x: int = 0                     # X coordinate (0-255)
-    y: int = 0                     # Y coordinate (0-255)
-    touch_type: str = "unknown"    # "press", "release", "drag", "unknown"
-    raw_data: List[int] = None     # Raw bytes for analysis
+    x: int = 0                     # panel X (0..479)
+    y: int = 0                     # panel Y (0..239)
+    touch_type: str = "unknown"    # "press" | "release"
+    raw_data: List[int] = None     # frame data bytes
     
     def __init__(
         self,
@@ -1058,43 +1032,7 @@ class AVCTouchEventAction(Action):
         self.y = y
         self.touch_type = touch_type
         self.raw_data = raw_data or []
-    
-    @property
-    def normalized_x(self) -> float:
-        """Get X as 0.0-1.0 value."""
-        return self.x / 255.0
-    
-    @property
-    def normalized_y(self) -> float:
-        """Get Y as 0.0-1.0 value."""
-        return self.y / 255.0
 
-
-@dataclass
-class AVCDebugBytesAction(Action):
-    """
-    Store raw AVC-LAN message bytes for debug visualization.
-    
-    Used for manual correlation between byte patterns and driving states.
-    Captures key messages:
-    - 0x110→0x490: MFD status/flow arrows (8 bytes)
-    - 0xA00→0x258: SOC/energy broadcast (32 bytes)
-    """
-    master_addr: int = 0
-    slave_addr: int = 0
-    data: List[int] = None
-    
-    def __init__(
-        self,
-        master_addr: int,
-        slave_addr: int,
-        data: List[int],
-        source: ActionSource = ActionSource.GATEWAY
-    ):
-        super().__init__(ActionType.AVC_DEBUG_BYTES, source)
-        self.master_addr = master_addr
-        self.slave_addr = slave_addr
-        self.data = data or []
 
 
 # ─────────────────────────────────────────────────────────────────────────────

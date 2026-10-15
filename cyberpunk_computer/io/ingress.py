@@ -120,9 +120,6 @@ class IngressController:
         # Statistics
         self._stats = IngressStats()
         
-        # Analysis/debug mode
-        self._analysis_mode = False
-        
         # Solicited CAN debug mode
         self._solicited_debug = False
         
@@ -165,10 +162,6 @@ class IngressController:
         Not safe to call while the ingress is running.
         """
         self._input_port = input_port
-    
-    def set_analysis_mode(self, enabled: bool) -> None:
-        """Enable/disable analysis mode for debugging."""
-        self._analysis_mode = enabled
     
     def set_solicited_debug(self, enabled: bool) -> None:
         """Enable/disable solicited CAN debug mode (prints 0x788/0x7E8/0x7EA/0x7EB responses)."""
