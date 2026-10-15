@@ -134,13 +134,17 @@ class OutgoingCommand:
     payload: Dict[str, Any]
     priority: int = 0
     timestamp: float = field(default_factory=time.time)
+    include_cmd: bool = True    # False: emit exactly {"id":N,"d":{...}} (AVC-LAN TX, nav_emu.py format)
     
     def to_gateway_json(self) -> dict:
         """
         Convert to gateway JSON format.
         
-        Returns: {"id": N, "cmd": "...", "d": {...}}
+        Returns: {"id": N, "cmd": "...", "d": {...}} (``cmd`` omitted when
+        ``include_cmd`` is False)
         """
+        if not self.include_cmd:
+            return {"id": self.device_id, "d": self.payload}
         return {
             "id": self.device_id,
             "cmd": self.command_type,

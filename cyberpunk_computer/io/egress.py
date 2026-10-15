@@ -23,9 +23,8 @@ from ..state.actions import (
     SetVolumeAction, SetBassAction, SetMidAction, SetTrebleAction,
     SetBalanceAction, SetFaderAction, SetMuteAction,
     SetTargetTempAction, SetFanSpeedAction, SetACAction, SetAutoModeAction,
-    SetRecirculationAction, SetAirDirectionAction,
+    SetRecirculationAction, SetAirDirectionAction, ClimateButtonAction,
 )
-from ..comm.avc_commands import AVCCommandGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -80,8 +79,11 @@ class EgressController:
         self._store = store
         self._output_port = output_port
         
-        # Command encoders
-        self._avc_commands = AVCCommandGenerator()
+        # AVC-LAN climate remote (comm.avc.ClimateRemote), set by the factory.
+        # Audio has no AVC-LAN control path (stock head unit removed; the
+        # aftermarket radio is not on the bus - AVC_MAP.md), so audio actions
+        # produce no bus traffic.
+        self._climate_remote = None
         
         # Statistics
         self._stats = EgressStats()
@@ -107,6 +109,14 @@ class EgressController:
         # Subscribe to state changes for state-based outputs
         store.subscribe(StateSlice.ALL, self._on_state_change)
     
+    def set_climate_remote(self, remote) -> None:
+        """Route UI climate actions to an AVC-LAN :class:`ClimateRemote`."""
+        self._climate_remote = remote
+
+    @property
+    def climate_remote(self):
+        return self._climate_remote
+
     @property
     def stats(self) -> EgressStats:
         """Get egress statistics."""
@@ -248,55 +258,35 @@ class EgressController:
     
     def _action_to_command(self, action: Action) -> Optional[OutgoingCommand]:
         """
-        Convert a UI action to an outgoing command.
-        
-        Args:
-            action: Action from UI
-            
-        Returns:
-            OutgoingCommand or None if no command needed
+        Convert a UI action to bus traffic.
+
+        Climate actions become verified AVC-LAN touch-button presses through
+        the climate remote (it owns the press/release timing, so nothing is
+        returned here). No other action has a verified bus encoding.
         """
-        avc_cmd = None
-        
-        # Audio commands
-        if isinstance(action, SetVolumeAction):
-            avc_cmd = self._avc_commands.set_volume(action.volume)
-        elif isinstance(action, SetBassAction):
-            avc_cmd = self._avc_commands.set_bass(action.bass)
-        elif isinstance(action, SetMidAction):
-            avc_cmd = self._avc_commands.set_mid(action.mid)
-        elif isinstance(action, SetTrebleAction):
-            avc_cmd = self._avc_commands.set_treble(action.treble)
-        elif isinstance(action, SetBalanceAction):
-            avc_cmd = self._avc_commands.set_balance(action.balance)
-        elif isinstance(action, SetFaderAction):
-            avc_cmd = self._avc_commands.set_fader(action.fader)
-        elif isinstance(action, SetMuteAction):
-            avc_cmd = self._avc_commands.mute_toggle()
-        
-        # Climate commands
-        elif isinstance(action, SetTargetTempAction):
-            avc_cmd = self._avc_commands.set_target_temp(action.temp)
-        elif isinstance(action, SetFanSpeedAction):
-            avc_cmd = self._avc_commands.set_fan_speed(action.speed)
-        elif isinstance(action, SetACAction):
-            avc_cmd = self._avc_commands.climate_ac_toggle()
-        elif isinstance(action, SetAutoModeAction):
-            avc_cmd = self._avc_commands.climate_auto_toggle()
-        elif isinstance(action, SetRecirculationAction):
-            avc_cmd = self._avc_commands.climate_recirc_toggle()
-        elif isinstance(action, SetAirDirectionAction):
-            avc_cmd = self._avc_commands.set_air_direction(action.direction)
-        
-        # Convert AVC command to OutgoingCommand
-        if avc_cmd is not None:
-            gateway_format = avc_cmd.to_gateway_format()
-            return OutgoingCommand(
-                device_id=DEVICE_AVC,
-                command_type=action.type.name.lower(),
-                payload=gateway_format
-            )
-        
+        remote = self._climate_remote
+        if remote is None:
+            return None
+        try:
+            if isinstance(action, ClimateButtonAction):
+                remote.press(action.button, action.count)
+            elif isinstance(action, SetTargetTempAction):
+                remote.set_temperature(action.temp)
+            elif isinstance(action, SetFanSpeedAction):
+                remote.set_fan(action.speed)
+            elif isinstance(action, SetACAction):
+                remote.set_ac(action.ac_on)
+            elif isinstance(action, SetAutoModeAction):
+                remote.set_auto(action.auto_mode)
+            elif isinstance(action, SetRecirculationAction):
+                remote.set_recirculation(action.recirculation)
+            elif isinstance(action, SetAirDirectionAction):
+                remote.set_air_direction(action.direction)
+            else:
+                return None
+            self._stats.avc_commands += 1
+        except ValueError as e:
+            logger.warning("climate command rejected: %s", e)
         return None
     
     # ─────────────────────────────────────────────────────────────────────────

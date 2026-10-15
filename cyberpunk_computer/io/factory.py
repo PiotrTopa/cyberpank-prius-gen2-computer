@@ -95,6 +95,8 @@ class VirtualTwin:
     rules_engine: RulesEngine
     mode: ExecutionMode
     comm_logger: Optional[CommLogger] = None  # Communication logger for replay
+    climate_remote: Optional[object] = None   # comm.avc.ClimateRemote (AVC-LAN climate buttons)
+    avc_scheduler: Optional[object] = None    # comm.avc.ThreadScheduler shared by AVC senders
     _enable_solicited: bool = False  # Whether to send solicited CAN subscriptions
 
     # Solicited subscription watchdog
@@ -261,6 +263,11 @@ class VirtualTwin:
                 logger.warning(f"Error cleaning up solicited subscriptions: {e}")
         
         self.ingress.stop()
+        if self.avc_scheduler is not None:
+            try:
+                self.avc_scheduler.stop()
+            except Exception:
+                pass
         if self.comm_logger:
             self.comm_logger.stop()
     
@@ -435,6 +442,21 @@ def create_virtual_twin(config: VirtualTwinConfig) -> VirtualTwin:
         config.mode == ExecutionMode.PRODUCTION
     )
     
+    # AVC-LAN climate remote control (verified button frames, AVC_MAP.md):
+    # UI climate actions -> egress -> ClimateRemote -> press/release frames.
+    # In replay/dev mode the output port only logs ("[WOULD SEND]").
+    from ..comm.avc import ClimateRemote, ThreadScheduler
+    from .ports import OutgoingCommand as _OC, DEVICE_AVC as _DEV_AVC
+
+    def _avc_send(device_id: int, payload: dict) -> bool:
+        return output_port.send(_OC(device_id=device_id, command_type="avc_tx",
+                                    payload=payload, include_cmd=False))
+
+    avc_scheduler = ThreadScheduler(name="avc-climate")
+    climate_remote = ClimateRemote(_avc_send, avc_scheduler)
+    ingress.avc.add_update_listener(climate_remote.on_update)
+    egress.set_climate_remote(climate_remote)
+
     # Add auto-save middleware for user preference changes
     from .persistence_middleware import create_persistence_middleware
     store.add_middleware(create_persistence_middleware(settings_mgr))
@@ -448,6 +470,8 @@ def create_virtual_twin(config: VirtualTwinConfig) -> VirtualTwin:
         rules_engine=rules_engine,
         mode=config.mode,
         comm_logger=comm_logger,
+        climate_remote=climate_remote,
+        avc_scheduler=avc_scheduler,
         _enable_solicited=enable_solicited
     )
 

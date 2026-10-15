@@ -8,9 +8,10 @@ for an unrecognized name (HTTP 404). Built actions use ``ActionSource.UI`` so th
 egress middleware forwards them to the vehicle, exactly like a touch on the
 pygame UI would.
 
-NOTE: vehicle-actuation commands (ready/start, climate) currently drive the
-virtual twin's state and rely on egress middleware for real bus output. Physical
-remote-start interlocks are intentionally NOT wired here yet — see backend TODO.
+NOTE: climate commands (``set_climate``, ``climate_button`` / ``climate_*``)
+reach the car as verified AVC-LAN touch-button presses (egress ->
+comm.avc.ClimateRemote). Ready/start only drive the twin's state; physical
+remote-start interlocks are intentionally NOT wired here yet.
 """
 
 from __future__ import annotations
@@ -361,6 +362,51 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
         },
     },
 }
+
+
+# ── AVC-LAN climate buttons (verified frames, AVC_MAP.md climate table) ─────
+
+def _climate_button_names() -> List[str]:
+    from ..comm.avc.decoder import CLIMATE_BUTTONS
+    return list(CLIMATE_BUTTONS.keys())
+
+
+def _build_climate_button(params: Dict[str, Any]) -> Action:
+    from ..state.actions import ClimateButtonAction
+    button = str(_require(params, "button")).strip().lower()
+    names = _climate_button_names()
+    if button not in names:
+        raise CommandError(f"unknown climate button '{button}'; one of: {', '.join(names)}")
+    count = _as_int(params.get("count", 1), "count", 1, 10)
+    return ClimateButtonAction(button, count, source=ActionSource.UI)
+
+
+def _climate_alias(button: str) -> CommandBuilder:
+    def build(params: Dict[str, Any]) -> Action:
+        return _build_climate_button({"button": button, "count": params.get("count", 1)})
+    return build
+
+
+COMMANDS["climate_button"] = {
+    "builder": _build_climate_button,
+    "description": (
+        "Press a climate touch button on the AVC-LAN (110->1C6 00 25 E0 84 ..., "
+        "release ~100 ms later). Presses are queued and never overlap; one press "
+        "= one step (temp_up/temp_down = 0.5 C). Toggles (ac, recirc, "
+        "rear_defogger, front_defrost) flip the current state."
+    ),
+    "params": {
+        "button": "one of: " + ", ".join(_climate_button_names()),
+        "count": "int 1..10 (optional, default 1)",
+    },
+}
+for _name in _climate_button_names():
+    _alias = "climate_system_off" if _name == "off" else f"climate_{_name}"
+    COMMANDS[_alias] = {
+        "builder": _climate_alias(_name),
+        "description": f"Press the climate '{_name}' button (alias of climate_button).",
+        "params": {"count": "int 1..10 (optional, default 1)"},
+    }
 
 
 def build_command(name: str, params: Dict[str, Any]) -> Action:
