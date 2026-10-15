@@ -298,3 +298,21 @@ class DataSourcesScreen(Screen):
             (self.width - s.get_width()) // 2,
             bar_y + (bar_h - s.get_height()) // 2,
         ))
+
+    # ─── Pointer / touch ──────────────────────────────────────────────
+
+    def setup_pointer(self) -> None:
+        """Rows: tap selects + activates (encoder semantics), see
+        pointer_helpers.MenuListZone. Footer: "< BACK" chip."""
+        from .pointer_helpers import add_menu_list
+        add_menu_list(
+            self,
+            x=self.SIDE_MARGIN, width=self.width - self.SIDE_MARGIN * 2,
+            width_fn=lambda: self.width - self.SIDE_MARGIN * 2 - (
+                self.SCROLLBAR_WIDTH + 4 if self._max_scroll() > 0 else 0),
+            first_y=self._content_top(), stride=self._item_stride(),
+            row_h=self.ITEM_HEIGHT, bottom=self._content_bottom(),
+            count=lambda: len(self._items),
+            scroll_px=lambda: self._scroll_offset, scrollable=True,
+        )
+        self.add_back_chip()

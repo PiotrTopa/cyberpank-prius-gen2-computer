@@ -387,3 +387,11 @@ class SolicitedMonitorScreen(Screen):
                 val_surf = font_value.render("--", True, COLORS["text_dim"])
             surface.blit(val_surf, (right_x + col_width - val_surf.get_width(), ry))
             ry += row_h
+
+    # ─── Pointer / touch ──────────────────────────────────────────────
+
+    def setup_pointer(self) -> None:
+        """The centred footer BACK button."""
+        bx = (self.width - 80) // 2
+        self.add_button_zone((bx - 8, self.height - self.FOOTER_H, 96, self.FOOTER_H),
+                             lambda x, y: self.pointer_back(), name="back")

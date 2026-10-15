@@ -232,3 +232,18 @@ class EngineMenuScreen(Screen):
         s = font.render(hint, True, COLORS["text_tertiary"])
         surface.blit(s, ((self.width - s.get_width()) // 2,
                          bar_y + (bar_h - s.get_height()) // 2))
+
+    # ─── Pointer / touch ──────────────────────────────────────────────
+
+    def setup_pointer(self) -> None:
+        """Rows: tap selects + activates (encoder semantics), see
+        pointer_helpers.MenuListZone. Footer: "< BACK" chip."""
+        from .pointer_helpers import add_menu_list
+        add_menu_list(
+            self,
+            x=self.SIDE_MARGIN, width=self.width - self.SIDE_MARGIN * 2,
+            first_y=self.HEADER_HEIGHT + 8, stride=self.ITEM_HEIGHT + 3,
+            row_h=self.ITEM_HEIGHT, bottom=self.height - 22,
+            count=lambda: len(self._items),
+        )
+        self.add_back_chip()

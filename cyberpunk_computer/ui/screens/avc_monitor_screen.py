@@ -505,3 +505,49 @@ class AVCMonitorScreen(Screen):
             surface, COLORS["cyan_dim"],
             (self.width - 3, bar_y, 2, bar_h)
         )
+
+    # ─── Pointer / touch ──────────────────────────────────────────────
+
+    def setup_pointer(self) -> None:
+        """Footer [BACK] [FREEZE/LIVE] tappable; when frozen, a vertical
+        drag on the table scrolls it (one ROTATE per row)."""
+        from ..pointer import PointerZone
+        bar_y = self.height - self.FOOTER_H
+        btn_w = 80
+        total = btn_w * self._BTN_COUNT + 16 * (self._BTN_COUNT - 1)
+        start_x = (self.width - total) // 2
+
+        def tap_button(i):
+            def on_click(x, y):
+                self._focused_btn = i
+                self.handle_input(IE.PRESS_LIGHT)
+            return on_click
+
+        for i in range(self._BTN_COUNT):
+            bx = start_x + i * (btn_w + 16)
+            self.add_pointer_zone(PointerZone(
+                (bx - 6, bar_y, btn_w + 12, self.FOOTER_H), on_click=tap_button(i),
+                feedback=lambda x, y, bx=bx: (bx, bar_y + 3, btn_w, self.FOOTER_H - 6),
+                name="avc-btn%d" % i))
+
+        top = self.HEADER_H + self.TABLE_HEADER_H
+        steps = {"done": 0}
+
+        def on_drag(x, y, dx, dy):
+            if not self._frozen or abs(dy) < abs(dx):
+                return True
+            want = int(-dy / self.ROW_H)
+            while steps["done"] < want:
+                steps["done"] += 1
+                self.handle_input(IE.ROTATE_RIGHT)
+            while steps["done"] > want:
+                steps["done"] -= 1
+                self.handle_input(IE.ROTATE_LEFT)
+            return True
+
+        def on_release(x, y, dx, dy):
+            steps["done"] = 0
+
+        self.add_pointer_zone(PointerZone(
+            (0, top, self.width, bar_y - top), on_drag=on_drag,
+            on_release=on_release, feedback=lambda x, y: None, name="avc-scroll"))

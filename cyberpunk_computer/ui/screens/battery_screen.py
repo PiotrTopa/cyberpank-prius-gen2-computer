@@ -615,3 +615,10 @@ class BatteryScreen(Screen):
         if temp < 90:
             return COLORS.get("warm_bright", COLORS["active"])
         return COLORS.get("alert_bright", (255, 60, 60))
+
+    # ─── Pointer / touch ──────────────────────────────────────────────
+
+    def setup_pointer(self) -> None:
+        """Footer BACK button + "< ROTATE >" hint tappable; swipe pages."""
+        from .pointer_helpers import add_paged_screen_pointer
+        add_paged_screen_pointer(self, self.HEADER_HEIGHT)
