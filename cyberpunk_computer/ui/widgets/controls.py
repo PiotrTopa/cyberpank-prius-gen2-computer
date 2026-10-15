@@ -47,6 +47,45 @@ class VolumeBar(Widget):
         self.max_val = max_val
         self.show_value = show_value
         self.segments = segments
+
+        # Pointer: when a change callback is set the bar becomes a slider
+        # (tap or drag sets the value from the x position).
+        self.on_change: Optional[Callable[[int], None]] = None
+        self.step = 1
+
+    draggable = True
+
+    def set_on_change(self, callback: Optional[Callable[[int], None]], step: int = 1) -> None:
+        """Make the bar pointer-adjustable; callback(value) on every change."""
+        self.on_change = callback
+        self.step = max(1, step)
+        self.pointer_enabled = callback is not None
+
+    def value_at(self, x: int) -> int:
+        """Value corresponding to native x (clamped, snapped to step)."""
+        inner = max(1, self.rect.width - 4)
+        t = (x - self.rect.x - 2) / inner
+        if t < 0.0:
+            t = 0.0
+        elif t > 1.0:
+            t = 1.0
+        v = self.min_val + t * (self.max_val - self.min_val)
+        return int(round(v / self.step) * self.step)
+
+    def _pointer_set(self, x: int) -> None:
+        v = self.value_at(x)
+        if v != self.value:
+            self.set_value(v)
+            if self.on_change is not None:
+                self.on_change(self.value)
+
+    def on_pointer_down(self, x: int, y: int) -> None:
+        self._pointer_set(x)
+
+    def on_pointer_move(self, x: int, y: int, pressed: bool) -> bool:
+        if pressed:
+            self._pointer_set(x)
+        return True
     
     @property
     def normalized_value(self) -> float:

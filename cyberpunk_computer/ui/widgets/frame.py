@@ -69,6 +69,11 @@ class Frame(Widget):
         
         # Animation phase offset (unique per frame for staggered effect)
         self._anim_offset = hash(title) % 100 / 100.0
+
+        # Pointer: optional drag hook on_drag(x, y, dx, dy) -> bool (claim)
+        self.on_drag: Optional[Callable[[int, int, int, int], bool]] = None
+        self._press_x = 0
+        self._press_y = 0
     
     def _calculate_content_rect(self) -> Rect:
         """Calculate the content area rectangle."""
@@ -272,6 +277,28 @@ class Frame(Widget):
         color = lerp_color(COLORS["cyan_dim"], COLORS["cyan"], intensity * pulse)
         pygame.draw.circle(surface, color, (x, y), 2)
     
+    def pointer_target_at(self, x: int, y: int):
+        """Pointer-enabled children (e.g. a draggable bar) win over the frame."""
+        if not self.hit_test(x, y):
+            return None
+        for child in reversed(self._children):
+            if child.pointer_enabled and child.hit_test(x, y):
+                return child
+        if self._title_widget is not None:
+            tw = self._title_widget
+            if tw.pointer_enabled and tw.hit_test(x, y):
+                return tw
+        return self if self.pointer_enabled else None
+
+    def on_pointer_down(self, x: int, y: int) -> None:
+        self._press_x = x
+        self._press_y = y
+
+    def on_pointer_move(self, x: int, y: int, pressed: bool) -> bool:
+        if self.on_drag is None or not pressed:
+            return False
+        return bool(self.on_drag(x, y, x - self._press_x, y - self._press_y))
+
     def handle_input(self, event: "InputEvent") -> bool:
         """Handle input events."""
         from ...input.manager import InputEvent as IE

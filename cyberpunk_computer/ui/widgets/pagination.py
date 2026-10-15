@@ -77,6 +77,35 @@ class PaginationControl(Widget):
 
         return False
         
+    def page_at(self, x: int) -> int:
+        """Page whose dot is nearest to native x."""
+        dot_radius = 4
+        spacing = 16
+        total_width = (self.num_pages * dot_radius * 2) + ((self.num_pages - 1) * spacing)
+        start_x = self.rect.x + (self.rect.width - total_width) // 2
+        best, best_d = 0, None
+        for i in range(self.num_pages):
+            cx = start_x + i * (dot_radius * 2 + spacing) + dot_radius
+            d = abs(x - cx)
+            if best_d is None or d < best_d:
+                best, best_d = i, d
+        return best
+
+    def set_page(self, page: int) -> None:
+        """Jump to a page (pointer tap / hardware button)."""
+        page = max(0, min(page, self.num_pages - 1))
+        if page != self.current_page:
+            self.current_page = page
+            self._dirty = True
+            if self._on_change:
+                self._on_change(page)
+
+    def on_click(self, x: int, y: int) -> bool:
+        """Tap on a dot jumps straight to that page."""
+        self.active_edit = False
+        self.set_page(self.page_at(x))
+        return True
+
     def render(self, surface: pygame.Surface) -> None:
         """Render the pagination dots."""
         if not self.visible:
