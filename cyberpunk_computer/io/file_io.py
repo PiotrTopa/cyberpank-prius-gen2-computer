@@ -169,6 +169,9 @@ class FileInputPort(InputPort):
         
         self._entries = []
         file_start_epoch = None
+
+        if self._is_capture_v3():
+            return self._load_capture_v3()
         
         # Collect raw entries for two-pass processing
         raw_entries = []
@@ -264,6 +267,98 @@ class FileInputPort(InputPort):
             logger.error(f"Failed to load file: {e}")
             return False
     
+    # ─────────────────────────────────────────────────────────────────────
+    # Gateway-v3 capture format (avc_capture.py / nav_emu.py / avc_dashboard.py)
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _is_capture_v3(self) -> bool:
+        """True when the first JSON line is a host capture record.
+
+        Capture records wrap each gateway line:
+        ``{"hm":..,"raw":"<gateway line>","obj":{..},"ht":<host epoch>}``
+        plus ``{"tx":..}`` / ``{"note":..}`` / ``{"start":..}`` lines, all
+        carrying ``ht`` and no top-level ``id``.
+        """
+        try:
+            with open(self.filepath, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    return isinstance(data, dict) and "ht" in data and "id" not in data
+        except OSError:
+            return False
+        return False
+
+    @staticmethod
+    def parse_capture_record(rec: dict) -> Optional[dict]:
+        """Gateway JSON object of one capture record, or None to skip it.
+
+        ``tx`` (our own transmissions — their echoes are in the stream
+        anyway), ``note`` and header lines are skipped. ``obj`` is used when
+        present, otherwise ``raw`` is parsed (2026-10-07 captures have no
+        ``obj``).
+        """
+        if not isinstance(rec, dict) or "tx" in rec or "note" in rec:
+            return None
+        obj = rec.get("obj")
+        if obj is None:
+            raw = rec.get("raw")
+            if not isinstance(raw, str) or not raw.startswith("{"):
+                return None
+            try:
+                obj = json.loads(raw)
+            except json.JSONDecodeError:
+                return None
+        if not isinstance(obj, dict) or "id" not in obj:
+            return None
+        return obj
+
+    def _load_capture_v3(self) -> bool:
+        """Load a gateway-v3 capture, paced by the host time ``ht``."""
+        first_ht: Optional[float] = None
+        prev = 0.0
+        skipped = 0
+        try:
+            with open(self.filepath, "r") as f:
+                for line_num, line in enumerate(f, 1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"Line {line_num}: Invalid JSON: {e}")
+                        continue
+                    obj = self.parse_capture_record(rec)
+                    ht = rec.get("ht") if isinstance(rec, dict) else None
+                    if obj is None or not isinstance(ht, (int, float)):
+                        skipped += 1
+                        continue
+                    if first_ht is None:
+                        first_ht = float(ht)
+                    rel = max(prev, float(ht) - first_ht)   # monotonic
+                    prev = rel
+                    self._entries.append(LogEntry(
+                        timestamp_ms=int(float(ht) * 1000),
+                        relative_time=rel,
+                        raw_line=line,
+                        raw_dict=obj,
+                        message=RawMessage.from_gateway_json(obj),
+                    ))
+        except Exception as e:
+            logger.error(f"Failed to load capture: {e}")
+            return False
+        logger.info(
+            f"Loaded {len(self._entries)} entries from gateway-v3 capture {self.filepath}"
+            f" (duration: {self.duration:.1f}s, skipped {skipped} tx/note/header lines)"
+        )
+        return True
+
     @staticmethod
     def _compute_gateway_offset(
         raw_entries: list,
