@@ -1,5 +1,10 @@
 # AVC-LAN Protocol Analysis - Prius Gen 2
 
+> **Superseded for gateway fw 3.x.** This document describes decoding of gateway fw 2.x output,
+> which was a bit-misaligned re-reading of the bus. The verified map is
+> `cyberpunk-prius-gateway/captures/2026-10-07/AVC_MAP.md`; what the backend decodes and sends
+> today is in [AVC_BACKEND.md](AVC_BACKEND.md).
+
 ## Overview
 
 AVC-LAN (Audio Visual Communication - Local Area Network) is Toyota's implementation of the IEBus (NEC Inter Equipment Bus) protocol. It's used for communication between various audio/visual and control devices in the vehicle.

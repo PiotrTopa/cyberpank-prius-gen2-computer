@@ -27,6 +27,18 @@ The Gateway acts as a bridge between:
 
 ---
 
+## 1a. AVC-LAN (ID 2) — gateway fw 3.x
+
+Frames arrive one per line: `{"id":2,"ts":..,"d":{"m":"1C6","s":"110","c":15,"d":["00","E0","5D","F7","46"]}}`
+(hex strings; optional `"b":1` broadcast, `"nak":1` unacknowledged, `"echo":1` our own TX). The host
+transmits with the same `d` shape (`"b":true` for broadcasts). fw 3.2.0 adds the nav-emulation helpers
+`{"id":0,"d":{"a":"avc_cfg","ack":"178"}}` and the auto-reply table
+`{"id":2,"d":{"a":"auto","slot":N,…}}`. Authoritative description:
+`cyberpunk-prius-gateway/PROTOCOL.md` and `gateway-rp2350/README.md` ("Protocol: what changed").
+What the backend decodes, answers and sends on the AVC-LAN: [AVC_BACKEND.md](AVC_BACKEND.md).
+
+---
+
 ## 2. CAN Bus Communication
 
 ### 2.1 Operating Modes

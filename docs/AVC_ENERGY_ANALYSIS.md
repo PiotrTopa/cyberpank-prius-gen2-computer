@@ -1,5 +1,10 @@
 # AVC-LAN Energy Monitor Data Analysis Summary
 
+> **Superseded for gateway fw 3.x.** This document describes decoding of gateway fw 2.x output,
+> which was a bit-misaligned re-reading of the bus. The verified map is
+> `cyberpunk-prius-gateway/captures/2026-10-07/AVC_MAP.md`; what the backend decodes and sends
+> today is in [AVC_BACKEND.md](AVC_BACKEND.md).
+
 ## Analiza danych energetycznych w AVC-LAN - Toyota Prius Gen 2
 
 ### Stan wiedzy
