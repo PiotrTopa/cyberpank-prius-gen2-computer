@@ -10,7 +10,7 @@ A pygame-based HMI (Human-Machine Interface) application designed to run on a **
 
 - **Native Resolution:** 480×240 pixels
 - **Aesthetic:** Cyberpunk / Synthwave / VFD-inspired visuals
-- **Input:** Rotary encoder with haptic feedback (keyboard for development)
+- **Input:** Rotary encoder with haptic feedback, MFD touch panel (keyboard + mouse for development)
 - **Communication:** NDJSON protocol over USB UART Gateway
 
 ## 🏗️ Architecture
@@ -129,6 +129,35 @@ See [DEPLOYMENT.md](./docs/DEPLOYMENT.md) for complete deployment guide and [Qui
 | Enter | Light press (select/enter) |
 | Space | Strong press (context action) |
 | Escape | Back / Exit |
+| Mouse wheel | Rotate encoder |
+
+### Touch & mouse
+
+The UI is fully usable by pointer. In dev mode the mouse drives it (window
+coordinates are scaled back to the native 480×240, so `--scale 2/4` works); in
+production the MFD touch panel drives it through the backend's `touch` events.
+Both feed the same gesture recogniser (`cyberpunk_computer/ui/pointer.py`), so
+they behave identically, and every gesture maps onto the encoder events:
+
+| Gesture | Effect |
+|---------|--------|
+| Tap a panel / button / list row | focus + light press (select, edit, open) |
+| Long press (≥ 600 ms) | strong press (detail screen; DTC clear confirm) |
+| Drag the volume bar | set volume directly |
+| While editing: tap `+` / `−` side, or drag sideways | rotate right / left |
+| Swipe left / right (dashboard centre, paged screens) | next / previous page |
+| `< BACK` chip / footer `BACK` button | back |
+| Tap on empty space | nothing |
+
+Production touch arrives as `touch` events (`{"x","y","pressed",...}`, already
+calibrated, streamed at 10–15 Hz while pressed) and the MFD hardware buttons as
+`button` events. The button → screen table lives in
+`cyberpunk_computer/ui/hw_buttons.py`: `menu` → home, `map` → dynamics page,
+`dest` → engine/diagnostics menu, `maintenance` → error codes (DTC),
+`calendar`/`language` → logged no-op. See
+[ARCHITECTURE.md](./docs/ARCHITECTURE.md#2-input-abstraction).
+
+Tests (headless): `SDL_VIDEODRIVER=dummy python -m pytest tests/test_pointer_ui.py`.
 
 ## 📁 Project Structure
 
