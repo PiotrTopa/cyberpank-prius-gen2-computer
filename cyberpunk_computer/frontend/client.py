@@ -191,5 +191,9 @@ class BackendClient:
             data = envelope.get("data", {})
             if name and self._on_event is not None:
                 self.counters["event_rx"] += 1
-                logger.info("Event received: %s %s", name, data)
+                if name == "touch":
+                    # 10-15 Hz while a finger is down: keep the log quiet
+                    logger.debug("Event received: %s %s", name, data)
+                else:
+                    logger.info("Event received: %s %s", name, data)
                 self._on_event(name, data)
