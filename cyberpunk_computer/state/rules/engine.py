@@ -327,6 +327,8 @@ class RulesEngine:
             changed.add(StateSlice.POWERBOX)
         if old_state.satellites != new_state.satellites:
             changed.add(StateSlice.SATELLITES)
+        if old_state.avc != new_state.avc:
+            changed.add(StateSlice.AVC)
         
         return changed
 

@@ -105,8 +105,15 @@ class ClimateState:
     ac_on: bool = False
     auto_mode: bool = False
     recirculation: bool = False
-    defrost: bool = False
+    defrost: bool = False          # front windshield defrost (AVC F3 b1 0x10)
     mode: ClimateMode = ClimateMode.OFF
+    # AVC-LAN climate status (1C6->110 00 E0 5D F3 ..., AVC_MAP.md)
+    rear_defogger: bool = False    # rear window heater (F3 b1 0x08)
+    fresh_air: bool = False        # F3 b1 0x40
+    air_direction: Optional[str] = None  # face | face_foot | foot | windscreen_foot
+    system_on: Optional[bool] = None     # False = climate OFF (fan 0); None = unknown
+    status_source: Optional[str] = None  # "avc" once the climate ECU status was seen
+    outside_temp_source: Optional[str] = None  # "avc" (E0 5D F7) | "obd" (PID 0146)
     
     def with_target_temp(self, temp: float) -> "ClimateState":
         """Return new state with updated target temperature."""
@@ -248,6 +255,15 @@ class EnergyState:
     flow_motor_to_battery: bool = False
     flow_engine_to_battery: bool = False
     flow_battery_to_wheels: bool = False # Indirect
+
+    # MFD energy-monitor arrows (AVC 1C6->110 00 E4 5F B9 F1 F2, AVC_MAP.md).
+    # The MFD draws an MG node: engine->MG->battery is how charging is shown.
+    flow_engine_to_mg: bool = False
+    flow_mg_to_wheels: bool = False
+    flow_wheels_to_mg: bool = False
+    flow_battery_to_mg: bool = False
+    flow_mg_to_battery: bool = False
+    flow_source: Optional[str] = None  # "avc" | "can" | None (never set)
     
     # Derived states
     charging: bool = False         # Battery being charged
@@ -382,6 +398,32 @@ class InputState:
         """Check if touch is currently active (within last 500ms)."""
         import time
         return (time.time() - self.last_touch_time) < 0.5 if self.last_touch_time else False
+
+
+@dataclass(frozen=True)
+class AvcState:
+    """AVC-LAN link + display state (gateway fw 3.x, AVC_MAP.md).
+
+    Updated on change only (not per frame). ``screen`` is the display's
+    active screen code from ``110->FFF 12 01 60 XX`` ("58" nav, "5F" energy,
+    "5D" climate, "5E" audio, "56" info).
+    """
+    last_frame_time: float = 0.0
+    screen: Optional[str] = None
+    screen_name: str = ""
+    lights_on: Optional[bool] = None        # 01 01 5B 40 / 01 01 5A 80 (event-only)
+    touch_pressed: bool = False
+    touch_x: int = 0
+    touch_y: int = 0
+    last_button: str = ""
+    climate_raw: str = ""                   # last F3 b1..b6 (hex)
+    energy_raw: str = ""                    # last B9 F1 F2 (hex)
+    battery_bars: Optional[int] = None      # E4 5F B8 (provisional, user-confirmed)
+    ev_cancelled: bool = False
+    nav_emulation: str = "off"              # off | configured
+    nav_screen_active: bool = False         # display currently on screen 58 (ours)
+    nav_registered: bool = False            # display talks to 178 this bus session
+    climate_queue: int = 0                  # pending remote climate presses
 
 
 @dataclass(frozen=True)
@@ -606,6 +648,7 @@ class AppState:
     vfd_satellite: VFDSatelliteState = field(default_factory=VFDSatelliteState)
     powerbox: PowerboxState = field(default_factory=PowerboxState)
     satellites: SatellitesState = field(default_factory=SatellitesState)
+    avc: AvcState = field(default_factory=AvcState)
 
     # UI-only state (not from vehicle)
     screen_brightness: int = 100

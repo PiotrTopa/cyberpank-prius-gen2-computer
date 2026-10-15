@@ -130,6 +130,10 @@ class ActionType(Enum):
     AVC_BUTTON_RELEASE = auto()
     AVC_TOUCH_EVENT = auto()
     AVC_DEBUG_BYTES = auto()  # Raw AVC-LAN bytes for manual correlation
+    SET_AVC_CLIMATE = auto()       # climate ECU status/setpoint from AVC (1C6->110 E0 5D F3/F5)
+    SET_AVC_BATTERY_INFO = auto()  # battery bars / EV mode from AVC (E4 5F B8)
+    SET_AVC_STATE = auto()         # AVC link/display state (screen, lights, touch, nav emulation)
+    CLIMATE_BUTTON = auto()        # remote climate button press request (UI -> AVC-LAN)
     
     # Debug/Analysis actions
     UPDATE_DEBUG_INFO = auto()
@@ -308,10 +312,13 @@ class SetAirDirectionAction(Action):
 class SetOutsideTempAction(Action):
     """Set outside temperature (from AVC-LAN climate messages)."""
     temp: float = 0.0
+    origin: Optional[str] = None   # "avc" | "obd" (shown as climate.outside_temp_source)
     
-    def __init__(self, temp: float, source: ActionSource = ActionSource.INTERNAL):
+    def __init__(self, temp: float, source: ActionSource = ActionSource.INTERNAL,
+                 origin: Optional[str] = None):
         super().__init__(ActionType.SET_OUTSIDE_TEMP, source)
         self.temp = temp
+        self.origin = origin
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -507,13 +514,27 @@ class SetEnergyFlowFlagsAction(Action):
                  motor_to_battery: bool = False,
                  engine_to_battery: bool = False,
                  battery_to_wheels: bool = False,
-                 source: ActionSource = ActionSource.INTERNAL):
+                 source: ActionSource = ActionSource.INTERNAL,
+                 *,
+                 engine_to_mg: Optional[bool] = None,
+                 mg_to_wheels: Optional[bool] = None,
+                 wheels_to_mg: Optional[bool] = None,
+                 battery_to_mg: Optional[bool] = None,
+                 mg_to_battery: Optional[bool] = None,
+                 origin: Optional[str] = None):
         super().__init__(ActionType.SET_ENERGY_FLOW_FLAGS, source)
         self.engine_to_wheels = engine_to_wheels
         self.battery_to_motor = battery_to_motor
         self.motor_to_battery = motor_to_battery
         self.engine_to_battery = engine_to_battery
         self.battery_to_wheels = battery_to_wheels
+        # MFD-model arrows (AVC B9); None = not provided by this source
+        self.engine_to_mg = engine_to_mg
+        self.mg_to_wheels = mg_to_wheels
+        self.wheels_to_mg = wheels_to_mg
+        self.battery_to_mg = battery_to_mg
+        self.mg_to_battery = mg_to_battery
+        self.origin = origin
 
 @dataclass
 class SetBatteryMaxTempAction(Action):
@@ -1555,3 +1576,62 @@ class EnqueueSatelliteCommandAction(Action):
         self.payload = payload
         self.priority = priority
         self.name = name or f"cmd:{device_id}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AVC-LAN (gateway fw 3.x, captures/2026-10-07/AVC_MAP.md)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class SetAvcClimateAction(Action):
+    """Climate ECU status / setpoint decoded from AVC-LAN.
+
+    Every field is optional; ``None`` leaves the state untouched. The setpoint
+    is stored unclamped (AVC NN codes, 0.5 °C steps).
+    """
+    def __init__(self, *, target_temp: Optional[float] = None,
+                 fan_speed: Optional[int] = None, ac_on: Optional[bool] = None,
+                 auto_mode: Optional[bool] = None, recirculation: Optional[bool] = None,
+                 fresh_air: Optional[bool] = None, defrost: Optional[bool] = None,
+                 rear_defogger: Optional[bool] = None, air_direction: Optional[str] = None,
+                 system_on: Optional[bool] = None,
+                 source: ActionSource = ActionSource.GATEWAY):
+        super().__init__(ActionType.SET_AVC_CLIMATE, source)
+        self.target_temp = target_temp
+        self.fan_speed = fan_speed
+        self.ac_on = ac_on
+        self.auto_mode = auto_mode
+        self.recirculation = recirculation
+        self.fresh_air = fresh_air
+        self.defrost = defrost
+        self.rear_defogger = rear_defogger
+        self.air_direction = air_direction
+        self.system_on = system_on
+
+
+class SetAvcBatteryInfoAction(Action):
+    """Battery bars + EV mode from AVC ``E4 5F B8`` (provisional row of
+    AVC_MAP.md, user-confirmed live on the 2026-10-07 drive home)."""
+    def __init__(self, bars: int, ev_mode: bool, ev_cancelled: bool,
+                 source: ActionSource = ActionSource.GATEWAY):
+        super().__init__(ActionType.SET_AVC_BATTERY_INFO, source)
+        self.bars = bars
+        self.ev_mode = ev_mode
+        self.ev_cancelled = ev_cancelled
+
+
+class SetAvcStateAction(Action):
+    """Partial update of :class:`AvcState` (only the given fields change)."""
+    def __init__(self, source: ActionSource = ActionSource.GATEWAY, **fields):
+        super().__init__(ActionType.SET_AVC_STATE, source)
+        self.fields = fields
+
+
+class ClimateButtonAction(Action):
+    """Request ``count`` presses of a climate touch button on the AVC-LAN
+    (names: comm.avc.CLIMATE_BUTTONS). Not reduced into state; the backend's
+    climate remote sends press + release frames through the gateway."""
+    def __init__(self, button: str, count: int = 1,
+                 source: ActionSource = ActionSource.UI):
+        super().__init__(ActionType.CLIMATE_BUTTON, source)
+        self.button = button
+        self.count = count

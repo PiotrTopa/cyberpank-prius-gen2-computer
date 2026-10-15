@@ -16,7 +16,7 @@ from enum import Enum, auto
 from .app_state import (
     AppState, AudioState, ClimateState, VehicleState, 
     EnergyState, ConnectionState, GearPosition, InputState, DisplayState,
-    DynamicsState, SatelliteNode
+    DynamicsState, SatelliteNode, ClimateMode
 )
 from .chart_data import ChartDataStore
 from .actions import (
@@ -58,6 +58,7 @@ class StateSlice(Enum):
     DIAGNOSTICS = auto()  # OBD-II DTC diagnostics
     POWERBOX = auto()  # Powerbox: ignition (ACC/BATT) + INA219 telemetry (devices 200-202)
     SATELLITES = auto()  # RS485 satellites: OUT2 power wake-locks + per-node twin (devices 100+)
+    AVC = auto()  # AVC-LAN link/display state (screen, lights, touch, nav emulation)
     ALL = auto()
 
 
@@ -319,11 +320,54 @@ class Store:
         elif action.type == ActionType.SET_OUTSIDE_TEMP:
             from .actions import SetOutsideTempAction
             a = action  # type: SetOutsideTempAction
-            self._state = replace(
-                self._state,
-                climate=replace(self._state.climate, outside_temp=a.temp)
-            )
+            climate = replace(self._state.climate, outside_temp=a.temp)
+            if getattr(a, "origin", None):
+                climate = replace(climate, outside_temp_source=a.origin)
+            self._state = replace(self._state, climate=climate)
             affected.add(StateSlice.CLIMATE)
+
+        elif action.type == ActionType.SET_AVC_CLIMATE:
+            a = action
+            c = self._state.climate
+            changes = {}
+            for name in ("target_temp", "fan_speed", "ac_on", "auto_mode", "recirculation",
+                         "fresh_air", "defrost", "rear_defogger", "air_direction", "system_on"):
+                v = getattr(a, name)
+                if v is not None:
+                    changes[name] = v
+            sys_on = changes.get("system_on", c.system_on)
+            auto = changes.get("auto_mode", c.auto_mode)
+            defrost = changes.get("defrost", c.defrost)
+            if sys_on is False:
+                changes["mode"] = ClimateMode.OFF
+            elif sys_on:
+                changes["mode"] = (ClimateMode.AUTO if auto else
+                                   ClimateMode.DEFROST if defrost else ClimateMode.MANUAL)
+            changes["status_source"] = "avc"
+            new_c = replace(c, **changes)
+            if new_c != c:
+                self._state = replace(self._state, climate=new_c)
+                affected.add(StateSlice.CLIMATE)
+
+        elif action.type == ActionType.SET_AVC_BATTERY_INFO:
+            a = action
+            dyn = replace(self._state.dynamics, soc_bars=a.bars, ev_mode_active=a.ev_mode)
+            veh = replace(self._state.vehicle, ev_mode=a.ev_mode)
+            avc = replace(self._state.avc, battery_bars=a.bars, ev_cancelled=a.ev_cancelled)
+            if dyn != self._state.dynamics:
+                affected.add(StateSlice.DYNAMICS)
+            if veh != self._state.vehicle:
+                affected.add(StateSlice.VEHICLE)
+            if avc != self._state.avc:
+                affected.add(StateSlice.AVC)
+            self._state = replace(self._state, dynamics=dyn, vehicle=veh, avc=avc)
+
+        elif action.type == ActionType.SET_AVC_STATE:
+            a = action
+            new_avc = replace(self._state.avc, **a.fields)
+            if new_avc != self._state.avc:
+                self._state = replace(self._state, avc=new_avc)
+                affected.add(StateSlice.AVC)
             
         # Vehicle reducers
         elif action.type == ActionType.SET_READY_MODE:
@@ -648,18 +692,29 @@ class Store:
         elif action.type == ActionType.SET_ENERGY_FLOW_FLAGS:
             from .actions import SetEnergyFlowFlagsAction
             a = action # type: SetEnergyFlowFlagsAction
-            self._state = replace(
-                self._state,
-                energy=replace(
-                    self._state.energy,
-                    flow_engine_to_wheels=a.engine_to_wheels,
-                    flow_battery_to_motor=a.battery_to_motor,
-                    flow_motor_to_battery=a.motor_to_battery,
-                    flow_engine_to_battery=a.engine_to_battery,
-                    flow_battery_to_wheels=a.battery_to_wheels
-                )
+            changes = dict(
+                flow_engine_to_wheels=a.engine_to_wheels,
+                flow_battery_to_motor=a.battery_to_motor,
+                flow_motor_to_battery=a.motor_to_battery,
+                flow_engine_to_battery=a.engine_to_battery,
+                flow_battery_to_wheels=a.battery_to_wheels,
             )
-            affected.add(StateSlice.ENERGY)
+            for name in ("engine_to_mg", "mg_to_wheels", "wheels_to_mg",
+                         "battery_to_mg", "mg_to_battery"):
+                v = getattr(a, name, None)
+                if v is not None:
+                    changes["flow_" + name] = v
+            if getattr(a, "origin", None):
+                changes["flow_source"] = a.origin
+            if getattr(a, "mg_to_battery", None) is not None:
+                # MFD model (AVC): derive the battery direction + regen flags too
+                changes["charging"] = bool(a.mg_to_battery)
+                changes["discharging"] = bool(a.battery_to_mg)
+                changes["regen_active"] = bool(a.wheels_to_mg)
+            new_e = replace(self._state.energy, **changes)
+            if new_e != self._state.energy:
+                self._state = replace(self._state, energy=new_e)
+                affected.add(StateSlice.ENERGY)
             
         # Connection reducers
         elif action.type == ActionType.SET_CONNECTION_STATE:

@@ -46,11 +46,7 @@ from ..state.actions import (
     AVCButtonPressAction, AVCTouchEventAction,
     SetStoredDTCsAction, SetPendingDTCsAction, SetDTCScanStateAction,
 )
-from ..comm.avc_decoder import (
-    AVCDecoder, AVCMessage, AVCMessageType,
-    parse_button_event, parse_touch_event,
-    HEARTBEAT_BUTTON_CODES,
-)
+from .avc_ingest import AvcIngest
 from ..comm.can_decoder import CANDecoder, CANMessageType
 from ..comm.solicited_can import parse_dtc_response, ECU_NAMES
 from ..state.app_state import GearPosition
@@ -109,7 +105,8 @@ class IngressController:
         self._input_port = input_port
         
         # Protocol decoders
-        self._avc_decoder = AVCDecoder()
+        # AVC-LAN (gateway fw 3.x, AVC_MAP.md): decoder + AVC-priority freshness
+        self._avc = AvcIngest()
         self._can_decoder = CANDecoder()
         
         # Satellite message handlers (device_id -> handler)
@@ -145,6 +142,11 @@ class IngressController:
         self._dtc_scan_start_time: float = 0.0     # When scan started (for timeout)
         self._DTC_SCAN_TIMEOUT: float = 5.0        # Max seconds to wait for all ECUs
     
+    @property
+    def avc(self) -> AvcIngest:
+        """AVC-LAN ingest (decoder, freshness, touch/button event sink)."""
+        return self._avc
+
     @property
     def stats(self) -> IngressStats:
         """Get ingress statistics."""
@@ -427,20 +429,9 @@ class IngressController:
             self._dispatch_actions(actions)
     
     def _handle_avc_message(self, msg: RawMessage) -> None:
-        """Handle AVC-LAN messages."""
+        """Handle AVC-LAN frames (gateway fw 3.x; comm.avc tables)."""
         self._stats.avc_messages += 1
-        
-        # Decode using AVC decoder
-        avc_msg = self._avc_decoder.decode_message(msg.data)
-        if not avc_msg:
-            return
-        
-        # Get classification
-        classification = self._avc_decoder.classify_message(avc_msg)
-        
-        # Convert to actions
-        actions = self._avc_to_actions(avc_msg, classification, msg.sequence)
-        
+        actions = self._avc.process(msg.data)
         if actions:
             self._dispatch_actions(actions)
     
@@ -488,102 +479,6 @@ class IngressController:
             self._store.dispatch(BatchAction(actions, ActionSource.GATEWAY))
     
     # ─────────────────────────────────────────────────────────────────────────
-    # AVC-LAN to Actions conversion
-    # ─────────────────────────────────────────────────────────────────────────
-    
-    def _avc_to_actions(
-        self, 
-        msg: AVCMessage, 
-        classification: str,
-        seq: Optional[int] = None
-    ) -> List[Action]:
-        """Convert AVC message to state actions."""
-        actions: List[Action] = []
-        data = msg.data
-        
-        # Volume messages
-        if "volume" in classification.lower() and len(data) >= 2:
-            volume = data[1] & 0x3F
-            actions.append(SetVolumeAction(volume, ActionSource.GATEWAY))
-        
-        # Climate Status
-        if msg.msg_type == AVCMessageType.CLIMATE_STATUS:
-            recirc = msg.values.get("recirc")
-            if recirc is not None:
-                actions.append(SetRecirculationAction(recirc, ActionSource.GATEWAY))
-        
-        # Body ECU outside temperature (0x040 -> 0x200): [28 00 C1 TT xx]
-        # Disabled — solicited PID 0146 from Engine ECU is the single source of truth
-        # for ambient/outside temperature. Both climate.outside_temp and
-        # vehicle.ambient_air_temp are fed from _handle_solicited_engine().
-        # elif msg.master_addr == 0x040 and msg.slave_addr == 0x200:
-        #     if len(data) >= 4 and data[0] == 0x28 and data[2] == 0xC1:
-        #         outside_temp = data[3] * 2 - 18
-        #         if -50 <= outside_temp <= 60:  # Sanity check
-        #             actions.append(SetOutsideTempAction(outside_temp, ActionSource.GATEWAY))
-        
-        # Button press
-        elif classification == "button_press":
-            btn = parse_button_event(data)
-            if btn:
-                # Skip periodic heartbeat / status codes (0x60xx family)
-                if btn.button_code in HEARTBEAT_BUTTON_CODES:
-                    pass  # Not a real button press — ignore
-                else:
-                    if self._analysis_mode:
-                        status = "PRESS" if btn.is_press else "RELEASE"
-                        seq_str = f"[{seq:>4}]" if seq is not None else ""
-                        raw_hex = " ".join(f"{b:02X}" for b in btn.raw_data)
-                        print(
-                            f"[BTN] {seq_str} {status}: {btn.button_name}"
-                            f" (code=0x{btn.button_code:04X}"
-                            f" mod=0x{btn.modifier:02X}"
-                            f" sfx=0x{btn.suffix:02X}"
-                            f" raw=[{raw_hex}])"
-                        )
-
-                    actions.append(AVCButtonPressAction(
-                        button_code=btn.button_code,
-                        modifier=btn.modifier,
-                        suffix=btn.suffix,
-                        is_press=btn.is_press,
-                        raw_data=btn.raw_data,
-                        button_name=btn.button_name,
-                        source=ActionSource.GATEWAY
-                    ))
-        
-        # Touch event
-        elif classification == "touch_event":
-            touch = parse_touch_event(data)
-            if touch:
-                if self._analysis_mode:
-                    seq_str = f"[{seq:>4}]" if seq is not None else ""
-                    print(f"[TCH] {seq_str} {touch.touch_type.upper()}: x={touch.x}, y={touch.y}")
-                
-                actions.append(AVCTouchEventAction(
-                    x=touch.x,
-                    y=touch.y,
-                    touch_type=touch.touch_type,
-                    raw_data=touch.raw_data,
-                    source=ActionSource.GATEWAY
-                ))
-        
-        # Capture debug bytes for manual correlation
-        # 0x110→0x490: MFD status/flow arrows (8 bytes)
-        # 0xA00→0x258: SOC/energy broadcast (32 bytes)
-        if (msg.master_addr == 0x110 and msg.slave_addr == 0x490) or \
-           (msg.master_addr == 0xA00 and msg.slave_addr == 0x258):
-            from ..state.actions import AVCDebugBytesAction
-            actions.append(AVCDebugBytesAction(
-                master_addr=msg.master_addr,
-                slave_addr=msg.slave_addr,
-                data=list(data),
-                source=ActionSource.GATEWAY
-            ))
-        
-        return actions
-    
-    # ─────────────────────────────────────────────────────────────────────────
     # CAN to Actions conversion
     # ─────────────────────────────────────────────────────────────────────────
     
@@ -625,11 +520,14 @@ class IngressController:
             charging = is_charging and abs(power_kw) > 0.5
             discharging = not is_charging and abs(power_kw) > 0.5
             
-            actions.append(SetChargingStateAction(
-                charging=charging,
-                discharging=discharging,
-                source=ActionSource.GATEWAY
-            ))
+            # AVC energy monitor (B9) is authoritative for the battery
+            # direction while fresh.
+            if not self._avc.fresh("energy"):
+                actions.append(SetChargingStateAction(
+                    charging=charging,
+                    discharging=discharging,
+                    source=ActionSource.GATEWAY
+                ))
             
             temp = msg.values.get("battery_temp")
             if temp is not None and -20 <= temp <= 60:
@@ -640,16 +538,20 @@ class IngressController:
                 actions.append(SetBatteryMaxTempAction(temp_max, ActionSource.GATEWAY))
         
         # Energy Flow (0x3B6)
+        # Unverified bit guesses; 0x3B6 is not on the bus the gateway taps
+        # (AVC_MAP.md cross-check). AVC B9 wins whenever it is fresh.
         elif msg.msg_type == CANMessageType.ENERGY_FLOW:
-            b5 = msg.values.get("flow_byte_5", 0)
-            actions.append(SetEnergyFlowFlagsAction(
-                engine_to_wheels=bool(b5 & 0x08),
-                battery_to_motor=bool(b5 & 0x10),
-                motor_to_battery=bool(b5 & 0x20),
-                engine_to_battery=bool(b5 & 0x40),
-                battery_to_wheels=bool(b5 & 0x80),
-                source=ActionSource.GATEWAY
-            ))
+            if not self._avc.fresh("energy"):
+                b5 = msg.values.get("flow_byte_5", 0)
+                actions.append(SetEnergyFlowFlagsAction(
+                    engine_to_wheels=bool(b5 & 0x08),
+                    battery_to_motor=bool(b5 & 0x10),
+                    motor_to_battery=bool(b5 & 0x20),
+                    engine_to_battery=bool(b5 & 0x40),
+                    battery_to_wheels=bool(b5 & 0x80),
+                    source=ActionSource.GATEWAY,
+                    origin="can",
+                ))
         
         # Fuel Consumption (0x520)
         elif msg.msg_type == CANMessageType.FUEL_CONSUMPTION:
@@ -695,7 +597,8 @@ class IngressController:
         elif msg.msg_type == CANMessageType.ENGINE_STATUS:
             ice_running = msg.values.get("ice_running")
             if ice_running is not None:
-                actions.append(SetICERunningAction(ice_running, ActionSource.GATEWAY))
+                if not self._avc.fresh("energy"):   # AVC B9 engine flag wins when fresh
+                    actions.append(SetICERunningAction(ice_running, ActionSource.GATEWAY))
                 actions.append(SetReadyModeAction(True, ActionSource.GATEWAY))
         
         # Pedals
@@ -710,11 +613,8 @@ class IngressController:
             if "fuel_level" in msg.values:
                 actions.append(SetFuelLevelAction(msg.values["fuel_level"], ActionSource.GATEWAY))
         
-        # Climate Data (Ambient Temp) — disabled, outside temp from AVC 0x040→0x200 only
-        # elif msg.msg_type == CANMessageType.CLIMATE_DATA:
-        #     ambient = msg.values.get("ambient_temp")
-        #     if ambient is not None and -50 <= ambient <= 80:
-        #         actions.append(SetOutsideTempAction(ambient, ActionSource.GATEWAY))
+        # Outside temperature: AVC 1C6->110 E0 5D F7 (primary), OBD PID 0146
+        # fallback (see _handle_solicited_engine). CAN CLIMATE_DATA unused.
         
         # Gear Position
         elif msg.msg_type == CANMessageType.GEAR_POSITION:
@@ -792,12 +692,13 @@ class IngressController:
         
         # SOC Bars & Events (0x529)
         elif msg.msg_type == CANMessageType.SOC_BARS_EVENT:
-            actions.append(SetSOCBarsEventAction(
-                soc_bars=msg.values.get("soc_bars", 0),
-                ev_mode_active=msg.values.get("ev_mode_active", False),
-                warning_triangle=msg.values.get("warning_triangle", False),
-                source=ActionSource.GATEWAY
-            ))
+            if not self._avc.fresh("battery"):   # AVC E4 5F B8 wins when fresh
+                actions.append(SetSOCBarsEventAction(
+                    soc_bars=msg.values.get("soc_bars", 0),
+                    ev_mode_active=msg.values.get("ev_mode_active", False),
+                    warning_triangle=msg.values.get("warning_triangle", False),
+                    source=ActionSource.GATEWAY
+                ))
             # Also set EV mode on vehicle state
             ev_active = msg.values.get("ev_mode_active", False)
             if ev_active:
@@ -867,8 +768,8 @@ class IngressController:
         rpm = values.get("rpm")
         if rpm is not None and 0 <= rpm <= 8000:
             actions.append(SetRPMAction(int(rpm), ActionSource.GATEWAY))
-            # If RPM > 0, engine is running
-            if rpm > 0:
+            # If RPM > 0, engine is running (AVC B9 engine flag wins when fresh)
+            if rpm > 0 and not self._avc.fresh("energy"):
                 actions.append(SetICERunningAction(True, ActionSource.GATEWAY))
         
         # Vehicle speed (PID 0x0D)
@@ -935,16 +836,17 @@ class IngressController:
                 aux_battery_voltage=float(aux_v), source=ActionSource.GATEWAY
             ))
         
-        # Ambient temperature (PID 0x46) — single source of truth
-        # Feeds both VehicleState.ambient_air_temp AND ClimateState.outside_temp
-        # so the CLIMATE UI on main screen shows the same value as the solicited monitor.
-        # AVC-LAN Body ECU 0x040→0x200 outside temp is disabled in favour of this.
+        # Ambient temperature (PID 0x46): always VehicleState.ambient_air_temp;
+        # ClimateState.outside_temp only while the AVC outside temperature
+        # (1C6->110 E0 5D F7, the value the car's own display shows) is stale.
         ambient = values.get("ambient_temp")
         if ambient is not None and -50 <= ambient <= 80:
             actions.append(SetEngineDataAction(
                 ambient_air_temp=float(ambient), source=ActionSource.GATEWAY
             ))
-            actions.append(SetOutsideTempAction(float(ambient), ActionSource.GATEWAY))
+            if not self._avc.fresh("outside_temp"):
+                actions.append(SetOutsideTempAction(float(ambient), ActionSource.GATEWAY,
+                                                    origin="obd"))
         
         # DTC responses (Mode 03/07)
         dtc_actions = self._handle_dtc_response(values, "ENGINE")
