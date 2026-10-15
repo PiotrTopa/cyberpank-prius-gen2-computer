@@ -11,8 +11,8 @@ This module adds the state integration rules:
   take over again.
 * **Outside temperature is AVC-only.** ``climate.outside_temp`` is written
   here and nowhere else (the CAN/OBD ambient values were never right); when
-  the AVC value goes stale, :meth:`AvcIngest.expire` clears it to ``None``
-  (UI shows N/A).
+  the AVC value goes stale it is kept (last reading frozen; see :meth:`AvcIngest.expire`)
+  (UI shows ``--`` until the first frame; the last reading is then kept).
 * **On change only.** Periodic frames (outside temp 1 Hz, energy 2 Hz,
   climate status 5 s) dispatch only when the decoded value changes.
 * **Events.** Calibrated touch and nav/info buttons are published on the
@@ -100,16 +100,15 @@ class AvcIngest:
         return t is not None and (self._clock() - t) <= self.fresh_s
 
     def expire(self) -> List[Action]:
-        """Actions for AVC values that went stale (cheap; called on every
+        """Actions for AVC values that went stale (called on every
         ``IngressController.update``).
 
-        Only the outside temperature is cleared: it has no other source, so
-        a stale AVC value must read N/A rather than freeze. (The other AVC
-        signals fall back to CAN via :meth:`fresh`.)
+        Nothing is cleared: the outside temperature keeps its last reading
+        (user, 2026-10-15: "freeze the last reading, i think prius takes like
+        5 mins to give -- reading"); the UI shows ``--`` only until the first
+        frame arrives. The other AVC signals fall back to CAN via
+        :meth:`fresh`.
         """
-        if self._outside is not None and not self.fresh("outside_temp"):
-            self._outside = None
-            return [SetOutsideTempAction(None, ActionSource.GATEWAY)]
         return []
 
     def _emit(self, name: str, data: Dict) -> None:

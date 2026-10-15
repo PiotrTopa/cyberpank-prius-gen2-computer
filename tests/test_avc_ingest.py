@@ -66,9 +66,9 @@ def test_outside_temp_is_avc_only_obd_never_writes_it():
     obd_ambient(ing, 8)
     assert store.state.climate.outside_temp == 22.0              # no fallback
     ing.update()                                                 # expiry pass
-    assert store.state.climate.outside_temp is None              # -> N/A
+    assert store.state.climate.outside_temp == 22.0              # frozen: last reading is kept
     obd_ambient(ing, 8)
-    assert store.state.climate.outside_temp is None
+    assert store.state.climate.outside_temp == 22.0              # OBD still never writes it
     feed_avc(ing, avc("1C6", "110", "00 E0 5D F7 45"))          # back: 21 C
     assert store.state.climate.outside_temp == 21.0
 

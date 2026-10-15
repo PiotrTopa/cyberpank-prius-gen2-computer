@@ -60,8 +60,8 @@ class ClimateMenuItem:
         """Get value as display string."""
         if self.options:
             return self.options[self._option_index]
-        if self.value is None or self.value == "N/A":
-            return "N/A"
+        if self.value is None or self.value == "--":
+            return "--"
         return f"{self.value}{self.unit}"
     
     def adjust(self, delta: int) -> None:
@@ -125,11 +125,11 @@ class ClimateScreen(Screen):
             # Air direction (FACE/FEET/etc)
             ClimateMenuItem("AIR DIRECTION", 0, options=["FACE", "FACE+FEET", "FEET", "DEFROST"]),
             # Outside temp: AVC-LAN only (1C6->110 00 E0 5D F7, AVC_BACKEND.md);
-            # N/A while no fresh AVC value. Inside temp is not on AVC-LAN.
+            # -- while no fresh AVC value. Inside temp is not on AVC-LAN.
             ClimateMenuItem("OUTSIDE TEMP",
-                            int(temp_out) if temp_out is not None else "N/A",
+                            int(temp_out) if temp_out is not None else "--",
                             unit="°C", readonly=True),
-            ClimateMenuItem("INSIDE TEMP", "N/A", readonly=True),
+            ClimateMenuItem("INSIDE TEMP", "--", readonly=True),
         ]
         
         # Navigation
@@ -244,7 +244,7 @@ class ClimateScreen(Screen):
                     break
         for item in self.items:
             if item.label == "OUTSIDE TEMP":
-                item.value = int(outside) if outside is not None else "N/A"
+                item.value = int(outside) if outside is not None else "--"
                 break
 
     def handle_input(self, event) -> bool:

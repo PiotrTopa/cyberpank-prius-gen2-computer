@@ -66,8 +66,8 @@ class MainScreen(Screen):
         # Sample data (will be replaced with live data from Gateway)
         self._volume = 35
         self._ambient_on = True
-        self._temp_in = "N/A"  # Inside temp not available on AVC-LAN
-        self._temp_out = "N/A"  # AVC-LAN only (climate.outside_temp), N/A when stale
+        self._temp_in = "--"  # Inside temp not available on AVC-LAN
+        self._temp_out = "--"  # AVC-LAN only (climate.outside_temp), N/A when stale
         self._temp_target = "21"
         self._climate_ac = True
         self._climate_auto = True
@@ -548,11 +548,11 @@ class MainScreen(Screen):
         self._temp_target = f"{state.climate.target_temp:.0f}"
         self._temp_in = (
             f"{state.climate.inside_temp:.0f}"
-            if state.climate.inside_temp is not None else "N/A"
+            if state.climate.inside_temp is not None else "--"
         )
         self._temp_out = (
             f"{state.climate.outside_temp:.0f}"
-            if state.climate.outside_temp is not None else "N/A"
+            if state.climate.outside_temp is not None else "--"
         )
         self._climate_ac = state.climate.ac_on
         self._climate_auto = state.climate.auto_mode
@@ -1425,11 +1425,11 @@ class MainScreen(Screen):
     def _on_climate_action(self) -> None:
         """Handle climate frame action (open climate settings screen)."""
         if self.app:
-            # Parse temp values safely (could be "N/A" or numeric strings)
+            # Parse temp values safely (could be "--" or numeric strings)
             try:
                 temp_out = int(self._temp_out)
             except (ValueError, TypeError):
-                temp_out = None  # N/A: no fresh AVC outside temperature
+                temp_out = None  # --: no fresh AVC outside temperature
             try:
                 temp_in = int(self._temp_in)
             except (ValueError, TypeError):

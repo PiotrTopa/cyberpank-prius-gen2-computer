@@ -176,7 +176,7 @@ class AVCStatusScreen(Screen):
         self._section(c, left_x, top, col_w, "DISPLAY / NAV", left)
 
         outside = (f"{climate.outside_temp:.0f}°C"
-                   if climate.outside_temp is not None else "N/A")
+                   if climate.outside_temp is not None else "--")
         right: List[Tuple[str, str, bool]] = [
             ("OUTSIDE", outside, climate.outside_temp is not None),
             ("CLIMATE STATUS", (climate.status_source or "--").upper(),
