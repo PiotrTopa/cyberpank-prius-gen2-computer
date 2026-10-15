@@ -67,7 +67,7 @@ class MainScreen(Screen):
         self._volume = 35
         self._ambient_on = True
         self._temp_in = "N/A"  # Inside temp not available on AVC-LAN
-        self._temp_out = "N/A"  # Updated from AVC-LAN 10C->310
+        self._temp_out = "N/A"  # AVC-LAN only (climate.outside_temp), N/A when stale
         self._temp_target = "21"
         self._climate_ac = True
         self._climate_auto = True
@@ -1429,7 +1429,7 @@ class MainScreen(Screen):
             try:
                 temp_out = int(self._temp_out)
             except (ValueError, TypeError):
-                temp_out = 0  # Default if not available
+                temp_out = None  # N/A: no fresh AVC outside temperature
             try:
                 temp_in = int(self._temp_in)
             except (ValueError, TypeError):

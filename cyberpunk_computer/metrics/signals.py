@@ -69,10 +69,10 @@ SIGNALS: List[Signal] = [
     Signal("fuel_flow", "L/h", lambda s: s.vehicle.fuel_flow_rate, "Instantaneous fuel flow"),
     Signal("trip_fuel", "L", lambda s: s.vehicle.trip_fuel_consumed, "Cumulative trip fuel"),
     # Environment / climate
-    Signal("ambient_temp", "°C", lambda s: s.vehicle.ambient_air_temp, "Ambient air temperature"),
+    Signal("ambient_temp", "°C", lambda s: s.vehicle.ambient_air_temp, "Ambient air temperature (OBD 0146, diagnostic)"),
     Signal("intake_air_temp", "°C", lambda s: s.vehicle.intake_air_temp, "Intake air temperature"),
     Signal("cabin_temp", "°C", lambda s: s.climate.inside_temp, "Cabin inside temperature"),
-    Signal("outside_temp", "°C", lambda s: s.climate.outside_temp, "Outside temperature (climate)"),
+    Signal("outside_temp", "°C", lambda s: s.climate.outside_temp, "Outside temperature (AVC-LAN)"),
     # Powerbox / POCO computer supply (INA219 on the Prius 12 V feed)
     Signal("powerbox_voltage", "V", lambda s: s.powerbox.system_voltage, "Computer 12V supply voltage (INA219)"),
     Signal("powerbox_current", "A", lambda s: s.powerbox.current_draw_a, "Computer current draw (INA219)"),

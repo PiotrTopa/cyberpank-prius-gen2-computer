@@ -9,7 +9,7 @@ from cyberpunk_computer.io.ingress import IngressController
 from cyberpunk_computer.io.mock_io import MockInputPort
 from cyberpunk_computer.io.ports import RawMessage
 from cyberpunk_computer.state.store import Store
-from avc_captures import capture, hms
+from avc_captures import avc_records, capture, hms, local_epoch
 
 
 class Clock:
@@ -45,22 +45,60 @@ class FakeCan:
         self.data = b""
 
 
-def test_outside_temp_avc_wins_while_fresh_then_obd():
+def obd_ambient(ing, celsius):
     from cyberpunk_computer.comm.can_decoder import CANMessageType
+    ing._dispatch_actions(ing._can_message_to_actions(
+        FakeCan(CANMessageType.SOLICITED_ENGINE, {"ambient_temp": celsius})))
+
+
+def test_outside_temp_is_avc_only_obd_never_writes_it():
     store, ing, clock, _ = make_ingress()
+    # No AVC yet: OBD 0146 is an engine diagnostic, outside temp stays N/A
+    obd_ambient(ing, 19)
+    assert store.state.climate.outside_temp is None
+    assert store.state.vehicle.ambient_air_temp == 19.0
     feed_avc(ing, avc("1C6", "110", "00 E0 5D F7 46"))          # 22 C
     assert store.state.climate.outside_temp == 22.0
-    assert store.state.climate.outside_temp_source == "avc"
-    # OBD ambient arrives while AVC is fresh -> ambient_air_temp only
-    ing._dispatch_actions(ing._can_message_to_actions(
-        FakeCan(CANMessageType.SOLICITED_ENGINE, {"ambient_temp": 19})))
+    obd_ambient(ing, 8)                                          # AVC fresh
     assert store.state.climate.outside_temp == 22.0
-    assert store.state.vehicle.ambient_air_temp == 19.0
-    clock.t += 16.0                                             # AVC stale
+    assert store.state.vehicle.ambient_air_temp == 8.0
+    clock.t += 16.0                                              # AVC stale
+    obd_ambient(ing, 8)
+    assert store.state.climate.outside_temp == 22.0              # no fallback
+    ing.update()                                                 # expiry pass
+    assert store.state.climate.outside_temp is None              # -> N/A
+    obd_ambient(ing, 8)
+    assert store.state.climate.outside_temp is None
+    feed_avc(ing, avc("1C6", "110", "00 E0 5D F7 45"))          # back: 21 C
+    assert store.state.climate.outside_temp == 21.0
+
+
+def test_can_5cc_climate_data_never_writes_outside_temp():
+    from cyberpunk_computer.comm.can_decoder import CANMessageType
+    store, ing, clock, _ = make_ingress()
     ing._dispatch_actions(ing._can_message_to_actions(
-        FakeCan(CANMessageType.SOLICITED_ENGINE, {"ambient_temp": 19})))
-    assert store.state.climate.outside_temp == 19.0
-    assert store.state.climate.outside_temp_source == "obd"
+        FakeCan(CANMessageType.CLIMATE_DATA, {"ambient_temp": 30})))
+    assert store.state.climate.outside_temp is None
+
+
+def test_outside_temp_drive_home_through_ingress():
+    """drive_home.notes 15:32:26: the car showed 22 C outside; the replayed
+    AVC frames through the whole ingress must show the same in the store."""
+    path = capture("2026-10-07/drive_home.ndjson")
+    store, ing, clock, _ = make_ingress()
+    t_mark = local_epoch("2026-10-07", "15:32:26")
+    near, seen = [], set()
+    for ht, d in avc_records(path):
+        clock.t = ht
+        feed_avc(ing, d)
+        ing.update()                     # expiry pass at capture time
+        t = store.state.climate.outside_temp
+        if t is not None:
+            seen.add(t)
+        if abs(ht - t_mark) <= 5:
+            near.append(t)
+    assert seen == {21.0, 22.0}
+    assert near and set(near) == {22.0}
 
 
 def test_energy_and_engine_from_avc_override_can():
@@ -157,7 +195,7 @@ def test_replay_drive2_through_ingress():
         if n == 0:
             break
     st = store.state
-    assert st.climate.outside_temp_source == "avc" and st.climate.outside_temp in (13.0, 14.0, 15.0)
+    assert st.climate.outside_temp in (13.0, 14.0, 15.0)
     assert st.climate.status_source == "avc" and st.climate.target_temp == 20.0
     assert st.energy.flow_source == "avc"
     assert st.avc.screen == "5F"

@@ -620,3 +620,15 @@ def test_application_mouse_scaled_and_keyboard_unchanged(monkeypatch):
     pygame.display.quit()
     pygame.display.init()
     pygame.display.set_mode(SIZE)
+
+
+def test_climate_screen_outside_temp_na_without_avc():
+    """Outside temperature is AVC-only: no value -> "N/A", never a default."""
+    from cyberpunk_computer.ui.screens import ClimateScreen
+    cs = ClimateScreen(SIZE, None)
+    item = next(i for i in cs.items if i.label == "OUTSIDE TEMP")
+    assert item.display_value == "N/A"
+    cs.update_temperatures(outside=22.0)
+    assert item.display_value == "22°C"
+    cs.update_temperatures(outside=None)
+    assert item.display_value == "N/A"

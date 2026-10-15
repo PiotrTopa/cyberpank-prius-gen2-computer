@@ -100,7 +100,7 @@ class ClimateState:
     """
     target_temp: float = 22.0
     inside_temp: Optional[float] = None
-    outside_temp: Optional[float] = None
+    outside_temp: Optional[float] = None  # AVC-LAN only (E0 5D F7); None = no fresh value
     fan_speed: int = 0  # 0-7
     ac_on: bool = False
     auto_mode: bool = False
@@ -113,7 +113,6 @@ class ClimateState:
     air_direction: Optional[str] = None  # face | face_foot | foot | windscreen_foot
     system_on: Optional[bool] = None     # False = climate OFF (fan 0); None = unknown
     status_source: Optional[str] = None  # "avc" once the climate ECU status was seen
-    outside_temp_source: Optional[str] = None  # "avc" (E0 5D F7) | "obd" (PID 0146)
     
     def with_target_temp(self, temp: float) -> "ClimateState":
         """Return new state with updated target temperature."""
@@ -186,7 +185,7 @@ class VehicleState:
     odometer_dtc_clear: Optional[int] = None      # Odometer since DTC clear, km (PID 0131)
     barometric_pressure: Optional[int] = None     # Barometric pressure, kPa (PID 0133)
     aux_battery_voltage: Optional[float] = None   # Aux battery voltage, V (PID 0142)
-    ambient_air_temp: Optional[float] = None      # Ambient air temp, °C (PID 0146)
+    ambient_air_temp: Optional[float] = None      # Ambient air temp, °C (PID 0146; diagnostic only, not outside temp)
     
     # Drive condition / shift sensors (from PID 21C3)
     drive_condition: Optional[int] = None     # 0-6: hybrid drive mode (byte X)

@@ -320,10 +320,8 @@ class Store:
         elif action.type == ActionType.SET_OUTSIDE_TEMP:
             from .actions import SetOutsideTempAction
             a = action  # type: SetOutsideTempAction
-            climate = replace(self._state.climate, outside_temp=a.temp)
-            if getattr(a, "origin", None):
-                climate = replace(climate, outside_temp_source=a.origin)
-            self._state = replace(self._state, climate=climate)
+            self._state = replace(self._state,
+                                  climate=replace(self._state.climate, outside_temp=a.temp))
             affected.add(StateSlice.CLIMATE)
 
         elif action.type == ActionType.SET_AVC_CLIMATE:

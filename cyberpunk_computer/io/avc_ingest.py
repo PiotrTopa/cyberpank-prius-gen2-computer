@@ -4,11 +4,15 @@ AVC-LAN ingest: gateway ID 2 lines → typed updates → store actions + events.
 Decoding is done by :mod:`cyberpunk_computer.comm.avc` (AVC_MAP.md tables).
 This module adds the state integration rules:
 
-* **AVC priority.** Signals that AVC provides (outside temperature, climate,
-  energy-flow arrows, engine running, battery bars / EV mode) are tracked with
-  a freshness window (:data:`FRESH_S`). While AVC is fresh, the CAN/OBD
-  ingest paths skip their competing actions (see ``IngressController``);
-  when AVC goes stale they take over again.
+* **AVC priority.** Signals that AVC provides (climate, energy-flow arrows,
+  engine running, battery bars / EV mode) are tracked with a freshness window
+  (:data:`FRESH_S`). While AVC is fresh, the CAN/OBD ingest paths skip their
+  competing actions (see ``IngressController``); when AVC goes stale they
+  take over again.
+* **Outside temperature is AVC-only.** ``climate.outside_temp`` is written
+  here and nowhere else (the CAN/OBD ambient values were never right); when
+  the AVC value goes stale, :meth:`AvcIngest.expire` clears it to ``None``
+  (UI shows N/A).
 * **On change only.** Periodic frames (outside temp 1 Hz, energy 2 Hz,
   climate status 5 s) dispatch only when the decoded value changes.
 * **Events.** Calibrated touch and nav/info buttons are published on the
@@ -95,6 +99,19 @@ class AvcIngest:
         t = self._seen.get(signal)
         return t is not None and (self._clock() - t) <= self.fresh_s
 
+    def expire(self) -> List[Action]:
+        """Actions for AVC values that went stale (cheap; called on every
+        ``IngressController.update``).
+
+        Only the outside temperature is cleared: it has no other source, so
+        a stale AVC value must read N/A rather than freeze. (The other AVC
+        signals fall back to CAN via :meth:`fresh`.)
+        """
+        if self._outside is not None and not self.fresh("outside_temp"):
+            self._outside = None
+            return [SetOutsideTempAction(None, ActionSource.GATEWAY)]
+        return []
+
     def _emit(self, name: str, data: Dict) -> None:
         if self._event_sink is not None:
             try:
@@ -134,7 +151,7 @@ class AvcIngest:
             self._seen["outside_temp"] = now
             if u.celsius != self._outside:
                 self._outside = u.celsius
-                out.append(SetOutsideTempAction(float(u.celsius), src, origin="avc"))
+                out.append(SetOutsideTempAction(float(u.celsius), src))
 
         elif isinstance(u, ClimateStatus):
             self._seen["climate"] = now

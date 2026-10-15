@@ -309,15 +309,13 @@ class SetAirDirectionAction(Action):
 
 @dataclass
 class SetOutsideTempAction(Action):
-    """Set outside temperature (from AVC-LAN climate messages)."""
-    temp: float = 0.0
-    origin: Optional[str] = None   # "avc" | "obd" (shown as climate.outside_temp_source)
+    """Set outside temperature. AVC-LAN only (``1C6->110 00 E0 5D F7``,
+    io/avc_ingest.py); ``None`` clears it when the AVC value goes stale."""
+    temp: Optional[float] = None
     
-    def __init__(self, temp: float, source: ActionSource = ActionSource.INTERNAL,
-                 origin: Optional[str] = None):
+    def __init__(self, temp: Optional[float], source: ActionSource = ActionSource.INTERNAL):
         super().__init__(ActionType.SET_OUTSIDE_TEMP, source)
         self.temp = temp
-        self.origin = origin
 
 
 # ─────────────────────────────────────────────────────────────────────────────

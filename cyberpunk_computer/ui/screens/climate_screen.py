@@ -60,6 +60,8 @@ class ClimateMenuItem:
         """Get value as display string."""
         if self.options:
             return self.options[self._option_index]
+        if self.value is None or self.value == "N/A":
+            return "N/A"
         return f"{self.value}{self.unit}"
     
     def adjust(self, delta: int) -> None:
@@ -100,7 +102,7 @@ class ClimateScreen(Screen):
         app=None,
         temp_target: float = 22.0,
         temp_in: float = 22.0,
-        temp_out: float = -5.0,
+        temp_out: Optional[float] = None,
         ac_on: bool = True,
         auto_mode: bool = True,
         recirc: bool = False
@@ -122,9 +124,11 @@ class ClimateScreen(Screen):
             ClimateMenuItem("AIR INTAKE", 0 if not recirc else 1, options=["FRESH", "RECIRC"]),
             # Air direction (FACE/FEET/etc)
             ClimateMenuItem("AIR DIRECTION", 0, options=["FACE", "FACE+FEET", "FEET", "DEFROST"]),
-            # Outside temp - read from AVC-LAN 10C->310 byte[5] / 2
-            # Inside temp - NOT available on AVC-LAN (would need CAN bus)
-            ClimateMenuItem("OUTSIDE TEMP", int(temp_out), unit="°C", readonly=True),
+            # Outside temp: AVC-LAN only (1C6->110 00 E0 5D F7, AVC_BACKEND.md);
+            # N/A while no fresh AVC value. Inside temp is not on AVC-LAN.
+            ClimateMenuItem("OUTSIDE TEMP",
+                            int(temp_out) if temp_out is not None else "N/A",
+                            unit="°C", readonly=True),
             ClimateMenuItem("INSIDE TEMP", "N/A", readonly=True),
         ]
         
@@ -238,11 +242,10 @@ class ClimateScreen(Screen):
                 if item.label == "INSIDE TEMP":
                     item.value = int(inside)
                     break
-        if outside is not None:
-            for item in self.items:
-                if item.label == "OUTSIDE TEMP":
-                    item.value = int(outside)
-                    break
+        for item in self.items:
+            if item.label == "OUTSIDE TEMP":
+                item.value = int(outside) if outside is not None else "N/A"
+                break
 
     def handle_input(self, event) -> bool:
         """Handle input events."""

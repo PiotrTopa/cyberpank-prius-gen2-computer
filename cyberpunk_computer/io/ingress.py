@@ -26,7 +26,7 @@ from ..state.actions import (
     SetVolumeAction, SetBassAction, SetMidAction, SetTrebleAction,
     SetBalanceAction, SetFaderAction, SetMuteAction,
     SetTargetTempAction, SetFanSpeedAction, SetACAction, SetAutoModeAction,
-    SetRecirculationAction, SetOutsideTempAction,
+    SetRecirculationAction,
     SetReadyModeAction, SetParkModeAction, SetICERunningAction,
     SetThrottlePositionAction, SetBrakePressedAction, SetFuelLevelAction,
     SetFuelFlowAction, SetEnergyFlowFlagsAction, SetBatteryMaxTempAction,
@@ -241,6 +241,12 @@ class IngressController:
             
             self._process_message(msg)
             processed += 1
+
+        # AVC-only values (outside temperature) read N/A once stale, also
+        # when the bus has gone silent and no frame arrives to notice it.
+        expired = self._avc.expire()
+        if expired:
+            self._dispatch_actions(expired)
         
         return processed
     
@@ -606,8 +612,8 @@ class IngressController:
             if "fuel_level" in msg.values:
                 actions.append(SetFuelLevelAction(msg.values["fuel_level"], ActionSource.GATEWAY))
         
-        # Outside temperature: AVC 1C6->110 E0 5D F7 (primary), OBD PID 0146
-        # fallback (see _handle_solicited_engine). CAN CLIMATE_DATA unused.
+        # Outside temperature: AVC-LAN only (1C6->110 E0 5D F7, io/avc_ingest.py).
+        # CAN 0x5CC CLIMATE_DATA and OBD PID 0146 never write climate.outside_temp.
         
         # Gear Position
         elif msg.msg_type == CANMessageType.GEAR_POSITION:
@@ -829,17 +835,14 @@ class IngressController:
                 aux_battery_voltage=float(aux_v), source=ActionSource.GATEWAY
             ))
         
-        # Ambient temperature (PID 0x46): always VehicleState.ambient_air_temp;
-        # ClimateState.outside_temp only while the AVC outside temperature
-        # (1C6->110 E0 5D F7, the value the car's own display shows) is stale.
+        # Ambient temperature (PID 0x46): engine diagnostic only
+        # (VehicleState.ambient_air_temp, solicited monitor). It is never the
+        # outside temperature: climate.outside_temp comes from AVC-LAN only.
         ambient = values.get("ambient_temp")
         if ambient is not None and -50 <= ambient <= 80:
             actions.append(SetEngineDataAction(
                 ambient_air_temp=float(ambient), source=ActionSource.GATEWAY
             ))
-            if not self._avc.fresh("outside_temp"):
-                actions.append(SetOutsideTempAction(float(ambient), ActionSource.GATEWAY,
-                                                    origin="obd"))
         
         # DTC responses (Mode 03/07)
         dtc_actions = self._handle_dtc_response(values, "ENGINE")

@@ -460,7 +460,7 @@ class CANDecoder:
         # 0x5CC: Outside / Ambient Temperature (broadcast, unsolicited)
         # Observed: 3 bytes [24, xx, xx] where byte 0 = temp + 40 offset
         # Formula: ambient_temp = byte0 - 40 (°C)
-        # Cross-validated against AVC-LAN 10C->310 outside temp messages
+        # Decoded for diagnostics only: climate.outside_temp is AVC-LAN only.
         elif can_id == 0x5CC and len(data) >= 1:
             msg.msg_type = CANMessageType.CLIMATE_DATA
             msg.values["ambient_temp"] = data[0] - 40
