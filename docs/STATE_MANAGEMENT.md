@@ -139,26 +139,28 @@ store.add_middleware(gateway_middleware)
 
 ## Data Flow Examples
 
-### Example 1: Volume Change from Vehicle
+### Example 1: Outside Temperature from the Vehicle
 
 ```
-1. InputPort receives: {"id":2,"d":{"m":"190","s":"110","d":["00","23"]}}
-2. IngressController decodes AVC-LAN message
-3. Creates: SetVolumeAction(volume=35, source=GATEWAY)
-4. Store.dispatch() updates state
-5. Subscribers notified: UI redraws volume bar
+1. InputPort receives: {"id":2,"d":{"m":"1C6","s":"110","d":["00","E0","5D","F7","46"]}}
+2. IngressController hands it to AvcIngest (comm.avc decoder: OutsideTemp 22 °C)
+3. Creates: SetOutsideTempAction(22.0, source=GATEWAY)
+4. Store.dispatch() updates climate.outside_temp
+5. Subscribers notified: UI redraws the outside temperature
 ```
 
-### Example 2: User Changes Volume
+### Example 2: User Changes Fan Speed
 
 ```
-1. User presses + on AudioScreen
-2. UI calls: store.dispatch(SetVolumeAction(36, source=UI))
+1. User adjusts FAN SPEED on ClimateScreen
+2. UI calls: store.dispatch(SetFanSpeedAction(3, source=UI))
 3. Store updates state
-4. EgressController sees source=UI, generates AVC command
-5. OutputPort sends command to vehicle
-6. UI subscriber redraws (already updated)
+4. EgressController sees source=UI, hands it to the AVC-LAN ClimateRemote
+5. ClimateRemote sends the verified button press/release frames via the gateway
+6. The climate ECU's status frame (E0 5D F3) confirms the new state
 ```
+
+AVC-LAN details: [AVC_BACKEND.md](AVC_BACKEND.md).
 
 ### Example 3: CAN Battery Update
 
@@ -193,8 +195,7 @@ cyberpunk_computer/
 │   └── factory.py          # VirtualTwin factory
 │
 ├── comm/                   # Protocol decoders/encoders
-│   ├── avc_decoder.py      # AVC-LAN protocol decoder
-│   ├── avc_commands.py     # AVC-LAN command generation
+│   ├── avc/                # AVC-LAN (fw 3.x) decoder, nav emulator, climate remote
 │   └── can_decoder.py      # CAN bus decoder
 │
 └── ui/

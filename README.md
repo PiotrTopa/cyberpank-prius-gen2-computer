@@ -181,6 +181,7 @@ cyberpunk-prius-gen2-computer/
 │   ├── io/                      # Virtual Twin IO layer
 │   │   ├── ports.py             # InputPort/OutputPort interfaces
 │   │   ├── ingress.py           # Data input → State
+│   │   ├── avc_ingest.py        # AVC-LAN updates → actions (AVC priority, outside temp)
 │   │   ├── egress.py            # State → Hardware output
 │   │   ├── file_io.py           # File replay (development)
 │   │   ├── serial_io.py         # Serial UART (production)
@@ -193,8 +194,9 @@ cyberpunk-prius-gen2-computer/
 │   │   └── rules.py             # Rules engine
 │   └── comm/                    # Protocol decoders
 │       ├── avc/                 # AVC-LAN (fw 3.x): decoder, touch calibration, nav emulator, climate remote — see docs/AVC_BACKEND.md
-│       ├── avc_decoder.py       # LEGACY fw 2.x decoder (avc_monitor_screen only)
-│       └── can_decoder.py       # CAN bus decoder
+│       ├── can_decoder.py       # CAN bus decoder
+│       ├── solicited_can.py     # Solicited OBD-II / CAN PIDs
+│       └── subscription_groups.py # Gateway CAN subscription slots
 ├── powerbox/                    # RP2040 Powerbox firmware
 │   ├── main.py                  # NDJSON firmware
 │   ├── ina219.py                # I2C driver
@@ -206,6 +208,7 @@ cyberpunk-prius-gen2-computer/
 ├── docs/                        # Documentation
 │   ├── ARCHITECTURE.md
 │   ├── VIRTUAL_TWIN_ARCHITECTURE.md
+│   ├── AVC_BACKEND.md           # AVC-LAN decoding, nav emulation, climate remote
 │   └── PROTOCOL.md
 ├── examples/                    # Usage examples
 ├── requirements.txt

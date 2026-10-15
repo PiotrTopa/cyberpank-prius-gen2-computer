@@ -220,11 +220,9 @@ class IngressController:
     def __init__(self, store: Store, input_port: InputPort):
         self._store = store
         self._input_port = input_port
-        self._decoders = {
-            DEVICE_AVC: AVCDecoder(),
-            DEVICE_CAN: CANDecoder(),
-            # Satellites use generic RS485 decoder
-        }
+        self._avc = AvcIngest()        # AVC-LAN: comm.avc decoder (docs/AVC_BACKEND.md)
+        self._can_decoder = CANDecoder()
+        # Satellites use generic RS485 decoder
     
     def update(self) -> None:
         """Process all pending messages from input port."""
@@ -254,10 +252,9 @@ class EgressController:
     def __init__(self, store: Store, output_port: OutputPort):
         self._store = store
         self._output_port = output_port
-        self._encoders = {
-            DEVICE_AVC: AVCCommandGenerator(),
-            # Satellites use generic RS485 encoder
-        }
+        # AVC-LAN: UI climate actions -> comm.avc.ClimateRemote (set by the factory)
+        self._climate_remote = None
+        # Satellites use generic RS485 encoder
         
         # Subscribe to all state changes
         store.subscribe(StateSlice.ALL, self._on_state_change)

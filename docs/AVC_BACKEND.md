@@ -7,9 +7,12 @@ touch calibration, remote climate procedure) and
 `gateway-rp2350/tools/nav_emu.py` as accepted by the real display on 2026-10-14 (`--fw-auto --fw-ack`).
 Gateway JSON: `cyberpunk-prius-gateway/PROTOCOL.md` + `gateway-rp2350/README.md` ("Protocol: what changed").
 
-Everything older in this repo (`AVC_LAN_ANALYSIS.md`, `AVC_ENERGY_ANALYSIS.md`,
-`AVC_DEBUG_DISPLAY.md`, `comm/avc_decoder.py`, `comm/avc_state.py`) describes gateway fw 2.x output,
-which was a bit-misaligned re-reading of the bus. It is kept for history only.
+History: the gateway fw 2.x era decoder, analysis scripts and notes (a bit-misaligned
+re-reading of the bus: `040->200` buttons, `10C->310` climate, `A00->258` / `110->490` energy) were
+removed on 2026-10-15 and live only in the repository history before the commit "remove legacy
+fw-2.x AVC-LAN code" and the docs commit that followed it. The fw 2.x recordings themselves remain
+in `logs/` and `assets/data/`. The verified capture history is the gateway repo's `captures/`
+(AVC_MAP.md and the per-day notes).
 
 Units: **110** display (EMV), **1C6** climate / info ECU (logicals E0 climate, E4/E5 info),
 **178** nav (logical 58). Frames below are `master->slave data…` (hex).
@@ -24,7 +27,8 @@ Units: **110** display (EMV), **1C6** climate / info ECU (logicals E0 climate, E
 | `comm/avc/nav_emulator.py` | nav ECU (178) emulation |
 | `comm/avc/climate_remote.py` | climate button presses through the gateway |
 | `comm/avc/scheduler.py` | timer thread (and a manual one for tests) |
-| `io/avc_ingest.py` | updates → store actions, AVC priority, `touch`/`button` events |
+| `io/avc_ingest.py` | updates → store actions, AVC priority, outside-temp expiry, `touch`/`button` events |
+| `ui/screens/avc_status_screen.py` | ENGINE menu → AVC-LAN STATUS: read-only view of `AppState.avc` + signal sources |
 | `io/file_io.py` | `--replay` of gateway-v3 captures |
 
 ## What is decoded
@@ -33,7 +37,7 @@ Units: **110** display (EMV), **1C6** climate / info ECU (logicals E0 climate, E
 |---|---|---|
 | `1C6->110 00 E0 5D F3 b1..b6` (5 s + on change) | `ClimateStatus`: fan `b6>>5` (0 = climate OFF), AUTO `b1&80`, fresh `40`, recirc `20`, front defrost `10`, rear heater `08`, A/C `02`; vent `b2` 80 face+foot / 40 foot / 20 windscreen+foot / 00 with `b1&01` face | `climate.fan_speed, auto_mode, ac_on, recirculation, fresh_air, defrost, rear_defogger, air_direction, system_on, mode` |
 | `1C6->110 00 E0 5D F5 NN 38` | `ClimateSetpoint` °C = 15.5 + 0.5·NN, NN 39 = OFF | `climate.target_temp` (unclamped) |
-| `1C6->110 00 E0 5D F7 TT` (1 Hz) | `OutsideTemp` TT − 48 °C | `climate.outside_temp`, `outside_temp_source = "avc"` |
+| `1C6->110 00 E0 5D F7 TT` (1 Hz) | `OutsideTemp` TT − 48 °C | `climate.outside_temp` (the only writer; `None` = N/A once stale, see below) |
 | `1C6->110 00 E4 5F B9 F1 F2 00` | `EnergyFlow`: F1 40 engine→wheels, F1 08 engine→MG; F2 40 MG→wheels, 80 wheels→MG, 10 battery→MG, 08 MG→battery; engine running = F1 ≠ 0 | `energy.flow_*` (new MFD arrows + legacy flags), `charging/discharging/regen_active`, `flow_source = "avc"`, `vehicle.ice_running` |
 | `1C6->110 00 E4 5F B8 00 00 XX YY 00` | `BatteryInfo` bars = (XX&07)+1, EV mode YY&40, EV cancelled YY&80 (provisional rows of AVC_MAP, user-confirmed live) | `dynamics.soc_bars`, `ev_mode_active`, `vehicle.ev_mode`, `avc.battery_bars` |
 | `110->FFF 12 01 60 XX …` | `DisplayScreen` 58 nav, 5F energy, 5D climate, 5E audio, 56 info | `avc.screen`, `screen_name`, `nav_screen_active` |
@@ -56,11 +60,16 @@ OBD paths in `io/ingress.py` do not dispatch the competing value:
 
 | Signal | AVC source | Fallback when AVC is stale |
 |---|---|---|
-| outside temperature | `E0 5D F7` | OBD PID 0146 (`outside_temp_source = "obd"`); PID 0146 always fills `vehicle.ambient_air_temp` |
 | energy arrows, charging / discharging / regen | `E4 5F B9` | CAN 0x3B6 (unverified bits; not on the bus the gateway taps), 0x3CB |
 | engine running | `E4 5F B9` F1 ≠ 0 | CAN 0x038, OBD rpm > 0 |
 | battery bars, EV mode | `E4 5F B8` | CAN 0x529 |
 | climate | `E0 5D F3/F5` | none (CAN has no climate) |
+
+**Outside temperature is AVC-only.** The CAN / OBD values were never right, so nothing else writes
+`climate.outside_temp`: OBD PID 0146 only fills `vehicle.ambient_air_temp` (engine diagnostic, shown
+on the solicited monitor and as the `ambient_temp` metric) and CAN 0x5CC is decoded but unused.
+When the AVC value is stale (15 s, e.g. bus silent or climate ECU asleep), `AvcIngest.expire()` —
+run on every `IngressController.update()` — sets `climate.outside_temp = None` and the UI shows N/A.
 
 READY is not on AVC; it still comes from CAN. Lights from AVC go to `avc.lights_on`; CAN 0x57F
 (when sniffed) still fills `dynamics.headlight_state`.
