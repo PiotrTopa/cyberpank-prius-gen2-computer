@@ -53,6 +53,78 @@ class InputEvent:
 - Light click → PRESS_LIGHT
 - Strong click → PRESS_STRONG
 
+#### Pointer model (mouse and touch)
+
+Mouse (dev) and the MFD touch panel (production) drive one gesture recogniser,
+`ui/pointer.py::PointerController`, in native 480×240 coordinates. It only knows
+`down(x, y)` / `move(x, y)` / `up(x, y)` plus a per-frame `update()`:
+
+| Gesture | Rule | Default semantics |
+|---------|------|-------------------|
+| click | down + up on the same target, ≤ 10 px movement, release within 8 px of its rect | focus + `PRESS_LIGHT` |
+| long press | held still ≥ 600 ms (fires while still down; the release then does nothing) | focus + `PRESS_STRONG` |
+| drag | target is `draggable` (slider) or claims the move (`on_pointer_move` → True) | target-specific; never clicks |
+| slide off | moved beyond the slop on a non-drag target | cancelled, no click |
+
+Targets:
+
+- **Widgets** (`ui/widgets/base.py`): `pointer_enabled` (default = focusable),
+  `draggable`, `hit_test`, `pointer_target_at` (containers return the deepest
+  pointer-enabled child — `Frame` lets a slider child win), and hooks
+  `on_pointer_down/move/up`, `on_click`, `on_long_press`. Returning False from
+  `on_click`/`on_long_press` selects the default semantics above.
+- **`PointerZone`**: rect + callbacks for custom-drawn screens (list rows,
+  footer buttons, swipe areas, the `< BACK` chip). Zones are hit-tested before
+  widgets; `Screen.setup_pointer()` registers them lazily on first use.
+- **`Screen`** (`ui/screens/base.py`): `pointer_target_at`, `pointer_click`,
+  `pointer_long_press`; the defaults focus the widget and call
+  `handle_input(PRESS_LIGHT/STRONG)`, i.e. the *same* code path as the encoder,
+  so edit modes, timeouts and activity tracking behave identically.
+  `pointer_helpers.MenuListZone` maps rows onto `_selected_index` + encoder
+  events (tap row = select + PRESS_LIGHT; on the row being edited: `>` end =
+  ROTATE_RIGHT, value area = ROTATE_LEFT, label = done; sideways drag = one
+  rotate per 16 px). A `< BACK` chip is added only where a screen had no
+  tappable way back; BACK goes through `Application.inject_input` like Escape.
+
+Pressed feedback is a 1 px outline in `COLORS["active"]` drawn by the app on a
+single pre-allocated `pygame.Rect`; the idle per-frame cost is a few
+comparisons (the Pi budget is ~21 fps on one core).
+
+**Sources:**
+
+- *Dev mouse* — `core/app.py::_process_events` maps left-button
+  `MOUSEBUTTONDOWN/MOTION/UP` from window to native coordinates (scale-aware:
+  `--scale 2/4`, fullscreen). The mouse wheel is encoder rotation.
+- *Production touch* — the backend publishes on the ZMQ event channel
+  (`frontend/client.py` → `RemoteTwin.add_event_callback`). The callback only
+  appends to `TouchEventQueue` (a deque) on the client thread; the main loop
+  drains it once per frame and feeds the same controller. Nothing depends on
+  SDL mouse (`SDL_VIDEODRIVER=dummy`, `SDL_NOMOUSE=1`).
+
+Touch contract (backend → frontend):
+
+```text
+"touch"  {"x": 0..479, "y": 0..239, "pressed": bool, "raw_x": int, "raw_y": int, "t": float}
+         pressed=true streamed at 10–15 Hz while the finger is down (first = down,
+         then moves); pressed=false = release with the last known x/y.
+         Coordinates are calibrated to the native surface by the backend.
+"button" {"key": "menu"|"dest"|"map"|"maintenance"|"calendar"|"language",
+          "pressed": bool, "t": float}
+```
+
+A touch press whose frames stop for 1 s is cancelled (never clicked); release
+frames without a preceding press are ignored. Buttons act on the press edge
+via the table in `ui/hw_buttons.py` (each target first unwinds to the home
+dashboard):
+
+| key | target |
+|-----|--------|
+| `menu` | home dashboard, page 1, edits cancelled |
+| `map` | dashboard DYNAMICS page (pressed again there → page 1) |
+| `dest` | ENGINE / DIAGNOSTICS menu |
+| `maintenance` | DIAGNOSTICS / DTC |
+| `calendar`, `language` | logged, no-op |
+
 ### 3. Encoder Configuration Protocol
 
 When focus changes between widgets, the application sends configuration to the encoder:

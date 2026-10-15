@@ -747,3 +747,10 @@ class EngineDetailScreen(Screen):
             return COLORS.get("warm_bright", COLORS["active"])
         else:
             return COLORS.get("alert_bright", (255, 60, 60))
+
+    # ─── Pointer / touch ──────────────────────────────────────────────
+
+    def setup_pointer(self) -> None:
+        """Footer BACK button + "< ROTATE >" hint tappable; swipe pages."""
+        from .pointer_helpers import add_paged_screen_pointer
+        add_paged_screen_pointer(self, self.HEADER_HEIGHT)

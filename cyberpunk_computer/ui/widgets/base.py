@@ -204,6 +204,66 @@ class Widget:
         """
         return False
     
+    # ------------------------------------------------------------------
+    # Pointer model (mouse / touch). See ui/pointer.py and Screen.
+    #
+    # A widget is a pointer target when ``pointer_enabled`` (default: it is
+    # focusable). The screen hit-tests in native 480x240 coordinates and
+    # applies the default semantics when the hooks below return False:
+    # tap = focus + PRESS_LIGHT, long press = focus + PRESS_STRONG.
+    # ``draggable`` widgets (sliders/bars) get every move while pressed and
+    # never click.
+    # ------------------------------------------------------------------
+
+    draggable = False
+
+    @property
+    def pointer_enabled(self) -> bool:
+        """Whether this widget is a pointer target."""
+        override = getattr(self, "_pointer_enabled", None)
+        return self.focusable if override is None else override
+
+    @pointer_enabled.setter
+    def pointer_enabled(self, value: bool) -> None:
+        self._pointer_enabled = value
+
+    def hit_test(self, x: int, y: int) -> bool:
+        """True if (x, y) is inside this visible widget."""
+        return self.visible and self.rect.contains(x, y)
+
+    def pointer_target_at(self, x: int, y: int) -> Optional["Widget"]:
+        """Deepest pointer target at (x, y), or None. Containers override."""
+        if self.pointer_enabled and self.hit_test(x, y):
+            return self
+        return None
+
+    def pointer_bounds(self) -> Rect:
+        """Rect used for the click tolerance check on release."""
+        return self.rect
+
+    def pointer_feedback_rect(self, x: int, y: int):
+        """Rect highlighted while pressed (None = no highlight)."""
+        r = self.rect
+        return (r.x, r.y, r.width, r.height)
+
+    def on_pointer_down(self, x: int, y: int) -> None:
+        """Pointer pressed on this widget."""
+
+    def on_pointer_move(self, x: int, y: int, pressed: bool) -> bool:
+        """Pointer moved while pressed. Return True to claim a drag."""
+        return False
+
+    def on_pointer_up(self, x: int, y: int) -> None:
+        """Pointer released (always called after a down on this widget)."""
+
+    def on_click(self, x: int, y: int) -> bool:
+        """Tap. Return True if handled; False -> focus + PRESS_LIGHT."""
+        return False
+
+    def on_long_press(self, x: int, y: int) -> bool:
+        """Long press. Return True if handled; False -> focus + PRESS_STRONG."""
+        return False
+
     def get_encoder_config(self) -> Optional[dict]:
         """
         Get encoder configuration for this widget.

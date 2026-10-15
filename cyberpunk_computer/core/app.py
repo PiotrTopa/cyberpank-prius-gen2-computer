@@ -14,6 +14,8 @@ from ..ui.colors import COLORS
 from ..ui.fonts import get_font
 from ..ui.screens.main_screen import MainScreen
 from ..input.manager import InputManager, InputEvent
+from ..ui.pointer import PointerController, TouchEventQueue
+from ..ui.hw_buttons import handle_hw_button
 from .renderer import Renderer
 
 logger = logging.getLogger(__name__)
@@ -57,6 +59,15 @@ class Application:
         
         # Create input manager
         self.input_manager = InputManager(config)
+
+        # Pointer model: one gesture recogniser fed by the mouse (dev) and by
+        # the MFD touch panel via backend "touch" events (production).
+        self.pointer = PointerController(lambda: self.current_screen)
+        self.touch_queue = TouchEventQueue()
+        win = pygame.display.get_surface()
+        win_w, win_h = win.get_size() if win is not None else config.native_size
+        self._mouse_sx = config.native_width / max(1, win_w)
+        self._mouse_sy = config.native_height / max(1, win_h)
         
         # Screen management
         self.screen_stack: list = []
@@ -102,6 +113,11 @@ class Application:
         
         # Set up verbose logging callback
         virtual_twin.ingress.add_message_log_callback(self._log_gateway_message)
+
+        # Touch panel + MFD buttons arrive as backend events on the client
+        # thread; they are only queued here and consumed on the main loop.
+        if hasattr(virtual_twin, "add_event_callback"):
+            virtual_twin.add_event_callback(self.touch_queue.push)
         
         # Start the Virtual Twin
         virtual_twin.start()
@@ -295,6 +311,11 @@ class Application:
             
             # Process events
             self._process_events()
+
+            # Touch / MFD buttons from the backend, then long-press timing
+            if self.touch_queue or self.touch_queue.touch_active:
+                self.touch_queue.drain(self.pointer, self._on_hw_button)
+            self.pointer.update()
             
             # Update current screen
             if self.current_screen:
@@ -475,12 +496,59 @@ class Application:
                         self._virtual_twin.ingress.set_analysis_mode(self._analysis_mode)
                     continue
             
+            # Mouse -> pointer model (scale-aware; window may be 2x/4x)
+            etype = event.type
+            if etype == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1:
+                    self.pointer.down(int(event.pos[0] * self._mouse_sx),
+                                      int(event.pos[1] * self._mouse_sy))
+                continue
+            if etype == pygame.MOUSEMOTION:
+                if self.pointer.pressed and event.buttons[0]:
+                    self.pointer.move(int(event.pos[0] * self._mouse_sx),
+                                      int(event.pos[1] * self._mouse_sy))
+                continue
+            if etype == pygame.MOUSEBUTTONUP:
+                if event.button == 1:
+                    self.pointer.up(int(event.pos[0] * self._mouse_sx),
+                                    int(event.pos[1] * self._mouse_sy))
+                continue
+            if etype == pygame.MOUSEWHEEL:
+                # Wheel = encoder rotation (dev convenience)
+                if event.y:
+                    self._handle_input(InputEvent.ROTATE_LEFT if event.y > 0
+                                       else InputEvent.ROTATE_RIGHT)
+                continue
+
             # Convert pygame events to input events
             input_event = self.input_manager.process_event(event)
             
             if input_event:
                 self._handle_input(input_event)
     
+    def inject_input(self, event: InputEvent) -> None:
+        """Feed an encoder-equivalent event (used by pointer affordances such
+        as the BACK chip); identical to a key/encoder event."""
+        self._handle_input(event)
+
+    def _on_hw_button(self, key: str, pressed: bool) -> None:
+        """MFD hardware/soft button from the backend (main thread)."""
+        try:
+            handle_hw_button(self, key, pressed)
+        except Exception:
+            logger.exception("MFD button %r handling failed", key)
+
+    def go_home(self):
+        """Unwind the screen stack to the root dashboard and return it."""
+        if self.pointer.pressed:
+            self.pointer.cancel()
+        while self.screen_stack:
+            self.pop_screen()
+        home = self.current_screen
+        if home is not None and hasattr(home, "reset_to_home"):
+            home.reset_to_home()
+        return home
+
     def _handle_input(self, event: InputEvent) -> None:
         """
         Handle an input event.
@@ -509,6 +577,11 @@ class Application:
         # Render current screen
         if self.current_screen:
             self.current_screen.render(surface)
+            self.current_screen.render_pointer_overlay(surface)
+
+        # Pressed feedback (1 px outline, pre-allocated rect)
+        if self.pointer.feedback_visible:
+            pygame.draw.rect(surface, COLORS["active"], self.pointer.feedback_rect, 1)
         
         # Render debug overlay if enabled
         if self.config.show_fps:

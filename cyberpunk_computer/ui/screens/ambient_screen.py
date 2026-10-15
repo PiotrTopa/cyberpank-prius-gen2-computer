@@ -407,3 +407,19 @@ class AmbientScreen(Screen):
                 return True
         
         return False
+
+    # ─── Pointer / touch ──────────────────────────────────────────────
+
+    def setup_pointer(self) -> None:
+        """Rows: tap selects + activates (encoder semantics), see
+        pointer_helpers.MenuListZone. Footer: "< BACK" chip."""
+        from .pointer_helpers import add_menu_list
+        add_menu_list(
+            self,
+            x=10, width=self.width - 20,
+            # MANUAL mode shows the colour preview on the right (rows end at 380)
+            width_fn=lambda: (self.width - 100 - 10) if self._mode == "MANUAL" else self.width - 30,
+            first_y=40, stride=28, row_h=26,
+            bottom=self.height - 22, count=lambda: len(self._menu_items),
+        )
+        self.add_back_chip()

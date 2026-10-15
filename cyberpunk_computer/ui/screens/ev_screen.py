@@ -469,3 +469,17 @@ class EVScreen(Screen):
             return COLORS.get("warm_bright", COLORS["active"])
         else:
             return COLORS.get("alert_bright", (255, 60, 60))
+
+    # ─── Pointer / touch ──────────────────────────────────────────────
+
+    def setup_pointer(self) -> None:
+        """Whole screen follows its own hint "[PRESS] BACK  [HOLD] BATT":
+        tap = PRESS_LIGHT (back), long press = PRESS_STRONG (battery)."""
+        from ..pointer import PointerZone
+        self.add_pointer_zone(PointerZone(
+            (0, 0, self.width, self.height),
+            on_click=lambda x, y: self.inject_input(IE.PRESS_LIGHT),
+            on_long_press=lambda x, y: self.handle_input(IE.PRESS_STRONG),
+            feedback=lambda x, y: None,
+            name="ev-press",
+        ))

@@ -218,7 +218,10 @@ class DTCScreen(Screen):
             return
         if self.app and hasattr(self.app, '_virtual_twin') and self.app._virtual_twin:
             vt = self.app._virtual_twin
-            vt.ingress.start_dtc_scan(output_port=vt.output_port, mode=0x03)
+            start = getattr(vt.ingress, "start_dtc_scan", None)
+            if start is None:  # remote frontend: no local ingress (yet)
+                return
+            start(output_port=vt.output_port, mode=0x03)
 
     def _trigger_clear(self) -> None:
         """Send Mode 04 (Clear DTCs) to all ECUs via the virtual twin."""
@@ -226,7 +229,10 @@ class DTCScreen(Screen):
             return
         if self.app and hasattr(self.app, '_virtual_twin') and self.app._virtual_twin:
             vt = self.app._virtual_twin
-            vt.ingress.clear_dtcs(output_port=vt.output_port)
+            clear = getattr(vt.ingress, "clear_dtcs", None)
+            if clear is None:  # remote frontend: no local ingress (yet)
+                return
+            clear(output_port=vt.output_port)
             self._clear_confirm = False
 
     def handle_input(self, event) -> bool:
@@ -493,3 +499,36 @@ class DTCScreen(Screen):
 
             s = font.render(label, True, text_color)
             surface.blit(s, (bx + (bw - s.get_width()) // 2, by + (bh - s.get_height()) // 2))
+
+    # ─── Pointer / touch ──────────────────────────────────────────────
+
+    def setup_pointer(self) -> None:
+        """Footer buttons tappable (focus + PRESS_LIGHT, as the encoder).
+
+        CLEAR confirmation bar: tap = cancel (PRESS_LIGHT), long press =
+        confirm (PRESS_STRONG) - the same strong press the encoder needs."""
+        from ..pointer import PointerZone
+        bar_h = 22
+        bar_y = self.height - bar_h
+        btn_w = 80
+        total = btn_w * self._BTN_COUNT + 16 * (self._BTN_COUNT - 1)
+        start_x = (self.width - total) // 2
+
+        def tap_button(i):
+            def on_click(x, y):
+                self._focused_btn = i
+                self.handle_input(IE.PRESS_LIGHT)
+            return on_click
+
+        for i, label in enumerate(self._BTN_LABELS):
+            bx = start_x + i * (btn_w + 16)
+            self.add_pointer_zone(PointerZone(
+                (bx - 6, bar_y, btn_w + 12, bar_h), on_click=tap_button(i),
+                feedback=lambda x, y, bx=bx: (bx, bar_y + 3, btn_w, bar_h - 6),
+                enabled=lambda: not self._clear_confirm, name=label.lower()))
+
+        self.add_pointer_zone(PointerZone(
+            (0, bar_y, self.width, bar_h),
+            on_click=lambda x, y: self.handle_input(IE.PRESS_LIGHT),
+            on_long_press=lambda x, y: bool(self.handle_input(IE.PRESS_STRONG)),
+            enabled=lambda: self._clear_confirm, name="clear-confirm"))

@@ -18,6 +18,7 @@ from ..widgets.frame import Frame
 from ..widgets.controls import VolumeBar, ToggleSwitch, ValueDisplay, ModeIcon, StatusIcon
 from ..widgets.vehicle_status import ConnectionIndicator
 from ..widgets.pagination import PaginationControl
+from ..pointer import TAP_SLOP
 # VFD widget removed - now runs as separate satellite app (device 110)
 # See vfd_satellite/ and docs/VFD_SATELLITE_PROTOCOL.md
 from ..colors import COLORS
@@ -123,6 +124,9 @@ class MainScreen(Screen):
         
         # Set focus order: Audio -> Climate -> Ambient -> Lights -> System -> Vehicle
         self._set_focus_order()
+
+        # Pointer / touch wiring
+        self._setup_pointer()
         
         # Start with focus hidden (visually)
         self.focus_manager.hide_focus()
@@ -533,10 +537,12 @@ class MainScreen(Screen):
 
     def _on_store_update(self, state) -> None:
         """Handle state update from Store."""
-        # Audio
-        self._volume = state.audio.volume
-        self._volume_bar.set_value(state.audio.volume)
-        self._volume_label.set_value(str(state.audio.volume))
+        # Audio (a pointer drag owns the bar for a moment; the store echo of
+        # the older value must not make it jump back)
+        if time.time() - self._volume_touch_t > self.VOLUME_ECHO_HOLD_S:
+            self._volume = state.audio.volume
+            self._volume_bar.set_value(state.audio.volume)
+            self._volume_label.set_value(str(state.audio.volume))
 
         # Climate
         self._temp_target = f"{state.climate.target_temp:.0f}"
@@ -618,6 +624,10 @@ class MainScreen(Screen):
     def update(self, dt: float) -> None:
         """Update screen and check for focus timeout."""
         super().update(dt)
+
+        # Flush a throttled pointer volume change
+        if self._volume_pending and time.time() - self._volume_sent_t >= self.VOLUME_DISPATCH_MIN_S:
+            self._dispatch_volume()
         
         # Get timeout from config
         focus_timeout = 15.0  # Default fallback
@@ -694,6 +704,10 @@ class MainScreen(Screen):
         # Render AVC input visualization (dev/debug aid only)
         if self.app and getattr(self.app, "config", None) and self.app.config.dev_mode:
             self._render_avc_input_visualization(surface, center_x, center_width)
+
+        # Touch adjust hints on the frame being edited (pointer-entered only)
+        if self._edit_by_pointer and (self._editing_volume or self._editing_target_temp):
+            self._render_touch_adjust_hints(surface)
     
     def _render_bottom_bar(
         self, surface: pygame.Surface, center_x: int, center_width: int
@@ -904,8 +918,7 @@ class MainScreen(Screen):
         headlight status, SOC bars, and EV mode.
         """
         if not self._store:
-            self._render_default_page(surface, center_x, center_width)
-            return
+            return  # no data source attached (headless tests): blank page
         
         dyn = self._store.state.dynamics
         font_label = get_font(8)
@@ -1258,6 +1271,7 @@ class MainScreen(Screen):
     
     def _enter_volume_edit(self) -> None:
         """Enter volume editing mode."""
+        self._edit_by_pointer = self._pointer_ctx
         self._editing_volume = True
         self._editing_start_time = time.time()
         self._audio_frame.active = True
@@ -1269,6 +1283,7 @@ class MainScreen(Screen):
     
     def _enter_target_temp_edit(self) -> None:
         """Enter target temperature editing mode."""
+        self._edit_by_pointer = self._pointer_ctx
         self._editing_target_temp = True
         self._editing_start_time = time.time()
         self._climate_frame.active = True
@@ -1522,3 +1537,181 @@ class MainScreen(Screen):
             store=self._store
         )
         self.app.push_screen(battery_screen)
+
+    # ------------------------------------------------------------------
+    # Pointer / touch
+    #
+    # Tap a panel   = focus + PRESS_LIGHT (quick edit / open menu), exactly
+    #                 like the encoder; long press = PRESS_STRONG (detail).
+    # While a panel is in quick-edit: tap its title bar = done, tap the left
+    # / right half of its body = ROTATE_LEFT / RIGHT, horizontal drag = one
+    # rotate step per 16 px. Tapping another panel ends the edit first.
+    # Volume bar: tap / drag sets the volume directly.
+    # Centre area: horizontal swipe changes page; pagination dots tappable.
+    # ------------------------------------------------------------------
+
+    VOLUME_DISPATCH_MIN_S = 0.15   # throttle backend commands during a drag
+    VOLUME_ECHO_HOLD_S = 1.5       # ignore stale store echoes after a drag
+    EDIT_DRAG_STEP_PX = 16
+
+    _hint_left = None
+    _hint_right = None
+
+    def _setup_pointer(self) -> None:
+        self._pointer_ctx = False
+        self._edit_by_pointer = False
+        self._volume_pending = False
+        self._volume_sent_t = 0.0
+        self._volume_touch_t = 0.0
+        self._drag_steps = 0
+
+        self._volume_bar.set_on_change(self._on_volume_pointer, step=1)
+
+        for frame in (self._audio_frame, self._climate_frame,
+                      self._ambient_frame, self._lights_frame):
+            frame.on_drag = self._make_edit_drag(frame)
+
+        center_x = self.SIDE_PANEL_WIDTH
+        center_w = self.width - 2 * self.SIDE_PANEL_WIDTH
+        self.add_swipe_zone(
+            (center_x, 0, center_w, self.height - self.BOTTOM_BAR_HEIGHT),
+            on_next=lambda: self.show_page(self._current_page + 1),
+            on_prev=lambda: self.show_page(self._current_page - 1),
+            name="page-swipe",
+        )
+
+    # -- navigation API (also used by MFD hardware buttons) -----------------
+
+    @property
+    def current_page(self) -> int:
+        return self._current_page
+
+    def show_page(self, page: int) -> None:
+        page = max(0, min(page, self._num_pages - 1))
+        self._pagination_control.active_edit = False
+        self._pagination_control.set_page(page)
+        self._current_page = page
+
+    def reset_to_home(self) -> None:
+        """Back to a neutral home state (MFD MENU button)."""
+        self._exit_all_edit_modes()
+        self.show_page(0)
+        self.focus_manager.hide_focus()
+        self.focus_manager.focus_index = 0
+
+    def open_engine_menu(self) -> None:
+        self._on_engine_menu_select()
+
+    def open_dtc(self) -> None:
+        if not self.app:
+            return
+        from .dtc_screen import DTCScreen
+        self.app.push_screen(DTCScreen((self.width, self.height), self.app, store=self._store))
+
+    # -- edit-mode helpers ----------------------------------------------------
+
+    def _editing_frame(self):
+        if self._editing_volume:
+            return self._audio_frame
+        if self._editing_target_temp:
+            return self._climate_frame
+        if self._editing_lights:
+            return self._lights_frame
+        if self._editing_ambient:
+            return self._ambient_frame
+        return None
+
+    def _owner_frame(self, target):
+        """The panel a pointer target belongs to (itself or its parent)."""
+        if target in (self._audio_frame, self._climate_frame,
+                      self._ambient_frame, self._lights_frame,
+                      self._vehicle_frame, self._battery_frame):
+            return target
+        return getattr(target, "parent", None)
+
+    def _make_edit_drag(self, frame):
+        def on_drag(x: int, y: int, dx: int, dy: int) -> bool:
+            if self._editing_frame() is not frame:
+                return False
+            if abs(dx) <= TAP_SLOP and abs(dy) <= TAP_SLOP:
+                return False
+            from ...input.manager import InputEvent as IE
+            steps = int(dx / self.EDIT_DRAG_STEP_PX)
+            while self._drag_steps < steps:
+                self._drag_steps += 1
+                self.handle_input(IE.ROTATE_RIGHT)
+            while self._drag_steps > steps:
+                self._drag_steps -= 1
+                self.handle_input(IE.ROTATE_LEFT)
+            return True
+        return on_drag
+
+    def pointer_target_at(self, x: int, y: int):
+        self._drag_steps = 0  # new gesture
+        target = super().pointer_target_at(x, y)
+        frame = self._editing_frame()
+        if (frame is not None and target is not None
+                and self._owner_frame(target) is not frame):
+            # Touching any other control ends the quick-edit first
+            self._exit_all_edit_modes()
+        return target
+
+    def pointer_click(self, target, x: int, y: int) -> bool:
+        from ...input.manager import InputEvent as IE
+        frame = self._editing_frame()
+        if frame is not None:
+            if self._owner_frame(target) is frame:
+                # Tap inside the panel being edited
+                if y < frame.rect.y + frame.TITLE_HEIGHT:
+                    return self.handle_input(IE.PRESS_LIGHT)   # done
+                if x < frame.rect.centerx:
+                    return self.handle_input(IE.ROTATE_LEFT)
+                return self.handle_input(IE.ROTATE_RIGHT)
+            # Somewhere else: finish the edit, then act normally
+            self._exit_all_edit_modes()
+        self._pointer_ctx = True
+        try:
+            return super().pointer_click(target, x, y)
+        finally:
+            self._pointer_ctx = False
+
+    def pointer_long_press(self, target, x: int, y: int) -> bool:
+        if self._editing_frame() is not None:
+            self._exit_all_edit_modes()
+        self._pointer_ctx = True
+        try:
+            return super().pointer_long_press(target, x, y)
+        finally:
+            self._pointer_ctx = False
+
+    # -- volume slider ------------------------------------------------------------
+
+    def _on_volume_pointer(self, value: int) -> None:
+        self._reset_activity()
+        self._volume = value
+        self._volume_label.set_value(str(value))
+        self._volume_touch_t = time.time()
+        self._volume_pending = True
+        if time.time() - self._volume_sent_t >= self.VOLUME_DISPATCH_MIN_S:
+            self._dispatch_volume()
+
+    def _dispatch_volume(self) -> None:
+        self._volume_pending = False
+        self._volume_sent_t = time.time()
+        if self._store:
+            self._store.dispatch(SetVolumeAction(self._volume, source=ActionSource.UI))
+
+    def _render_touch_adjust_hints(self, surface: pygame.Surface) -> None:
+        frame = self._editing_frame()
+        if frame is None:
+            return
+        if MainScreen._hint_left is None:
+            font = get_mono_font(14)
+            MainScreen._hint_left = font.render("-", False, COLORS["active"])
+            MainScreen._hint_right = font.render("+", False, COLORS["active"])
+        r = frame.rect
+        # Bottom corners: clear of the readouts and the mode icons
+        y = r.bottom - MainScreen._hint_left.get_height() - 1
+        surface.blit(MainScreen._hint_left, (r.x + 2, y))
+        surface.blit(MainScreen._hint_right,
+                     (r.right - MainScreen._hint_right.get_width() - 2, y))

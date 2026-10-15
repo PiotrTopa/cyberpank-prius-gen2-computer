@@ -401,3 +401,18 @@ class ClimateScreen(Screen):
         hint_surf = font.render(hint, True, COLORS["text_tertiary"])
         hint_x = (self.width - hint_surf.get_width()) // 2
         surface.blit(hint_surf, (hint_x, bar_y + (bar_h - hint_surf.get_height()) // 2))
+
+    # ─── Pointer / touch ──────────────────────────────────────────────
+
+    def setup_pointer(self) -> None:
+        """Rows: tap selects + activates (encoder semantics), see
+        pointer_helpers.MenuListZone. Footer: "< BACK" chip."""
+        from .pointer_helpers import add_menu_list
+        add_menu_list(
+            self,
+            x=self.SIDE_MARGIN, width=self.width - self.SIDE_MARGIN * 2,
+            first_y=self.HEADER_HEIGHT + self.ITEM_PADDING + 4,
+            stride=self.ITEM_HEIGHT + self.ITEM_PADDING, row_h=self.ITEM_HEIGHT,
+            bottom=self.height - 22, count=lambda: len(self.items),
+        )
+        self.add_back_chip()
