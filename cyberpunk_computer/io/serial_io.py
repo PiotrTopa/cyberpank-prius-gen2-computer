@@ -91,6 +91,27 @@ class SerialPort(BidirectionalPort):
         
         # Reconnection state
         self._last_reconnect_attempt = 0.0
+
+        # Hooks (run on the reader thread): every parsed line, and every
+        # (re)connect. Used by the AVC-LAN nav emulator, which must answer the
+        # display within milliseconds instead of waiting for the engine tick.
+        self._rx_hooks: list = []
+        self._connect_hooks: list = []
+
+    def add_rx_hook(self, fn) -> None:
+        """``fn(obj: dict)`` for every JSON line received (reader thread)."""
+        self._rx_hooks.append(fn)
+
+    def add_connect_hook(self, fn) -> None:
+        """``fn()`` after the port is opened or reopened (reader thread)."""
+        self._connect_hooks.append(fn)
+
+    def _run_connect_hooks(self) -> None:
+        for fn in list(self._connect_hooks):
+            try:
+                fn()
+            except Exception:
+                logger.exception("Serial connect hook failed")
     
     @property
     def stats(self) -> dict:
@@ -135,6 +156,9 @@ class SerialPort(BidirectionalPort):
             self._writer_thread.start()
             
             logger.info(f"Serial port opened: {self.config.port}")
+            if self._connect_hooks:
+                threading.Thread(target=self._run_connect_hooks, daemon=True,
+                                 name="SerialConnectHooks").start()
             return True
             
         except Exception as e:
@@ -223,6 +247,11 @@ class SerialPort(BidirectionalPort):
                         continue
                     
                     data = json.loads(text)
+                    for hook in self._rx_hooks:
+                        try:
+                            hook(data)
+                        except Exception:
+                            logger.exception("Serial rx hook failed")
                     msg = RawMessage.from_gateway_json(data)
                     self._rx_queue.put(msg)
                     self._stats["rx_messages"] += 1
@@ -328,6 +357,7 @@ class SerialPort(BidirectionalPort):
             self._connected = True
             self._stats["reconnects"] += 1
             logger.info(f"Serial port reconnected successfully (attempt #{self._stats['reconnects']})")
+            self._run_connect_hooks()
             return True
             
         except Exception as e:

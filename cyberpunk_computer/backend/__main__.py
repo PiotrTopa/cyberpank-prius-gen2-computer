@@ -117,6 +117,8 @@ def _build_config(args: argparse.Namespace) -> BackendConfig:
         replay_file=args.replay,
         replay_speed=args.replay_speed,
         replay_loop=args.replay_loop,
+        nav_emulation=not args.no_nav_emu,
+        nav_lang=args.nav_lang,
         recording=_build_recording(args),
         powerbox_enabled=not args.no_powerbox,
         power_mode_flag=args.power_mode_flag,
@@ -193,7 +195,9 @@ def main() -> None:
     replay = parser.add_argument_group("replay")
     replay.add_argument(
         "--replay", default=None,
-        help="replay a recorded NDJSON log instead of opening the gateway serial port",
+        help="replay a recorded NDJSON log instead of opening the gateway serial port "
+             "(backend/TripRecorder logs or gateway-v3 captures from avc_capture.py / "
+             "nav_emu.py: obj/raw + ht per line, paced by ht)",
     )
     replay.add_argument(
         "--replay-speed", type=float, default=1.0,
@@ -201,6 +205,17 @@ def main() -> None:
     )
     replay.add_argument(
         "--replay-loop", action="store_true", help="loop the replay file",
+    )
+
+    # AVC-LAN nav ECU emulation (comm.avc.NavEmulator)
+    avc = parser.add_argument_group("AVC-LAN")
+    avc.add_argument(
+        "--no-nav-emu", action="store_true",
+        help="do not emulate the nav ECU (178) on the AVC-LAN (e.g. real nav connected)",
+    )
+    avc.add_argument(
+        "--nav-lang", default="02",
+        help="display UI language the emulated nav sets (B7 LL): 02 English, 06 Dutch",
     )
 
     # Trip recording (rotating per-trip NDJSON logs)

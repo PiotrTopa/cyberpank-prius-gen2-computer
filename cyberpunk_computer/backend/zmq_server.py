@@ -76,6 +76,11 @@ class ZmqServer:
 
     # ── producers (engine thread) ────────────────────────────────────────────
 
+    def state_due(self) -> bool:
+        """True when a state frame would be accepted now (lets the caller skip
+        serializing the whole AppState on every dispatch)."""
+        return time.time() - self._last_state_ts >= self.state_min_interval
+
     def enqueue_state(self, envelope: dict):
         """Queue a state envelope, latest-only + rate-limited."""
         now = time.time()
@@ -130,7 +135,11 @@ class ZmqServer:
                     break
                 pub_sock.send_string(json.dumps(envelope))
                 self.stats["event_pub"] += 1
-                logger.info("ZMQ event published: %s", envelope.get("name"))
+                if envelope.get("name") in ("touch", "button"):
+                    logger.debug("ZMQ event published: %s %s", envelope.get("name"),
+                                 envelope.get("data"))
+                else:
+                    logger.info("ZMQ event published: %s", envelope.get("name"))
             try:
                 envelope = self._state_box.get_nowait()
                 pub_sock.send_string(json.dumps(envelope))

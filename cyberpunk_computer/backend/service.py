@@ -128,6 +128,13 @@ class BackendConfig:
     replay_speed: float = 1.0   # 1.0 = realtime, 0 = as fast as possible
     replay_loop: bool = False
 
+    # ── AVC-LAN nav emulation (comm.avc.NavEmulator, port of nav_emu.py) ─────
+    # Stand in for the removed nav ECU (178) so the display keeps its nav
+    # screen, sends touch/buttons to us, and the climate dialogue works. Live
+    # gateway only (never in replay).
+    nav_emulation: bool = True
+    nav_lang: str = "02"        # B7 LL: 02 English (2026-10-14), 06 Dutch (run1)
+
     # ── Trip recording ───────────────────────────────────────────────────────
     # Record live (or replayed) traffic to rotating per-trip NDJSON files.
     recording: RecordingConfig = field(default_factory=RecordingConfig)
@@ -388,6 +395,12 @@ class BackendService:
         self.port_power = None
         self._pp_enforce_last: float = 0.0
 
+        # AVC-LAN nav emulator (live gateway only) + status mirror cadence.
+        self.nav_emulator = None
+        self._nav_scheduler = None
+        self._avc_tick_last: float = 0.0
+        self._avc_status_last: Optional[dict] = None
+
     # ── composition ────────────────────────────────────────────────────────
 
     def build(self) -> None:
@@ -456,6 +469,11 @@ class BackendService:
             # MultiInputPort) so the hotplug monitor can retarget it.
             if isinstance(twin.input_port, SerialPort):
                 self._gateway_serial = twin.input_port
+
+        # AVC-LAN nav emulation on the gateway serial port (reader-thread hook
+        # so replies leave within milliseconds of the display's request).
+        if self._gateway_serial is not None and cfg.nav_emulation:
+            self._wire_nav_emulator(self._gateway_serial)
 
         # Optional powerbox seam: merge a second serial device into the ingress,
         # offset into the reserved DEVICE_POWERBOX_BASE id range. Not used in
@@ -537,9 +555,12 @@ class BackendService:
         )
 
         # State: subscribe the ZMQ publisher to store updates (the server
-        # rate-limits internally). Events: every bridge.push_event envelope is
-        # mirrored onto the ZMQ PUB channel via the event sink.
+        # rate-limits internally; serialize only when a frame is due — AVC
+        # touch/energy updates dispatch many times per second). Events: every
+        # bridge.push_event envelope is mirrored onto the ZMQ PUB channel.
         def _zmq_on_state(state):
+            if not zmq_srv.state_due():
+                return
             from ..api.serialization import serialize_state
             zmq_srv.enqueue_state(
                 {"type": "state", "ts": time.time(), "state": serialize_state(state)}
@@ -547,6 +568,10 @@ class BackendService:
 
         self._unsubscribe_zmq = twin.store.subscribe(StateSlice.ALL, _zmq_on_state)
         bridge.add_event_sink(zmq_srv.enqueue_event)
+
+        # AVC-LAN touch + nav/info button events ("touch", "button") go out on
+        # the same event channel (contract in io/avc_ingest.py).
+        twin.ingress.avc.set_event_sink(bridge.push_event)
 
         # Human-interface events (frontend touch/keys, satellite controls):
         # re-broadcast every InputEventAction as an "input" event to all
@@ -571,6 +596,44 @@ class BackendService:
         self.bridge = bridge
         self.api = api
         self.zmq = zmq_srv
+
+    def _wire_nav_emulator(self, serial_port: SerialPort) -> None:
+        """Bind a NavEmulator to the gateway serial port."""
+        from ..comm.avc import NavEmulator, ThreadScheduler
+
+        def _send(device_id: int, payload: dict) -> bool:
+            return serial_port.send(OutgoingCommand(
+                device_id=device_id, command_type="avc_nav", payload=payload,
+                include_cmd=False))
+
+        self._nav_scheduler = ThreadScheduler(name="avc-nav")
+        nav = NavEmulator(_send, self._nav_scheduler, lang=self.config.nav_lang)
+        serial_port.add_rx_hook(nav.on_gateway_line)
+        serial_port.add_connect_hook(nav.configure)
+        self.nav_emulator = nav
+        logger.info("AVC nav emulation enabled (178, lang %s)", self.config.nav_lang)
+
+    def _avc_tick(self) -> None:
+        """Mirror nav-emulator / climate-remote status into AvcState (1 Hz)."""
+        now = time.time()
+        if now - self._avc_tick_last < 1.0 or self.twin is None:
+            return
+        self._avc_tick_last = now
+        fields: dict = {}
+        nav = self.nav_emulator
+        if nav is not None:
+            st = nav.status()
+            fields.update(
+                nav_emulation="configured" if st["configured"] else "off",
+                nav_registered=bool(st["registered"]),
+            )
+        remote = getattr(self.twin, "climate_remote", None)
+        if remote is not None:
+            fields["climate_queue"] = remote.queued
+        if fields and fields != self._avc_status_last:
+            self._avc_status_last = fields
+            from ..state.actions import SetAvcStateAction
+            self.twin.store.dispatch(SetAvcStateAction(**fields))
 
     def _wire_powerbox(self, twin: VirtualTwin) -> None:
         """Register powerbox ingress parsers and power-management rules.
@@ -1018,6 +1081,7 @@ class BackendService:
                     self._chassis_fan_tick()
                     self._vfd_clock_tick()
                     self._satellite_tick()
+                    self._avc_tick()
                     if self.recorder is not None:
                         self.recorder.tick()
                 except Exception:
@@ -1665,6 +1729,17 @@ class BackendService:
                 self._unsubscribe_powerbox()
             except Exception:
                 pass
+        if self.nav_emulator is not None:
+            # Like nav_emu.py at exit: clear the 178 ACK + auto-reply slots so
+            # the gateway does not impersonate a nav nobody answers for.
+            try:
+                self.nav_emulator.enabled = False
+                self.nav_emulator.deconfigure()
+                time.sleep(0.1)   # let the serial writer flush
+            except Exception:
+                logger.exception("Error deconfiguring nav emulator")
+        if self._nav_scheduler is not None:
+            self._nav_scheduler.stop()
         if self.twin is not None:
             try:
                 self.twin.stop()
