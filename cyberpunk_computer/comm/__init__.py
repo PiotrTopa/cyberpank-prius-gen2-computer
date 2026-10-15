@@ -7,7 +7,12 @@ Also provides CAN bus message decoding for vehicle data.
 
 Supports Gateway Protocol v2.8.0 with solicited CAN mode.
 
-Reference: Flerchinger, J.J. "AN IN-DEPTH LOOK AT THE TOYOTA AUDIO & VIDEO BUS (AVC-LAN)" 2006
+AVC-LAN: the backend uses :mod:`cyberpunk_computer.comm.avc` (gateway fw 3.x,
+verified map in cyberpunk-prius-gateway/captures/2026-10-07/AVC_MAP.md).
+``avc_decoder`` / ``avc_state`` are LEGACY decoders fitted to gateway fw 2.x
+output (bit-misaligned re-readings of the bus, Flerchinger-era guesses); they
+remain only because the pygame UI's debug screens still import them. Do not
+use them for new code.
 """
 
 from .protocol import (
@@ -45,16 +50,6 @@ from .avc_state import (
     ClimateState,
     VehicleState,
     DisplayState,
-)
-from .avc_commands import (
-    AVCLANCommand,
-    AVCCommandGenerator,
-    CommandQueue,
-    AudioParamCode,
-    # Value range constants
-    BALANCE_MIN, BALANCE_MAX, BALANCE_CENTER,
-    FADE_MIN, FADE_MAX, FADE_CENTER,
-    TONE_MIN, TONE_MAX, TONE_CENTER,
 )
 from .can_decoder import (
     CANDecoder,
@@ -118,15 +113,6 @@ __all__ = [
     "ClimateState",
     "VehicleState",
     "DisplayState",
-    # AVC Commands
-    "AVCLANCommand",
-    "AVCCommandGenerator",
-    "CommandQueue",
-    "AudioParamCode",
-    # Value range constants
-    "BALANCE_MIN", "BALANCE_MAX", "BALANCE_CENTER",
-    "FADE_MIN", "FADE_MAX", "FADE_CENTER",
-    "TONE_MIN", "TONE_MAX", "TONE_CENTER",
     # CAN Decoder
     "CANDecoder",
     "CANMessage",

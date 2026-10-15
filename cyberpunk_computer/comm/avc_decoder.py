@@ -1,4 +1,12 @@
 """
+LEGACY (gateway fw 2.x) — superseded by cyberpunk_computer.comm.avc.
+
+The addresses/frames below were fitted to v2.x gateway output, which is a
+bit-misaligned re-reading of the real bus (AVC_MAP.md "Cross-check vs host
+repo"). Kept only for the pygame UI debug screens that still import it; the
+backend does not use it.
+
+
 AVC-LAN Protocol Decoder for Toyota Prius Gen 2.
 
 This module provides decoding and interpretation of AVC-LAN messages
