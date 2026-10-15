@@ -307,6 +307,34 @@ def test_engine_menu_tap_opens_entry():
     assert em._selected_index == 1
 
 
+def test_engine_menu_avc_status_screen():
+    """AVC-LAN STATUS entry opens the read-only status page (AppState.avc);
+    it renders from a cache and the BACK chip returns to the menu."""
+    from dataclasses import replace
+    from cyberpunk_computer.state.store import Store
+    from cyberpunk_computer.ui.screens import EngineMenuScreen, AVCStatusScreen
+    store = Store()
+    st = store.state
+    store._state = replace(st, avc=replace(st.avc, screen="5F", screen_name="energy"),
+                           climate=replace(st.climate, outside_temp=None))
+    app = FakeApp(main_screen())
+    em = EngineMenuScreen(SIZE, app, store=store)
+    app.push_screen(em)
+    idx = next(i for i, it in enumerate(em._items) if it.action_key == "avc")
+    pc, clock = make(lambda: app.current_screen)
+    y = em.HEADER_HEIGHT + 8 + idx * (em.ITEM_HEIGHT + 3) + 12
+    assert tap(pc, clock, 200, y) == "click"
+    scr = app.current_screen
+    assert isinstance(scr, AVCStatusScreen)
+    surf = pygame.Surface(SIZE)
+    scr.render(surf)
+    first = scr._ref_avc
+    scr.render(surf)                   # unchanged state: cached canvas reused
+    assert scr._ref_avc is first is store.state.avc
+    tap(pc, clock, 20, 232)            # BACK chip
+    assert app.current_screen is em
+
+
 def test_data_sources_tap_toggles():
     from cyberpunk_computer.ui.screens import DataSourcesScreen
     app = FakeApp(main_screen())

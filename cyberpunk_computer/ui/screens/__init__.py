@@ -16,7 +16,7 @@ from .engine_detail_screen import EngineDetailScreen
 from .ev_screen import EVScreen
 from .battery_screen import BatteryScreen
 from .dtc_screen import DTCScreen
-from .avc_monitor_screen import AVCMonitorScreen
+from .avc_status_screen import AVCStatusScreen
 from .solicited_monitor_screen import SolicitedMonitorScreen
 from .data_sources_screen import DataSourcesScreen
 
@@ -33,7 +33,7 @@ __all__ = [
     "EVScreen",
     "BatteryScreen",
     "DTCScreen",
-    "AVCMonitorScreen",
+    "AVCStatusScreen",
     "SolicitedMonitorScreen",
     "DataSourcesScreen",
 ]

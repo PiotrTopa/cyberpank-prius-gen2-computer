@@ -5,7 +5,7 @@ Settings/diagnostics hub accessed via light press on ENGINE frame.
 Provides navigation to:
 - Chart Settings (time base for graphs)
 - Error Codes / DTC diagnostics
-- AVC-LAN bus monitor
+- AVC-LAN status (decoded state, read-only)
 
 This is a settings/menu screen — auto-dismisses after inactivity timeout.
 """
@@ -62,7 +62,7 @@ class EngineMenuScreen(Screen):
             _MenuEntry("EV / HYBRID", "Hybrid temps, motor RPMs, block dV", "ev"),
             _MenuEntry("ERROR CODES", "OBD-II diagnostic trouble codes", "dtc"),
             _MenuEntry("SOLICITED MONITOR", "Live solicited CAN PID values", "solicited"),
-            _MenuEntry("AVC-LAN MONITOR", "Live AVC-LAN bus sniffer", "avc"),
+            _MenuEntry("AVC-LAN STATUS", "Display, nav emulation, AVC signals", "avc"),
         ]
 
         self._selected_index = 0
@@ -143,8 +143,8 @@ class EngineMenuScreen(Screen):
             self.app.push_screen(screen)
 
         elif item.action_key == "avc":
-            from .avc_monitor_screen import AVCMonitorScreen
-            screen = AVCMonitorScreen(
+            from .avc_status_screen import AVCStatusScreen
+            screen = AVCStatusScreen(
                 (self.width, self.height),
                 self.app,
                 store=self._store,
