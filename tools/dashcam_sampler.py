@@ -41,13 +41,21 @@ def stats(path: str, crop: str = "") -> dict:
     cmd = ["ffprobe", "-v", "error", "-f", "lavfi", "-i", chain,
            "-show_entries", "frame_tags=lavfi.signalstats.YAVG,lavfi.signalstats.YMIN,"
            "lavfi.signalstats.YMAX,lavfi.signalstats.UAVG,lavfi.signalstats.VAVG",
-           "-of", "csv=p=0"]
+           "-of", "default=nw=1"]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
-    vals = r.stdout.strip().split(",")
-    if len(vals) < 5:
-        return {}
-    y_avg, y_min, y_max, u_avg, v_avg = (float(v) for v in vals[:5])
-    return {"y_avg": y_avg, "y_min": y_min, "y_max": y_max, "u_avg": u_avg, "v_avg": v_avg}
+    # lines look like: TAG:lavfi.signalstats.YAVG=71.123 — map by name, never by position
+    out = {}
+    names = {"YAVG": "y_avg", "YMIN": "y_min", "YMAX": "y_max", "UAVG": "u_avg", "VAVG": "v_avg"}
+    for line in r.stdout.splitlines():
+        if "lavfi.signalstats." in line and "=" in line:
+            key, val = line.strip().split("=", 1)
+            tag = key.rsplit(".", 1)[-1]
+            if tag in names:
+                try:
+                    out[names[tag]] = float(val)
+                except ValueError:
+                    pass
+    return out
 
 
 def main() -> int:
