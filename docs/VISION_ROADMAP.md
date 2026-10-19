@@ -14,7 +14,7 @@ of a rewrite.
 
 | Source | Today | Later |
 |---|---|---|
-| 70mai dashcam, RTSP 640×360 @ 30 fps over its hotspot (`docs/DASHCAM_70MAI.md`) | the only camera the computer can read; one client at a time | stays the "cheap" source for brightness/weather sampling at 0.2 fps |
+| 70mai dashcam, RTSP 640×360 @ 30 fps over its hotspot (`docs/DASHCAM_70MAI.md`) | the only camera the computer can read; one client at a time | stays the "cheap" source for the environment model at 1 fps (one long ffmpeg session) |
 | flowpilot Poco F1 (separate device, own camera) | not present | fully owned by flowpilot; the car computer may *receive* its outputs (lead car, lane lines, path) over the car network as an optional feed, never its camera |
 | car computer Poco F1 own camera | not used | optional second source if it can be mounted facing the road; otherwise the dashcam stays the only road view |
 | Head unit reverse/front analog cameras (`docs/HEADUNIT_INTEGRATION.md`) | hardware video plane, not capturable | n/a for vision |
@@ -31,6 +31,8 @@ cyberpunk_computer/vision/
                        later: a shared grabber feeding several consumers from one RTSP session;
                        optional FlowpilotFeed (network subscriber for flowpilot *outputs*, not frames)
     light_features.py  per-frame statistics via ffmpeg/ffprobe (sky band, road band, chroma, clip)
+    scene_features.py  superset for the environment model (bands, percentiles, shares, edges)
+    environment.py     EnvironmentModel: day/dusk_dawn/night/enclosed + weather hint (2026-10-19)
     sun.py             solar elevation from time + position
     auto_lights.py     AutoLightModel: hysteresis state machine -> LightDecision
     detectors/         (empty slot) one module per detector, same interface:
@@ -53,6 +55,11 @@ See `docs/DASHCAM_70MAI.md` for the data and the rule. Inputs: sun elevation (cl
 sky-band luma, sky chroma, clipped fraction; outputs `lights_recommended` with a reason. The
 actuation (AVC-LAN / CAN or the head unit) is a separate step and is not switched automatically
 until the thresholds have been confirmed on dusk, night and rain drives.
+
+Environment model (2026-10-19): `vision/scene_features.py` + `vision/environment.py`
+(decision tree + rules fitted on BDD100K val, DAWN and our first drive; pure-Python
+runtime, 1 fps, 10 s vote) feed `AutoLightModel`; results and limits in
+`docs/VISION_ENVIRONMENT_MODEL_2026-10-19.md`.
 
 ## 4. Road signs (later): what openpilot gives and what it does not
 

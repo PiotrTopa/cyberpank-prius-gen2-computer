@@ -422,10 +422,12 @@ class AvcState:
 class VisionState:
     """Dashcam vision: automatic-headlight recommendation (io/dashcam_ingest.py).
 
-    Published every ~5 s by ``DashcamLightIngest`` when ``BACKEND_DASHCAM_URL``
+    Published every ~1 s by ``DashcamLightIngest`` when ``BACKEND_DASHCAM_URL``
     is set (disabled otherwise: ``enabled`` stays False, everything None).
     ``lights_recommended`` is a recommendation only; nothing switches the
     lamps. Rules and thresholds: vision/auto_lights.py, docs/DASHCAM_70MAI.md.
+    ``environment`` / ``time_of_day`` / ``enclosed`` / ``weather`` come from
+    vision/environment.py (10 s window; docs/VISION_ENVIRONMENT_MODEL_2026-10-19.md).
     The ``speed_limit_*`` / ``road_name`` / ``position_ok`` fields come from
     the speed-limit service (docs/VISION_ROADMAP.md 4.1); no GPS feeds it yet.
     """
@@ -439,6 +441,12 @@ class VisionState:
     sky_clip: Optional[float] = None          # 30 s median, sky share with Y > 250
     sun_elevation: Optional[float] = None     # degrees (position: GPS or BACKEND_HOME_LATLON)
     updated_at: float = 0.0
+    # Environment model (vision/environment.py), None until a frame was classified.
+    environment: Optional[str] = None         # day | dusk_dawn | night | enclosed
+    time_of_day: Optional[str] = None         # day | dusk_dawn | night
+    enclosed: Optional[bool] = None           # garage / tunnel / covered car park
+    weather: Optional[str] = None             # clear | overcast | rainy | snowy; None = no confident call
+    environment_confidence: Optional[float] = None   # 0..1, display only
     # Speed limit (vision/fusion/service.py: OSM map prior + camera sightings).
     # Set by SpeedLimitService.update(position), which the future GPS ingest calls.
     speed_limit_kmh: Optional[int] = None

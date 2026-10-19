@@ -1,4 +1,4 @@
-"""Dashcam ingest: 70mai frames → auto-light model → ``state.vision``.
+"""Dashcam ingest: 70mai frames → environment + auto-light models → ``state.vision``.
 
 Optional and off by default. Enabled when ``BACKEND_DASHCAM_URL`` is set
 (e.g. ``rtsp://192.168.0.1/liveRTSP/av4``); empty or unset = disabled, and
@@ -6,12 +6,16 @@ then nothing is started and the state's ``vision`` section stays at its
 defaults (``enabled=False``).
 
 When enabled, one background thread (``dashcam-lights``) runs every
-``interval_s`` (5 s, ``BACKEND_DASHCAM_INTERVAL_S``):
+``interval_s`` (1 s, ``BACKEND_DASHCAM_INTERVAL_S``; user decision
+2026-10-19: the stream serves lights / environment at 1 fps):
 
-    DashcamRtspSource.grab() → light_features.extract() → sun elevation
-    → AutoLightModel.update()
+    DashcamRtspSource.grab() → scene_features.extract() → sun elevation
+    → EnvironmentModel.update() → AutoLightModel.update(environment=...)
 
-and stores the result. The engine thread (the only one that dispatches)
+and stores the result (lights fields + ``environment``, ``time_of_day``,
+``enclosed``, ``weather``, ``environment_confidence``). An extractor that
+returns plain :class:`LightFeatures` (tests, old callers) runs the lights
+model in its threshold mode and leaves the environment fields at None. The engine thread (the only one that dispatches)
 calls :meth:`DashcamLightIngest.drain_actions` on each tick and dispatches
 the returned :class:`SetVisionStateAction`. A missing ffmpeg, a sleeping
 camera or the hotspot being out of range only make the frame ``None``: the
@@ -31,17 +35,20 @@ import logging
 import os
 import threading
 import time
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple, Union
 
 from ..state.actions import Action, SetVisionStateAction
 from ..vision.auto_lights import AutoLightModel, LightThresholds
-from ..vision.frames import DashcamRtspSource, FrameSource
-from ..vision.light_features import LightFeatures, extract
+from ..vision.environment import Environment, EnvironmentModel
+from ..vision.frames import DashcamRtspSource, DashcamStreamSource, FrameSource
+from ..vision.light_features import LightFeatures
+from ..vision.scene_features import SceneFeatures, extract
 from ..vision.sun import solar_elevation
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_HOME_LATLON: Tuple[float, float] = (54.35, 18.65)   # Gdańsk
+DEFAULT_INTERVAL_S = 1.0
 
 LatLon = Tuple[float, float]
 PositionFn = Callable[[], Optional[LatLon]]
@@ -62,6 +69,15 @@ def parse_latlon(text: Optional[str], default: LatLon = DEFAULT_HOME_LATLON) -> 
     return lat, lon
 
 
+def make_source(url: str, kind: Optional[str] = None, interval_s: float = DEFAULT_INTERVAL_S):
+    """``stream`` (default): one long-running ffmpeg at 1/interval fps
+    (:class:`DashcamStreamSource`); ``grab``: one RTSP session per frame
+    (:class:`DashcamRtspSource`, too slow for 1 fps on the 70mai)."""
+    if (kind or "stream").strip().lower() == "grab":
+        return DashcamRtspSource(url)
+    return DashcamStreamSource(url, fps=1.0 / max(1.0, interval_s))
+
+
 def position_from_state(state) -> Optional[LatLon]:
     """Last GPS fix from the state, if the state has one (it does not yet)."""
     for section in ("gps", "location", "position"):
@@ -79,12 +95,14 @@ class DashcamLightIngest:
     """Source + model on a worker thread; actions drained on the engine thread."""
 
     def __init__(self, source: FrameSource, model: Optional[AutoLightModel] = None,
-                 interval_s: float = 5.0, position: Optional[PositionFn] = None,
+                 interval_s: float = DEFAULT_INTERVAL_S, position: Optional[PositionFn] = None,
                  default_latlon: LatLon = DEFAULT_HOME_LATLON,
-                 extractor: Callable[..., Optional[LightFeatures]] = extract,
-                 clock: Callable[[], float] = time.time) -> None:
+                 extractor: Callable[..., Union[SceneFeatures, LightFeatures, None]] = extract,
+                 clock: Callable[[], float] = time.time,
+                 environment: Optional[EnvironmentModel] = None) -> None:
         self.source = source
         self.model = model or AutoLightModel(LightThresholds())
+        self.environment = environment or EnvironmentModel()
         self.interval_s = interval_s
         self.position = position
         self.default_latlon = default_latlon
@@ -107,10 +125,11 @@ class DashcamLightIngest:
         if not url:
             return None
         try:
-            interval = float(env.get("BACKEND_DASHCAM_INTERVAL_S") or 5.0)
+            interval = float(env.get("BACKEND_DASHCAM_INTERVAL_S") or DEFAULT_INTERVAL_S)
         except ValueError:
-            interval = 5.0
-        return cls(DashcamRtspSource(url), interval_s=max(1.0, interval),
+            interval = DEFAULT_INTERVAL_S
+        return cls(make_source(url, env.get("BACKEND_DASHCAM_SOURCE"), interval),
+                   interval_s=max(1.0, interval),
                    position=position,
                    default_latlon=parse_latlon(env.get("BACKEND_HOME_LATLON")))
 
@@ -127,24 +146,32 @@ class DashcamLightIngest:
         return self.default_latlon
 
     def poll_once(self) -> dict:
-        """Grab, extract, decide; store and return the vision fields."""
+        """Grab, extract, classify, decide; store and return the vision fields."""
         self.polls += 1
         now = self._clock()
-        features: Optional[LightFeatures] = None
+        raw = None
         try:
             frame = self.source.grab()
             if frame is not None:
-                features = self._extract(frame.path, t=frame.t)
+                raw = self._extract(frame.path, t=frame.t)
         except Exception:
             logger.exception("dashcam: frame/feature step failed")
-            features = None
+            raw = None
+        scene = raw if isinstance(raw, SceneFeatures) else None
+        features: Optional[LightFeatures] = scene.light() if scene is not None else raw
         sun: Optional[float]
         try:
             lat, lon = self._latlon()
             sun = solar_elevation(now, lat, lon)
         except Exception:
             sun = None
-        d = self.model.update(features, sun, t=features.t if features is not None else now)
+        t = features.t if features is not None else now
+        env: Optional[Environment] = None
+        try:
+            env = self.environment.update(scene, sun, t=t)
+        except Exception:
+            logger.exception("dashcam: environment step failed")
+        d = self.model.update(features, sun, t=t, environment=env)
         f = d.features
         fields = dict(
             enabled=True, camera_ok=features is not None,
@@ -152,6 +179,11 @@ class DashcamLightIngest:
             sky_y=_r(f.get("sky_y")), sky_chroma=_r(f.get("sky_chroma")),
             sky_clip=_r(f.get("sky_clip"), 3), sun_elevation=_r(sun, 2),
             updated_at=now,
+            environment=env.label if env else None,
+            time_of_day=env.time_of_day if env else None,
+            enclosed=env.enclosed if env else None,
+            weather=env.weather if env else None,
+            environment_confidence=env.confidence if env else None,
         )
         if d.changed:
             logger.info("dashcam: lights %s (%s)", "ON" if d.lights else "off", d.reason)
@@ -197,6 +229,12 @@ class DashcamLightIngest:
         if self._thread is not None:
             self._thread.join(timeout)
             self._thread = None
+        stop_source = getattr(self.source, "stop", None)
+        if callable(stop_source):
+            try:
+                stop_source()
+            except Exception:
+                logger.exception("dashcam: source stop failed")
 
 
 def _r(v: Optional[float], nd: int = 1) -> Optional[float]:
