@@ -58,6 +58,13 @@ This application communicates with the vehicle through the **Gateway** using the
 
 See: [PROTOCOL.md](./docs/PROTOCOL.md) for full specification.
 
+### Car peripherals (facts measured on the car, for future integration work)
+
+- [HEADUNIT_INTEGRATION.md](./docs/HEADUNIT_INTEGRATION.md) — Android head unit (AC8227L): ADB/root access, MCU serial protocol, steering wheel key map, vendor control broadcasts, volume chain, design and plan (parked 2026-10-19).
+- [DASHCAM_70MAI.md](./docs/DASHCAM_70MAI.md) — 70mai dashcam over its hotspot: RTSP live stream, frame grabbing, scene brightness helper `tools/dashcam_brightness.py`.
+- [MFD_VIDEO_TIMINGS.md](./docs/MFD_VIDEO_TIMINGS.md) — Toyota MFD RGB input: DPI timings, VGA666 wiring, 74HC86 composite-sync combiner.
+- Per-day bench and car logs with the user's words: `cyberpunk-prius-gateway/captures/<date>/CAPTURES.md`.
+
 ### Quick Reference
 
 ```json
