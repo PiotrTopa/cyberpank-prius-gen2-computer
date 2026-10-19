@@ -157,11 +157,19 @@ extractor), and GPS: no ingest exists, so nothing publishes these fields yet.
   sighting that agrees raises confidence; one that disagrees overrides after two consistent frames
   if the sign is on our side of the road and we are not passing a junction; limits expire by
   distance or by the next sighting; end-of-limit signs and built-up-area signs reset to defaults.
-- **Resolution budget:** at 640×360 a 60 cm sign is readable from about 15–20 m; the Poco camera
-  at 1080p doubles that. Good enough for confirmation, not for reading signs across a dual
-  carriageway.
+- **Resolution budget (measured 2026-10-19, `docs/VISION_DETECTOR_EXPERIMENT_2026-10-19.md`):** at
+  640×360 a sign is 17–25 px only when nearly level with the car (about 5–8 m for a 60 cm disc);
+  shape/colour classes work at that size, digits of a speed-limit disc do not (3–4 px per digit).
+  So the dashcam stream confirms sign *type* close up; reading numbers needs a higher-resolution
+  road-facing camera (the computer's own phone camera at 1080p, or a dashcam with a higher-res
+  stream). The map prior therefore carries the number; the camera confirms the sign.
 - **Latency budget:** 5 fps detector, 3-frame track, so a confirmed sighting about 1 s after the
-  sign enters the readable zone.
+  sign enters the readable zone; the 10 s sampler misses most signs, so the shared grabber must
+  run at 2–5 fps for this phase.
+- **Measured on the laptop (same doc):** yolo11n at 416 input, ONNX Runtime 14–23 ms/frame on 4
+  cores, ncnn Vulkan 7–9 ms on the Quadro; TFLite int8 3.1 MB but loses small objects (traffic
+  lights 33→20), so prefer GPU fp16 on the phone. Phone estimate 10–25 fps at 416 (±2×, not
+  measured). COCO classes already give cars (157/174 frames) and traffic lights (30 frames).
 - **Compute budget on the Poco:** the whole Snapdragon 845 is ours (flowpilot runs elsewhere);
   a nano detector at 2–5 fps with the GPU delegate leaves room for the backend. Measure before
   promising.
