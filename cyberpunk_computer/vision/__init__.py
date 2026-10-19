@@ -6,6 +6,10 @@ OpenCV). Modules:
 * :mod:`.ffmpeg`          — the only place ffmpeg/ffprobe are invoked;
 * :mod:`.frames`          — frame sources (live RTSP dashcam, folder replay);
 * :mod:`.light_features`  — sky/road band luma, sky chroma, sky clipping;
+* :mod:`.scene_features`  — superset for the environment model (bands, percentiles,
+                            dark/clip shares, edge density), one ffprobe run;
+* :mod:`.environment`     — day / dusk-dawn / night / enclosed + weather hint
+                            (fitted trees embedded as data) + replay CLI;
 * :mod:`.sun`             — solar elevation (NOAA approximation);
 * :mod:`.auto_lights`     — the headlight state machine + offline replay CLI.
 
@@ -13,13 +17,13 @@ All of these are pure and thread-free; the backend thread lives in
 :mod:`cyberpunk_computer.io.dashcam_ingest`. See docs/DASHCAM_70MAI.md.
 """
 
-from .frames import DashcamRtspSource, DirectorySource, Frame, FrameSource
+from .frames import DashcamRtspSource, DashcamStreamSource, DirectorySource, Frame, FrameSource
 from .light_features import LightFeatures, extract, from_sample_row
 from .sun import solar_elevation
 
 __all__ = [
     "AutoLightModel", "LightDecision", "LightThresholds", "replay",
-    "DashcamRtspSource", "DirectorySource", "Frame", "FrameSource",
+    "DashcamRtspSource", "DashcamStreamSource", "DirectorySource", "Frame", "FrameSource",
     "LightFeatures", "extract", "from_sample_row", "solar_elevation",
 ]
 

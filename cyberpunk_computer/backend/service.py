@@ -319,9 +319,11 @@ class BackendConfig:
     # ── Dashcam vision (io.dashcam_ingest, docs/DASHCAM_70MAI.md) ────────────
     # Auto-light recommendation from the 70mai live stream + sun elevation,
     # published as state.vision. None/empty = disabled (no thread, no ffmpeg).
-    # Env: BACKEND_DASHCAM_URL, BACKEND_DASHCAM_INTERVAL_S, BACKEND_HOME_LATLON.
+    # Env: BACKEND_DASHCAM_URL, BACKEND_DASHCAM_INTERVAL_S, BACKEND_DASHCAM_SOURCE,
+    # BACKEND_HOME_LATLON.
     dashcam_url: Optional[str] = None
-    dashcam_interval_s: float = 5.0
+    dashcam_interval_s: float = 1.0
+    dashcam_source: str = "stream"        # stream (one ffmpeg, 1 fps) | grab (session per frame)
     home_latlon: tuple = (54.35, 18.65)   # sun position fallback until a GPS fix exists
 
     verbose: bool = False
@@ -617,11 +619,10 @@ class BackendService:
         dispatches (io.dashcam_ingest). Never fatal: a missing ffmpeg or
         camera only leaves ``vision.camera_ok`` False."""
         try:
-            from ..io.dashcam_ingest import DashcamLightIngest, position_from_state
-            from ..vision.frames import DashcamRtspSource
+            from ..io.dashcam_ingest import DashcamLightIngest, make_source, position_from_state
             cfg = self.config
             self.dashcam = DashcamLightIngest(
-                DashcamRtspSource(cfg.dashcam_url),
+                make_source(cfg.dashcam_url, cfg.dashcam_source, cfg.dashcam_interval_s),
                 interval_s=max(1.0, cfg.dashcam_interval_s),
                 position=lambda: position_from_state(twin.store.state),
                 default_latlon=tuple(cfg.home_latlon),

@@ -125,6 +125,14 @@ python -m cyberpunk_computer.vision.auto_lights --frames DIR                 # J
 #   --latlon 54.35,18.65 (default Gdańsk)  --no-sun (camera only)  --all (every decision)
 ```
 
+**Update 2026-10-19 (environment model):** the ingest now samples at 1 fps through one
+long-running ffmpeg (`DashcamStreamSource`), extracts `scene_features`, runs the fitted
+`EnvironmentModel` (day / dusk_dawn / night / enclosed + weather hint, BDD100K + this
+drive) and feeds it to `AutoLightModel` (environment mode; the thresholds below are the
+fallback). `state.vision` gained `environment, time_of_day, enclosed, weather,
+environment_confidence`. Data, metrics and rules: `docs/VISION_ENVIRONMENT_MODEL_2026-10-19.md`.
+The paragraph below describes the first version.
+
 Backend: `io/dashcam_ingest.py` (`DashcamLightIngest`) runs source + model on a thread every 5 s
 and publishes `state.vision` (`enabled, camera_ok, lights_recommended, reason, confidence, sky_y,
 sky_chroma, sky_clip, sun_elevation, updated_at`). Off unless `BACKEND_DASHCAM_URL` is set

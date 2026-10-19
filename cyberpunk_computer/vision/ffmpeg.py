@@ -78,25 +78,28 @@ def _escape_movie_path(path: str) -> str:
     return v
 
 
-_TAGS = {"YAVG": "y_avg", "YMIN": "y_min", "YMAX": "y_max", "UAVG": "u_avg", "VAVG": "v_avg"}
+_TAGS = {"YAVG": "y_avg", "YMIN": "y_min", "YMAX": "y_max", "UAVG": "u_avg", "VAVG": "v_avg",
+         "YLOW": "y_low", "YHIGH": "y_high", "SATAVG": "sat_avg"}
 
 
 def signalstats(path: str, branches: Mapping[str, str],
-                timeout: float = 20.0) -> Optional[Dict[str, Dict[str, float]]]:
+                timeout: float = 20.0, pre: str = "") -> Optional[Dict[str, Dict[str, float]]]:
     """``signalstats`` of several filtered views of one image, one ffprobe run.
 
     ``branches`` maps a name to a filter chain applied before ``signalstats``
     (``""`` = the whole frame), e.g. ``{"sky": "crop=iw:ih/3:0:0"}``. Returns
-    ``{name: {"y_avg", "y_min", "y_max", "u_avg", "v_avg"}}`` (8-bit values),
-    or ``None`` if ffprobe is missing or fails.
+    ``{name: {"y_avg", "y_min", "y_max", "u_avg", "v_avg", "y_low", "y_high",
+    "sat_avg"}}`` (8-bit values; ``y_low``/``y_high`` are signalstats' 10 % /
+    90 % percentiles), or ``None`` if ffprobe is missing or fails. ``pre`` is
+    a filter chain applied once before the split (e.g. a ``scale``).
     """
     names: List[str] = list(branches)
     if not names or not os.path.exists(path):
         return None
     n = len(names)
     labels = "".join(f"[s{i}]" for i in range(n))
-    parts = [f"movie={_escape_movie_path(path)},split={n}{labels}" if n > 1
-             else f"movie={_escape_movie_path(path)}[s0]"]
+    src = f"movie={_escape_movie_path(path)}" + (f",{pre}" if pre else "")
+    parts = [f"{src},split={n}{labels}" if n > 1 else f"{src}[s0]"]
     for i, name in enumerate(names):
         chain = branches[name]
         parts.append(f"[s{i}]" + (chain + "," if chain else "") + f"signalstats[out{i}]")

@@ -2,6 +2,8 @@
 
 import time
 
+import pytest
+
 from cyberpunk_computer.api.serialization import serialize_state
 from cyberpunk_computer.frontend.deserialize import deserialize_state
 from cyberpunk_computer.io.dashcam_ingest import (
@@ -9,7 +11,7 @@ from cyberpunk_computer.io.dashcam_ingest import (
 )
 from cyberpunk_computer.state.store import StateSlice, Store
 from cyberpunk_computer.vision import ffmpeg
-from cyberpunk_computer.vision.frames import DashcamRtspSource, Frame
+from cyberpunk_computer.vision.frames import DashcamRtspSource, DashcamStreamSource, Frame
 from cyberpunk_computer.vision.light_features import LightFeatures, chroma
 
 
@@ -38,8 +40,12 @@ def test_from_env_enabled():
     ing = DashcamLightIngest.from_env(env={
         "BACKEND_DASHCAM_URL": "rtsp://192.168.0.1/liveRTSP/av4",
         "BACKEND_DASHCAM_INTERVAL_S": "7", "BACKEND_HOME_LATLON": "50.06,19.94"})
-    assert isinstance(ing.source, DashcamRtspSource)
+    assert isinstance(ing.source, DashcamStreamSource)     # 1 fps needs one long session
+    assert ing.source.fps == pytest.approx(1 / 7.0)
     assert ing.interval_s == 7.0 and ing.default_latlon == (50.06, 19.94)
+    grab = DashcamLightIngest.from_env(env={"BACKEND_DASHCAM_URL": "rtsp://x/y",
+                                            "BACKEND_DASHCAM_SOURCE": "grab"})
+    assert isinstance(grab.source, DashcamRtspSource) and grab.interval_s == 1.0
 
 
 def test_parse_latlon():

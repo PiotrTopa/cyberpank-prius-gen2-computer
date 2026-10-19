@@ -20,3 +20,7 @@ litert-torch==0.9.4
 ai-edge-litert==2.2.0
 ncnn==1.0.20260526     # Vulkan inference (Quadro / iGPU here, Adreno on a phone)
 pnnx==20260526         # torch -> ncnn exporter
+# environment model fitting (tools/vision/env_fit.py, env_sheets.py), 2026-10-19
+scikit-learn==1.9.1
+pandas==3.0.6
+pillow==13.0.0

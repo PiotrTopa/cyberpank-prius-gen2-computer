@@ -70,17 +70,19 @@ def _build_dashcam() -> dict:
     """Dashcam vision config from env (io.dashcam_ingest; disabled by default):
 
         BACKEND_DASHCAM_URL=rtsp://192.168.0.1/liveRTSP/av4   # empty = off
-        BACKEND_DASHCAM_INTERVAL_S=5
+        BACKEND_DASHCAM_INTERVAL_S=1
+        BACKEND_DASHCAM_SOURCE=stream     # stream (one ffmpeg) | grab (session per frame)
         BACKEND_HOME_LATLON=54.35,18.65   # sun position until a GPS fix exists
     """
     from ..io.dashcam_ingest import parse_latlon
     try:
-        interval = float(os.environ.get("BACKEND_DASHCAM_INTERVAL_S") or 5.0)
+        interval = float(os.environ.get("BACKEND_DASHCAM_INTERVAL_S") or 1.0)
     except ValueError:
-        interval = 5.0
+        interval = 1.0
     return dict(
         dashcam_url=(os.environ.get("BACKEND_DASHCAM_URL") or "").strip() or None,
         dashcam_interval_s=interval,
+        dashcam_source=(os.environ.get("BACKEND_DASHCAM_SOURCE") or "stream").strip().lower(),
         home_latlon=parse_latlon(os.environ.get("BACKEND_HOME_LATLON")),
     )
 

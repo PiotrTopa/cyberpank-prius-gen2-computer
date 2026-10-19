@@ -1,7 +1,7 @@
 """Automatic-headlight model: sun elevation + dashcam sky features, no ML.
 
 Rule (docs/DASHCAM_70MAI.md, "Cheap auto-light rule, first proposal"), fed
-with one :class:`LightFeatures` sample every ~5 s and, optionally, the sun
+with one :class:`LightFeatures` sample every ~1 s (5 s before 2026-10-19) and, optionally, the sun
 elevation for the same instant:
 
 Each step first appends the sample to a sliding window (``window_s`` = 30 s)
@@ -37,6 +37,18 @@ and takes the **median** of ``sky_y``, ``sky_chroma``, ``sky_clip`` and
    **Bootstrap**: the very first camera decision takes the candidate at once
    (nothing to protect against flapping yet); in the dead band it starts ON.
 
+   **Environment mode** (``update(..., environment=env)``, the default in the
+   backend since 2026-10-19): the candidates come from the
+   :class:`~.environment.Environment` instead of the sky thresholds — ON when
+   it wants lights (night, dusk_dawn or enclosed), OFF for day; an
+   environment with ``confidence < env_min_confidence`` (0.6) is the dead
+   band. Reasons ``env-<label>`` (e.g. ``env-enclosed``, ``env-day``,
+   ``bootstrap-env-night``). Rules 1–3, the persistence times and the
+   bootstrap are unchanged. The sky thresholds stay as the fallback when no
+   environment is given (plain :class:`LightFeatures`, sampler CSVs); they
+   were checked against BDD100K and left unchanged
+   (docs/VISION_ENVIRONMENT_MODEL_2026-10-19.md).
+
 Persistence timers reset whenever rules 1–3 take over or the candidate
 disappears. ``confidence`` is a heuristic 0..1: 1.0 for twilight, 0.5 for
 holds/pending, and 0.5–1.0 for camera decisions scaled by how far the
@@ -47,7 +59,8 @@ Thresholds are placeholders from one sunny drive; dusk, night, rain and
 overcast drives will move them (see the doc). Evaluate a drive offline::
 
     python -m cyberpunk_computer.vision.auto_lights --csv samples.csv
-    python -m cyberpunk_computer.vision.auto_lights --frames DIR   # needs ffprobe
+    python -m cyberpunk_computer.vision.auto_lights --frames DIR   # needs ffprobe; environment mode
+    python -m cyberpunk_computer.vision.auto_lights --features F.csv   # scene-feature CSV
 
 Extension point (scene understanding — signs, lights of other cars, rain):
 add further feature producers next to :mod:`light_features` and feed their
@@ -64,10 +77,14 @@ import sys
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Callable, Deque, Dict, Iterable, List, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Callable, Deque, Dict, Iterable, List, Optional, Sequence, Union
 
 from .light_features import LightFeatures, from_sample_row
 from .sun import solar_elevation
+
+if TYPE_CHECKING:   # pragma: no cover
+    from .environment import Environment
+    from .scene_features import SceneFeatures
 
 DEFAULT_LATLON = (54.35, 18.65)   # Gdańsk
 
@@ -85,6 +102,7 @@ class LightThresholds:
     off_persist_s: float = 20.0
     twilight_deg: float = -6.0     # civil twilight
     window_s: float = 30.0         # median window
+    env_min_confidence: float = 0.6   # environment mode: below this = dead band (hold)
 
 
 @dataclass(frozen=True)
@@ -155,8 +173,13 @@ class AutoLightModel:
 
     def update(self, features: Optional[LightFeatures] = None,
                sun_elevation: Optional[float] = None,
-               t: Optional[float] = None) -> LightDecision:
-        """One step. ``t`` defaults to the sample time (or now without one)."""
+               t: Optional[float] = None,
+               environment: Optional["Environment"] = None) -> LightDecision:
+        """One step. ``t`` defaults to the sample time (or now without one).
+
+        ``environment`` (from :class:`~.environment.EnvironmentModel`) replaces
+        the sky thresholds of rule 4 when given (see the module docstring).
+        """
         th = self.th
         if t is None:
             t = features.t if features is not None else time.time()
@@ -192,18 +215,28 @@ class AutoLightModel:
             return self._decide(t, self.lights, "clip-hold", 0.5, med, sun)
 
         # 4. hysteresis (a clipped sky never yields an ON candidate)
-        on_cand = sky_y < th.sky_y_on and chroma < th.chroma_on and not clipped
-        off_cand = sky_y > th.sky_y_off or chroma > th.chroma_off
-        on_margin = min((th.sky_y_on - sky_y) / 30.0, (th.chroma_on - chroma) / th.chroma_on)
-        off_margin = max((sky_y - th.sky_y_off) / 30.0, (chroma - th.chroma_off) / th.chroma_off)
+        if environment is not None:
+            # environment mode: the scene label decides, its confidence is the margin
+            sure = environment.confidence >= th.env_min_confidence
+            on_cand = sure and environment.lights_wanted and not clipped
+            off_cand = sure and not environment.lights_wanted
+            margin = 2.0 * (environment.confidence - 0.5)
+            on_margin = off_margin = margin
+            on_word, off_word = "env-" + environment.label, "env-" + environment.label
+        else:
+            on_cand = sky_y < th.sky_y_on and chroma < th.chroma_on and not clipped
+            off_cand = sky_y > th.sky_y_off or chroma > th.chroma_off
+            on_margin = min((th.sky_y_on - sky_y) / 30.0, (th.chroma_on - chroma) / th.chroma_on)
+            off_margin = max((sky_y - th.sky_y_off) / 30.0, (chroma - th.chroma_off) / th.chroma_off)
+            on_word, off_word = "dark-sky", "daylight"
 
         if self.lights is None:      # bootstrap: nothing to protect yet
             self._reset_pending()
             if off_cand:
-                return self._decide(t, False, "bootstrap-daylight",
+                return self._decide(t, False, "bootstrap-" + off_word,
                                     0.5 + 0.5 * _clamp01(off_margin), med, sun)
             if on_cand:
-                return self._decide(t, True, "bootstrap-dark-sky",
+                return self._decide(t, True, "bootstrap-" + on_word,
                                     0.5 + 0.5 * _clamp01(on_margin), med, sun)
             return self._decide(t, True, "bootstrap-dead-band", 0.5, med, sun)
 
@@ -215,7 +248,7 @@ class AutoLightModel:
         target = on_cand            # True = lights on wanted
         if target == self.lights:
             self._reset_pending()
-            reason = "dark-sky" if target else "daylight"
+            reason = on_word if target else off_word
             margin = on_margin if target else off_margin
             return self._decide(t, target, reason, 0.5 + 0.5 * _clamp01(margin), med, sun)
 
@@ -224,7 +257,7 @@ class AutoLightModel:
         persist = th.on_persist_s if target else th.off_persist_s
         if t - self._pending_since >= persist:
             self._reset_pending()
-            reason = "dark-sky" if target else "daylight"
+            reason = on_word if target else off_word
             margin = on_margin if target else off_margin
             return self._decide(t, target, reason, 0.5 + 0.5 * _clamp01(margin), med, sun)
         return self._decide(t, self.lights, "pending-on" if target else "pending-off",
@@ -238,22 +271,36 @@ def sun_at(lat: float, lon: float) -> SunFn:
     return lambda t: solar_elevation(t, lat, lon)
 
 
-def replay(rows: Iterable[Union[Dict, LightFeatures]],
+def replay(rows: Iterable[Union[Dict, LightFeatures, "SceneFeatures"]],
            thresholds: Optional[LightThresholds] = None,
-           sun: Optional[SunFn] = None) -> List[LightDecision]:
-    """Run a fresh model over ``rows`` (sampler CSV dicts or LightFeatures).
+           sun: Optional[SunFn] = None,
+           use_environment: bool = True) -> List[LightDecision]:
+    """Run a fresh model over ``rows`` (sampler CSV dicts, LightFeatures or SceneFeatures).
 
     ``sun`` maps a sample time to a sun elevation (e.g. :func:`sun_at`);
     ``None`` = camera only. Rows without usable sky values are skipped.
+    :class:`~.scene_features.SceneFeatures` rows also run the
+    :class:`~.environment.EnvironmentModel` (10 s window) and feed it in
+    (environment mode) unless ``use_environment`` is False.
     Returns one :class:`LightDecision` per usable row.
     """
+    from .environment import EnvironmentModel
+    from .scene_features import SceneFeatures
     model = AutoLightModel(thresholds)
+    env_model = EnvironmentModel()
     out: List[LightDecision] = []
     for row in rows:
-        f = row if isinstance(row, LightFeatures) else from_sample_row(row)
+        env = None
+        if isinstance(row, SceneFeatures):
+            s = sun(row.t) if sun else None
+            if use_environment:
+                env = env_model.update(row, s, t=row.t)
+            f = row.light()
+        else:
+            f = row if isinstance(row, LightFeatures) else from_sample_row(row)
         if f is None:
             continue
-        out.append(model.update(f, sun(f.t) if sun else None, t=f.t))
+        out.append(model.update(f, sun(f.t) if sun else None, t=f.t, environment=env))
     return out
 
 
@@ -268,9 +315,9 @@ def _fmt_t(t: float) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t))
 
 
-def _load_frames(path: str) -> List[LightFeatures]:
+def _load_frames(path: str) -> List["SceneFeatures"]:
     from .frames import DirectorySource
-    from .light_features import extract
+    from .scene_features import extract
     feats = []
     for fr in DirectorySource(path):
         f = extract(fr.path, t=fr.t)
@@ -285,16 +332,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         description="Replay the auto-light model over a recorded drive.")
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--csv", help="samples.csv from tools/dashcam_sampler.py")
-    src.add_argument("--frames", help="folder of YYYYmmdd_HHMMSS.jpg frames (needs ffprobe; adds sky_clip)")
+    src.add_argument("--frames", help="folder of YYYYmmdd_HHMMSS.jpg frames (needs ffprobe; "
+                                      "adds sky_clip and the environment model)")
+    src.add_argument("--features", help="scene-feature CSV (tools/vision/env_features.py); "
+                                        "environment mode like --frames")
     ap.add_argument("--latlon", default=f"{DEFAULT_LATLON[0]},{DEFAULT_LATLON[1]}",
                     help="position for the sun elevation (default Gdańsk)")
     ap.add_argument("--no-sun", action="store_true", help="camera only")
     ap.add_argument("--all", action="store_true", help="print every decision, not only changes")
+    ap.add_argument("--thresholds", action="store_true",
+                    help="--frames/--features: ignore the environment model, use the sky thresholds")
     args = ap.parse_args(argv)
 
     if args.csv:
         with open(args.csv, newline="") as f:
             rows: List = list(csv.DictReader(f))
+    elif args.features:
+        from .scene_features import from_row
+        with open(args.features, newline="") as f:
+            rows = [r for r in (from_row(x) for x in csv.DictReader(f)) if r is not None]
     else:
         rows = _load_frames(args.frames)
         if not rows:
@@ -304,7 +360,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not args.no_sun:
         lat, lon = (float(x) for x in args.latlon.split(","))
         sun = sun_at(lat, lon)
-    timeline = replay(rows, sun=sun)
+    timeline = replay(rows, sun=sun, use_environment=not args.thresholds)
     show = timeline if args.all else transitions(timeline)
     print("time                 lights reason              conf  sky_y  chroma  clip   sun")
     for d in show:
