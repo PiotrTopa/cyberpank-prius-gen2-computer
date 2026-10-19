@@ -1,27 +1,31 @@
 # Vision roadmap: lights now, signs later, next to a flowpilot port
 
 Decision 2026-10-19 (user): keep the automatic-headlight logic simple (no machine learning); do
-scene understanding later, together with the user's own port of flowpilot (openpilot on Android).
-This document fixes *where* each vision function lives so that the later work drops into a
-prepared slot instead of a rewrite.
+scene understanding later. flowpilot (openpilot on Android) will run on its **own, separate Poco F1
+with its own camera**; the car computer (the other Poco F1) shares nothing with it. This document
+fixes *where* each vision function lives so that the later work drops into a prepared slot instead
+of a rewrite.
 
 ## 1. Camera sources in the car
 
 | Source | Today | Later |
 |---|---|---|
 | 70mai dashcam, RTSP 640×360 @ 30 fps over its hotspot (`docs/DASHCAM_70MAI.md`) | the only camera the computer can read; one client at a time | stays the "cheap" source for brightness/weather sampling at 0.2 fps |
-| Poco F1 rear camera through flowpilot | not used | flowpilot owns it at full rate for its driving model; frames are reachable through openpilot's VisionIPC / `roadCameraState` on the same phone |
+| flowpilot Poco F1 (separate device, own camera) | not present | fully owned by flowpilot; the car computer may *receive* its outputs (lead car, lane lines, path) over the car network as an optional feed, never its camera |
+| car computer Poco F1 own camera | not used | optional second source if it can be mounted facing the road; otherwise the dashcam stays the only road view |
 | Head unit reverse/front analog cameras (`docs/HEADUNIT_INTEGRATION.md`) | hardware video plane, not capturable | n/a for vision |
 
-Rule: one process owns one camera. The dashcam is ours; the phone camera is flowpilot's. A sign
-reader runs on frames it receives, never on a camera it opens itself.
+Rule: one grabber process owns a camera and fans frames out to every consumer (the dashcam's RTSP
+server accepts one client, so the brightness sampler and a sign detector must share one grab).
+flowpilot's camera is on another phone and is not ours.
 
 ## 2. Package layout (host repo)
 
 ```
 cyberpunk_computer/vision/
     frames.py          FrameSource protocol: DashcamRtspSource, DirectorySource (replay)
-                       later: FlowpilotVisionIpcSource (subscribes to flowpilot's camera stream)
+                       later: a shared grabber feeding several consumers from one RTSP session;
+                       optional FlowpilotFeed (network subscriber for flowpilot *outputs*, not frames)
     light_features.py  per-frame statistics via ffmpeg/ffprobe (sky band, road band, chroma, clip)
     sun.py             solar elevation from time + position
     auto_lights.py     AutoLightModel: hysteresis state machine -> LightDecision
@@ -65,9 +69,9 @@ until the thresholds have been confirmed on dusk, night and rain drives.
 
 ### 4.2 Phase B: camera confirmation of signs
 
-- **Where:** `vision/detectors/signs.py` on the Poco, fed by flowpilot's camera frames
-  (VisionIPC subscriber at a reduced rate, e.g. 5 fps) or by the dashcam stream when flowpilot is
-  off. The detector never runs on both at once.
+- **Where:** `vision/detectors/signs.py` on the car computer Poco, fed by the dashcam stream
+  through the shared grabber (2–5 fps), or by the computer's own camera if one is mounted facing
+  the road. flowpilot's camera on the other phone is not involved.
 - **Model:** a nano-size detector (YOLO v8n/11n/12n family) at 320–416 px input, exported to
   TensorFlow Lite / LiteRT with the GPU delegate (Snapdragon 845: Adreno 630) or ONNX Runtime with
   NNAPI; expect a few frames per second, which is enough for signs that stay in view for seconds.
@@ -87,8 +91,9 @@ until the thresholds have been confirmed on dusk, night and rain drives.
   carriageway.
 - **Latency budget:** 5 fps detector, 3-frame track, so a confirmed sighting about 1 s after the
   sign enters the readable zone.
-- **Compute budget on the Poco:** flowpilot's model already loads the GPU; run the sign detector
-  at 2–5 fps and skip frames when flowpilot reports high load. Measure before promising.
+- **Compute budget on the Poco:** the whole Snapdragon 845 is ours (flowpilot runs elsewhere);
+  a nano detector at 2–5 fps with the GPU delegate leaves room for the backend. Measure before
+  promising.
 
 ### 4.3 Phase C: traffic lights and other scene state
 
@@ -102,7 +107,8 @@ until the thresholds have been confirmed on dusk, night and rain drives.
 1. Lights model + tests + optional backend ingest (in progress 2026-10-19).
 2. Dusk, night, rain, overcast and tunnel drives sampled; thresholds fixed; actuation enabled.
 3. Phase A map speed limit (independent of any camera; can start any time).
-4. flowpilot port (user). While it is being done, keep the vision package's frame interface stable
-   so a `FlowpilotVisionIpcSource` is a new class, not a change.
+4. flowpilot port (user) on its own Poco. The only touch point is an optional network feed of its
+   outputs into the car computer's state; keep the vision package's frame interface stable so a
+   shared grabber or a second camera is a new class, not a change.
 5. Phase B sign detector, first offline on recorded drives, then on the Poco.
 6. Phase C.
