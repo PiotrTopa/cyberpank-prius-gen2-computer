@@ -66,6 +66,25 @@ def _build_mfd():
     )
 
 
+def _build_dashcam() -> dict:
+    """Dashcam vision config from env (io.dashcam_ingest; disabled by default):
+
+        BACKEND_DASHCAM_URL=rtsp://192.168.0.1/liveRTSP/av4   # empty = off
+        BACKEND_DASHCAM_INTERVAL_S=5
+        BACKEND_HOME_LATLON=54.35,18.65   # sun position until a GPS fix exists
+    """
+    from ..io.dashcam_ingest import parse_latlon
+    try:
+        interval = float(os.environ.get("BACKEND_DASHCAM_INTERVAL_S") or 5.0)
+    except ValueError:
+        interval = 5.0
+    return dict(
+        dashcam_url=(os.environ.get("BACKEND_DASHCAM_URL") or "").strip() or None,
+        dashcam_interval_s=interval,
+        home_latlon=parse_latlon(os.environ.get("BACKEND_HOME_LATLON")),
+    )
+
+
 def _build_recording(args: argparse.Namespace) -> RecordingConfig:
     include = {tok.strip().lower() for tok in (args.record_include or "").split(",") if tok.strip()}
     if not include or "all" in include:
@@ -102,6 +121,7 @@ def _build_recording(args: argparse.Namespace) -> RecordingConfig:
 def _build_config(args: argparse.Namespace) -> BackendConfig:
     mfd_enabled, mfd_config = _build_mfd()
     return BackendConfig(
+        **_build_dashcam(),
         gateway_port=args.gateway_port,
         powerbox_port=args.powerbox_port,
         auto_discover=not args.no_auto_discover,

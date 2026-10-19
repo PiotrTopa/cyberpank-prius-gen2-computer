@@ -59,6 +59,7 @@ class StateSlice(Enum):
     POWERBOX = auto()  # Powerbox: ignition (ACC/BATT) + INA219 telemetry (devices 200-202)
     SATELLITES = auto()  # RS485 satellites: OUT2 power wake-locks + per-node twin (devices 100+)
     AVC = auto()  # AVC-LAN link/display state (screen, lights, touch, nav emulation)
+    VISION = auto()  # dashcam vision: auto-light recommendation (io/dashcam_ingest.py)
     ALL = auto()
 
 
@@ -366,6 +367,12 @@ class Store:
             if new_avc != self._state.avc:
                 self._state = replace(self._state, avc=new_avc)
                 affected.add(StateSlice.AVC)
+
+        elif action.type == ActionType.SET_VISION_STATE:
+            new_vision = replace(self._state.vision, **action.fields)
+            if new_vision != self._state.vision:
+                self._state = replace(self._state, vision=new_vision)
+                affected.add(StateSlice.VISION)
             
         # Vehicle reducers
         elif action.type == ActionType.SET_READY_MODE:

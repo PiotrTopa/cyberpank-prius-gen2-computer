@@ -87,6 +87,50 @@ GPS, which is free and robust.
 The garage/daylight split above passes with these numbers; dusk and overcast values will move
 the 120/150 pair, so treat them as placeholders until those drives exist.
 
+### Implementation (2026-10-19)
+
+Package `cyberpunk_computer/vision/` (pure Python + the ffmpeg/ffprobe binaries; no numpy, PIL
+or OpenCV; no threads):
+
+| Module | Content |
+|---|---|
+| `ffmpeg.py` | The only place ffmpeg/ffprobe run. `grab_jpeg` (one RTSP session per frame), `signalstats` (several crops of one image in one ffprobe run). Never raises. |
+| `frames.py` | `FrameSource` protocol, `DashcamRtspSource(url)` (retries, `None` when the camera is absent), `DirectorySource(path)` (replay of `YYYYmmdd_HHMMSS.jpg` folders). |
+| `light_features.py` | `LightFeatures` (`sky_y, sky_u, sky_v, sky_chroma, sky_clip, road_y, y_avg, t`), `extract(path)`, `from_sample_row(row)` for sampler CSVs (`sky_clip=None`). `sky_clip` is exact: sky crop → `lutyuv=y='if(gt(val,250),255,0)'` → YAVG/255. |
+| `sun.py` | `solar_elevation(t, lat, lon)`, NOAA approximation, geometric (no refraction). |
+| `auto_lights.py` | `AutoLightModel` state machine, `LightThresholds`, `LightDecision`, `replay()`, CLI. |
+
+Thresholds (`LightThresholds`, placeholders from this one sunny drive): `sky_y` on < 120 / off >
+150, chroma on < 8 / off > 12, 30 s median window, on after 5 s, off after 20 s, twilight below
+−6°, clip hold above 5 %. Order of the rules: twilight → ON; no camera → hold (or sun only);
+clipped sky → no ON; otherwise the hysteresis above. The first decision bootstraps at once.
+
+One deviation from the proposal: on the real frames the open sunny sky is 10–40 % clipped almost
+all the time (garage ≤ 4 %), so a full "hold while clipped" kept the garage's ON state for the
+whole sunny drive. The clip rule therefore only blocks switching ON (a darkened picture next to
+the sun is not trusted); switching OFF stays open. `LightThresholds(clip_blocks_off=True)` restores
+the literal rule.
+
+Result on this drive (CSV and the JPEG folder give the same timeline): ON from the first garage
+frame, OFF at 15:25:21 (`daylight`, 13 s after the "outside" note at 15:25:08), then no further
+switch through "into the sun", "sun straight in", wipers and shade.
+
+Evaluate a new drive offline:
+
+```bash
+python -m cyberpunk_computer.vision.auto_lights --csv DIR/samples.csv        # sampler CSV
+python -m cyberpunk_computer.vision.auto_lights --frames DIR                 # JPEGs, adds sky_clip
+#   --latlon 54.35,18.65 (default Gdańsk)  --no-sun (camera only)  --all (every decision)
+```
+
+Backend: `io/dashcam_ingest.py` (`DashcamLightIngest`) runs source + model on a thread every 5 s
+and publishes `state.vision` (`enabled, camera_ok, lights_recommended, reason, confidence, sky_y,
+sky_chroma, sky_clip, sun_elevation, updated_at`). Off unless `BACKEND_DASHCAM_URL` is set
+(`BACKEND_DASHCAM_INTERVAL_S`, default 5). The sun position comes from a GPS fix in the state once
+one exists, otherwise `BACKEND_HOME_LATLON` (default `54.35,18.65`). The output is a
+recommendation only; nothing switches the lamps yet. Tests: `tests/test_vision_*.py` (fixtures:
+this drive's CSV and one frame with the sun in the picture).
+
 ### Beyond brightness: reading the scene
 
 - **Classic first.** Brightness, chroma and clipping from ffmpeg cost nothing and run anywhere.
