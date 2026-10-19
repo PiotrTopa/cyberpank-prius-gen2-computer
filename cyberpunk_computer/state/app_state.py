@@ -419,6 +419,27 @@ class AvcState:
 
 
 @dataclass(frozen=True)
+class VisionState:
+    """Dashcam vision: automatic-headlight recommendation (io/dashcam_ingest.py).
+
+    Published every ~5 s by ``DashcamLightIngest`` when ``BACKEND_DASHCAM_URL``
+    is set (disabled otherwise: ``enabled`` stays False, everything None).
+    ``lights_recommended`` is a recommendation only; nothing switches the
+    lamps. Rules and thresholds: vision/auto_lights.py, docs/DASHCAM_70MAI.md.
+    """
+    enabled: bool = False
+    camera_ok: bool = False                   # last grab + feature extraction worked
+    lights_recommended: Optional[bool] = None
+    reason: str = ""                          # auto_lights reason (twilight, daylight, ...)
+    confidence: Optional[float] = None        # 0..1 heuristic, display only
+    sky_y: Optional[float] = None             # 30 s median, top-third Y (0..255)
+    sky_chroma: Optional[float] = None        # 30 s median, |(U,V) - 128|
+    sky_clip: Optional[float] = None          # 30 s median, sky share with Y > 250
+    sun_elevation: Optional[float] = None     # degrees (position: GPS or BACKEND_HOME_LATLON)
+    updated_at: float = 0.0
+
+
+@dataclass(frozen=True)
 class DiagnosticsState:
     """
     OBD-II Diagnostic Trouble Code (DTC) state.
@@ -641,6 +662,7 @@ class AppState:
     powerbox: PowerboxState = field(default_factory=PowerboxState)
     satellites: SatellitesState = field(default_factory=SatellitesState)
     avc: AvcState = field(default_factory=AvcState)
+    vision: VisionState = field(default_factory=VisionState)
 
     # UI-only state (not from vehicle)
     screen_brightness: int = 100

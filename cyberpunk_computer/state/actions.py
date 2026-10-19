@@ -133,6 +133,9 @@ class ActionType(Enum):
     SET_AVC_BATTERY_INFO = auto()  # battery bars / EV mode from AVC (E4 5F B8)
     SET_AVC_STATE = auto()         # AVC link/display state (screen, lights, touch, nav emulation)
     CLIMATE_BUTTON = auto()        # remote climate button press request (UI -> AVC-LAN)
+
+    # Vision (dashcam auto-light recommendation)
+    SET_VISION_STATE = auto()      # partial update of VisionState (io/dashcam_ingest.py)
     
     # Debug/Analysis actions
     UPDATE_DEBUG_INFO = auto()
@@ -1559,6 +1562,13 @@ class SetAvcStateAction(Action):
     """Partial update of :class:`AvcState` (only the given fields change)."""
     def __init__(self, source: ActionSource = ActionSource.GATEWAY, **fields):
         super().__init__(ActionType.SET_AVC_STATE, source)
+        self.fields = fields
+
+
+class SetVisionStateAction(Action):
+    """Partial update of :class:`VisionState` (only the given fields change)."""
+    def __init__(self, source: ActionSource = ActionSource.INTERNAL, **fields):
+        super().__init__(ActionType.SET_VISION_STATE, source)
         self.fields = fields
 
 

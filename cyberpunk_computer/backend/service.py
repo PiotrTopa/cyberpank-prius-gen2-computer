@@ -316,6 +316,14 @@ class BackendConfig:
     fan_ema_alpha_up: float = 0.03        # rise: tau ~= 2s/0.03 ~= 65s (measured ~65s)
     fan_ema_alpha_down: float = 0.03      # fall: tau ~= 2s/0.03 ~= 65s (measured ~60s)
 
+    # ── Dashcam vision (io.dashcam_ingest, docs/DASHCAM_70MAI.md) ────────────
+    # Auto-light recommendation from the 70mai live stream + sun elevation,
+    # published as state.vision. None/empty = disabled (no thread, no ffmpeg).
+    # Env: BACKEND_DASHCAM_URL, BACKEND_DASHCAM_INTERVAL_S, BACKEND_HOME_LATLON.
+    dashcam_url: Optional[str] = None
+    dashcam_interval_s: float = 5.0
+    home_latlon: tuple = (54.35, 18.65)   # sun position fallback until a GPS fix exists
+
     verbose: bool = False
 
 
@@ -400,6 +408,9 @@ class BackendService:
         self._nav_scheduler = None
         self._avc_tick_last: float = 0.0
         self._avc_status_last: Optional[dict] = None
+
+        # Dashcam auto-light ingest (optional, io.dashcam_ingest).
+        self.dashcam = None
 
     # ── composition ────────────────────────────────────────────────────────
 
@@ -518,6 +529,10 @@ class BackendService:
         if cfg.recording.enabled:
             self._wire_recording(twin)
 
+        # Dashcam vision: optional auto-light recommendation (state.vision).
+        if cfg.dashcam_url:
+            self._wire_dashcam(twin)
+
         # (MFD power manager is wired later in build(), after the port power
         # controllers exist — its VBUS goes through powerbox relay ch3.)
 
@@ -596,6 +611,32 @@ class BackendService:
         self.bridge = bridge
         self.api = api
         self.zmq = zmq_srv
+
+    def _wire_dashcam(self, twin: VirtualTwin) -> None:
+        """Dashcam light ingest: worker thread grabs + decides, engine tick
+        dispatches (io.dashcam_ingest). Never fatal: a missing ffmpeg or
+        camera only leaves ``vision.camera_ok`` False."""
+        try:
+            from ..io.dashcam_ingest import DashcamLightIngest, position_from_state
+            from ..vision.frames import DashcamRtspSource
+            cfg = self.config
+            self.dashcam = DashcamLightIngest(
+                DashcamRtspSource(cfg.dashcam_url),
+                interval_s=max(1.0, cfg.dashcam_interval_s),
+                position=lambda: position_from_state(twin.store.state),
+                default_latlon=tuple(cfg.home_latlon),
+            )
+            logger.info("Dashcam light ingest enabled: %s", cfg.dashcam_url)
+        except Exception:
+            logger.exception("Dashcam light ingest could not be set up; disabled")
+            self.dashcam = None
+
+    def _dashcam_tick(self) -> None:
+        """Dispatch the dashcam ingest's newest result (engine thread)."""
+        if self.dashcam is None or self.twin is None:
+            return
+        for action in self.dashcam.drain_actions():
+            self.twin.store.dispatch(action)
 
     def _wire_nav_emulator(self, serial_port: SerialPort) -> None:
         """Bind a NavEmulator to the gateway serial port."""
@@ -1050,6 +1091,11 @@ class BackendService:
         self.sink.start()
         self.api.start()
         self.zmq.start()
+        if self.dashcam is not None:
+            try:
+                self.dashcam.start()
+            except Exception:
+                logger.exception("Dashcam light ingest failed to start")
 
         # USB hotplug: re-discover + retarget serial ports on plug/unplug.
         if (
@@ -1082,6 +1128,7 @@ class BackendService:
                     self._vfd_clock_tick()
                     self._satellite_tick()
                     self._avc_tick()
+                    self._dashcam_tick()
                     if self.recorder is not None:
                         self.recorder.tick()
                 except Exception:
@@ -1708,6 +1755,11 @@ class BackendService:
                 self._usb_monitor.stop()
             except Exception:
                 logger.exception("Error stopping USB monitor")
+        if self.dashcam is not None:
+            try:
+                self.dashcam.stop()
+            except Exception:
+                logger.exception("Error stopping dashcam ingest")
         if self.api is not None:
             self.api.stop()
         if self.zmq:
