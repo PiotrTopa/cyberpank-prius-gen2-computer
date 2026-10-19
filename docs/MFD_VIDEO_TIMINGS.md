@@ -9,6 +9,11 @@ In this system:
 - **Video Output:** DPI (Display Parallel Interface) via a custom resistor-ladder DAC (VGA666 / Gert VGA pinout).
 - **Format:** 480x240 @ 60 Hz progressive scan (262 total scanlines, matching 525-line NTSC field timing).
 - **Sync:** Negative polarity composite sync (C-Sync) fed to the MFD sync input.
+- **Sync combiner (on the VGA666 board, DIP-14 socket): a 74HC86 XOR gate** merges the Pi's separate
+  H-sync (GPIO 3) and V-sync (GPIO 2) into the composite sync. The socket is wired for the 74HC86 pinout
+  (VCC pin 14, GND pin 7). An LM339 (also DIP-14, used in the AVC-LAN gateway PHY) does NOT fit this socket:
+  on 2026-10-19 one had been inserted by mistake and the MFD got no sync at all (recorded in
+  `cyberpunk-prius-gateway/captures/2026-10-19/CAPTURES.md`).
 
 ---
 
