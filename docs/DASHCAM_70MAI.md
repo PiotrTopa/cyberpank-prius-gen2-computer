@@ -33,9 +33,11 @@ was Y average ≈ 43 (frame `captures/2026-10-19/70mai/frame1_live.jpg`).
 
 - The backend (on the Poco) joins the hotspot as a secondary Wi-Fi network while mobile data stays
   the internet route; the camera is only reachable while the car is on and the camera is awake.
-- A `dashcam` ingest samples one frame every few seconds, publishes `scene_luma` (and later
-  derived flags: dark, tunnel, rain streaks, wipers) into the vehicle state; the auto-light logic
-  consumes it together with the AVC-LAN lights state.
+- A `dashcam` ingest samples one frame per second (user decision 2026-10-19: this stream serves
+  lights / environment only), runs the environment model (day, dusk, night, enclosed, weather
+  flags) and publishes it with the lights recommendation into the vehicle state; the auto-light
+  logic consumes it together with the AVC-LAN lights state. The model is fitted and tested on our
+  own sampled drives plus public dashcam datasets with time-of-day / weather labels.
 - Thresholds have to be learned on the road: record Y average together with time of day and the
   headlamp state for a few drives before switching anything automatically.
 

@@ -1,7 +1,11 @@
 # Vision roadmap: lights now, signs later, next to a flowpilot port
 
-Decision 2026-10-19 (user): keep the automatic-headlight logic simple (no machine learning); do
-scene understanding later. flowpilot (openpilot on Android) will run on its **own, separate Poco F1
+Decision 2026-10-19 (user): the dashcam stream is used ONLY for lights / an environment model
+(day, dusk, night, enclosed, weather) at 1 fps; it is not a sign-reading camera (measured: digits
+unreadable at 640×360). Sign reading, if ever, needs a higher-resolution road-facing camera and is
+parked; the `detectors/` slot and the map speed limit stay as built. More samples will be recorded
+in other conditions, and free public dashcam datasets (standard dashcam view) are used to test
+and fit the environment model. flowpilot (openpilot on Android) will run on its **own, separate Poco F1
 with its own camera**; the car computer (the other Poco F1) shares nothing with it. This document
 fixes *where* each vision function lives so that the later work drops into a prepared slot instead
 of a rewrite.
