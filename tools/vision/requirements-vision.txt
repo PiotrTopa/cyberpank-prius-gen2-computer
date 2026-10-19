@@ -1,0 +1,22 @@
+# Experiment venv for tools/vision/*.py (NOT a backend dependency; the backend
+# only shells out to it). Versions as used on 2026-10-19 (Python 3.14).
+#
+#   python3 -m venv .venv-vision
+#   .venv-vision/bin/pip install -r tools/vision/requirements-vision.txt \
+#       --extra-index-url https://download.pytorch.org/whl/cpu
+#
+# Use the CPU torch index: the PyPI torch wheel is the CUDA 13 build (~3 GB with
+# its nvidia-* wheels) and has no kernels for the laptop's Pascal Quadro P3200
+# (sm_61) anyway. Set YOLO_AUTOINSTALL=false when exporting, or Ultralytics will
+# pip-install (and replace torch) by itself. litert-torch needs torch < 2.14.
+torch==2.13.0
+torchvision==0.28.0
+ultralytics==8.4.182
+huggingface_hub==2.2.0
+onnx==1.23.2
+onnxslim==0.1.98
+onnxruntime==1.31.0
+litert-torch==0.9.4
+ai-edge-litert==2.2.0
+ncnn==1.0.20260526     # Vulkan inference (Quadro / iGPU here, Adreno on a phone)
+pnnx==20260526         # torch -> ncnn exporter

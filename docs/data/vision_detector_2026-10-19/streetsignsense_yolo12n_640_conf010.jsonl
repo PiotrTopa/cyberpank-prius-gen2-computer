@@ -1,0 +1,174 @@
+{"frame": "20261019_152214.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 839.7, "infer_ms": 57.64, "detections": []}
+{"frame": "20261019_152224.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 42.54, "infer_ms": 39.18, "detections": []}
+{"frame": "20261019_152234.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 41.62, "infer_ms": 39.22, "detections": []}
+{"frame": "20261019_152244.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 41.75, "infer_ms": 38.79, "detections": []}
+{"frame": "20261019_152341.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.58, "infer_ms": 38.15, "detections": []}
+{"frame": "20261019_152351.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 41.23, "infer_ms": 38.18, "detections": []}
+{"frame": "20261019_152401.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 42.07, "infer_ms": 38.81, "detections": []}
+{"frame": "20261019_152411.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 42.17, "infer_ms": 39.26, "detections": []}
+{"frame": "20261019_152421.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 41.5, "infer_ms": 39.3, "detections": []}
+{"frame": "20261019_152431.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 41.28, "infer_ms": 38.39, "detections": []}
+{"frame": "20261019_152441.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.63, "infer_ms": 37.89, "detections": []}
+{"frame": "20261019_152451.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 41.89, "infer_ms": 38.8, "detections": []}
+{"frame": "20261019_152501.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 41.58, "infer_ms": 38.53, "detections": []}
+{"frame": "20261019_152511.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.97, "infer_ms": 38.41, "detections": []}
+{"frame": "20261019_152521.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.93, "infer_ms": 38.07, "detections": []}
+{"frame": "20261019_152531.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 42.05, "infer_ms": 38.63, "detections": []}
+{"frame": "20261019_152541.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 41.84, "infer_ms": 39.1, "detections": []}
+{"frame": "20261019_152551.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 42.09, "infer_ms": 39.73, "detections": []}
+{"frame": "20261019_152601.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.78, "infer_ms": 38.24, "detections": []}
+{"frame": "20261019_152611.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 41.27, "infer_ms": 38.26, "detections": []}
+{"frame": "20261019_152621.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 44.76, "infer_ms": 41.19, "detections": [{"cls": "mand_pass_right", "score": 0.6077, "box": [94.2, 124.3, 111.5, 150.6]}]}
+{"frame": "20261019_152631.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.98, "infer_ms": 37.41, "detections": [{"cls": "mand_go_straight", "score": 0.122, "box": [356.9, 130.1, 365.3, 138.7]}]}
+{"frame": "20261019_152641.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 41.48, "infer_ms": 39.1, "detections": []}
+{"frame": "20261019_152651.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.54, "infer_ms": 37.21, "detections": []}
+{"frame": "20261019_152701.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.39, "infer_ms": 36.98, "detections": []}
+{"frame": "20261019_152711.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 41.07, "infer_ms": 38.75, "detections": []}
+{"frame": "20261019_152721.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 42.05, "infer_ms": 39.73, "detections": []}
+{"frame": "20261019_152731.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 42.5, "infer_ms": 40.19, "detections": []}
+{"frame": "20261019_152741.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 42.24, "infer_ms": 39.89, "detections": []}
+{"frame": "20261019_152751.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 42.21, "infer_ms": 39.7, "detections": [{"cls": "mand_go_straight", "score": 0.2372, "box": [301.2, 127.6, 311.4, 137.2]}]}
+{"frame": "20261019_152801.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 42.99, "infer_ms": 40.62, "detections": []}
+{"frame": "20261019_152811.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 42.26, "infer_ms": 39.86, "detections": []}
+{"frame": "20261019_152821.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 42.64, "infer_ms": 40.15, "detections": []}
+{"frame": "20261019_152831.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 42.68, "infer_ms": 39.55, "detections": []}
+{"frame": "20261019_152841.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 41.33, "infer_ms": 38.64, "detections": []}
+{"frame": "20261019_152851.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 38.89, "infer_ms": 36.39, "detections": []}
+{"frame": "20261019_152901.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.44, "infer_ms": 38.03, "detections": []}
+{"frame": "20261019_152911.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 41.83, "infer_ms": 39.36, "detections": []}
+{"frame": "20261019_152921.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 42.87, "infer_ms": 40.29, "detections": [{"cls": "info_crosswalk", "score": 0.1222, "box": [311.8, 115.7, 321.3, 127.9]}]}
+{"frame": "20261019_152931.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 38.82, "infer_ms": 36.56, "detections": []}
+{"frame": "20261019_152941.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 38.84, "infer_ms": 36.44, "detections": []}
+{"frame": "20261019_152951.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.14, "infer_ms": 36.57, "detections": [{"cls": "mand_roundabout", "score": 0.328, "box": [446.4, 111.6, 456.4, 122.5]}]}
+{"frame": "20261019_153001.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.61, "infer_ms": 37.31, "detections": []}
+{"frame": "20261019_153011.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.68, "infer_ms": 38.44, "detections": []}
+{"frame": "20261019_153021.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.09, "infer_ms": 37.02, "detections": [{"cls": "prio_priority_road", "score": 0.7884, "box": [536.2, 94.6, 556.5, 118.2]}, {"cls": "info_crosswalk", "score": 0.3978, "box": [397.0, 104.5, 407.8, 115.2]}]}
+{"frame": "20261019_153031.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 38.69, "infer_ms": 36.49, "detections": []}
+{"frame": "20261019_153041.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.62, "infer_ms": 37.29, "detections": []}
+{"frame": "20261019_153051.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.27, "infer_ms": 36.67, "detections": [{"cls": "mand_go_straight", "score": 0.3127, "box": [327.5, 127.9, 339.1, 140.3]}]}
+{"frame": "20261019_153101.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 38.34, "infer_ms": 35.88, "detections": []}
+{"frame": "20261019_153111.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.01, "infer_ms": 36.55, "detections": [{"cls": "forb_speed_over_40", "score": 0.1137, "box": [424.4, 182.4, 441.3, 203.1]}]}
+{"frame": "20261019_153121.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 38.27, "infer_ms": 35.97, "detections": []}
+{"frame": "20261019_153131.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 41.38, "infer_ms": 38.89, "detections": [{"cls": "info_parking", "score": 0.1096, "box": [590.3, 127.6, 601.6, 142.8]}, {"cls": "forb_speed_over_70", "score": 0.1061, "box": [195.2, 112.2, 207.7, 131.0]}]}
+{"frame": "20261019_153141.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 38.91, "infer_ms": 36.61, "detections": []}
+{"frame": "20261019_153151.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 38.93, "infer_ms": 36.64, "detections": []}
+{"frame": "20261019_153201.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 38.48, "infer_ms": 36.16, "detections": []}
+{"frame": "20261019_153211.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.08, "infer_ms": 36.79, "detections": []}
+{"frame": "20261019_153221.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.44, "infer_ms": 36.78, "detections": [{"cls": "prio_priority_road", "score": 0.3038, "box": [487.8, 96.4, 505.0, 116.7]}, {"cls": "mand_go_straight", "score": 0.2249, "box": [119.6, 114.7, 126.0, 133.9]}, {"cls": "info_crosswalk", "score": 0.1986, "box": [489.9, 120.6, 502.3, 134.8]}]}
+{"frame": "20261019_153231.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.05, "infer_ms": 37.3, "detections": [{"cls": "mand_go_straight", "score": 0.4942, "box": [119.4, 116.7, 126.9, 134.0]}, {"cls": "prio_priority_road", "score": 0.424, "box": [488.0, 95.7, 505.3, 116.5]}, {"cls": "info_crosswalk", "score": 0.2865, "box": [490.6, 121.4, 502.5, 134.8]}]}
+{"frame": "20261019_153241.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 38.77, "infer_ms": 36.11, "detections": [{"cls": "mand_go_straight", "score": 0.3666, "box": [119.5, 118.3, 125.7, 134.0]}, {"cls": "prio_priority_road", "score": 0.289, "box": [488.0, 95.4, 505.1, 114.8]}]}
+{"frame": "20261019_153251.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.36, "infer_ms": 36.77, "detections": [{"cls": "prio_priority_road", "score": 0.6255, "box": [500.8, 92.6, 518.7, 114.2]}]}
+{"frame": "20261019_153301.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.55, "infer_ms": 37.13, "detections": [{"cls": "prio_priority_road", "score": 0.614, "box": [507.0, 91.7, 524.2, 114.9]}, {"cls": "info_crosswalk", "score": 0.4458, "box": [509.2, 116.7, 521.9, 132.5]}, {"cls": "forb_no_entry", "score": 0.1428, "box": [261.9, 160.6, 273.2, 170.1]}]}
+{"frame": "20261019_153311.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.34, "infer_ms": 37.67, "detections": [{"cls": "prio_priority_road", "score": 0.5809, "box": [507.2, 92.8, 524.4, 115.9]}, {"cls": "mand_go_straight_right", "score": 0.1639, "box": [509.0, 116.4, 521.9, 131.2]}, {"cls": "forb_no_entry", "score": 0.1508, "box": [262.1, 160.4, 273.2, 169.8]}, {"cls": "info_crosswalk", "score": 0.1031, "box": [509.7, 117.2, 521.9, 130.9]}]}
+{"frame": "20261019_153321.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.8, "infer_ms": 37.53, "detections": []}
+{"frame": "20261019_153331.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.31, "infer_ms": 36.72, "detections": [{"cls": "forb_no_stopping", "score": 0.1561, "box": [498.7, 118.4, 510.7, 135.6]}]}
+{"frame": "20261019_153341.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.21, "infer_ms": 36.93, "detections": []}
+{"frame": "20261019_153351.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 38.93, "infer_ms": 36.66, "detections": []}
+{"frame": "20261019_153401.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 38.66, "infer_ms": 36.39, "detections": []}
+{"frame": "20261019_153411.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 38.38, "infer_ms": 36.13, "detections": []}
+{"frame": "20261019_153421.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.94, "infer_ms": 38.52, "detections": []}
+{"frame": "20261019_153431.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 41.08, "infer_ms": 38.1, "detections": []}
+{"frame": "20261019_153441.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.2, "infer_ms": 37.88, "detections": []}
+{"frame": "20261019_153451.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 41.92, "infer_ms": 39.63, "detections": []}
+{"frame": "20261019_153501.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 41.37, "infer_ms": 38.22, "detections": []}
+{"frame": "20261019_153511.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.85, "infer_ms": 38.48, "detections": []}
+{"frame": "20261019_153521.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.81, "infer_ms": 38.46, "detections": []}
+{"frame": "20261019_153531.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 38.74, "infer_ms": 36.4, "detections": []}
+{"frame": "20261019_153541.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.28, "infer_ms": 36.84, "detections": []}
+{"frame": "20261019_153551.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.85, "infer_ms": 37.56, "detections": []}
+{"frame": "20261019_153601.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.55, "infer_ms": 37.23, "detections": []}
+{"frame": "20261019_153611.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.54, "infer_ms": 37.22, "detections": []}
+{"frame": "20261019_153621.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.19, "infer_ms": 36.85, "detections": []}
+{"frame": "20261019_153631.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.01, "infer_ms": 37.65, "detections": []}
+{"frame": "20261019_153641.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.61, "infer_ms": 38.2, "detections": []}
+{"frame": "20261019_153651.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.7, "infer_ms": 37.35, "detections": []}
+{"frame": "20261019_153701.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.97, "infer_ms": 37.73, "detections": []}
+{"frame": "20261019_153711.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.08, "infer_ms": 36.69, "detections": []}
+{"frame": "20261019_153721.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.34, "infer_ms": 37.0, "detections": []}
+{"frame": "20261019_153731.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.19, "infer_ms": 37.61, "detections": [{"cls": "mand_pass_right", "score": 0.1092, "box": [79.2, 125.2, 91.6, 139.1]}]}
+{"frame": "20261019_153741.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.38, "infer_ms": 37.72, "detections": [{"cls": "mand_pass_right", "score": 0.1139, "box": [79.5, 126.5, 91.5, 141.1]}]}
+{"frame": "20261019_153751.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.35, "infer_ms": 36.76, "detections": [{"cls": "forb_no_stopping", "score": 0.2193, "box": [321.7, 120.1, 337.1, 134.3]}, {"cls": "forb_no_stopping", "score": 0.1099, "box": [321.4, 125.0, 336.3, 149.2]}]}
+{"frame": "20261019_153801.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.58, "infer_ms": 37.13, "detections": []}
+{"frame": "20261019_153811.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 38.6, "infer_ms": 36.3, "detections": []}
+{"frame": "20261019_153821.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 42.04, "infer_ms": 39.7, "detections": []}
+{"frame": "20261019_153831.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.49, "infer_ms": 37.08, "detections": []}
+{"frame": "20261019_153841.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.73, "infer_ms": 37.27, "detections": []}
+{"frame": "20261019_153851.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.59, "infer_ms": 37.33, "detections": []}
+{"frame": "20261019_153901.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 43.7, "infer_ms": 41.24, "detections": []}
+{"frame": "20261019_153911.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.85, "infer_ms": 37.3, "detections": []}
+{"frame": "20261019_153921.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.56, "infer_ms": 37.2, "detections": []}
+{"frame": "20261019_153931.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.42, "infer_ms": 36.99, "detections": []}
+{"frame": "20261019_153941.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 41.46, "infer_ms": 38.28, "detections": []}
+{"frame": "20261019_153951.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.1, "infer_ms": 37.79, "detections": []}
+{"frame": "20261019_154001.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.87, "infer_ms": 37.6, "detections": []}
+{"frame": "20261019_154011.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 42.7, "infer_ms": 40.29, "detections": []}
+{"frame": "20261019_154021.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 41.02, "infer_ms": 38.36, "detections": [{"cls": "mand_go_left", "score": 0.5593, "box": [44.2, 95.1, 80.8, 148.1]}, {"cls": "mand_pass_right", "score": 0.499, "box": [43.9, 95.3, 80.1, 148.6]}, {"cls": "mand_go_straight", "score": 0.1251, "box": [370.4, 146.8, 382.5, 160.8]}]}
+{"frame": "20261019_154031.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.89, "infer_ms": 37.41, "detections": []}
+{"frame": "20261019_154041.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.83, "infer_ms": 37.46, "detections": []}
+{"frame": "20261019_154051.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.7, "infer_ms": 37.12, "detections": []}
+{"frame": "20261019_154101.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.43, "infer_ms": 37.05, "detections": []}
+{"frame": "20261019_154111.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.57, "infer_ms": 38.06, "detections": []}
+{"frame": "20261019_154121.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 38.96, "infer_ms": 36.63, "detections": []}
+{"frame": "20261019_154131.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.03, "infer_ms": 36.59, "detections": []}
+{"frame": "20261019_154141.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.34, "infer_ms": 37.11, "detections": []}
+{"frame": "20261019_154151.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.57, "infer_ms": 37.18, "detections": []}
+{"frame": "20261019_154201.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.43, "infer_ms": 37.1, "detections": []}
+{"frame": "20261019_154211.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.55, "infer_ms": 37.04, "detections": []}
+{"frame": "20261019_154221.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.6, "infer_ms": 38.03, "detections": []}
+{"frame": "20261019_154231.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.06, "infer_ms": 37.25, "detections": []}
+{"frame": "20261019_154241.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.94, "infer_ms": 37.53, "detections": []}
+{"frame": "20261019_154251.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.33, "infer_ms": 37.87, "detections": []}
+{"frame": "20261019_154301.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.01, "infer_ms": 37.62, "detections": []}
+{"frame": "20261019_154311.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.4, "infer_ms": 36.98, "detections": []}
+{"frame": "20261019_154321.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.7, "infer_ms": 38.34, "detections": []}
+{"frame": "20261019_154331.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.18, "infer_ms": 36.81, "detections": []}
+{"frame": "20261019_154341.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.17, "infer_ms": 36.7, "detections": []}
+{"frame": "20261019_154351.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.62, "infer_ms": 37.25, "detections": []}
+{"frame": "20261019_154401.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.97, "infer_ms": 37.64, "detections": []}
+{"frame": "20261019_154411.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.95, "infer_ms": 37.49, "detections": []}
+{"frame": "20261019_154421.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.68, "infer_ms": 37.22, "detections": []}
+{"frame": "20261019_154431.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.55, "infer_ms": 37.22, "detections": []}
+{"frame": "20261019_154441.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.12, "infer_ms": 37.7, "detections": []}
+{"frame": "20261019_154451.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 38.62, "infer_ms": 36.32, "detections": []}
+{"frame": "20261019_154501.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.66, "infer_ms": 37.18, "detections": []}
+{"frame": "20261019_154511.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.43, "infer_ms": 37.94, "detections": []}
+{"frame": "20261019_154521.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.31, "infer_ms": 36.96, "detections": []}
+{"frame": "20261019_154531.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.36, "infer_ms": 37.36, "detections": []}
+{"frame": "20261019_154541.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.98, "infer_ms": 37.7, "detections": []}
+{"frame": "20261019_154551.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.59, "infer_ms": 37.01, "detections": [{"cls": "info_crosswalk", "score": 0.1167, "box": [520.9, 130.1, 527.2, 137.0]}]}
+{"frame": "20261019_154601.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.56, "infer_ms": 37.14, "detections": []}
+{"frame": "20261019_154611.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.17, "infer_ms": 36.78, "detections": []}
+{"frame": "20261019_154621.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.29, "infer_ms": 37.87, "detections": []}
+{"frame": "20261019_154631.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.65, "infer_ms": 38.27, "detections": []}
+{"frame": "20261019_154641.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 41.18, "infer_ms": 38.54, "detections": []}
+{"frame": "20261019_154651.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 42.09, "infer_ms": 38.58, "detections": []}
+{"frame": "20261019_154701.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 41.4, "infer_ms": 38.86, "detections": []}
+{"frame": "20261019_154711.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.32, "infer_ms": 37.53, "detections": [{"cls": "forb_no_entry", "score": 0.1308, "box": [197.5, 169.7, 212.1, 181.4]}]}
+{"frame": "20261019_154721.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.35, "infer_ms": 37.83, "detections": []}
+{"frame": "20261019_154731.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.75, "infer_ms": 37.33, "detections": []}
+{"frame": "20261019_154741.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 41.56, "infer_ms": 38.54, "detections": []}
+{"frame": "20261019_154751.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.49, "infer_ms": 37.94, "detections": []}
+{"frame": "20261019_154801.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.01, "infer_ms": 37.3, "detections": [{"cls": "forb_no_entry", "score": 0.172, "box": [191.6, 168.5, 208.3, 184.6]}]}
+{"frame": "20261019_154811.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 41.87, "infer_ms": 38.74, "detections": []}
+{"frame": "20261019_154821.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.77, "infer_ms": 38.37, "detections": []}
+{"frame": "20261019_154831.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.6, "infer_ms": 38.16, "detections": []}
+{"frame": "20261019_154841.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.55, "infer_ms": 37.66, "detections": [{"cls": "mand_go_left", "score": 0.7616, "box": [511.1, 134.0, 522.5, 152.9]}, {"cls": "info_crosswalk", "score": 0.641, "box": [564.6, 87.6, 580.6, 107.9]}, {"cls": "forb_no_entry", "score": 0.2777, "box": [167.3, 123.7, 175.8, 133.9]}, {"cls": "mand_go_straight", "score": 0.1004, "box": [510.9, 133.7, 522.6, 152.9]}]}
+{"frame": "20261019_154851.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.46, "infer_ms": 37.92, "detections": []}
+{"frame": "20261019_154901.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 41.53, "infer_ms": 38.22, "detections": []}
+{"frame": "20261019_154911.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.89, "infer_ms": 38.23, "detections": []}
+{"frame": "20261019_154921.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 41.09, "infer_ms": 38.33, "detections": [{"cls": "prio_give_way", "score": 0.2959, "box": [75.9, 115.1, 90.0, 126.5]}]}
+{"frame": "20261019_154931.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.97, "infer_ms": 37.41, "detections": []}
+{"frame": "20261019_154941.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.27, "infer_ms": 37.69, "detections": []}
+{"frame": "20261019_154951.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.81, "infer_ms": 38.33, "detections": []}
+{"frame": "20261019_155001.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.69, "infer_ms": 37.43, "detections": []}
+{"frame": "20261019_155011.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.14, "infer_ms": 37.71, "detections": []}
+{"frame": "20261019_155021.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 42.51, "infer_ms": 39.47, "detections": []}
+{"frame": "20261019_155031.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 41.77, "infer_ms": 39.36, "detections": []}
+{"frame": "20261019_155041.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 41.31, "infer_ms": 38.51, "detections": [{"cls": "forb_overtake_car", "score": 0.2253, "box": [104.8, 162.6, 111.2, 171.3]}]}
+{"frame": "20261019_155051.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.96, "infer_ms": 37.51, "detections": []}
+{"frame": "20261019_155101.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.77, "infer_ms": 38.27, "detections": []}
+{"frame": "20261019_155111.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 39.79, "infer_ms": 37.35, "detections": []}
+{"frame": "20261019_155121.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.29, "infer_ms": 37.75, "detections": []}
+{"frame": "20261019_155131.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.59, "infer_ms": 37.92, "detections": []}
+{"frame": "20261019_155141.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 41.98, "infer_ms": 39.47, "detections": []}
+{"frame": "20261019_155151.jpg", "w": 640, "h": 360, "model": "streetsignsense-yolo12n.pt", "imgsz": 640, "ms": 40.44, "infer_ms": 37.84, "detections": []}
