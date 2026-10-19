@@ -1,0 +1,9 @@
+# synthetic camera sightings for track_old_town_to_armii_krajowej.csv (t = track start + s)
+# +100/+101: two right-side "60" signs on the 70 section of Aleja Armii Krajowej -> override
+# +103: one "40" on the left (counts: the matched carriageway is oneway) -> pending only;
+# +190: an "80" agreeing with the map -> map+camera
+t,value_kmh,score,side,kind
+1792411300,60,0.9,right,limit
+1792411301,60,0.85,right,limit
+1792411303,40,0.9,left,limit
+1792411390,80,0.8,right,limit

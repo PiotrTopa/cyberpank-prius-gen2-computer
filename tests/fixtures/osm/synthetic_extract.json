@@ -1,0 +1,212 @@
+{
+ "format": "osm-speed-extract",
+ "version": 1,
+ "scale": 100000,
+ "bbox": [
+  53.999,
+  17.996,
+  54.004,
+  18.1
+ ],
+ "created": "2026-10-19T00:00:00Z",
+ "source": "synthetic (tests)",
+ "license": "synthetic",
+ "osm_base": "",
+ "ways": [
+  {
+   "id": 1,
+   "c": [
+    5400000,
+    1800000,
+    5400090,
+    1800000,
+    5400181,
+    1800000
+   ],
+   "t": {
+    "highway": "primary",
+    "name": "Testowa",
+    "maxspeed:forward": "70",
+    "maxspeed:backward": "50"
+   }
+  },
+  {
+   "id": 2,
+   "c": [
+    5400090,
+    1799771,
+    5400090,
+    1800000,
+    5400090,
+    1800229
+   ],
+   "t": {
+    "highway": "residential",
+    "name": "Poprzeczna"
+   }
+  },
+  {
+   "id": 3,
+   "c": [
+    5400000,
+    1800459,
+    5400181,
+    1800459
+   ],
+   "t": {
+    "highway": "secondary",
+    "oneway": "yes",
+    "name": "Dwujezdniowa",
+    "source:maxspeed": "PL:urban"
+   }
+  },
+  {
+   "id": 4,
+   "c": [
+    5400181,
+    1800481,
+    5400000,
+    1800481
+   ],
+   "t": {
+    "highway": "secondary",
+    "oneway": "yes",
+    "name": "Dwujezdniowa",
+    "source:maxspeed": "PL:urban"
+   }
+  },
+  {
+   "id": 5,
+   "c": [
+    5400000,
+    1801528,
+    5400181,
+    1801528
+   ],
+   "t": {
+    "highway": "tertiary",
+    "maxspeed": "90",
+    "name": "Wiejska"
+   }
+  },
+  {
+   "id": 6,
+   "c": [
+    5400181,
+    1801528,
+    5400181,
+    1801834
+   ],
+   "t": {
+    "highway": "unclassified",
+    "name": "Polna"
+   }
+  },
+  {
+   "id": 7,
+   "c": [
+    5400000,
+    1803057,
+    5400271,
+    1803057
+   ],
+   "t": {
+    "highway": "trunk",
+    "motorroad": "yes",
+    "oneway": "yes",
+    "ref": "S6"
+   }
+  },
+  {
+   "id": 8,
+   "c": [
+    5400000,
+    1803821,
+    5400271,
+    1803821
+   ],
+   "t": {
+    "highway": "motorway",
+    "ref": "A1"
+   }
+  },
+  {
+   "id": 9,
+   "c": [
+    5400000,
+    1804586,
+    5400090,
+    1804586
+   ],
+   "t": {
+    "highway": "living_street",
+    "name": "Ogrodowa"
+   }
+  },
+  {
+   "id": 10,
+   "c": [
+    5400000,
+    1805350,
+    5400271,
+    1805350
+   ],
+   "t": {
+    "highway": "primary",
+    "oneway": "yes",
+    "lanes": "2",
+    "source:maxspeed": "PL:rural"
+   }
+  },
+  {
+   "id": 11,
+   "c": [
+    5400000,
+    1806114,
+    5400181,
+    1806114
+   ],
+   "t": {
+    "highway": "tertiary",
+    "name": "Wioskowa"
+   }
+  },
+  {
+   "id": 12,
+   "c": [
+    5400000,
+    1809171,
+    5400181,
+    1809171
+   ],
+   "t": {
+    "highway": "tertiary",
+    "name": "Pustkowie"
+   }
+  },
+  {
+   "id": 13,
+   "c": [
+    5400018,
+    1799988,
+    5400163,
+    1799988
+   ],
+   "t": {
+    "highway": "service",
+    "service": "parking_aisle"
+   }
+  }
+ ],
+ "places": [
+  {
+   "id": 100,
+   "c": [
+    5400090,
+    1806267
+   ],
+   "place": "village",
+   "name": "Testowo"
+  }
+ ]
+}
