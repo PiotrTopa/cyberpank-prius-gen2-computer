@@ -426,6 +426,8 @@ class VisionState:
     is set (disabled otherwise: ``enabled`` stays False, everything None).
     ``lights_recommended`` is a recommendation only; nothing switches the
     lamps. Rules and thresholds: vision/auto_lights.py, docs/DASHCAM_70MAI.md.
+    The ``speed_limit_*`` / ``road_name`` / ``position_ok`` fields come from
+    the speed-limit service (docs/VISION_ROADMAP.md 4.1); no GPS feeds it yet.
     """
     enabled: bool = False
     camera_ok: bool = False                   # last grab + feature extraction worked
@@ -437,6 +439,13 @@ class VisionState:
     sky_clip: Optional[float] = None          # 30 s median, sky share with Y > 250
     sun_elevation: Optional[float] = None     # degrees (position: GPS or BACKEND_HOME_LATLON)
     updated_at: float = 0.0
+    # Speed limit (vision/fusion/service.py: OSM map prior + camera sightings).
+    # Set by SpeedLimitService.update(position), which the future GPS ingest calls.
+    speed_limit_kmh: Optional[int] = None
+    speed_limit_source: str = "none"          # map | map+camera | camera | default | none
+    speed_limit_confidence: float = 0.0       # 0..1 heuristic, display only
+    road_name: Optional[str] = None           # matched OSM way (name, else ref)
+    position_ok: bool = False                 # valid GPS fix inside the map extract
 
 
 @dataclass(frozen=True)

@@ -32,11 +32,15 @@ cyberpunk_computer/vision/
     detectors/         (empty slot) one module per detector, same interface:
                        Detector.process(frame, t) -> list[Detection]; Detection = class, box,
                        score, t. A detector never touches the store directly.
-    fusion/            (empty slot) temporal voting + state rules per topic
-                       (e.g. speed_limit.py keeps the current limit from votes + map prior)
+    maps/              offline map data (2026-10-19): osm_speed_limit.py = OSM extract loader,
+                       grid index, map matching, Polish implicit limits; data/gdansk_15km.json.gz
+    fusion/            temporal voting + state rules per topic (2026-10-19):
+                       speed_limit.py = SpeedLimitFusion (map prior + camera sightings) + replay CLI;
+                       service.py = SpeedLimitService.update(position) -> SetVisionStateAction
 ```
 
-State: `VehicleState.vision` (lights fields now; later `speed_limit`, `signs_recent`,
+State: `VehicleState.vision` (lights fields; `speed_limit_kmh`, `speed_limit_source`,
+`speed_limit_confidence`, `road_name`, `position_ok` since 2026-10-19; later `signs_recent`,
 `traffic_light`) published like every other ingest; the frontend only reads state.
 
 ## 3. Lights (now)
@@ -67,6 +71,72 @@ until the thresholds have been confirmed on dusk, night and rain drives.
 - This gives a usable limit on every road instantly and is what the forks do. It also provides the
   *prior* for the camera phase: a sign reader only has to confirm or override a known candidate.
 
+#### Implemented 2026-10-19: map prior + fusion (no GPS ingest yet)
+
+Pure Python (no numpy, no network at runtime). Pieces:
+
+- `tools/osm_extract.py` — one Overpass query for a box (default 15×15 km around Gdańsk,
+  `54.28263,18.5344,54.41737,18.7656`): drivable `highway=*` ways (motorway … service; no
+  footways/cycleways/tracks) with geometry and the tags `maxspeed`, `maxspeed:forward/backward`,
+  `maxspeed:type`, `source:maxspeed`, `zone:traffic`, `zone:maxspeed`, `maxspeed:conditional`,
+  `name`, `ref`, `oneway`, `junction`, `lanes`, `motorroad`, `dual_carriageway`, `service`, plus
+  `place=*` nodes. Writes compact JSON (gzipped if `.gz`), coordinates as 1e-5° integers. Polite:
+  one request, own User-Agent, retry with 30/60/120 s backoff on 429/5xx/timeouts (the public
+  server answered 502 three times on 2026-10-19 before serving the box).
+
+      python3 tools/osm_extract.py -o cyberpunk_computer/vision/maps/data/gdansk_15km.json.gz
+      python3 tools/osm_extract.py --center 54.52,18.53 --size-km 20 -o gdynia.json.gz
+      python3 tools/osm_extract.py --bbox S,W,N,E -o box.json.gz --save-raw raw.json
+      python3 tools/osm_extract.py --clip S,W,N,E --in big.json.gz -o small.json.gz
+
+  The bundled extract (OSM base 2026-10-19 15:22 UTC, © OpenStreetMap contributors, ODbL):
+  28 512 ways, 8 582 with an explicit `maxspeed[:forward|:backward]`, 178 place nodes, 1.0 MB
+  gzipped; 18 982 of the ways are `highway=service` (driveways, parking aisles). A whole-
+  Pomorskie box is ~80× the area (size not measured): produce it with `--bbox` when needed.
+- `vision/maps/osm_speed_limit.py` — `OsmSpeedMap.load(path)` (0.6 s, ~140 MB RSS for the
+  15 km box on the P52), `match(Position) -> MapMatch`, `speed_limit(match) -> SpeedLimit`.
+  Matching: local metric projection, 64 m grid buckets, nearest segment within 25 m with cost
+  `distance + 0.25 m/° · heading error (+40 m wrong way on a oneway, +5 m for service roads)`;
+  heading ignored below 5 km/h; `oneway`, `-1`, roundabouts, motorways honoured; the direction
+  picks `maxspeed:forward/backward` (no heading: the lower one). 0.01–0.05 ms per lookup.
+  Junctions = vertices shared by two non-service ways; `MapMatch.at_junction` = within 30 m.
+- Limits (Polish defaults): explicit `maxspeed` (also `PL:zone30`-style values) → basis
+  `explicit maxspeed`; else motorway 140, expressway (`motorroad=yes`) 120 dual / 100 single,
+  living street 20, built-up 50 → `implicit built-up`; outside 100 on a 2-lane dual carriageway,
+  else 90 → `implicit road class`. **Built-up is heuristic** (OSM has no D-42/D-43 polygons),
+  resolved per way: own `PL:urban`/`PL:rural`/`PL:zone*` tags (reliable) → `residential`/
+  `living_street` → majority of neighbouring ways (tags, `maxspeed=50`/`90`) → within a radius
+  of a `place` node → not built-up. Confidence = basis confidence × match confidence; service
+  roads and links are capped low.
+- `vision/fusion/speed_limit.py` — `SpeedLimitFusion`: priority camera override > end-of-limit
+  default > map explicit > built-up sign default > map implicit. A disagreeing `Sighting(value_kmh,
+  score, side, t, kind)` counts only on our side (`right`/`overhead`; `left` on a oneway), not at
+  a junction, score ≥ 0.5; two consistent ones within 30 s override. Agreeing sightings raise the
+  confidence (+0.25·score) and refresh an override. Overrides end at the next junction (> 50 m
+  after the sign: the Polish B-33 rule), after 3 km or 10 min. `end_limit` → the road's default;
+  `built_up_begin`/`end` → 50 / road-class default until the opposite sign (20 km cap). A new map
+  value needs 2 consecutive fixes (no flicker on crossing streets); a lost match holds 10 s.
+- `vision/fusion/service.py` — `SpeedLimitService.update(position) -> SetVisionStateAction`
+  (**the GPS ingest hook**) and `add_sighting(s)` (the detector hook); publishes
+  `vision.speed_limit_kmh/_source/_confidence`, `road_name`, `position_ok` (valid fix inside the
+  extract box). Not wired into the backend: no GPS source exists yet.
+- Replay a drive (CSV `t,lat,lon[,heading_deg,speed_kmh]` or GPX; sightings CSV
+  `t,value_kmh,score,side[,kind]`):
+
+      python -m cyberpunk_computer.vision.fusion.speed_limit \
+          --track tests/fixtures/osm/track_old_town_to_armii_krajowej.csv \
+          --sightings tests/fixtures/osm/sightings_armii_krajowej.csv [--map X.json.gz] [--all]
+
+  The fixture is a synthetic 7.7 km shortest-path drive (60 km/h, 1 Hz, 1.5 m noise) from
+  Podwale Przedmiejskie along Aleja Armii Krajowej: 30 → 50 → 70 → 80 → 50 → 100, 0.12 ms/step.
+
+Known gaps: time-dependent limits (`maxspeed:conditional` is kept but ignored), temporary and
+construction limits, zone signs (`strefa tempo 30`, `strefa zamieszkania` areas are only known
+where each way is tagged), vehicle-class limits, expressway/motorway rules inside built-up
+areas, the built-up heuristic at town edges (the place-radius rule calls the whole Gdańsk box
+built-up), service-road limits (parking lots are not public roads), map age (re-run the
+extractor), and GPS: no ingest exists, so nothing publishes these fields yet.
+
 ### 4.2 Phase B: camera confirmation of signs
 
 - **Where:** `vision/detectors/signs.py` on the car computer Poco, fed by the dashcam stream
@@ -82,7 +152,8 @@ until the thresholds have been confirmed on dusk, night and rain drives.
   offline first, then correct by hand.
 - **Two-stage reading:** detector finds the round sign, a tiny classifier (or the detector's
   classes) reads the number; a track across 3+ frames with consistent class is one "sighting".
-- **Fusion:** `vision/fusion/speed_limit.py` holds the current limit: map prior + sightings; a
+- **Fusion** (implemented 2026-10-19, see 4.1 above; the detector only has to emit
+  `Sighting`s): `vision/fusion/speed_limit.py` holds the current limit: map prior + sightings; a
   sighting that agrees raises confidence; one that disagrees overrides after two consistent frames
   if the sign is on our side of the road and we are not passing a junction; limits expire by
   distance or by the next sighting; end-of-limit signs and built-up-area signs reset to defaults.
