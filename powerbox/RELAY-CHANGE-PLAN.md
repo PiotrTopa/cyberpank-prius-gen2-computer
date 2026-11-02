@@ -24,6 +24,7 @@ The inside-box BMP280 (`0x77`) and the AHT20 (`0x38`) are not fitted.
 **Loads:** only relay 1 is wired NC; relays 2–8 are NO.
 - Relay 1 (NC): the gateway; energised = hard restart of the powerbox (below).
 - Relay 2 (NO): MFD Raspberry Pi Zero v1.3 (≈ +100–115 mA at 12 V while running). Tested: relay on → Pi draws within ~1 s → USB gadget link (host `enx021e4d000001`) and ping at 49–50 s; three hard off/on cycles gave one clean enumeration each, no xHCI wedge (Pi gadget binds late, see `cyberpunk-prius-gateway/raspberry_pi_config/README.md`). Every hard cut risks the SD card: the backend must keep `ssh … poweroff` + wait before cutting the relay.
+- Relay 3 (NO, fw ch2 with today's map): comma.ai panda (hw type cuatro, fw `DEV-f120999e-DEBUG`), for unsolicited CAN reading; its use is not designed yet. Tested 2026-11-02 off the car: relay on → about +150 mA at 12 V, USB enumeration (`bbaa:ddcc`, full speed, behind the hub) at 4.6 s, answers control requests (hw type, version, health). No CAN traffic, since no bus is connected. Runs alongside the MFD Pi on the same hub without problems.
 - **Board relay 1 energised = hard restart of the powerbox.** The RP2040 loses power, the PCF comes back at 0xFF, relay 1 releases, and power returns by itself. Measured from command: USB drops after 0.4 s, re-enumerates after 1.0 s, firmware STATUS after 4.9 s (3 s of that is `SAFE_BOOT_DELAY_S`).
 
 ## What the code must take into account
