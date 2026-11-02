@@ -1,5 +1,5 @@
 """
-MFD video board (Raspberry Pi Zero 2W) power management.
+MFD video board (Raspberry Pi Zero v1.3) power management.
 
 The MFD board generates the 15 kHz VGA666 video signal for the Prius Gen 2
 MFD. It hangs off the USB hub's PPPS-capable port (currently the only socket

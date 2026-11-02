@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Deployment script for CyberPunk Computer to Raspberry Pi Zero 2W.
+Deployment script for CyberPunk Computer to Raspberry Pi Zero v1.3.
 
 This script automates the deployment process:
 - Syncs code to the target device
@@ -540,7 +540,7 @@ def main() -> int:
     default_user = env_vars.get('DEPLOY_USER', 'piotr')
     
     parser = argparse.ArgumentParser(
-        description="Deploy CyberPunk Computer to Raspberry Pi Zero 2W",
+        description="Deploy CyberPunk Computer to Raspberry Pi Zero v1.3",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

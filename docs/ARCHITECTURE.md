@@ -2,7 +2,7 @@
 
 ## Overview
 
-The CyberPunk Computer is a pygame-based HMI application designed for embedded deployment on Raspberry Pi Zero 2W, with development support on desktop systems.
+The CyberPunk Computer is a pygame-based HMI application designed for embedded deployment on Raspberry Pi Zero v1.3, with development support on desktop systems.
 
 **See also:** [VIRTUAL_TWIN_ARCHITECTURE.md](./VIRTUAL_TWIN_ARCHITECTURE.md) for the detailed Virtual Twin pattern documentation, including:
 - IO abstraction layers (InputPort/OutputPort)

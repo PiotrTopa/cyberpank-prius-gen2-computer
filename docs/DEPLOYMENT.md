@@ -1,6 +1,6 @@
 # Deployment Guide
 
-This guide explains how to deploy the CyberPunk Prius Gen 2 Computer to your Raspberry Pi Zero 2W.
+This guide explains how to deploy the CyberPunk Prius Gen 2 Computer to your Raspberry Pi Zero v1.3.
 
 ## Table of Contents
 
@@ -15,10 +15,10 @@ This guide explains how to deploy the CyberPunk Prius Gen 2 Computer to your Ras
 
 ### Hardware
 
-- Raspberry Pi Zero 2W with Raspberry Pi OS installed
+- Raspberry Pi Zero v1.3 with Raspberry Pi OS installed
 - USB UART device (RP2040 Gateway) connected to the RPI
 - Display connected to RPI (framebuffer `/dev/fb0`)
-- Network connection (WiFi or Ethernet)
+- USB Ethernet gadget link (no Wi-Fi on the Zero v1.3); board setup and image: `cyberpunk-prius-gateway/raspberry_pi_config/README.md`
 
 ### Software
 
@@ -434,7 +434,7 @@ ssh prius 'sudo killall cat'
 
 ## Performance Tuning
 
-### Optimize for Raspberry Pi Zero 2W
+### Optimize for Raspberry Pi Zero v1.3
 
 Edit service file if needed:
 

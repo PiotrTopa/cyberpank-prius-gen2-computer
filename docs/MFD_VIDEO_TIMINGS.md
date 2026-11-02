@@ -5,7 +5,7 @@
 The Toyota Prius Gen 2 Multi-Function Display (MFD) utilizes a 7-inch analog RGB screen driven over an **RGBS** interface (Analog Red, Green, Blue + active-low Composite Sync).
 
 In this system:
-- **Host:** Raspberry Pi Zero 2W.
+- **Host:** Raspberry Pi Zero v1.3.
 - **Video Output:** DPI (Display Parallel Interface) via a custom resistor-ladder DAC (VGA666 / Gert VGA pinout).
 - **Format:** 480x240 @ 60 Hz progressive scan (262 total scanlines, matching 525-line NTSC field timing).
 - **Sync:** Negative polarity composite sync (C-Sync) fed to the MFD sync input.

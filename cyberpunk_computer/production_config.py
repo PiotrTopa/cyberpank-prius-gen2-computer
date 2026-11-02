@@ -1,5 +1,5 @@
 """
-Production configuration for deployment to Raspberry Pi Zero 2W.
+Production configuration for deployment to Raspberry Pi Zero v1.3.
 
 This module provides specialized configuration for production deployment
 with proper logging levels, USB UART handling, and output routing.
@@ -96,7 +96,7 @@ def create_production_twin_config(prod_config: Optional[ProductionConfig] = None
 
 def get_default_production_config() -> ProductionConfig:
     """
-    Get default production configuration for RPI Zero 2W.
+    Get default production configuration for Raspberry Pi Zero v1.3.
     
     Returns:
         ProductionConfig with sensible defaults

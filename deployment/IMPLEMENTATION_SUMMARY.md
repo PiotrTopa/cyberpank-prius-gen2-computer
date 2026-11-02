@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document summarizes the deployment pipeline implementation for the CyberPunk Prius Gen 2 Computer. The solution enables reliable production deployment to Raspberry Pi Zero 2W with resilient USB UART handling.
+This document summarizes the deployment pipeline implementation for the CyberPunk Prius Gen 2 Computer. The solution enables reliable production deployment to Raspberry Pi Zero v1.3 with resilient USB UART handling.
 
 ## What Was Implemented
 
@@ -117,7 +117,7 @@ Development Machine (Windows)
         │
         │ deploy.py (rsync)
         ▼
-Raspberry Pi Zero 2W
+Raspberry Pi Zero v1.3
         │
         ├─ systemd (cyberpunk-computer.service)
         │     │
@@ -314,7 +314,7 @@ Possible improvements for the deployment pipeline:
 
 ## Conclusion
 
-The deployment pipeline provides a robust, production-ready solution for deploying the CyberPunk Computer to Raspberry Pi Zero 2W. Key achievements:
+The deployment pipeline provides a robust, production-ready solution for deploying the CyberPunk Computer to Raspberry Pi Zero v1.3. Key achievements:
 
 ✅ **Resilient**: Auto-reconnect handles USB device issues gracefully
 ✅ **Automated**: One-command deployment and updates

@@ -4,7 +4,7 @@ Custom onboard computer system for the **Cybersecurity Field Unit** - a retro-mo
 
 ## 🎯 Overview
 
-A pygame-based HMI (Human-Machine Interface) application designed to run on a **Raspberry Pi Zero 2W**, displaying on the native MFD (Multi-Function Display) of the Prius.
+A pygame-based HMI (Human-Machine Interface) application designed to run on a **Raspberry Pi Zero v1.3**, displaying on the native MFD (Multi-Function Display) of the Prius.
 
 ### Key Features
 
@@ -17,7 +17,7 @@ A pygame-based HMI (Human-Machine Interface) application designed to run on a **
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    Raspberry Pi Zero 2W                      │
+│                   Raspberry Pi Zero v1.3                    │
 │  ┌─────────────────────────────────────────────────────────┐│
 │  │              CyberPunk Computer (This App)              ││
 │  │  ┌──────────┐  ┌──────────┐  ┌────────────────────────┐││
@@ -110,7 +110,7 @@ python -m cyberpunk_computer --replay assets/data/full.ndjson --dev --scale 2
 
 ### Deployment to Raspberry Pi
 
-For production deployment to RPI Zero 2W:
+For production deployment to Raspberry Pi Zero v1.3:
 
 ```bash
 # First-time setup (installs service and enables auto-start)

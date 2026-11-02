@@ -72,7 +72,7 @@ Development Machine
        │
        │ rsync (deploy.py)
        ▼
-Raspberry Pi Zero 2W
+Raspberry Pi Zero v1.3
        │
        ├─ systemd service (auto-start, restart on failure)
        ├─ Python venv (isolated dependencies)
