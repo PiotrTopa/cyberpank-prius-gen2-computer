@@ -43,6 +43,8 @@ The inside-box BMP280 (`0x77`) and the AHT20 (`0x38`) are not fitted.
 
   0 % stops the fan completely (no minimum-speed floor); 5 % already turns it (~255 RPM). Near-linear up to ~50 %, flattening above.
 
+**Main POCO power button:** now on **GP27**. Tested 2026-11-03 from the REPL: the line idles high with no pull (the phone's ~1.8 V); a 6 s LOW (output 0), then release to an input with no pulls, booted the phone from off (kernel start 22:50:55, Wi-Fi + ssh about 35 s later). Never drive it high.
+
 ## What the code must take into account
 
 1. **Pin map.** `RELAY_PIN_MAP` (`main.py:146`) is `{1:3, 2:2, 3:1, 4:0, 5:4, 6:5, 7:6, 8:7}`, so firmware ch1..4 are reversed against the board (fw ch4 "GATEWAY" = board relay 1). Target: `{n: n-1}`, fw channel N = board relay N, with the `RELAY_CH_*` constants taken from the final port table.
@@ -52,7 +54,7 @@ The inside-box BMP280 (`0x77`) and the AHT20 (`0x38`) are not fitted.
 5. **Docs.** `main.py` header (around lines 41 and 130–145), README, `POCO/POWER.md`: the relay table, NC loads, VCC-from-RP2040, the restart relay.
 6. **Tests.** `.venv/bin/python -m pytest tests` (pygame test `--ignore`). Add cases for the pin map, NC inversion, and the restart channel being rejected by plain `relay`.
 7. **Relay state is not read back from the chip.** `relay_states()` returns the cached byte `self._port`, and `PCF8574.pin()` updates that cache *before* the I2C write. Observed 2026-11-02: after an off/on cycle of relay 2 the firmware reported `rly` ch on while the relay was physically off (Pi drawing nothing); resending the command fixed it. The PCF either reset or a write failed silently. The code must update the cache only after a successful write, report `rly` from a chip read-back, and periodically re-assert the wanted state (or detect a PCF reset by reading it back).
-9. **Fan pins moved.** Firmware has the fan on GP27 (PWM, inverted for the 2N7000) and GP26 (tach), and the POCO power buttons on GP29 (main) / GP28 (secondary). On the bench the fan is now GP29 PWM (non-inverted) + GP28 tach. The final pin table must settle where the POCO buttons go (they must never sit on the fan pins: a fan PWM on a button line presses the phone's power button), update `FAN_PWM_PIN`/`FAN_TACH_PIN`, drop the duty inversion, and fix the header pin docs.
+9. **Fan pins moved.** Firmware has the fan on GP27 (PWM, inverted for the 2N7000) and GP26 (tach), and the POCO power buttons on GP29 (main) / GP28 (secondary). On the bench the fan is now GP29 PWM (non-inverted) + GP28 tach, and the main POCO button is GP27. The final pin table must settle where the secondary POCO button goes (they must never sit on the fan pins: a fan PWM on a button line presses the phone's power button), update `FAN_PWM_PIN`/`FAN_TACH_PIN`, drop the duty inversion, and fix the header pin docs.
 8. **Host heartbeats.** Firmware TX is gated on them (`{"a":"hb","n":N}`). Without heartbeats the port is silent. Bench tools must send them.
 
 ## Open questions
