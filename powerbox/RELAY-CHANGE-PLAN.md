@@ -28,6 +28,11 @@ The inside-box BMP280 (`0x77`) and the AHT20 (`0x38`) are not fitted.
 - Relay 4 (NO, fw ch1 with today's map): a second USB 2.0 hub (VIA Labs `2109:2817`, 4 ports, on bench-hub port 4), for several devices; first device: an fvision Android-dashcam (`1902:3241`, "Buildwin Media-Player", 2 GB). It is not UVC: it shows up as USB storage, and live 1280×720 JPEG frames are read with O_DIRECT from the file `VSFILE` (sector 896 of the disk, 384 sectors; the JPEG starts at byte 8704). Verified 2026-11-03 (frame grabbed); the camera's own clock is wrong (shows 2022). Tested 2026-11-03: with the relay off the hub is absent from USB; relay on → +84 mA at 12 V, high-speed enumeration in about 6 s. Its power comes only through the relay now (no VBUS back-feed from the upstream cable).
 - **Board relay 1 energised = hard restart of the powerbox.** The RP2040 loses power, the PCF comes back at 0xFF, relay 1 releases, and power returns by itself. Measured from command: USB drops after 0.4 s, re-enumerates after 1.0 s, firmware STATUS after 4.9 s (3 s of that is `SAFE_BOOT_DELAY_S`).
 
+**Chassis fan (bench-tested 2026-11-03, REPL):** ADDA AB07505HX110B00 (Dell 00G700), 5 V 0.40 A, 4-wire blower.
+- PWM now on **GP29** at 25 kHz, **not inverted** (GPIO duty = fan duty; no 2N7000 stage in the path).
+- Tach now on **GP28**, internal pull-up, falling edges, 2 pulses/rev.
+- Measured GPIO duty → RPM: 0 % → ~255 (still slowing down, or the minimum speed), 25 % → 1665, 50 % → 2955, 75 % → 3930, 100 % → 4665.
+
 ## What the code must take into account
 
 1. **Pin map.** `RELAY_PIN_MAP` (`main.py:146`) is `{1:3, 2:2, 3:1, 4:0, 5:4, 6:5, 7:6, 8:7}`, so firmware ch1..4 are reversed against the board (fw ch4 "GATEWAY" = board relay 1). Target: `{n: n-1}`, fw channel N = board relay N, with the `RELAY_CH_*` constants taken from the final port table.
@@ -37,6 +42,7 @@ The inside-box BMP280 (`0x77`) and the AHT20 (`0x38`) are not fitted.
 5. **Docs.** `main.py` header (around lines 41 and 130–145), README, `POCO/POWER.md`: the relay table, NC loads, VCC-from-RP2040, the restart relay.
 6. **Tests.** `.venv/bin/python -m pytest tests` (pygame test `--ignore`). Add cases for the pin map, NC inversion, and the restart channel being rejected by plain `relay`.
 7. **Relay state is not read back from the chip.** `relay_states()` returns the cached byte `self._port`, and `PCF8574.pin()` updates that cache *before* the I2C write. Observed 2026-11-02: after an off/on cycle of relay 2 the firmware reported `rly` ch on while the relay was physically off (Pi drawing nothing); resending the command fixed it. The PCF either reset or a write failed silently. The code must update the cache only after a successful write, report `rly` from a chip read-back, and periodically re-assert the wanted state (or detect a PCF reset by reading it back).
+9. **Fan pins moved.** Firmware has the fan on GP27 (PWM, inverted for the 2N7000) and GP26 (tach), and the POCO power buttons on GP29 (main) / GP28 (secondary). On the bench the fan is now GP29 PWM (non-inverted) + GP28 tach. The final pin table must settle where the POCO buttons go (they must never sit on the fan pins: a fan PWM on a button line presses the phone's power button), update `FAN_PWM_PIN`/`FAN_TACH_PIN`, drop the duty inversion, and fix the header pin docs.
 8. **Host heartbeats.** Firmware TX is gated on them (`{"a":"hb","n":N}`). Without heartbeats the port is silent. Bench tools must send them.
 
 ## Open questions
