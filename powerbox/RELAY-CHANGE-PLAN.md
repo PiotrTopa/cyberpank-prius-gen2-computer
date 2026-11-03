@@ -21,7 +21,7 @@ The inside-box BMP280 (`0x77`) and the AHT20 (`0x38`) are not fitted.
 - VCC (opto/input side) comes from the **RP2040-Zero 5 V pin**. When the RP2040 is unpowered, all coils are released.
 - PCF8574 power-up state is 0xFF, so all coils are released after any restart.
 
-**Loads:** only relay 1 is wired NC; relays 2–8 are NO.
+**Loads:** only relay 1 is wired NC; relays 2–8 are NO. Tested so far: relays 1–4; relays 5–8 not assigned yet.
 - Relay 1 (NC): the powerbox's own supply, and nothing else. Energised = hard restart of the powerbox (below); de-energised (incl. RP2040 off or reset) = powered.
 - Relay 2 (NO): MFD Raspberry Pi Zero v1.3 (≈ +100–115 mA at 12 V while running). Tested: relay on → Pi draws within ~1 s → USB gadget link (host `enx021e4d000001`) and ping at 49–50 s; three hard off/on cycles gave one clean enumeration each, no xHCI wedge (Pi gadget binds late, see `cyberpunk-prius-gateway/raspberry_pi_config/README.md`). Every hard cut risks the SD card: the backend must keep `ssh … poweroff` + wait before cutting the relay.
 - Relay 3 (NO, fw ch2 with today's map): powers a USB 2.0 hub (`1a40:0101`, "USB2.0 HUB", on bench-hub port 3), with the CAN gateway (`2e8a:000a` "Prius Gateway", fw 3.2.0, hub port 3) and the comma.ai panda (`bbaa:ddcc`, hw type cuatro, fw `DEV-f120999e-DEBUG`, hub port 4) behind it. The gateway is powered from this hub, so relay 3 off = gateway off. The panda is for unsolicited CAN reading; its use is not designed yet. Tested 2026-11-03 off the car: relay on → 50 → 155 mA at 12 V; the hub enumerates at high speed within about 6 s, the gateway at about 7 s (sends `GW_HB` every second, CAN in LISTEN mode, no errors) and the panda at about 9 s (answers hw type, version and health; no CAN traffic, since no bus is connected).
@@ -43,4 +43,5 @@ The inside-box BMP280 (`0x77`) and the AHT20 (`0x38`) are not fitted.
 
 - Q1. Final port table: which load on which board relay (1–8), NO or NC for each?
 - Q3. Restart scope. Relay VCC comes from the RP2040 5 V, so while the powerbox restarts every NO relay releases: the MFD Pi (hard cut) and the relay-3 hub (gateway + panda) drop too. Is that acceptable, or does the restart need to keep them up?
+- Q5. Spontaneous powerbox resets: on 2026-11-03 the RP2040 re-enumerated by itself several times (about 13:03, 15:21, 15:22, 15:30, during bench rewiring). Each reset releases every relay (MFD, gateway hub, camera hub drop). Cause not known (wiring transients, WDT, brown-out?); `getlog` / the reset cause should be checked before the car.
 - Q4. Fit the inside-box BMP280 `0x77` / AHT20 `0x38`, or drop them from the firmware?
