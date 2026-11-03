@@ -31,7 +31,17 @@ The inside-box BMP280 (`0x77`) and the AHT20 (`0x38`) are not fitted.
 **Chassis fan (bench-tested 2026-11-03, REPL):** ADDA AB07505HX110B00 (Dell 00G700), 5 V 0.40 A, 4-wire blower.
 - PWM now on **GP29** at 25 kHz, **not inverted** (GPIO duty = fan duty; no 2N7000 stage in the path).
 - Tach now on **GP28**, internal pull-up, falling edges, 2 pulses/rev.
-- Measured GPIO duty → RPM: 0 % → ~255 (still slowing down, or the minimum speed), 25 % → 1665, 50 % → 2955, 75 % → 3930, 100 % → 4665.
+- Duty → RPM, full sweep 2026-11-03 (5 % steps, 4 s settle + 3 s count, up then down, no hysteresis, ±20 RPM):
+
+  | duty % | 0 | 5 | 10 | 15 | 20 | 25 | 30 | 35 | 40 | 45 | 50 |
+  |---|---|---|---|---|---|---|---|---|---|---|---|
+  | RPM | 0 | 255 | 650 | 1025 | 1475 | 1675 | 1965 | 2240 | 2505 | 2735 | 2965 |
+
+  | duty % | 55 | 60 | 65 | 70 | 75 | 80 | 85 | 90 | 95 | 100 |
+  |---|---|---|---|---|---|---|---|---|---|---|
+  | RPM | 3170 | 3380 | 3565 | 3745 | 3920 | 4085 | 4245 | 4400 | 4540 | 4680 |
+
+  0 % stops the fan completely (no minimum-speed floor); 5 % already turns it (~255 RPM). Near-linear up to ~50 %, flattening above.
 
 ## What the code must take into account
 
