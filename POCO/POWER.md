@@ -246,11 +246,13 @@ Rules that came out of that measurement:
   be applied again. ON = data-enable first, then the relay.
 - **Gateway auto-recovery counts from the VBUS-on edge**, not from the last heartbeat, so
   key-on does not cold-cycle a gateway that was silent only because its relay was off.
-- **PCF8574 reset on the ACC-off transient** (`rly_fix … pcf_reset=1`, want 0xE1 got 0xFF):
-  every relay dropped for ~1 s while the MCU kept running → MFD Pi brown-out reboot, all
-  hubs re-enumerated, "MFD board UNREACHABLE" for 50 s. Firmware ≥ 2.2.2 re-checks the
-  expander every 100 ms (was ~1 s, STATUS-paced) which bounds the dropout; the real fix is
-  hardware (expander VCC decoupling / ACC-sense wiring — see powerbox/RELAY-CHANGE-PLAN.md).
+- **PCF8574 expander reset at the first key-off, seen once** (`rly_fix … pcf_reset=1`, want
+  0xE1 got 0xFF, 16:16): every relay dropped for ~1 s while the MCU kept running → MFD Pi
+  brown-out reboot, all hubs re-enumerated, "MFD board UNREACHABLE" for 50 s. Not an
+  ACC-line effect (the ACC input is only a 2N7000 gate into GP11, no load); it did not recur
+  on the 17:19 and 18:01 key-offs. Firmware ≥ 2.2.2 re-checks the expander every 100 ms (was
+  ~1 s, STATUS-paced), which bounds and time-stamps any repeat. Cause open — see
+  powerbox/RELAY-CHANGE-PLAN.md.
 
 ## Powerbox power management (relay board, POCO button, heartbeat)
 

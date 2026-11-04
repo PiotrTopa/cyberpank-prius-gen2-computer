@@ -103,12 +103,14 @@ class MfdPowerManager:
         iface_exists: Optional[Callable[[str], bool]] = None,
         clock: Callable[[], float] = time.monotonic,
         controller: Optional[object] = None,
+        iface_configured: Optional[Callable[[str, str], bool]] = None,
     ) -> None:
         self.config = config
         self._publish = publish
         self._run = runner or self._default_runner
         self._spawn = spawner or self._default_spawner
         self._iface_exists = iface_exists or self._default_iface_exists
+        self._iface_configured = iface_configured or self._default_iface_configured
         self._clock = clock
         # Port power controller (backend.port_power.RelayPortPower on the car:
         # the Pi's VBUS goes through powerbox relay ch3, with data-off
@@ -228,9 +230,44 @@ class MfdPowerManager:
         )
         self._set_port_power(self._powered)
 
+    def _default_iface_configured(self, iface: str, host_cidr: str) -> bool:
+        """Sudo-free probe: is ``iface`` UP and carrying ``host_cidr``'s address?
+
+        Reads the IFF_UP flag from sysfs and lists the v4 addresses with
+        ``ip -o -4 addr show`` (no privilege needed). Any failure reads as
+        "not configured", which falls through to the (idempotent) re-apply.
+        """
+        try:
+            with open(f"/sys/class/net/{iface}/flags") as fh:
+                if not int(fh.read().strip(), 16) & 0x1:   # IFF_UP
+                    return False
+        except (OSError, ValueError):
+            return False
+        want = host_cidr.split("/", 1)[0]
+        try:
+            r = self._run(["ip", "-o", "-4", "addr", "show", "dev", iface], timeout=5)
+        except Exception:
+            return False
+        if getattr(r, "returncode", 1) != 0:
+            return False
+        out = getattr(r, "stdout", "") or ""
+        return any(f" inet {want}/" in f" {line}" for line in str(out).splitlines())
+
     def _configure_host_iface(self) -> None:
-        """(Re)apply host-side IP config; idempotent, safe every tick."""
+        """(Re)apply the host-side IP config when it is missing.
+
+        Gadget re-enumerations wipe the host address, so this runs every tick
+        while the board is up — but only the sudo-free probe does in the steady
+        state. Blindly re-adding every tick cost two sudo calls per 5 s (217 in
+        the 18 min after a boot, 2026-11-04) and buried the journal.
+        """
         cfg = self.config
+        try:
+            if self._iface_configured(cfg.iface, cfg.host_cidr):
+                return
+        except Exception:
+            logger.debug("MFD host iface probe failed", exc_info=True)
+        logger.info("MFD host link: configuring %s %s", cfg.iface, cfg.host_cidr)
         try:
             # "File exists" from a duplicate add is expected and harmless.
             self._run(["sudo", "ip", "addr", "add", cfg.host_cidr, "dev", cfg.iface])
@@ -380,7 +417,8 @@ class MfdPowerManager:
                 pass
 
         elif self._state == STATE_ON:
-            # Gadget re-enumerations wipe the host address: keep re-applying.
+            # Gadget re-enumerations wipe the host address: keep checking
+            # (and re-applying only when it is gone).
             if self._iface_exists(cfg.iface):
                 self._configure_host_iface()
                 reachable = self._ping()

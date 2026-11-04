@@ -162,6 +162,33 @@ class TestRelayPortPower:
         assert len(uhub) == 1 and "off" in uhub[0]
         assert sent == [(2, False)]
 
+    def test_no_data_drift_on_an_empty_port_of_a_ganged_hub(self):
+        """After a clean OFF the top hub keeps reporting "power" on the dark
+        port (ganged hub, 2026-11-04). With no device on the port that is not
+        drift and must not even cost a uhubctl read; a device re-appearing
+        on the dark port is drift and re-applies the sequence."""
+        relays = {"v": (0, 0, 0, 0)}
+        sent, uhub, clockh = [], [], {"t": 0.0}
+        present = {"v": True}
+        c = self._make(relays, sent, uhub, clockh, present_holder=present,
+                       stdout=UHUBCTL_OUTPUT)  # port 4 reads "power" forever
+        c.set(False)
+        present["v"] = False
+        clockh["t"] = 1.0
+        c.tick()
+        assert len(uhub) == 1 and "off" in uhub[0]   # OFF finished
+        clockh["t"] = 20.0
+        c.enforce()
+        clockh["t"] = 40.0
+        c.enforce()
+        assert sent == [(2, False)]                  # no re-apply
+        assert len(uhub) == 1                        # no `uhubctl -f` either
+        present["v"] = True                          # zombie back on the port
+        clockh["t"] = 60.0
+        c.enforce()
+        assert sent == [(2, False), (2, False)]      # re-applied
+        assert c.off_pending
+
     def test_read_maps_channel(self):
         relays = {"v": (0, 1, 0, 0)}  # ch2 powered
         c = self._make(relays, [], [], {"t": 0.0})

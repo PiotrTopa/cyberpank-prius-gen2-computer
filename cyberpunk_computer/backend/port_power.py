@@ -343,11 +343,13 @@ class RelayPortPower:
         * VBUS (relay) drift — verified against the powerbox "rly" telemetry.
           Covers lost relay commands and hub resets that cold-boot the powerbox
           (PCF wakes with every coil released).
-        * Data-port drift — verified against uhubctl. A hub reset silently
+        * Data-port drift — a device present (sysfs) on a port meant to be
+          dark, with uhubctl reporting the port enabled. A hub reset silently
           re-enables every port; for a port whose VBUS is OFF that recreates
           the unpowered-zombie bus poisoning, so the data-off MUST be
           re-applied (diagnosed the hard way 2026-08-01: zombie gateway →
-          poisoning → more hub resets → more zombies).
+          poisoning → more hub resets → more zombies). An empty port is never
+          drift, whatever the (ganged) hub's power bit says.
 
         VBUS drift is only actionable while the powerbox telemetry is FRESH.
         A wedged USB-CDC link freezes the ``rly`` mirror at its last value
@@ -385,8 +387,23 @@ class RelayPortPower:
         vbus_drift = actual is not None and actual != self._desired
         data_drift = False
         if not vbus_drift and self._desired is False and self._data_off_due is None:
-            data = self.read_data_state()
-            data_drift = data is True  # data enabled on a port meant to be dark
+            # A dark port has drifted only when a DEVICE is back on it (sysfs)
+            # AND the hub reports the port enabled. uhubctl alone is not
+            # evidence: the top hub (Terminus 1a40:0101) is ganged, its per-port
+            # power bit reads "power" for every port whatever was commanded, so
+            # after each clean OFF the old check re-applied the sequence every
+            # enforce tick (seen 2026-11-04). No device on the port means
+            # nothing can poison the bus, so there is nothing to re-apply; the
+            # sysfs stat also spares two sudo uhubctl calls per tick at key-off.
+            present: Optional[bool] = None
+            try:
+                present = self._device_present()
+            except Exception:
+                logger.debug("device-present probe failed (%s)", self.name,
+                             exc_info=True)
+            if present is not False:
+                data = self.read_data_state()
+                data_drift = data is True  # data enabled on a port meant to be dark
         if not vbus_drift and not data_drift:
             return
         logger.warning(
