@@ -28,12 +28,21 @@ Two controller flavours:
   firmware (PCF8574 expander, NDJSON ``{"a":"relay","ch":N,"on":b}``). Two
   hard-won rules are encoded here:
 
-  1. **Data-off before VBUS-off, VBUS-on before data-on.** A device left
-     data-connected on an unpowered socket back-feeds through its ESD diodes
-     and destabilises the ENTIRE hub (EMI port-disables, -32/-71 enumeration
-     storms — diagnosed 2026-08-01). So the hub port is administratively
-     disabled (``uhubctl -a off`` = data-only disconnect on this hub) before
-     the relay cuts VBUS, and re-enabled only after VBUS is back.
+  1. **VBUS-off first, data-off right after the disconnect; VBUS-on before
+     data-on.** A device left data-connected on an unpowered socket back-feeds
+     through its ESD diodes and destabilises the ENTIRE hub (EMI port-disables,
+     -32/-71 enumeration storms — diagnosed 2026-08-01), so the hub port is
+     administratively disabled (``uhubctl -a off`` = data-only disconnect on
+     this hub) whenever its VBUS is off, and re-enabled only after VBUS is
+     back. The ORDER of the off sequence was reversed on 2026-11-04: disabling
+     the port *before* cutting VBUS hides the disconnect from the host — the
+     parent hub reports nothing for a disabled port, the kernel only gives up
+     after ~10 s of ``clear tt`` errors (321 of them in one key-off) and on
+     that timeout re-enables the port, so the data-off had to be applied a
+     second time by ``enforce()``. Cutting VBUS first gives a clean disconnect
+     within a second; ``tick()`` then disables the port as soon as the device
+     is gone from sysfs (``data_off_max_wait_s`` cap). ON enables the port
+     first and then closes the relay, so the hub is ready when VBUS arrives.
 
   2. **Commands are lossy; state must be verified.** The powerbox CDC link can
      silently swallow a command (consumed, never acked). Controllers therefore
@@ -49,6 +58,7 @@ All external effects are injectable for tests.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -80,6 +90,14 @@ class PortPowerConfig:
 
 def _default_runner(cmd, timeout=10):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+def _sysfs_device_present(hub: str, port: int) -> Optional[bool]:
+    """Is a device enumerated under hub port ``<hub>.<port>`` (sysfs)?"""
+    try:
+        return os.path.exists("/sys/bus/usb/devices/%s.%d" % (hub, int(port)))
+    except Exception:
+        return None
 
 
 def parse_uhubctl_port_power(output: str, hub: str, port: int) -> Optional[bool]:
@@ -187,6 +205,8 @@ class RelayPortPower:
         enforce_min_interval_s: float = 5.0,
         clock: Callable[[], float] = time.monotonic,
         telemetry_fresh: Optional[Callable[[], bool]] = None,
+        device_present: Optional[Callable[[], Optional[bool]]] = None,
+        data_off_max_wait_s: float = 3.0,
     ) -> None:
         if int(relay_ch) == RELAY_CH_RESTART:
             raise ValueError(
@@ -210,6 +230,14 @@ class RelayPortPower:
         # link-health probe keep the previous behaviour.
         self._telemetry_fresh = telemetry_fresh or (lambda: True)
         self._stale_logged = False
+        # OFF is two-step: VBUS off now, data-off once the device has dropped
+        # off the bus (tick()). ``_data_off_due`` is the deadline of a pending
+        # data-off (None = nothing pending).
+        self._device_present = device_present or (
+            lambda: _sysfs_device_present(hub, data_port))
+        self._data_off_max_wait_s = float(data_off_max_wait_s)
+        self._data_off_due: Optional[float] = None
+        self._data_off_since: Optional[float] = None
 
     @property
     def desired(self) -> Optional[bool]:
@@ -241,14 +269,48 @@ class RelayPortPower:
     def _apply(self, on: bool) -> bool:
         self._last_apply = self._clock()
         if on:
-            ok = self._send_relay(self.relay_ch, True)
+            self._data_off_due = None
+            # Port enabled BEFORE the coil closes: the hub is ready when VBUS
+            # arrives (the relay command lands ~1 s later over the CDC link).
             self._data(True)
+            ok = self._send_relay(self.relay_ch, True)
         else:
-            self._data(False)
             ok = self._send_relay(self.relay_ch, False)
+            # Data-off follows the disconnect (tick()); re-arm if pending.
+            self._data_off_since = self._last_apply
+            self._data_off_due = self._last_apply + self._data_off_max_wait_s
         logger.info("Port power %s (relay ch%d) -> %s (sent=%s)",
                     self.name, self.relay_ch, "ON" if on else "OFF", ok)
         return ok
+
+    @property
+    def off_pending(self) -> bool:
+        """True between the VBUS-off command and the data-off that follows."""
+        return self._data_off_due is not None
+
+    def tick(self) -> None:
+        """Finish a pending OFF: disable the hub data port once the device has
+        dropped off the bus, or after ``data_off_max_wait_s``. Cheap (one
+        sysfs stat while pending, nothing otherwise) — call on every tick."""
+        if self._data_off_due is None:
+            return
+        now = self._clock()
+        present: Optional[bool] = None
+        try:
+            present = self._device_present()
+        except Exception:
+            logger.debug("device-present probe failed (%s)", self.name,
+                         exc_info=True)
+        if present is False or now >= self._data_off_due:
+            self._data_off_due = None
+            since = self._data_off_since if self._data_off_since is not None else now
+            if present is False:
+                why = "device gone after %.1fs" % (now - since)
+            else:
+                why = ("no disconnect seen within %.1fs"
+                       % self._data_off_max_wait_s)
+            logger.info("Port %s: finishing OFF (%s)", self.name, why)
+            self._data(False)
 
     def read(self) -> Optional[bool]:
         """Actual VBUS state from the mirrored powerbox ``rly`` telemetry."""
@@ -298,6 +360,7 @@ class RelayPortPower:
         """
         if self._desired is None:
             return
+        self.tick()
         if (self._clock() - self._last_apply) < self._enforce_min_s:
             return  # give the last attempt time to land / telemetry to update
         fresh = True
@@ -321,7 +384,7 @@ class RelayPortPower:
         actual = self.read() if fresh else None
         vbus_drift = actual is not None and actual != self._desired
         data_drift = False
-        if not vbus_drift and self._desired is False:
+        if not vbus_drift and self._desired is False and self._data_off_due is None:
             data = self.read_data_state()
             data_drift = data is True  # data enabled on a port meant to be dark
         if not vbus_drift and not data_drift:
@@ -378,6 +441,15 @@ class HubPortPower:
     @property
     def relay_ports(self) -> tuple:
         return (self.gateway, self.mfd, self.camera)
+
+    def tick_all(self) -> None:
+        """Advance pending OFF sequences (data-off right after the disconnect).
+        Cheap; the backend calls it every engine tick."""
+        for c in self.relay_ports:
+            try:
+                c.tick()
+            except Exception:
+                logger.exception("port power tick failed (%s)", c.name)
 
     def enforce_all(self) -> None:
         for c in self.relay_ports:

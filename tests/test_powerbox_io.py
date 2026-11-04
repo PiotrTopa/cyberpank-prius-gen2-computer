@@ -20,6 +20,7 @@ from cyberpunk_computer.state.actions import (
     SetPowerboxConnectionAction,
     SetPowerboxPowerStatusAction,
     SetPowerboxTelemetryAction,
+    SetPowerboxIgnitionAction,
 )
 from cyberpunk_computer.state.app_state import (
     RELAY_CH_CAM_HUB,
@@ -210,3 +211,71 @@ class TestCommands:
         assert c.set_rs485_power(True)
         assert sent == [{"a": "relay", "ch": RELAY_CH_RS485, "on": True}]
         assert not hasattr(c, "set_out")
+
+
+class TestAccOffDebouncer:
+    """ACC ON->OFF edges are held ``hold_s``; ON passes at once; a glitch is dropped."""
+
+    def _mk(self, hold=3.0):
+        from cyberpunk_computer.io.powerbox import AccOffDebouncer
+        clock = {"t": 100.0}
+        return AccOffDebouncer(hold, clock=lambda: clock["t"]), clock
+
+    @staticmethod
+    def _ign(acc, batt=True):
+        return SetPowerboxIgnitionAction(acc_on=acc, batt_present=batt)
+
+    def test_boot_with_key_off_passes_immediately(self):
+        d, _ = self._mk()
+        out = d.filter([self._ign(False)])
+        assert [a.acc_on for a in out] == [False]
+        assert not d.pending
+
+    def test_off_edge_is_held_then_released(self):
+        d, clock = self._mk(3.0)
+        d.filter([self._ign(True)])
+        out = d.filter([self._ign(False, batt=False)])
+        assert [a.acc_on for a in out] == [True]       # held: still "on" downstream
+        assert out[0].batt_present is False             # ...but batt keeps flowing
+        assert d.pending
+        clock["t"] = 102.9
+        assert d.due() is None
+        clock["t"] = 103.0
+        rel = d.due()
+        assert rel is not None and rel.acc_on is False and rel.batt_present is False
+        assert not d.pending
+        # Repeats of the OFF (STATUS frames) now pass straight through.
+        assert [a.acc_on for a in d.filter([self._ign(False)])] == [False]
+
+    def test_glitch_back_on_is_dropped(self):
+        d, clock = self._mk(3.0)
+        d.filter([self._ign(True)])
+        d.filter([self._ign(False)])
+        clock["t"] = 101.0
+        out = d.filter([self._ign(True)])
+        assert [a.acc_on for a in out] == [True]
+        assert not d.pending
+        clock["t"] = 110.0
+        assert d.due() is None                          # nothing left to release
+
+    def test_disabled_passes_everything(self):
+        d, _ = self._mk(0.0)
+        d.filter([self._ign(True)])
+        assert [a.acc_on for a in d.filter([self._ign(False)])] == [False]
+
+    def test_other_actions_untouched(self):
+        d, _ = self._mk()
+        other = SetPowerboxTelemetryAction(voltage=12.0)
+        assert d.filter([other]) == [other]
+
+    def test_register_with_filter_wraps_handlers(self):
+        from cyberpunk_computer.io.powerbox import (
+            register_powerbox_ingress, DEVICE_POWERBOX_EVENTS)
+        handlers = {}
+        ingress = type("I", (), {"register_satellite_handler":
+                                  lambda self, dev, h: handlers.__setitem__(dev, h)})()
+        d, _ = self._mk(3.0)
+        register_powerbox_ingress(ingress, action_filter=d.filter)
+        handlers[DEVICE_POWERBOX_EVENTS]({"event": "acc_on"})
+        out = handlers[DEVICE_POWERBOX_EVENTS]({"event": "acc_off"})
+        assert [a.acc_on for a in out] == [True] and d.pending

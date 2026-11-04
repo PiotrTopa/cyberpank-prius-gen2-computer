@@ -119,7 +119,7 @@ import pcf8574                      # PCF8574 driver + RelayBoard (pin map, NC, 
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-VERSION = "2.2.1"
+VERSION = "2.2.2"
 
 # Device role — reported in the unified identify ("whoami") response and the
 # ready banner so the computer can discover which USB-CDC port is the powerbox
@@ -146,6 +146,13 @@ ACC_PIN = 11
 # Re-send the ACC event at least this often even when it has not changed, so the
 # computer's virtual twin recovers the state after a reconnect / restart.
 ACC_HEARTBEAT_MS = 5000
+
+# Relay board read-back period between STATUS frames. The PCF8574 was seen
+# power-up-resetting (0xFF = every coil released) on the ACC-off transient
+# while the MCU kept running (2026-11-04): the STATUS-paced check (~1 s)
+# repaired it 1.03 s later, long enough for the MFD Pi to brown out and every
+# hub to re-enumerate. 100 ms bounds that window; one I2C byte per check.
+RELAY_VERIFY_MS = 100
 
 # Re-announce identity (IDENT on the system channel) at least this often. This
 # makes the device discoverable by the computer at ANY time — not just at boot —
@@ -710,6 +717,7 @@ class PowerManager:
         self.relays = None
         # Pending hard restart: ticks at which to energise the restart relay.
         self.restart_due = None
+        self.relay_verify_ms = 0   # last periodic relay read-back (RELAY_VERIFY_MS)
         self.state = "normal"
         now = time.ticks_ms()
         self.boot_ms = now
@@ -955,6 +963,10 @@ class PowerManager:
             self._do_hard_restart()
         elif self.relays is not None and self.relays.restart_at is not None:
             self.relays.tick()               # notices a failed cut, releases
+        elif self.relays is not None and \
+                time.ticks_diff(now, self.relay_verify_ms) >= RELAY_VERIFY_MS:
+            self.relay_verify_ms = now
+            self.relays.tick()               # catches a PCF power-up reset fast
 
         # 3) Under-voltage backstop (only with a real reading, only while normal).
         if self.state == "normal" and voltage is not None:

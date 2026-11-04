@@ -1,8 +1,19 @@
 # Relay board + I2C — current state
 
-Status: **IMPLEMENTED and flashed (firmware 2.2.0 on the board since
+Status: **IMPLEMENTED and flashed (firmware 2.2.2 on the board since
 2026-11-04, bench-verified on the P52).** Decisions of 2026-11-03 are final; this file is the
 current-state reference for the hardware and the code that drives it.
+
+**Open hardware issue (2026-11-04): the PCF8574 power-up-resets on the ACC-off
+transient.** First bench key-off with the full stack: 1.0 s after `acc_off` the firmware
+read back 0xFF (every coil released) with the MCU still running (`rly_fix want=225 got=255
+pcf_reset=1`); the STATUS-paced check repaired it, but by then the MFD Pi had browned out
+(55 s reboot) and every hub re-enumerated. Firmware 2.2.2 reads the expander back every
+100 ms (`RELAY_VERIFY_MS`) to bound the dropout. To fix for real: scope the expander VCC
+and the I2C lines at ACC-off, add local decoupling (≥10 µF + 100 nF) at the PCF8574, and
+check whether the ACC-sense circuit (GP11, pull-up, 12 V side) shares a ground/supply
+path with the expander — the MCU never saw a brown-out, so the glitch is local to the
+expander / relay-board input side.
 
 ## Hardware as it is
 

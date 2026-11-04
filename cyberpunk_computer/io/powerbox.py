@@ -32,7 +32,8 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import TYPE_CHECKING, List, Optional
+import time
+from typing import TYPE_CHECKING, Callable, List, Optional
 
 from .ports import (
     DEVICE_POWERBOX_BASE,
@@ -358,17 +359,84 @@ def parse_powerbox_message(device_id: int, data: dict) -> List[Action]:
     return []
 
 
-def register_powerbox_ingress(ingress: "IngressController") -> None:
-    """Register satellite handlers for the powerbox device id range."""
-    ingress.register_satellite_handler(
-        DEVICE_POWERBOX_BASE, lambda d: parse_powerbox_message(DEVICE_POWERBOX_BASE, d)
-    )
-    ingress.register_satellite_handler(
-        DEVICE_POWERBOX_POWER, lambda d: parse_powerbox_message(DEVICE_POWERBOX_POWER, d)
-    )
-    ingress.register_satellite_handler(
-        DEVICE_POWERBOX_EVENTS, lambda d: parse_powerbox_message(DEVICE_POWERBOX_EVENTS, d)
-    )
+class AccOffDebouncer:
+    """Hold an ACC ON->OFF edge for ``hold_s`` before it reaches the store.
+
+    Everything downstream (power profile, roadsense, MFD, satellite rail,
+    gateway relay) follows ``powerbox.acc_on``; a key turned past ACC and back,
+    or a bounce on the sense line, must not start the whole key-off cascade.
+    ACC-on always passes immediately. While an OFF is held, frames are passed
+    through with ``acc_on=True`` so the battery flag keeps flowing. The held
+    OFF is released by :meth:`due` (called from the engine tick).
+    """
+
+    def __init__(self, hold_s: float, clock: Callable[[], float] = time.monotonic) -> None:
+        self.hold_s = max(0.0, float(hold_s))
+        self._clock = clock
+        self._last_acc: Optional[bool] = None   # last value that reached the store
+        self._pending_since: Optional[float] = None
+        self._pending_batt: bool = True
+
+    @property
+    def pending(self) -> bool:
+        return self._pending_since is not None
+
+    def filter(self, actions: List[Action]) -> List[Action]:
+        out: List[Action] = []
+        for a in actions:
+            if not isinstance(a, SetPowerboxIgnitionAction):
+                out.append(a)
+                continue
+            if a.acc_on:
+                if self._pending_since is not None:
+                    logger.info("ACC-off glitch ignored: back on after %.1fs",
+                                self._clock() - self._pending_since)
+                self._pending_since = None
+                self._last_acc = True
+                out.append(a)
+            elif self._last_acc is not True or self.hold_s <= 0:
+                # Not an ON->OFF edge (boot with the key off, repeats of an
+                # OFF already applied) or debounce disabled: pass through.
+                self._last_acc = False
+                out.append(a)
+            else:
+                if self._pending_since is None:
+                    self._pending_since = self._clock()
+                    logger.info("ACC off seen: holding %.1fs before acting", self.hold_s)
+                self._pending_batt = bool(a.batt_present)
+                out.append(SetPowerboxIgnitionAction(
+                    acc_on=True, batt_present=self._pending_batt))
+        return out
+
+    def due(self) -> Optional[Action]:
+        """The held ACC-off once ``hold_s`` has elapsed, else None."""
+        if self._pending_since is None:
+            return None
+        if self._clock() - self._pending_since < self.hold_s:
+            return None
+        self._pending_since = None
+        self._last_acc = False
+        logger.info("ACC off confirmed after %.1fs hold", self.hold_s)
+        return SetPowerboxIgnitionAction(acc_on=False, batt_present=self._pending_batt)
+
+
+def register_powerbox_ingress(
+    ingress: "IngressController",
+    action_filter: Optional[Callable[[List[Action]], List[Action]]] = None,
+) -> None:
+    """Register satellite handlers for the powerbox device id range.
+
+    ``action_filter`` (e.g. :meth:`AccOffDebouncer.filter`) post-processes the
+    actions of every powerbox frame before they reach the store.
+    """
+    def _handler(dev: int):
+        if action_filter is None:
+            return lambda d: parse_powerbox_message(dev, d)
+        return lambda d: action_filter(parse_powerbox_message(dev, d))
+
+    ingress.register_satellite_handler(DEVICE_POWERBOX_BASE, _handler(DEVICE_POWERBOX_BASE))
+    ingress.register_satellite_handler(DEVICE_POWERBOX_POWER, _handler(DEVICE_POWERBOX_POWER))
+    ingress.register_satellite_handler(DEVICE_POWERBOX_EVENTS, _handler(DEVICE_POWERBOX_EVENTS))
     logger.info("Powerbox ingress handlers registered (devices %d-%d)",
                 DEVICE_POWERBOX_BASE, DEVICE_POWERBOX_EVENTS)
 

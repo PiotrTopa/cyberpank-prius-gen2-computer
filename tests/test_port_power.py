@@ -1,7 +1,8 @@
 """Tests for backend.port_power — hub port power controllers.
 
 Covers the two hard-won bring-up rules:
-  * data-off before VBUS-off, VBUS-on before data-on (bus-poisoning avoidance);
+  * VBUS-off first, data-off right after the disconnect (tick()); data-on
+    before VBUS-on (bus-poisoning avoidance, order fixed 2026-11-04);
   * lossy relay commands converge via enforce() against the "rly" telemetry.
 """
 
@@ -71,33 +72,95 @@ class TestUhubctlPortPower:
 
 class TestRelayPortPower:
     def _make(self, relays_holder, sent, uhub_calls, clock_holder,
-              fresh_holder=None):
+              fresh_holder=None, present_holder=None, stdout=""):
         return RelayPortPower(
             "sdr", relay_ch=2, hub="1-1", data_port=4,
             send_relay=lambda ch, on: (sent.append((ch, on)), True)[1],
             get_relays=lambda: relays_holder["v"],
-            runner=_runner_recorder(uhub_calls),
+            runner=_runner_recorder(uhub_calls, stdout=stdout),
             clock=lambda: clock_holder["t"],
             telemetry_fresh=(None if fresh_holder is None
                              else lambda: fresh_holder["v"]),
+            device_present=(None if present_holder is None
+                            else lambda: present_holder["v"]),
         )
 
-    def test_off_sequence_data_first(self):
+    def test_off_sequence_vbus_first_then_data_after_disconnect(self):
         relays = {"v": (0, 1, 0, 0)}
         sent, uhub, clockh = [], [], {"t": 0.0}
-        c = self._make(relays, sent, uhub, clockh)
+        present = {"v": True}
+        c = self._make(relays, sent, uhub, clockh, present_holder=present)
         c.set(False)
-        # Data disabled via uhubctl BEFORE the relay VBUS command.
-        assert uhub and "off" in uhub[0]
         assert sent == [(2, False)]
+        assert uhub == []                   # data stays on until the device drops
+        assert c.off_pending
+        clockh["t"] = 0.5
+        c.tick()
+        assert uhub == []
+        present["v"] = False                # kernel saw the disconnect
+        c.tick()
+        assert len(uhub) == 1 and "off" in uhub[0]
+        assert not c.off_pending
+        c.tick()
+        assert len(uhub) == 1               # once
 
-    def test_on_sequence_vbus_first(self):
+    def test_off_sequence_data_off_after_timeout(self):
+        relays = {"v": (0, 1, 0, 0)}
+        sent, uhub, clockh = [], [], {"t": 0.0}
+        present = {"v": True}               # never disconnects (back-fed?)
+        c = self._make(relays, sent, uhub, clockh, present_holder=present)
+        c.set(False)
+        clockh["t"] = 2.9
+        c.tick()
+        assert uhub == []
+        clockh["t"] = 3.0
+        c.tick()
+        assert len(uhub) == 1 and "off" in uhub[0]
+
+    def test_on_cancels_pending_data_off(self):
+        relays = {"v": (0, 1, 0, 0)}
+        sent, uhub, clockh = [], [], {"t": 0.0}
+        present = {"v": True}
+        c = self._make(relays, sent, uhub, clockh, present_holder=present)
+        c.set(False)
+        c.set(True)                         # wanted again right away
+        clockh["t"] = 10.0
+        c.tick()
+        assert [u for u in uhub if "off" in u] == []
+        assert uhub and "on" in uhub[0]
+
+    def test_on_sequence_data_first_then_vbus(self):
         relays = {"v": (0, 0, 0, 0)}
         sent, uhub, clockh = [], [], {"t": 0.0}
-        c = self._make(relays, sent, uhub, clockh)
+        order = []
+        c = RelayPortPower(
+            "sdr", relay_ch=2, hub="1-1", data_port=4,
+            send_relay=lambda ch, on: (order.append(("relay", on)), True)[1],
+            get_relays=lambda: relays["v"],
+            runner=lambda cmd, timeout=10: (order.append(("data", cmd[-1])),
+                                            mock.Mock(returncode=0, stdout=""))[1],
+            clock=lambda: clockh["t"],
+        )
         c.set(True)
-        assert sent == [(2, True)]
-        assert uhub and "on" in uhub[0]
+        assert order == [("data", "on"), ("relay", True)]
+
+    def test_enforce_does_not_rush_the_data_off(self):
+        """enforce() must not treat a port whose OFF is still pending as
+        data-drifted (uhubctl still shows it powered) — tick() finishes it."""
+        relays = {"v": (0, 0, 0, 0)}            # VBUS already off per mirror
+        sent, uhub, clockh = [], [], {"t": 0.0}
+        present = {"v": True}
+        c = self._make(relays, sent, uhub, clockh, present_holder=present,
+                       stdout=UHUBCTL_OUTPUT)  # port 4 reads "power" (enabled)
+        c.set(False)
+        clockh["t"] = 1.0
+        c.enforce()
+        assert uhub == [] and sent == [(2, False)]
+        present["v"] = False
+        clockh["t"] = 2.0
+        c.enforce()
+        assert len(uhub) == 1 and "off" in uhub[0]
+        assert sent == [(2, False)]
 
     def test_read_maps_channel(self):
         relays = {"v": (0, 1, 0, 0)}  # ch2 powered
@@ -181,6 +244,20 @@ class TestHubPortPower:
         assert hub.camera.data_port == 4
         assert hub.powerbox.port == 5
         assert 1 not in {c.relay_ch for c in hub.relay_ports}
+
+    def test_tick_all_finishes_pending_offs_and_survives_errors(self):
+        hub = HubPortPower.build(
+            PortPowerConfig(),
+            send_relay=lambda ch, on: True,
+            get_relays=lambda: (None, 0, 0, 0, 0, 0, 0, 0),
+            runner=_runner_recorder([]),
+        )
+        hub.gateway.tick = mock.Mock(side_effect=RuntimeError("boom"))
+        hub.camera._device_present = lambda: False
+        hub.camera.set(False)
+        assert hub.camera.off_pending
+        hub.tick_all()                      # must not raise
+        assert not hub.camera.off_pending   # camera's data-off was finished
 
     def test_enforce_all_survives_errors(self):
         hub = HubPortPower.build(

@@ -3,25 +3,38 @@
 # Invariants: NEVER touch the SIM WAN (prius-wan) or WireGuard (wg-homelab);
 # those stay up so SSH-over-cellular + VPN always survive a wifi switch.
 # Modes (flag /etc/prius/wifi-mode): client | ap | off
+# The power profile (prius-power) does NOT rewrite the flag: `suspend` turns the
+# radio off for the key-off `low` profile, `resume` re-applies the flag for
+# `full`. Every verb is idempotent (an already-active mode is left alone) and
+# the whole script runs under one lock, because prius-wifi.path re-runs
+# `prius-wifi apply` on every flag write — two concurrent activations of the
+# AP used to race ("base network connection was interrupted", 2026-11-04).
 set -eu
 FLAG=/etc/prius/wifi-mode
 CLIENT_CON=prius-home-wifi
 AP_CON=prius-ap
+LOCK=/run/lock/prius-wifi.lock
 
 read_flag() { [ -r "$FLAG" ] && tr -d ' \t\n' < "$FLAG" || echo off; }
+active_wifi() {
+  nmcli -t -f NAME,TYPE con show --active 2>/dev/null | awk -F: '$2=="802-11-wireless"{print $1}' | head -1
+}
 
 set_client() {
+  [ "$(active_wifi)" = "$CLIENT_CON" ] && return 0
   nmcli radio wifi on
   nmcli con down "$AP_CON" >/dev/null 2>&1 || true
   nmcli con up "$CLIENT_CON"
 }
 set_ap() {
+  [ "$(active_wifi)" = "$AP_CON" ] && return 0
   nmcli radio wifi on
   nmcli con down "$CLIENT_CON" >/dev/null 2>&1 || true
   sleep 2
   nmcli con up "$AP_CON"
 }
 set_off() {
+  if [ -z "$(active_wifi)" ] && [ "$(nmcli radio wifi 2>/dev/null)" = "disabled" ]; then return 0; fi
   nmcli con down "$CLIENT_CON" >/dev/null 2>&1 || true
   nmcli con down "$AP_CON" >/dev/null 2>&1 || true
   nmcli radio wifi off
@@ -46,13 +59,26 @@ status() {
   ip route show default | sed 's/^/  /'
 }
 
-write_flag() { echo "$1" | tee "$FLAG" >/dev/null; }
+# Only touch the flag when it changes (every write re-triggers prius-wifi.path).
+write_flag() { [ "$(read_flag)" = "$1" ] && return 0; echo "$1" | tee "$FLAG" >/dev/null; }
 
-case "${1:-status}" in
+verb="${1:-status}"
+case "$verb" in
+  status) status; exit 0 ;;
+  client|ap|off|apply|suspend|resume) ;;
+  *) echo "usage: prius-wifi {client|ap|off|apply|suspend|resume|status}" >&2; exit 2 ;;
+esac
+
+# Serialise with the path-unit re-run (and with prius-power).
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$LOCK"
+  flock -w 60 9 || echo "prius-wifi: lock busy, continuing" >&2
+fi
+
+case "$verb" in
   client) write_flag client; apply ;;
   ap)     write_flag ap;     apply ;;
   off)    write_flag off;    apply ;;
-  apply)  apply ;;
-  status) status ;;
-  *) echo "usage: prius-wifi {client|ap|off|apply|status}" >&2; exit 2 ;;
+  apply|resume) apply ;;        # resume: power profile 'full' -> whatever the flag says
+  suspend) set_off ;;           # power profile 'low': radio off, flag untouched
 esac

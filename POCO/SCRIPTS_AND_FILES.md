@@ -15,7 +15,7 @@ or reverse-engineer where the flags/scripts live. Stock pmOS files are not liste
 
 | Path | Type | Purpose |
 |------|------|---------|
-| `/usr/local/sbin/prius-power` | sh script (755) | low/full CPU power profiles. `prius-power {low\|full\|apply\|status}` |
+| `/usr/local/sbin/prius-power` | sh script (755) | low/full CPU power profiles. `prius-power {low\|full\|apply\|status}`; `low` also `prius-wifi suspend`, `full` `prius-wifi resume`. The backend writes the flag (key-off `low` only once roadsense is down) |
 | `/etc/prius/power-mode` | flag file (664) | single source of truth: `low` or `full`. Default `low` |
 | `/etc/systemd/system/prius-power.service` | systemd oneshot (enabled) | runs `prius-power apply` on boot/trigger |
 | `/etc/systemd/system/prius-power.path` | systemd path (enabled) | watches `/etc/prius/power-mode`, triggers the service on change |
@@ -56,7 +56,7 @@ Details in [POWER.md](POWER.md).
 | `/etc/wireguard/wg-homelab.conf` | WireGuard conf | VPN overlay, addr `10.200.0.5/32`, endpoint `<WG_SERVER_IP>:51820`, AllowedIPs `10.200.0.0/24,192.168.0.0/24`, keepalive 25 |
 | NM conn `wg-homelab` | NetworkManager | brings up the WireGuard tunnel, autoconnect yes |
 | NM conn `prius-wan` | NetworkManager | SIM WAN, APN `internet`, `gsm.pin` (value in secrets.env), metric 800, autoconnect yes |
-| `/usr/local/sbin/prius-wifi` | sh script (755) | Wi-Fi mode toggle `prius-wifi {client\|ap\|off\|apply\|status}`. Never touches WAN/VPN |
+| `/usr/local/sbin/prius-wifi` | sh script (755) | Wi-Fi mode toggle `prius-wifi {client\|ap\|off\|apply\|suspend\|resume\|status}` (`suspend`/`resume` = power profile, flag untouched; idempotent, `flock`-serialised). Never touches WAN/VPN |
 | `/etc/prius/wifi-mode` | flag file (664) | single source of truth: `client`/`ap`/`off`. Default `ap` (hotspot; main access is LTE + WireGuard) |
 | `/etc/systemd/system/prius-wifi.service` | systemd oneshot (enabled) | runs `prius-wifi apply` on boot/trigger |
 | `/etc/systemd/system/prius-wifi.path` | systemd path (enabled) | watches `/etc/prius/wifi-mode`, triggers the service on change |

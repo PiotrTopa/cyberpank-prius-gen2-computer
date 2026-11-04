@@ -43,6 +43,7 @@ def make_service(hb_age_s=60.0, stale=True, powered=True, desired=None, hb_seen=
     svc._gw_recover_last = 0.0
     svc._gw_recover_epoch = time.time() - hb_age_s
     svc._gw_recover_attempts = 0
+    svc._gw_vbus_on_at = time.time() - hb_age_s   # VBUS on since the last HB
     gw = FakeGateway(powered=powered, desired=desired)
     svc.port_power = types.SimpleNamespace(gateway=gw)
     last_hb = (time.time() - hb_age_s) if hb_seen else None
@@ -58,6 +59,36 @@ def test_cycles_when_stale_and_powered():
     svc._gateway_recover_tick()
     assert gw.calls == [False]
     assert svc._gw_recover_off_at is not None
+
+
+def test_no_cycle_right_after_vbus_on_at_key_on():
+    """Key-on re-powers relay ch3 after minutes of key-off silence: the stale
+    clock restarts at the VBUS edge instead of counting the key-off period
+    (a 737 s "stall" cold-cycled a healthy, booting gateway on 2026-11-04)."""
+    svc, gw = make_service(hb_age_s=737.0, powered=False)
+    svc._gw_vbus_on_at = None
+    svc._gateway_recover_tick()          # VBUS off -> nothing
+    assert gw.calls == []
+    gw.powered = True                    # relay ch3 just came on
+    svc._gateway_recover_tick()
+    assert gw.calls == []                # 0 s since VBUS-on: no cycle
+    svc._gw_vbus_on_at -= 31.0           # 31 s of VBUS, still silent
+    svc._gateway_recover_tick()
+    assert gw.calls == [False]           # now it is a real stall
+
+
+def test_vbus_edge_resets_after_recovery_repower():
+    """After the two-phase cycle re-powers the port, the next judgement waits
+    a full stale window from that re-power (cooldown aside)."""
+    svc, gw = make_service()
+    svc.config.gateway_recover_cooldown_s = 0.0
+    svc._gateway_recover_tick()
+    assert gw.calls == [False]
+    svc._gw_recover_off_at = time.time() - 10.0   # off window elapsed
+    svc._gateway_recover_tick()
+    assert gw.calls == [False, True]
+    svc._gateway_recover_tick()                   # VBUS-on edge just now
+    assert gw.calls == [False, True]
 
 
 def test_repowers_after_off_window():
@@ -135,6 +166,8 @@ def test_backoff_doubles_and_heartbeat_resets_it():
         svc._gateway_recover_tick()          # off
         svc._gw_recover_off_at = time.time() - cfg.gateway_recover_off_s - 1
         svc._gateway_recover_tick()          # on
+        svc._gateway_recover_tick()          # VBUS-on edge observed...
+        svc._gw_vbus_on_at = time.time() - 60.0   # ...a full stale window ago
 
     cycle()
     assert svc._gw_recover_attempts == 1

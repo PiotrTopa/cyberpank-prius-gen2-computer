@@ -59,6 +59,13 @@ class SatelliteAccHoldRule(StateRule):
     Acquires the ``"acc"`` holder on the OFF->ON edge and releases it on
     ON->OFF (the power-off itself is further debounced by the linger in
     :class:`SatellitePowerRule`).
+
+    Edge-only on purpose: the hold action dispatched from inside a rule lands
+    after the current dispatch cycle, and the POWERBOX slice changes twice per
+    ACC edge (PMEVENT, then STATUS), so without the edge test the mismatch was
+    seen again before the holder appeared and the acquire was logged and
+    dispatched twice (2026-11-04). It also means a manual release of the
+    ``acc`` holder is respected until the next ACC edge.
     """
 
     @property
@@ -83,6 +90,8 @@ class SatelliteAccHoldRule(StateRule):
         held = HOLDER_ACC in new_state.satellites.power_holders
         if new_acc == held:
             return
+        if old_state is not None and bool(old_state.powerbox.acc_on) == new_acc:
+            return  # not an ACC edge: the hold for this edge is already in flight
         logger.info("Satellite ACC hold %s (acc_on=%s)",
                     "acquire" if new_acc else "release", new_acc)
         store.dispatch(SatellitePowerHoldAction(HOLDER_ACC, acquire=new_acc))

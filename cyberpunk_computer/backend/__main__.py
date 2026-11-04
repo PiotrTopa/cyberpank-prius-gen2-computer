@@ -81,6 +81,7 @@ def _build_roadsense():
         BACKEND_ROADSENSE_CAMERA_RELAY=1     # power the camera hub (relay ch4) with the stack
         BACKEND_ROADSENSE_CAMERA_SETTLE_S=8
         BACKEND_ROADSENSE_GRACE_S=30         # key-off grace before the stop
+        BACKEND_ACC_OFF_DEBOUNCE_S=3         # hold an ACC-off this long before anything acts on it
         BACKEND_ROADSENSE_START_TIMEOUT_S=120
         BACKEND_ROADSENSE_STOP_TIMEOUT_S=60
         BACKEND_ROADSENSE_API_DEAD_RESTART_S=180   # 0 = never auto-restart
@@ -246,6 +247,7 @@ def _build_config(args: argparse.Namespace) -> BackendConfig:
         mfd_config=mfd_config,
         roadsense_enabled=roadsense_enabled,
         roadsense_config=roadsense_config,
+        acc_off_debounce_s=float(os.environ.get("BACKEND_ACC_OFF_DEBOUNCE_S", "3")),
         verbose=args.verbose,
     )
 

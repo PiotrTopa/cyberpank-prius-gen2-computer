@@ -248,6 +248,12 @@ class BackendConfig:
     # after a hub reset (which cold-boots the powerbox and releases all relays).
     port_power_enforce_s: float = 15.0
 
+    # ACC ON->OFF edges are held this long before they reach the store (every
+    # ACC follower — power profile, roadsense, MFD, satellite rail, gateway
+    # relay — keys off it). A key turned past ACC and back, or a bounce on the
+    # sense line, must not start the key-off cascade. ACC-on is immediate.
+    acc_off_debounce_s: float = 3.0
+
     # ── RS485 satellites (relay ch5 rail power management + twin) ────────────
     # The satellite subsystem: rail wake-lock power rule (rail on while ACC is
     # on or jobs are pending), the serialized job queue, periodic scheduler and
@@ -404,6 +410,7 @@ class BackendService:
         self._gw_recover_last: float = 0.0               # last cycle start (cooldown)
         self._gw_recover_epoch: float = time.time()      # staleness reference when no HB seen yet
         self._gw_recover_attempts: int = 0               # consecutive cycles without a heartbeat
+        self._gw_vbus_on_at: Optional[float] = None      # when relay ch3 VBUS was last seen coming on
 
         # MFD video board power manager (backend.mfd_power).
         self.mfd_power = None
@@ -415,6 +422,8 @@ class BackendService:
 
         # USB hub port power controllers (backend.port_power.HubPortPower).
         self.port_power = None
+        # ACC-off debounce (io.powerbox.AccOffDebouncer), wired at setup.
+        self._acc_debounce = None
         self._pp_enforce_last: float = 0.0
         # Pending re-assert of every wanted relay state after a powerbox boot
         # banner (the PCF wakes at 0xFF: every NO load dropped). Delayed a few
@@ -710,7 +719,9 @@ class BackendService:
         """
         cfg = self.config
 
-        register_powerbox_ingress(twin.ingress)
+        from ..io.powerbox import AccOffDebouncer
+        self._acc_debounce = AccOffDebouncer(cfg.acc_off_debounce_s)
+        register_powerbox_ingress(twin.ingress, action_filter=self._acc_debounce.filter)
 
         try:
             from pathlib import Path
@@ -1239,6 +1250,7 @@ class BackendService:
                 try:
                     self.twin.update()
                     self.bridge.drain_commands()
+                    self._acc_debounce_tick()
                     self._powerbox_heartbeat_tick()
                     self._powerbox_watchdog_tick()
                     self._gateway_watchdog_tick()
@@ -1326,6 +1338,18 @@ class BackendService:
         logger.info("Key off: 'low' CPU profile deferred until roadsense has stopped "
                     "(state=%s)", self.roadsense_power.state)
         return True
+
+    def _acc_debounce_tick(self) -> None:
+        """Release a held ACC-off once the debounce window has elapsed."""
+        if self._acc_debounce is None or self.twin is None:
+            return
+        try:
+            action = self._acc_debounce.due()
+        except Exception:
+            logger.exception("ACC debounce tick failed")
+            return
+        if action is not None:
+            self.twin.store.dispatch(action)
 
     def _powerbox_heartbeat_tick(self) -> None:
         """Send the POCO->powerbox heartbeat (rolling counter) on cadence.
@@ -1441,7 +1465,7 @@ class BackendService:
                 self._gw_stale = True
                 logger.warning(
                     "Gateway link STALE: no heartbeat for %.1fs (>%.1fs). "
-                    "Likely an ACC power-save disconnect; marking disconnected.",
+                    "Key-off VBUS cut or a wedged MCU; marking disconnected.",
                     age, stale_s,
                 )
                 if conn.connected:
@@ -1486,6 +1510,18 @@ class BackendService:
         gw = self.port_power.gateway
         now = time.time()
 
+        # VBUS edge: a board that has just been (re)powered needs its boot time
+        # before silence means "wedged". Key-on turns relay ch3 back on after
+        # minutes of key-off silence; measured from the last heartbeat that
+        # looked like a 737 s stall and cold-cycled a healthy, still-booting
+        # gateway 2 s after power-up (2026-11-04). Staleness is therefore
+        # measured from the LATER of the last heartbeat and the VBUS-on edge.
+        if gw.read() is True:
+            if self._gw_vbus_on_at is None:
+                self._gw_vbus_on_at = now
+        else:
+            self._gw_vbus_on_at = None
+
         # Phase 2: mid-cycle — re-power once the off window has elapsed.
         if self._gw_recover_off_at is not None:
             if now - self._gw_recover_off_at >= cfg.gateway_recover_off_s:
@@ -1499,14 +1535,17 @@ class BackendService:
         if last:
             if not self._gw_stale:
                 return
-            age = now - last
+            since = last
         else:
             # No heartbeat ever seen this boot: either the gateway was already
             # wedged before we started (recoverable) or it runs pre-2.28.0
             # firmware with no GW_HB (a cycle is harmless — it reboots into
             # the same silence and the cooldown caps the rate). Measure
             # staleness from backend start.
-            age = now - self._gw_recover_epoch
+            since = self._gw_recover_epoch
+        if self._gw_vbus_on_at is not None and self._gw_vbus_on_at > since:
+            since = self._gw_vbus_on_at
+        age = now - since
         if age < cfg.gateway_recover_stale_s:
             return
         # A heartbeat after the last cycle proves recovery worked — reset backoff.
@@ -1577,6 +1616,9 @@ class BackendService:
         cfg = self.config
         if self.port_power is None:
             return
+        # Every tick: finish pending OFF sequences (data-off right after the
+        # device has dropped off the bus — see RelayPortPower.tick).
+        self.port_power.tick_all()
         now = time.time()
         if self._pp_reassert_at is not None and now >= self._pp_reassert_at:
             # Post-boot re-assert (POWERBOX_READY seen): push every wanted

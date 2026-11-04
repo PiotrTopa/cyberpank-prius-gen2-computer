@@ -125,6 +125,22 @@ class TestSatelliteAccHoldRule:
         run_rule(rule, store, old)
         assert HOLDER_ACC not in store.state.satellites.power_holders
 
+    def test_only_the_edge_acquires(self):
+        """The POWERBOX slice changes twice per ACC edge (PMEVENT, STATUS);
+        the second evaluation sees no edge and must not dispatch again. A
+        manual release of the holder is likewise respected until the next
+        edge."""
+        store = make_store()
+        rule = SatelliteAccHoldRule()
+        old = store.state
+        store.dispatch(SetPowerboxIgnitionAction(acc_on=True, batt_present=True))
+        run_rule(rule, store, old)
+        assert HOLDER_ACC in store.state.satellites.power_holders
+        store.dispatch(SatellitePowerHoldAction(HOLDER_ACC, acquire=False))
+        assert HOLDER_ACC not in store.state.satellites.power_holders
+        run_rule(rule, store, store.state)      # ACC on -> on: no edge
+        assert HOLDER_ACC not in store.state.satellites.power_holders
+
 
 class TestSatellitePowerRule:
     def test_on_immediate_off_lingers(self):

@@ -218,6 +218,40 @@ backend's `RoadsenseManager` (`backend/roadsense_power.py`, env
 provider is AGPL and only ever talks to the stack over its sockets; this repo
 only drives `systemctl` and reads JSON over HTTP.
 
+## Key-off / key-on sequence (as measured 2026-11-04, bench)
+
+Everything follows `powerbox.acc_on` in the store (ACC-off is debounced
+`BACKEND_ACC_OFF_DEBOUNCE_S`, default 3 s, before it reaches the store;
+ACC-on is immediate).
+
+| t (key-off) | what | owner |
+|---|---|---|
+| 0 s | ACC off seen; `low` profile **held back** while roadsense runs | `PowerModeRule` + `_roadsense_holds_low` |
+| +10 s | satellite rail (relay ch5) off (linger); gateway relay ch3 off | `SatellitePowerRule`, gateway ACC follower |
+| +30 s | roadsense grace over → `roadsense.target` stopped (~0.3 s) | `RoadsenseManager` |
+| +35 s | camera relay ch4 off → `low` profile applied (cpu4-7 offline, Wi-Fi suspended) | `RoadsenseManager` → deferred switch |
+| +600 s | MFD Pi: clean `poweroff` over SSH, 45 s later relay ch2 off | `MfdPowerManager` |
+
+| t (key-on) | what |
+|---|---|
+| 0 s | `full` profile written (cores online within 0.3 s, Wi-Fi back ~4 s); satellite + gateway relays on |
+| +2 s | MFD relay on (boot ≈ 55 s); camera relay on |
+| +13 s | `roadsense.target` started (8 s camera settle) → running at ≈ +25 s |
+
+Rules that came out of that measurement:
+
+- **Relay port OFF = VBUS first, data-off after the disconnect** (`backend/port_power.py`).
+  Disabling the hub port first hid the disconnect from the kernel: ~10 s of `clear tt`
+  errors (321 in one key-off), then the kernel re-enabled the port and the data-off had to
+  be applied again. ON = data-enable first, then the relay.
+- **Gateway auto-recovery counts from the VBUS-on edge**, not from the last heartbeat, so
+  key-on does not cold-cycle a gateway that was silent only because its relay was off.
+- **PCF8574 reset on the ACC-off transient** (`rly_fix … pcf_reset=1`, want 0xE1 got 0xFF):
+  every relay dropped for ~1 s while the MCU kept running → MFD Pi brown-out reboot, all
+  hubs re-enumerated, "MFD board UNREACHABLE" for 50 s. Firmware ≥ 2.2.2 re-checks the
+  expander every 100 ms (was ~1 s, STATUS-paced) which bounds the dropout; the real fix is
+  hardware (expander VCC decoupling / ACC-sense wiring — see powerbox/RELAY-CHANGE-PLAN.md).
+
 ## Powerbox power management (relay board, POCO button, heartbeat)
 
 The powerbox RP2040-Zero (firmware 2.1) starts/wakes the main POCO through its

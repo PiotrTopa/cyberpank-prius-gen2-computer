@@ -1,8 +1,12 @@
 #!/bin/sh
 # prius-power - Prius computer power profiles. Never suspends the system:
 # keeps modem (cellular), WireGuard, SSH and USB/OTG serial listening alive.
-#   low  : key OFF  - offline Gold cluster, cap Silver cluster (lowest idle draw)
-#   full : key ON   - all cores online, full clocks
+#   low  : key OFF  - offline Gold cluster, cap Silver cluster (lowest idle draw),
+#                     Wi-Fi radio suspended (prius-wifi suspend; the wifi-mode flag is kept)
+#   full : key ON   - all cores online, full clocks, Wi-Fi back per /etc/prius/wifi-mode
+# The backend writes /etc/prius/power-mode at key-off (deferred until the
+# roadsense stack is down, since it pins cpu4-7) and at key-on; prius-power.path
+# then runs `prius-power apply`.
 set -u
 
 FLAG=/etc/prius/power-mode
@@ -40,7 +44,7 @@ apply_low() {
     for n in $BIG_CORES; do
         [ -w "$CPU/cpu$n/online" ] && echo 0 > "$CPU/cpu$n/online" 2>/dev/null || true
     done
-    /usr/local/sbin/prius-wifi off
+    /usr/local/sbin/prius-wifi suspend
     display_off
 }
 
@@ -53,7 +57,7 @@ apply_full() {
     for n in $BIG_CORES; do
         [ -w "$CPU/cpu$n/online" ] && echo 1 > "$CPU/cpu$n/online" 2>/dev/null || true
     done
-    /usr/local/sbin/prius-wifi ap
+    /usr/local/sbin/prius-wifi resume
     for p in "$CPU"/cpufreq/policy*; do
         [ -d "$p" ] || continue
         set_gov "$p" schedutil

@@ -125,9 +125,14 @@ sudo prius-wifi status     # show current mode + wlan0 state
 echo client | sudo tee /etc/prius/wifi-mode
 ```
 
-- Flag file: `/etc/prius/wifi-mode` (`client|ap|off`, default `off`).
+- Flag file: `/etc/prius/wifi-mode` (`client|ap|off`, default `ap`). It is the operator's
+  choice only: the key-off `low` power profile runs `prius-wifi suspend` (radio off, flag
+  untouched) and `full` runs `prius-wifi resume` (re-apply the flag), so a `client` choice
+  survives a key cycle.
 - `prius-wifi.service` (oneshot) applies the flag at boot; `prius-wifi.path` watches the
-  flag file and re-applies on change. Both enabled.
+  flag file and re-applies on change. Both enabled. Every verb is idempotent and the script
+  serialises itself with `flock` (the path-unit re-run used to race the caller's own
+  activation).
 - **AP PSK** was generated on-device (random 16 chars); read it with
   `nmcli -s -t -f 802-11-wireless-security.psk con show prius-ap`.
 - ⚠️ Don't hammer the flag with rapid successive writes — the oneshot can't restart while a
