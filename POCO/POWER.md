@@ -246,6 +246,10 @@ Rules that came out of that measurement:
   be applied again. ON = data-enable first, then the relay.
 - **Gateway auto-recovery counts from the VBUS-on edge**, not from the last heartbeat, so
   key-on does not cold-cycle a gateway that was silent only because its relay was off.
+- **A backend (re)started at key-off adopts the gateway at key-on.** Its serial port starts on
+  a pending placeholder; the reader thread now runs regardless and connects when the hotplug
+  monitor retargets it (before 2026-11-04 18:43 the thread was never started, the gateway
+  stayed deaf and the 30 s stale-link recovery cold-cycled it in vain).
 - **PCF8574 expander reset at the first key-off, seen once** (`rly_fix … pcf_reset=1`, want
   0xE1 got 0xFF, 16:16): every relay dropped for ~1 s while the MCU kept running → MFD Pi
   brown-out reboot, all hubs re-enumerated, "MFD board UNREACHABLE" for 50 s. Not an
