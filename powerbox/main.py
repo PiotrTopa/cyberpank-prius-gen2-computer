@@ -119,7 +119,7 @@ import pcf8574                      # PCF8574 driver + RelayBoard (pin map, NC, 
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-VERSION = "2.2.0"
+VERSION = "2.2.1"
 
 # Device role — reported in the unified identify ("whoami") response and the
 # ready banner so the computer can discover which USB-CDC port is the powerbox
@@ -257,6 +257,12 @@ POCO_HB_TIMEOUT_MS = 15000
 # backend heartbeats every 2 s; 20 s covers a warm RP2040 reboot + USB-CDC
 # re-enumeration.
 POCO_BOOT_GRACE_MS = 20000
+# A POCO that WAS heartbeating and went quiet is most likely rebooting
+# (`systemctl reboot` -> backend back ~75 s later, measured 2026-11-04), not
+# off: the ladder waits this long after the LAST heartbeat before pressing, so
+# a 6 s wake press never lands on a booting phone. A cold start (no heartbeat
+# seen since our own boot) still presses after POCO_BOOT_GRACE_MS.
+POCO_LOST_GRACE_MS = 180000
 # After a power-button press, wait this long before pressing again. MUST exceed
 # the POCO's worst-case boot -> first heartbeat time (~3-5 min: pmOS boot +
 # backend start), or the ladder kills a booting phone before it can ever report
@@ -978,6 +984,8 @@ class PowerManager:
             # boot -> first-heartbeat time so a booting phone is never pressed
             # again before it can report alive.
             past_boot = time.ticks_diff(now, self.boot_ms) >= self.boot_grace_ms
+            if self.seen_poco and time.ticks_diff(now, self.last_poco_change_ms) < POCO_LOST_GRACE_MS:
+                past_boot = False         # was alive: give a reboot time to finish
             cooled = time.ticks_diff(now, self.last_btn_ms) >= POCO_WAKE_COOLDOWN_MS
             if self.poco_alive(now):
                 self.wake_tries = 0

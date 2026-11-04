@@ -14,9 +14,13 @@ set_gov() {
     [ -w "$1/scaling_governor" ] && echo "$2" > "$1/scaling_governor" 2>/dev/null || true
 }
 
-# Blank / restore the unused DSI display pipeline (saves ~0.19 W at idle).
-# Controlled via its systemd service so the daemon holds DRM master out of band.
+# Blank the unused DSI display pipeline (saves ~0.19 W at idle) — OPT-IN only,
+# via the flag /etc/prius/blank-display. Off by default since 2026-11-04: on
+# the single computer (kernel 7.1) blanking leaves the LAB/IBB over-current IRQ
+# storming (~4600/s) and unbinding labibb takes the GPU (roadsense) down; the
+# blanked panel is also the suspect for `systemctl reboot` hangs.
 display_off() {
+    [ -e /etc/prius/blank-display ] || return 0
     command -v systemctl >/dev/null 2>&1 && \
         systemctl start prius-blank.service >/dev/null 2>&1 || true
 }

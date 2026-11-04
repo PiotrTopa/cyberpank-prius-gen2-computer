@@ -310,7 +310,7 @@ def _cmd(fw, payload, cfg):
 
 class TestCommandSurface:
     def test_version_bumped(self, fw):
-        assert fw.main.VERSION == "2.2.0"
+        assert fw.main.VERSION == "2.2.1"
 
     def test_relay_command_sets_load_channels(self, fw, pm):
         with Recorder(fw) as rec:
@@ -557,3 +557,40 @@ class TestBootPyRecovery:
         src = open(os.path.join(POWERBOX_DIR, "boot.py")).read()
         exec(compile(src, "boot.py", "exec"), {"__name__": "boot"})
         assert (tmp_path / "main.py").read_bytes() == b"old"
+
+
+class TestWakeLadderRebootGrace:
+    """2026-11-04: during a `systemctl reboot` the ladder pressed 6 s ~15 s
+    after the last heartbeat, i.e. on a booting phone."""
+
+    def _setup(self, fw, pm, monkeypatch):
+        t = [10_000_000]
+        monkeypatch.setattr(fw.main.time, "ticks_ms", lambda: t[0])
+        presses = []
+        monkeypatch.setattr(pm.pm, "_press", lambda poco, ms, why: presses.append((ms, why)))
+        p = pm.pm
+        p.boot_ms = t[0] - 10 * 60_000          # long past our own boot grace
+        p.last_btn_ms = t[0] - 10 * 60_000      # cooled down
+        return t, presses
+
+    def test_no_press_while_a_recently_alive_poco_reboots(self, fw, pm, monkeypatch):
+        t, presses = self._setup(fw, pm, monkeypatch)
+        with Recorder(fw):
+            pm.pm.on_poco_hb(1)
+            t[0] += 90_000                       # 90 s quiet: rebooting
+            pm.pm.tick(12.0)
+        assert presses == []
+
+    def test_presses_once_the_lost_grace_expires(self, fw, pm, monkeypatch):
+        t, presses = self._setup(fw, pm, monkeypatch)
+        with Recorder(fw):
+            pm.pm.on_poco_hb(1)
+            t[0] += fw.main.POCO_LOST_GRACE_MS + 1000
+            pm.pm.tick(12.0)
+        assert presses == [(fw.main.POCO_BTN_PRESS_MS, "wake")]
+
+    def test_cold_start_still_presses_after_boot_grace(self, fw, pm, monkeypatch):
+        t, presses = self._setup(fw, pm, monkeypatch)
+        with Recorder(fw):
+            pm.pm.tick(12.0)                     # never saw a heartbeat
+        assert presses == [(fw.main.POCO_BTN_PRESS_MS, "wake")]
