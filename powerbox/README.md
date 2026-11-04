@@ -221,8 +221,10 @@ Host-side, two measures keep the link clean:
   MM's AT probes from opening/closing the port; `MODE="0666"` lets the backend open
   the tty without a `chmod` race.
 
-The board runs **`main.py` only** (autostarts; has the WDT + a 3 s Ctrl-C safe-boot
-window). The powerbox MCU is **bus-powered** (runs off USB VBUS; no direct 12 V
+The board runs **`main.py`** (autostarts; has the WDT + a 3 s Ctrl-C safe-boot
+window) plus a two-line **`boot.py`** that releases the POCO button (GP27) before
+anything else: the RP2040's reset-default pull-down would otherwise hold the
+button pressed whenever `main.py` is not running and boot-loop the phone. The powerbox MCU is **bus-powered** (runs off USB VBUS; no direct 12 V
 line); since 2026-10-26 the hub's 5 V buck hangs on the **permanent 12 V feed**,
 so cutting hub-port VBUS is a true cold reset (`prius-usb-power cycle`, ≥ 4 s off
 → `energy_mah` resets to ~0) and **any MCU reset (reflash, DTR pulse, WDT, soft
