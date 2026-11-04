@@ -23,7 +23,16 @@ Therefore after blanking we:
     2. unbind the qcom-lab-ibb-regulator platform driver, freeing the storming
        IRQ for good.
 
-Consequence: the display CANNOT be restored at runtime anymore — a reboot is
+2026-11-04 (single computer, kernel 7.1): step 2 cascades through device
+links into msm_drm_unbind + adreno_unbind, i.e. it takes the GPU (and
+/dev/dri) down with the panel. roadsense needs the GPU (ncnn/Vulkan), and the
+unbound panel is also the likely cause of `systemctl reboot` hanging. Step 2 is
+therefore OFF by default (PRIUS_BLANK_LABIBB=never); the daemon logs the
+LAB/IBB interrupt rate after blanking so a storm is visible. "auto" unbinds
+only when the rate exceeds PRIUS_BLANK_STORM_HZ, "always" restores the old
+behaviour (headless box without GPU work).
+
+Consequence of step 2: the display CANNOT be restored at runtime anymore — a reboot is
 required to get the panel back. This box is headless, so that is the intended
 trade-off. On SIGTERM/SIGINT the daemon simply exits without touching the
 panel (no restore — restoring is what hangs the kernel).
@@ -40,9 +49,12 @@ import ctypes.util
 import os
 import signal
 import sys
+import time
 
 DRI_NODE = os.environ.get("PRIUS_DRI_NODE", "/dev/dri/card0")
 LABIBB_DRIVER = "/sys/bus/platform/drivers/qcom-lab-ibb-regulator"
+LABIBB_MODE = os.environ.get("PRIUS_BLANK_LABIBB", "never")   # never | auto | always
+STORM_HZ = float(os.environ.get("PRIUS_BLANK_STORM_HZ", "1000"))
 VTCON_DIR = "/sys/class/vtconsole"
 
 # ---- Linux ioctl encoding (asm-generic) ----
@@ -166,6 +178,34 @@ def unbind_fbcon():
         log("fbcon unbind failed: %s (continuing)" % e)
 
 
+def labibb_irq_count():
+    """Sum of the LAB/IBB interrupt counters in /proc/interrupts (None if absent)."""
+    total, seen = 0, False
+    try:
+        with open("/proc/interrupts") as f:
+            for line in f:
+                low = line.lower()
+                if "lab" in low or "ibb" in low:
+                    parts = line.split()
+                    for tok in parts[1:]:
+                        if not tok.isdigit():
+                            break
+                        total += int(tok)
+                    seen = True
+    except OSError:
+        return None
+    return total if seen else None
+
+
+def labibb_irq_rate(window_s=3.0):
+    a = labibb_irq_count()
+    time.sleep(window_s)
+    b = labibb_irq_count()
+    if a is None or b is None:
+        return None
+    return (b - a) / window_s
+
+
 def unbind_labibb():
     """Unbind the LAB/IBB regulator driver to stop the over-current IRQ storm.
 
@@ -245,7 +285,15 @@ def main():
 
     # Harden: no runtime restore path exists past this point (see docstring).
     unbind_fbcon()
-    unbind_labibb()
+    rate = labibb_irq_rate()
+    log("LAB/IBB irq rate after blank: %s/s (mode %s)"
+        % ("n/a" if rate is None else "%.0f" % rate, LABIBB_MODE))
+    if LABIBB_MODE == "always" or (LABIBB_MODE == "auto" and rate is not None
+                                   and rate > STORM_HZ):
+        unbind_labibb()   # NOTE: also unbinds msm_drm + adreno (GPU) on 7.x
+    elif rate is not None and rate > STORM_HZ:
+        log("WARNING: LAB/IBB irq storm (%.0f/s) left running: unbinding it "
+            "would take the GPU down (PRIUS_BLANK_LABIBB=never)" % rate)
 
     log("blanked %d CRTC(s); holding master. pid %d" % (n_blanked, os.getpid()))
 
