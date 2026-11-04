@@ -9,7 +9,10 @@ always-on Linux machine mounted in the car. It:
 - listens permanently on the **network** (SSH login + API callers),
 - runs over a **cellular SIM** WAN with a **WireGuard** overlay for remote access,
 - scales power between a **low** (ignition off) and **full** (ignition on) profile,
-  **without ever suspending** (suspend would drop modem/VPN/SSH/serial).
+  **without ever suspending** (suspend would drop modem/VPN/SSH/serial),
+- runs the **roadsense** perception stack (camera, road model, signs, environment;
+  separate repos, systemd units under `roadsense.target`) while ACC is on — the
+  backend starts/stops it, there is no second computer for it (decision 2026-11-04).
 
 ## Hardware
 
@@ -134,6 +137,7 @@ caps, env vars (`RUSTICL_ENABLE=freedreno`) and recommended math libraries are d
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │ Application: cyberpunk_computer (board computer app)          │
+│   + roadsense.target (perception stack, ACC-only, slice-bound) │
 ├──────────────────────────────────────────────────────────────┤
 │ IO listeners:  OTG/USB virtual COM (serial)   +   SSH / API   │
 ├──────────────────────────────────────────────────────────────┤

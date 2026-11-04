@@ -186,6 +186,19 @@ def _build_set_relay(params: Dict[str, Any]) -> Action:
     return SetRelayAction(ch, on, source=ActionSource.UI)
 
 
+def _build_roadsense_mode(params: Dict[str, Any]) -> Action:
+    from ..state.actions import RoadsenseModeAction
+    mode = str(_require(params, "mode")).strip().lower()
+    if mode not in ("auto", "on", "off"):
+        raise CommandError("'mode' must be one of auto, on, off")
+    return RoadsenseModeAction(mode, source=ActionSource.UI)
+
+
+def _build_roadsense_restart(params: Dict[str, Any]) -> Action:
+    from ..state.actions import RoadsenseRestartAction
+    return RoadsenseRestartAction(source=ActionSource.UI)
+
+
 def _build_powerbox_hard_restart(params: Dict[str, Any]) -> Action:
     from ..state.actions import PowerboxHardRestartAction
     return PowerboxHardRestartAction(source=ActionSource.UI)
@@ -293,9 +306,10 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
     "powerbox_button": {
         "builder": _build_powerbox_button,
         "description": (
-            "Press a POCO power button through the powerbox. poco 1 = main "
-            "computer, 2 = secondary. ms 6000 boots an off phone, 35000 "
-            "force-resets a frozen one, 300 is a plain key tap."
+            "Press the POCO power button through the powerbox (poco 1 = the car "
+            "computer; 2 is a legacy slot the firmware refuses, there is no second "
+            "POCO). ms 6000 boots an off phone, 35000 force-resets a frozen one, "
+            "300 is a plain key tap."
         ),
         "params": {"poco": "int 1..2 (default 1)", "ms": "int 100..40000 (default 6000)"},
     },
@@ -311,8 +325,8 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
     "set_relay": {
         "builder": _build_set_relay,
         "description": (
-            "Set a relay-board load channel: ch4 = camera hub (dashcam), "
-            "ch6 = secondary POCO hub (reserved), ch7/8 spare. ch3 (CAN hub: "
+            "Set a relay-board load channel: ch4 = camera hub (dashcam; owned by "
+            "the roadsense manager while the stack runs), ch6-8 spare. ch3 (CAN hub: "
             "gateway + panda) redirects to the gateway power path; ch2 (MFD "
             "Pi) is owned by the MFD manager and is refused while it runs; "
             "ch5 (RS485 rail) becomes a manual satellite hold; ch1 is the "
@@ -329,6 +343,20 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
             "hard cut, CAN hub with gateway + panda, camera hub) and comes back "
             "OFF until the backend re-asserts the wanted states on the boot banner."
         ),
+        "params": {},
+    },
+    "roadsense_mode": {
+        "builder": _build_roadsense_mode,
+        "description": (
+            "Operator mode of the roadsense perception stack running on this "
+            "computer: auto = follow ACC (default), on = keep it running with the "
+            "key off (bench), off = keep it stopped. State in `roadsense`."
+        ),
+        "params": {"mode": "auto | on | off"},
+    },
+    "roadsense_restart": {
+        "builder": _build_roadsense_restart,
+        "description": "Restart roadsense.target (only while the stack runs).",
         "params": {},
     },
     "set_fan": {

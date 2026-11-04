@@ -60,6 +60,7 @@ class StateSlice(Enum):
     SATELLITES = auto()  # RS485 satellites: OUT2 power wake-locks + per-node twin (devices 100+)
     AVC = auto()  # AVC-LAN link/display state (screen, lights, touch, nav emulation)
     VISION = auto()  # dashcam vision: auto-light recommendation (io/dashcam_ingest.py)
+    ROADSENSE = auto()  # roadsense perception stack on this computer (backend.roadsense_power)
     ALL = auto()
 
 
@@ -772,21 +773,11 @@ class Store:
             )
             affected.add(StateSlice.CONNECTION)
 
-        elif action.type == ActionType.SET_POCO2_STATUS:
-            a = action  # type: SetPoco2StatusAction
-            self._state = replace(
-                self._state,
-                connection=replace(
-                    self._state.connection,
-                    poco2_state=a.state,
-                    poco2_reachable=a.reachable,
-                    poco2_state_since=getattr(a, "state_since", None),
-                    poco2_last_ok_ping=getattr(a, "last_ok_ping", None),
-                    poco2_boot_presses=getattr(a, "boot_presses", None) or 0,
-                    poco2_last_boot_s=getattr(a, "last_boot_s", None),
-                ),
-            )
-            affected.add(StateSlice.CONNECTION)
+        elif action.type == ActionType.SET_ROADSENSE_STATE:
+            new_rs = replace(self._state.roadsense, **action.fields)
+            if new_rs != self._state.roadsense:
+                self._state = replace(self._state, roadsense=new_rs)
+                affected.add(StateSlice.ROADSENSE)
 
         
         # AVC Input reducers (buttons and touch)

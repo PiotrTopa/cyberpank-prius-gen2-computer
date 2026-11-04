@@ -66,35 +66,47 @@ def _build_mfd():
     )
 
 
-def _build_poco2():
-    """Secondary-POCO power manager config from BACKEND_POCO2_* env vars.
+def _build_roadsense():
+    """roadsense stack manager config from BACKEND_ROADSENSE_* env vars.
 
-    Returns ``(enabled, Poco2PowerConfig | None)``:
+    Returns ``(enabled, RoadsenseConfig | None)``. Single-computer layout: the
+    stack runs on this POCO under ``roadsense.target`` (roadsense +
+    roadsense-signs reference deployment) and follows ACC::
 
-        BACKEND_POCO2_ENABLED=1
-        BACKEND_POCO2_IP=192.168.0.86     # how the main POCO reaches it
-        BACKEND_POCO2_SSH_USER=user
-        BACKEND_POCO2_PRESS_MS=6000       # power-on hold (3 s does not boot it)
-        BACKEND_POCO2_GRACE_S=600         # key-off grace before shutdown
-        BACKEND_POCO2_BOOT_TIMEOUT_S=150  # per press, before pressing again
-        BACKEND_POCO2_MAX_BOOT_PRESSES=2
-        BACKEND_POCO2_SHUTDOWN_WAIT_S=60
+        BACKEND_ROADSENSE_ENABLED=1
+        BACKEND_ROADSENSE_TARGET=roadsense.target
+        BACKEND_ROADSENSE_UNITS=roadsense-camerad-dvr.service,roadsense-modeld.service,...
+        BACKEND_ROADSENSE_API_HOST=127.0.0.1
+        BACKEND_ROADSENSE_API_PORT=8090      # ROADSENSE_API_PORT on the phone (8080 is ours)
+        BACKEND_ROADSENSE_CAMERA_RELAY=1     # power the camera hub (relay ch4) with the stack
+        BACKEND_ROADSENSE_CAMERA_SETTLE_S=8
+        BACKEND_ROADSENSE_GRACE_S=30         # key-off grace before the stop
+        BACKEND_ROADSENSE_START_TIMEOUT_S=120
+        BACKEND_ROADSENSE_STOP_TIMEOUT_S=60
+        BACKEND_ROADSENSE_API_DEAD_RESTART_S=180   # 0 = never auto-restart
+        BACKEND_ROADSENSE_MODE=auto          # auto | on | off (initial operator mode)
     """
-    enabled = os.environ.get("BACKEND_POCO2_ENABLED", "0").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
+    enabled = os.environ.get("BACKEND_ROADSENSE_ENABLED", "0").strip().lower() in (
+        "1", "true", "yes", "on")
     if not enabled:
         return False, None
-    from .poco2_power import Poco2PowerConfig
+    from .roadsense_power import DEFAULT_UNITS, RoadsenseConfig
     env = os.environ.get
-    return True, Poco2PowerConfig(
-        board_ip=env("BACKEND_POCO2_IP", "192.168.0.86"),
-        ssh_user=env("BACKEND_POCO2_SSH_USER", "user"),
-        press_ms=int(env("BACKEND_POCO2_PRESS_MS", "6000")),
-        grace_s=float(env("BACKEND_POCO2_GRACE_S", "600")),
-        boot_timeout_s=float(env("BACKEND_POCO2_BOOT_TIMEOUT_S", "150")),
-        max_boot_presses=int(env("BACKEND_POCO2_MAX_BOOT_PRESSES", "2")),
-        shutdown_wait_s=float(env("BACKEND_POCO2_SHUTDOWN_WAIT_S", "60")),
+    units_raw = (env("BACKEND_ROADSENSE_UNITS") or "").strip()
+    units = tuple(u.strip() for u in units_raw.split(",") if u.strip()) or DEFAULT_UNITS
+    return True, RoadsenseConfig(
+        target=env("BACKEND_ROADSENSE_TARGET", "roadsense.target"),
+        units=units,
+        api_host=env("BACKEND_ROADSENSE_API_HOST", "127.0.0.1"),
+        api_port=int(env("BACKEND_ROADSENSE_API_PORT", "8090")),
+        camera_relay=env("BACKEND_ROADSENSE_CAMERA_RELAY", "1").strip().lower() in (
+            "1", "true", "yes", "on"),
+        camera_settle_s=float(env("BACKEND_ROADSENSE_CAMERA_SETTLE_S", "8")),
+        grace_s=float(env("BACKEND_ROADSENSE_GRACE_S", "30")),
+        start_timeout_s=float(env("BACKEND_ROADSENSE_START_TIMEOUT_S", "120")),
+        stop_timeout_s=float(env("BACKEND_ROADSENSE_STOP_TIMEOUT_S", "60")),
+        api_dead_restart_s=float(env("BACKEND_ROADSENSE_API_DEAD_RESTART_S", "180")),
+        mode=env("BACKEND_ROADSENSE_MODE", "auto").strip().lower() or "auto",
     )
 
 
@@ -154,7 +166,7 @@ def _build_recording(args: argparse.Namespace) -> RecordingConfig:
 
 def _build_config(args: argparse.Namespace) -> BackendConfig:
     mfd_enabled, mfd_config = _build_mfd()
-    poco2_enabled, poco2_config = _build_poco2()
+    roadsense_enabled, roadsense_config = _build_roadsense()
     return BackendConfig(
         **_build_dashcam(),
         gateway_port=args.gateway_port,
@@ -193,8 +205,8 @@ def _build_config(args: argparse.Namespace) -> BackendConfig:
         fan_ema_alpha_down=args.fan_ema_alpha_down,
         mfd_enabled=mfd_enabled,
         mfd_config=mfd_config,
-        poco2_enabled=poco2_enabled,
-        poco2_config=poco2_config,
+        roadsense_enabled=roadsense_enabled,
+        roadsense_config=roadsense_config,
         verbose=args.verbose,
     )
 

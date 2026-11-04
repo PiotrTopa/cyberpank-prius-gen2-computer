@@ -187,6 +187,37 @@ disabling the deepest cpuidle states or wiring up ramoops.
 - Invariants that must hold in **every** profile: system **loggable over SSH**, **modem ON**,
   **USB ON**, OTG serial + WireGuard alive. Only "everything else" gets trimmed when we optimise.
 
+## roadsense stack (same POCO, ACC-only)
+
+The road-perception stack (`roadsense.target`: camerad-dvr, modeld, envd, api +
+the roadsense-signs `signd`) runs on this phone only while ACC is on. The
+backend's `RoadsenseManager` (`backend/roadsense_power.py`, env
+`BACKEND_ROADSENSE_*`, API commands `roadsense_mode auto|on|off` and
+`roadsense_restart`, state `roadsense` in `/api/v1/state`):
+
+1. key on → powerbox relay ch4 (camera hub) on → 8 s settle →
+   `systemctl start --no-block roadsense.target` → `/v1/health` on
+   `127.0.0.1:8090` polled (worker thread, never blocks the engine loop);
+2. key off → 30 s grace → `systemctl stop --no-block roadsense.target` → wait
+   until every unit is inactive (60 s cap) → relay ch4 off;
+3. RUNNING watchdog: `systemctl is-active` per unit + the health probe; an API
+   silent for 180 s restarts the target (one restart per 300 s);
+4. **CPU profile coupling:** the stack pins cpu4-7 (modeld/signd/envd), which
+   the `low` profile takes offline. While the manager is active the backend
+   holds `full`; at key-off the `PowerModeRule` hands the `low` switch to the
+   manager (`hold_low`), which applies it only once the stack is OFF. With mode
+   `on` (bench) the profile stays `full` with the key off.
+5. Resources: the stack runs in `roadsense.slice` (roadsense repo: CPUWeight
+   100, MemoryHigh 3G / MemoryMax 3584M), `prius-backend.service` at
+   CPUWeight 1000 / Nice -10, so the backend stays responsive at full load.
+6. Thermals: every tick samples all `/sys/class/thermal` zones into
+   `roadsense.temps` (plus `hottest_zone`/`hottest_c`) whether or not the stack
+   runs — the raw input for the heat model.
+
+`roadsense.target` is **not enabled at boot**; the backend owns it. The sign
+provider is AGPL and only ever talks to the stack over its sockets; this repo
+only drives `systemctl` and reads JSON over HTTP.
+
 ## Powerbox power management (relay board, POCO button, heartbeat)
 
 The powerbox RP2040-Zero (firmware 2.1) starts/wakes the main POCO through its
@@ -201,14 +232,14 @@ the behaviour the POCO side depends on:
 | 1 | **NC** | the powerbox's **own** supply — `{"a":"hard_restart"}` only, refused by `relay` | n/a (it *is* the restart) | `powerbox_hard_restart` API command |
 | 2 | NO | MFD Raspberry Pi Zero | OFF | `backend/mfd_power.py` (ssh poweroff + wait, then cut) |
 | 3 | NO | USB hub: CAN gateway **and** comma.ai panda | OFF | gateway power path (`SetGatewayUsbPowerAction`, satellite wake-locks) |
-| 4 | NO | USB hub (VIA): fvision dashcam / aux | OFF | `set_relay` ch4 (`port_power.camera`) |
+| 4 | NO | USB hub (VIA): fvision dashcam / aux | OFF | `backend/roadsense_power.py` while the roadsense stack runs (on with ACC, off after the stop); `set_relay` ch4 otherwise |
 | 5 | NO | RS485 satellite power | OFF | `state/rules/satellite_power.py` wake-locks |
-| 6-8 | NO | unassigned (6 reserved for a secondary POCO hub) | OFF | `set_relay` |
+| 6-8 | NO | unassigned | OFF | `set_relay` |
 
 | Pin | Function | Idle | Behaviour |
 |-----|----------|------|-----------|
 | GP27 | main POCO power button (short-to-GND) | input, pulls off | LOW pulse = press (6 s powers on, 35 s forces a reset). Never driven high (phone line ~1.8 V). |
-| — | secondary POCO button | not connected | `button`/`wake` for poco 2 → `ERROR POCO2_NC`, no press. |
+| — | "poco 2" slot | not connected | no second POCO exists (single-computer layout); `button`/`wake` for poco 2 → `ERROR POCO2_NC`, no press. |
 | GP29 / GP28 | chassis fan PWM (25 kHz, not inverted) / tach | 0 % at boot | fan runs flat out while the firmware is not driving GP29 (bootloader, 3 s safe-boot). |
 
 **Restart scope.** Relay opto VCC is the RP2040's 5 V, so whenever the RP2040

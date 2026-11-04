@@ -229,12 +229,14 @@ class BackendConfig:
     mfd_enabled: bool = False
     mfd_config: Optional[object] = None    # MfdPowerConfig; None -> defaults
 
-    # ── Secondary POCO (roadsense board, permanent power, button-started) ────
-    # ACC-follower like the MFD manager, but "power on" is a powerbox button
-    # press and "power off" an SSH poweroff (backend.poco2_power). Knobs map to
-    # BACKEND_POCO2_* env vars — see backend.__main__.
-    poco2_enabled: bool = False
-    poco2_config: Optional[object] = None  # Poco2PowerConfig; None -> defaults
+    # ── roadsense perception stack (same computer, ACC-follower) ─────────────
+    # Single-computer layout (2026-11-04): roadsense runs on this POCO as
+    # systemd units under roadsense.target. The manager powers the camera hub
+    # (relay ch4), starts the target with ACC, stops it cleanly after the
+    # key-off grace and mirrors its /v1/health (backend.roadsense_power). Knobs
+    # map to BACKEND_ROADSENSE_* env vars — see backend.__main__.
+    roadsense_enabled: bool = False
+    roadsense_config: Optional[object] = None  # RoadsenseConfig; None -> defaults
 
     # ── USB hub port power (backend.port_power) ──────────────────────────────
     # Topology of hub port power control: the powerbox's socket has native PPPS
@@ -405,8 +407,11 @@ class BackendService:
 
         # MFD video board power manager (backend.mfd_power).
         self.mfd_power = None
-        # Secondary POCO power manager (backend.poco2_power).
-        self.poco2_power = None
+        # roadsense stack manager (backend.roadsense_power).
+        self.roadsense_power = None
+        # Key-off "low" CPU profile deferred until roadsense has stopped
+        # (modeld is pinned to cpu4-7, which "low" takes offline).
+        self._low_mode_deferred = False
 
         # USB hub port power controllers (backend.port_power.HubPortPower).
         self.port_power = None
@@ -768,40 +773,51 @@ class BackendService:
                 mfd_cfg.grace_s,
             )
 
-        # Secondary POCO (roadsense board): ACC-follower that starts it with a
-        # powerbox button press and shuts it down over SSH after the key-off
-        # grace. The powerbox itself never presses the secondary's button.
-        if cfg.poco2_enabled:
-            from .poco2_power import Poco2PowerConfig, Poco2PowerManager
-            from ..state.actions import SetPoco2StatusAction
+        # roadsense stack (same computer): ACC-follower that powers the camera
+        # hub, starts roadsense.target and stops it cleanly after the key-off
+        # grace; mirrors its health + the phone's thermal zones into the state.
+        if cfg.roadsense_enabled:
+            from .roadsense_power import RoadsenseConfig, RoadsenseManager
+            from ..state.actions import SetRoadsenseStateAction
 
-            p2_cfg = cfg.poco2_config or Poco2PowerConfig()
+            rs_cfg = cfg.roadsense_config or RoadsenseConfig()
 
-            def _publish_poco2(status: dict) -> None:
-                twin.store.dispatch(SetPoco2StatusAction(
+            def _publish_roadsense(status: dict) -> None:
+                twin.store.dispatch(SetRoadsenseStateAction(
+                    enabled=True,
                     state=status["state"],
-                    reachable=status["reachable"],
+                    mode=status["mode"],
+                    desired=bool(status.get("desired")),
+                    camera_power=status.get("camera_power"),
+                    api_ok=status.get("api_ok"),
+                    api_url=status.get("api_url") or "",
+                    api_port=int(status.get("api_port") or 0),
+                    health=status.get("health"),
+                    units=status.get("units"),
+                    temps=status.get("temps"),
+                    hottest_zone=status.get("hottest_zone"),
+                    hottest_c=status.get("hottest_c"),
                     state_since=status.get("state_since"),
-                    last_ok_ping=status.get("last_ok_ping"),
-                    boot_presses=status.get("boot_presses"),
-                    last_boot_s=status.get("last_boot_s"),
+                    last_api_ok=status.get("last_api_ok"),
+                    restarts=int(status.get("restarts") or 0),
+                    last_error=status.get("last_error"),
                 ))
 
-            self.poco2_power = Poco2PowerManager(
-                p2_cfg,
-                press=lambda ms: commander.press_button(ms, poco=2),
-                publish=_publish_poco2,
-                report_alive=commander.report_poco2_alive,
+            self.roadsense_power = RoadsenseManager(
+                rs_cfg, publish=_publish_roadsense,
+                camera=self.port_power.camera if rs_cfg.camera_relay else None,
             )
+            twin.store.dispatch(SetRoadsenseStateAction(
+                enabled=True, state=self.roadsense_power.state, mode=rs_cfg.mode,
+                api_url="http://%s:%d" % (rs_cfg.api_host, rs_cfg.api_port),
+                api_port=rs_cfg.api_port))
             logger.info(
-                "Secondary POCO power manager wired (board=%s press=%dms grace=%.0fs)",
-                p2_cfg.board_ip, p2_cfg.press_ms, p2_cfg.grace_s,
+                "roadsense manager wired (target=%s api=%s:%d camera relay ch%s "
+                "grace=%.0fs mode=%s)",
+                rs_cfg.target, rs_cfg.api_host, rs_cfg.api_port,
+                pp_cfg.camera_relay_ch if rs_cfg.camera_relay else "-",
+                rs_cfg.grace_s, rs_cfg.mode,
             )
-            if not POCO2_BUTTON_CONNECTED:
-                logger.warning(
-                    "Secondary POCO power manager enabled but the powerbox has NO "
-                    "secondary button wired (fw 2.1): presses are refused "
-                    "(ERROR POCO2_NC); only ping/ssh shutdown will work")
 
         def _powerbox_middleware(action, store) -> None:
             from ..state.actions import ActionSource
@@ -818,12 +834,28 @@ class BackendService:
                 return
             if getattr(action, "source", None) == ActionSource.UI and self.powerbox_commander:
                 if type(action).__name__ == "PowerboxButtonAction":
-                    # Manual power-button press (main or secondary POCO).
+                    # Manual power-button press. "poco 2" is a legacy slot:
+                    # there is no second POCO (single computer) and fw 2.1
+                    # refuses it (ERROR POCO2_NC).
                     if int(action.poco) == 2 and not POCO2_BUTTON_CONNECTED:
-                        logger.warning("Secondary POCO button press ignored: not wired "
-                                       "on the powerbox (fw 2.1)")
+                        logger.warning("POCO 2 button press ignored: no second POCO "
+                                       "(single-computer layout), not wired on the powerbox")
                     else:
                         self.powerbox_commander.press_button(int(action.ms), poco=int(action.poco))
+                elif type(action).__name__ == "RoadsenseModeAction":
+                    if self.roadsense_power is None:
+                        logger.warning("roadsense mode %r ignored: manager disabled "
+                                       "(BACKEND_ROADSENSE_ENABLED=0)", action.mode)
+                    else:
+                        try:
+                            self.roadsense_power.set_mode(str(action.mode))
+                        except ValueError as exc:
+                            logger.error("roadsense mode rejected: %s", exc)
+                elif type(action).__name__ == "RoadsenseRestartAction":
+                    if self.roadsense_power is None:
+                        logger.warning("roadsense restart ignored: manager disabled")
+                    else:
+                        self.roadsense_power.request_restart()
                 elif type(action).__name__ == "PowerboxHardRestartAction":
                     logger.warning(
                         "Powerbox HARD RESTART requested: the box cuts its own supply; "
@@ -849,7 +881,13 @@ class BackendService:
                         store.dispatch(SatellitePowerHoldAction(
                             "manual:ui", acquire=action.on))
                     elif pp is not None and ch == pp.camera.relay_ch:
-                        pp.camera.set(action.on)
+                        if self.roadsense_power is not None and self.roadsense_power.is_active():
+                            logger.warning(
+                                "Ignoring manual relay toggle for the camera hub (ch%d) — "
+                                "owned by the roadsense manager while the stack runs "
+                                "(use roadsense_mode off)", ch)
+                        else:
+                            pp.camera.set(action.on)
                     elif pp is not None and ch == pp.gateway.relay_ch:
                         # Keep desired-state bookkeeping consistent with the
                         # UI path for the gateway.
@@ -909,7 +947,8 @@ class BackendService:
                 logger.warning("Local poweroff disabled — POCO keeps running on %s", reason)
 
         twin.rules_engine.register(
-            PowerModeRule(apply_mode=controller.set_for_ignition)
+            PowerModeRule(apply_mode=controller.set_for_ignition,
+                          hold_low=self._roadsense_holds_low)
         )
 
         # Persisted UI overrides win over the CLI defaults; mirror the active
@@ -1199,7 +1238,7 @@ class BackendService:
                     self._gateway_usb_power_tick()
                     self._port_power_enforce_tick()
                     self._mfd_power_tick()
-                    self._poco2_power_tick()
+                    self._roadsense_power_tick()
                     self._poco_power_tick()
                     self._chassis_fan_tick()
                     self._vfd_clock_tick()
@@ -1232,15 +1271,53 @@ class BackendService:
         except Exception:
             logger.exception("MFD power tick failed")
 
-    def _poco2_power_tick(self) -> None:
-        """Advance the secondary-POCO power manager (ACC follower)."""
-        if self.poco2_power is None or self.twin is None:
+    def _roadsense_power_tick(self) -> None:
+        """Advance the roadsense stack manager (ACC follower) and finish a
+        deferred key-off "low" CPU profile once the stack is down."""
+        if self.roadsense_power is None or self.twin is None:
             return
         acc = bool(self.twin.store.state.powerbox.acc_on)
         try:
-            self.poco2_power.tick(acc)
+            self.roadsense_power.tick(acc)
         except Exception:
-            logger.exception("Secondary POCO power tick failed")
+            logger.exception("roadsense tick failed")
+        # The stack needs the Gold cluster (modeld/signd/envd pin cpu4-7, which
+        # the "low" profile takes offline): whenever it is meant to run, hold
+        # the "full" profile — also with the key off (operator mode "on").
+        if (self.roadsense_power.is_active() and self.power_controller is not None
+                and self.twin.store.state.powerbox.power_mode != "full"):
+            try:
+                from ..state.actions import SetPowerboxPowerModeAction
+                self.power_controller.set_mode("full")
+                self.twin.store.dispatch(SetPowerboxPowerModeAction("full"))
+                logger.info("POCO power profile -> full (roadsense %s)", self.roadsense_power.state)
+                if not acc:
+                    self._low_mode_deferred = True
+            except Exception:
+                logger.exception("Full power profile for roadsense failed")
+        if self._low_mode_deferred and self.roadsense_power.is_off():
+            self._low_mode_deferred = False
+            if not acc and self.power_controller is not None:
+                try:
+                    from ..state.actions import SetPowerboxPowerModeAction
+                    self.power_controller.set_for_ignition(False)
+                    self.twin.store.dispatch(SetPowerboxPowerModeAction("low"))
+                    logger.info("POCO power profile -> low (deferred until roadsense stopped)")
+                except Exception:
+                    logger.exception("Deferred low power profile failed")
+
+    def _roadsense_holds_low(self) -> bool:
+        """PowerModeRule hook: keep the Gold cluster online while roadsense runs.
+
+        Returns True (and arms the deferred switch) when the stack is still up
+        at key-off; :meth:`_roadsense_power_tick` applies "low" once it is off.
+        """
+        if self.roadsense_power is None or self.roadsense_power.is_off():
+            return False
+        self._low_mode_deferred = True
+        logger.info("Key off: 'low' CPU profile deferred until roadsense has stopped "
+                    "(state=%s)", self.roadsense_power.state)
+        return True
 
     def _powerbox_heartbeat_tick(self) -> None:
         """Send the POCO->powerbox heartbeat (rolling counter) on cadence.

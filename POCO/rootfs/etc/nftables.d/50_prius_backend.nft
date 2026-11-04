@@ -1,0 +1,11 @@
+# postmarketOS ships nftables with policy drop on input; /etc/nftables.d/*.nft
+# are included. Open the car computer backend: REST/WebSocket/dashboard on 8080
+# and the ZeroMQ PUB/REP pair (8081/8082) the MFD frontend subscribes to.
+# (Traffic from the MFD Pi arrives on usb*, which the base ruleset accepts
+# anyway; this rule covers Wi-Fi/WireGuard clients. The roadsense API has its
+# own file, 50_roadsense.nft, installed by the roadsense repo.)
+table inet filter {
+	chain input {
+		tcp dport { 8080, 8081, 8082 } accept comment "accept prius backend API + ZMQ"
+	}
+}

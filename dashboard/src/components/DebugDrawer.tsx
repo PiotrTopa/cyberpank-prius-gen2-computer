@@ -81,10 +81,10 @@ export function DebugDrawer({ pb, conn, state, now, onClose }: {
             </span>
           </div>
 
-          <Section title="Relay board & buttons (fw 2.0)" icon={CircuitBoard}>
+          <Section title="Relay board & buttons (fw 2.1)" icon={CircuitBoard}>
             <div className="flex flex-col gap-2">
               <Rail name="RS485 rail · relay 5" desc="Satellite power (wake-lock rule)" val={pb.rs485_power} />
-              <Rail name="Secondary POCO · GP28" desc="Backend ACC-follower, button-started" val={pb.poco2_alive} />
+              <Rail name="Camera hub · relay 4" desc={`roadsense ${state.roadsense?.state ?? '--'} (${state.roadsense?.mode ?? 'auto'})${state.roadsense?.api_ok ? ' · API OK' : ''}${state.roadsense?.hottest_c != null ? ` · ${state.roadsense.hottest_zone} ${state.roadsense.hottest_c.toFixed(0)} C` : ''}`} val={state.roadsense?.camera_power ?? null} />
               <Rail name="Fan · GP29 pwm / GP28 tach" desc={`${pb.fan_duty_pct?.toFixed(0) ?? '--'} % · ${pb.fan_rpm ?? '--'} rpm`} val={pb.fan_duty_pct != null ? pb.fan_duty_pct > 0 : null} />
             </div>
           </Section>

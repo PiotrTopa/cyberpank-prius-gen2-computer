@@ -98,7 +98,7 @@ class ActionType(Enum):
     SET_POWER_CHART_TIME_BASE = auto()
     SET_GATEWAY_USB_POWER = auto()
     SET_MFD_STATUS = auto()  # MFD video board power manager status (backend)
-    SET_POCO2_STATUS = auto()  # secondary POCO power manager status (backend)
+    SET_ROADSENSE_STATE = auto()  # partial update of RoadsenseState (backend.roadsense_power)
     
     # VFD Satellite actions (device 110)
     UPDATE_VFD_SATELLITE = auto()  # Update VFD computed state
@@ -117,6 +117,8 @@ class ActionType(Enum):
     POWERBOX_BUTTON = auto()          # press a POCO power button via the powerbox
     POWERBOX_HARD_RESTART = auto()    # powerbox self-power-cut (restart relay)
     SET_RELAY = auto()                # relay board load channel (PCF8574 ch 2-8)
+    ROADSENSE_MODE = auto()           # roadsense stack operator mode (auto|on|off)
+    ROADSENSE_RESTART = auto()        # restart roadsense.target
     INPUT_EVENT = auto()              # human-interface event (frontend/satellite HID)
     SET_FAN_OVERRIDE = auto()   # manual chassis-fan override (None = auto)
 
@@ -1482,29 +1484,28 @@ class SetFanOverrideAction(Action):
         self.pct = pct
 
 
-class SetPoco2StatusAction(Action):
-    """Mirror the secondary-POCO power manager status (backend.poco2_power).
+class RoadsenseModeAction(Action):
+    """Operator mode for the roadsense stack manager: ``auto`` (follow ACC),
+    ``on`` (keep the stack up with the key off, bench work) or ``off`` (keep it
+    down). Not reduced into state; the backend applies it to the manager, whose
+    status comes back through :class:`SetRoadsenseStateAction`."""
+    def __init__(self, mode: str, source: ActionSource = ActionSource.UI):
+        super().__init__(ActionType.ROADSENSE_MODE, source)
+        self.mode = mode
 
-    Same shape as :class:`SetMfdStatusAction`; ``boot_presses`` counts the
-    button presses issued in the current boot attempt.
-    """
-    def __init__(
-        self,
-        state: str,
-        reachable: "Optional[bool]" = None,
-        state_since: "Optional[float]" = None,
-        last_ok_ping: "Optional[float]" = None,
-        boot_presses: "Optional[int]" = None,
-        last_boot_s: "Optional[float]" = None,
-        source: ActionSource = ActionSource.INTERNAL,
-    ):
-        super().__init__(ActionType.SET_POCO2_STATUS, source)
-        self.state = state
-        self.reachable = reachable
-        self.state_since = state_since
-        self.last_ok_ping = last_ok_ping
-        self.boot_presses = boot_presses
-        self.last_boot_s = last_boot_s
+
+class RoadsenseRestartAction(Action):
+    """Restart ``roadsense.target`` (only acted on while the stack runs)."""
+    def __init__(self, source: ActionSource = ActionSource.UI):
+        super().__init__(ActionType.ROADSENSE_RESTART, source)
+
+
+class SetRoadsenseStateAction(Action):
+    """Partial update of :class:`RoadsenseState` (backend.roadsense_power
+    status mirror; only the given fields change)."""
+    def __init__(self, source: ActionSource = ActionSource.INTERNAL, **fields):
+        super().__init__(ActionType.SET_ROADSENSE_STATE, source)
+        self.fields = fields
 
 
 # ─────────────────────────────────────────────────────────────────────────────

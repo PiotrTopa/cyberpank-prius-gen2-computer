@@ -39,10 +39,17 @@ class PowerModeRule(StateRule):
     ``apply_mode`` is called with ``True`` for ACC/ON (full performance) and
     ``False`` for key-off (low idle). It is only called on an actual transition
     of ``acc_on`` (or on the first observed state).
+
+    ``hold_low`` (optional) is consulted before a key-off switch to ``low``:
+    when it returns True the switch is NOT applied here (the caller has taken
+    over, e.g. the backend defers it until the roadsense stack, pinned to the
+    Gold cluster that ``low`` takes offline, has stopped).
     """
 
-    def __init__(self, apply_mode: Callable[[bool], None]):
+    def __init__(self, apply_mode: Callable[[bool], None],
+                 hold_low: Optional[Callable[[], bool]] = None):
         self._apply_mode = apply_mode
+        self._hold_low = hold_low
 
     @property
     def name(self) -> str:
@@ -66,6 +73,13 @@ class PowerModeRule(StateRule):
         old_acc = old_state.powerbox.acc_on if old_state is not None else None
         if old_acc == new_acc:
             return
+        if not new_acc and self._hold_low is not None:
+            try:
+                if self._hold_low():
+                    logger.info("PowerModeRule: key off, 'low' profile held back")
+                    return
+            except Exception:
+                logger.exception("PowerModeRule.hold_low failed; applying low")
         try:
             self._apply_mode(new_acc)
             mode_str = "full" if new_acc else "low"

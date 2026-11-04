@@ -51,7 +51,6 @@ from ..state.app_state import (  # noqa: F401
     RELAY_CH_CAM_HUB,
     RELAY_CH_CAN_HUB,
     RELAY_CH_MFD,
-    RELAY_CH_POCO2_HUB,
     RELAY_CH_RESTART,
     RELAY_CH_RS485,
     RELAY_CHANNELS,
@@ -64,10 +63,10 @@ BUTTON_POWER_ON_MS = 6000
 BUTTON_FORCE_MS = 35000
 BUTTON_TAP_MS = 300
 
-# The secondary POCO's power button is NOT wired on the powerbox (fw 2.1:
-# GP28 became the fan tach, POCO2_BTN_PIN = None). Commands for poco 2 are
-# refused by the firmware with ERROR POCO2_NC; the backend treats them as
-# inert. Flip to True (and set the firmware pin) when it is connected again.
+# There is no second POCO (single-computer layout since 2026-11-04: this POCO
+# runs the backend AND roadsense). Firmware 2.1 keeps the "poco 2" command
+# slots but refuses them (ERROR POCO2_NC, POCO2_BTN_PIN = None); the backend
+# treats them as inert.
 POCO2_BUTTON_CONNECTED = False
 
 if TYPE_CHECKING:  # avoid import cycles at runtime

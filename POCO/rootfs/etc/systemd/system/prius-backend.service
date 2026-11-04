@@ -18,6 +18,13 @@ ExecStart=/usr/local/sbin/prius-backend run
 Restart=always
 RestartSec=5
 
+# Single computer: the roadsense perception stack (roadsense.slice, CPUWeight
+# 100, Nice -5 daemons pinned to the big cores) shares this phone. Keep the
+# 50 Hz engine loop, the serial links and the API responsive under that load.
+CPUWeight=1000
+IOWeight=1000
+Nice=-10
+
 StandardOutput=journal
 StandardError=journal
 

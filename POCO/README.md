@@ -7,6 +7,14 @@ engineer `systemd`, hunt for flag files, or rediscover the networking layout by 
 > The phone is the actual on-car computer. It is headless, always-on, powered from the
 > AUX battery (the phone battery is amputated; a constant 4.1 V is fed to the battery
 > terminals). Access is over a cellular SIM + WireGuard overlay.
+>
+> **Single computer (decision 2026-11-04):** the same POCO also runs the roadsense
+> road-perception stack (repos `roadsense`, MIT, and `roadsense-signs`, AGPL) as
+> systemd units under `roadsense.target`, only while ACC is on. The backend starts
+> and stops it (`backend/roadsense_power.py`, `BACKEND_ROADSENSE_*`), powers its
+> camera hub (powerbox relay ch4) and mirrors its health and the phone's thermal
+> zones in the API (`roadsense` slice of `/api/v1/state`). The roadsense API itself
+> serves port **8090** on this machine (8080 is the backend). There is no second POCO.
 
 ## Documents
 

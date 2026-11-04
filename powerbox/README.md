@@ -42,7 +42,7 @@ the host what it sees.
 | Pin | Function | Idle | Notes |
 |---|---|---|---|
 | GP27 | main POCO button | input, pulls off | LOW = press. 6 s boots an off phone (3 s does not; verified 2026-11-03), 35 s force-resets a frozen SoC. Never driven high. |
-| — | secondary POCO button | **not connected** (`POCO2_BTN_PIN = None`) | `{"a":"button","poco":2}` / `{"a":"wake","poco":2}` reply `ERROR POCO2_NC` and press nothing. Re-enable by assigning a free pin — never GP28/GP29 (fan) or GP14/15 (dead). |
+| — | "poco 2" slot | **not connected** (`POCO2_BTN_PIN = None`) | No second POCO exists (single-computer layout, 2026-11-04). `{"a":"button","poco":2}` / `{"a":"wake","poco":2}` reply `ERROR POCO2_NC` and press nothing. |
 
 ### Main POCO wake ladder
 
@@ -61,15 +61,16 @@ heartbeat to stop (≥ 25 s) or the grace, then `sleep`: no wake presses until
 does the same from the firmware side and sends `SHUTDOWN` to the host, which
 must `systemctl poweroff` itself (backend default since 2.0).
 
-### Secondary POCO
+### roadsense on the same POCO
 
-Permanent power, normally off, **button not wired to the powerbox for now**.
-The backend's `Poco2PowerManager` (off by default, `BACKEND_POCO2_ENABLED`)
-mirrors the MFD Pi manager: key-on → `{"a":"button","poco":2,"ms":6000}` and
-ping until up; key-off → 10 min grace → `ssh poweroff`. With the button
-unconnected the firmware refuses the press (`ERROR POCO2_NC`); ping/ssh still
-work. The host-reported liveness `{"a":"p2","alive":b}` is still accepted and
-echoed as `p2` in STATUS.
+Since 2026-11-04 there is **one** POCO: it runs the backend and the roadsense
+perception stack (camerad-dvr / modeld / envd / api + the signd provider) as
+systemd units under `roadsense.target`. The backend's `RoadsenseManager`
+(`backend/roadsense_power.py`, `BACKEND_ROADSENSE_*`) follows ACC: key-on →
+relay ch4 (camera hub) on, 8 s settle, `systemctl start roadsense.target`;
+key-off → 30 s grace → `systemctl stop`, wait for the units, relay ch4 off. The
+powerbox is not involved beyond relay ch4; the legacy `p2`/`poco 2` fields stay
+in the protocol but mean nothing.
 
 ### Main POCO power button (GP27)
 
@@ -97,7 +98,7 @@ PCF powers up at 0xFF (all coils released).
 | 3 | NO | USB 2.0 hub (`1a40:0101`): **CAN gateway + comma.ai panda** | One switch for both. Hub enumerates ~6 s, gateway ~7 s, panda ~9 s after power; 50 → 155 mA @ 12 V. |
 | 4 | NO | USB 2.0 hub (VIA `2109:2817`): fvision dashcam (`1902:3241`, USB storage, frames via `VSFILE`) / aux | +84 mA @ 12 V, enumerates ~6 s. |
 | 5 | NO | RS485 satellite power | Semantics kept from fw 2.0; **not yet tested** on this board. |
-| 6–8 | NO | unassigned (6 reserved: secondary POCO hub) | Generic `relay` channels. |
+| 6–8 | NO | unassigned | Generic `relay` channels. |
 
 `on` always means **load powered** (`rly` 1): for NO channels the pin goes LOW
 (coil energised), for the NC channel HIGH (coil released) — the NC flag is
@@ -178,7 +179,7 @@ A rolling "automotive" counter lets each side detect if the other died:
 | Shutdown | `{"a":"off","grace_s":30}` | Host is halting itself: stop waking it (`shutdown` → `sleep`). |
 | Heartbeat | `{"a":"hb","n":0-255}` | Keep "POCO alive" fresh. |
 | Wake | `{"a":"wake","poco":1}` | Leave `sleep` and re-arm the ladder. `poco:2` → `ERROR POCO2_NC` (not connected). |
-| Secondary alive | `{"a":"p2","alive":true}` | Host-reported liveness of the secondary POCO (echoed in STATUS). |
+| p2 alive | `{"a":"p2","alive":true}` | Legacy: host-reported liveness of a second POCO (echoed as `p2` in STATUS); unused since the single-computer layout. |
 | Fan | `{"a":"fan","pct":0-100}` | 4-wire fan speed (GP29, not inverted); `duty` 0-65535 accepted for the old form. |
 | Power button | `{"a":"button","poco":1,"ms":6000}` | Hold GP27 low (6000 = power on, 35000 = force reset). `poco:2` → `ERROR POCO2_NC`. |
 | Relay | `{"a":"relay","ch":2-8,"on":true}` | Power a load channel (ack `relay_<ch>_on`). `ch:1` → `ERROR RELAY` (restart relay). |
@@ -239,7 +240,7 @@ power model + the host-side staleness watchdog that detects a silent USB-CDC lin
 * **Host System:** POCO F1 (`prius`) running postmarketOS.
 * **USB Hub:** labeled D-Link DUB-H4 **rev D1**, but internally an **ActionStar `2101:8500`** (same guts as the unsupported rev C1 — uhubctl issue #88; a truly per-port rev D enumerates as Genesys `05E3:0608`). Bench-tested 2026-07-21: **only the socket on internal port 5 has switchable VBUS** — put the **gateway** there; all other sockets are hardwired 5 V (off/cycle = data-only), and even an all-ports gang off doesn't cut them. The built-in HID `2101:8501` is the LED controller, not a power interface. (Previous hub: DUB-H4 rev F1, Terminus FE1.1s `1a40:0101`, fully ganged — there `hubcycle` really cut all VBUS.)
 * **Microcontroller:** Waveshare RP2040-Zero connected to **Port 1** of the USB Hub.
-* **Power (since 2026-10-26):** the RP2040 is **bus-powered** from the hub, and the hub's 5 V buck, the main POCO's buck and the secondary POCO's buck all hang on the **permanent 12 V feed**. There is no master rail and no suicide path any more: the box is always on, the main POCO is only ever started through its power button, and the backend puts the box to "sleep" (no wake presses) when it shuts the phone down, until ACC rises again. The INA219 *senses* the 12 V system.
+* **Power (since 2026-10-26):** the RP2040 is **bus-powered** from the hub, and the hub's 5 V buck and the POCO's buck hang on the **permanent 12 V feed**. There is no master rail and no suicide path any more: the box is always on, the main POCO is only ever started through its power button, and the backend puts the box to "sleep" (no wake presses) when it shuts the phone down, until ACC rises again. The INA219 *senses* the 12 V system.
 
 ### Pinout (RP2040 / Raspberry Pi Pico)
 
@@ -251,7 +252,7 @@ power model + the host-side staleness watchdog that detects a silent USB-CDC lin
 | GP27 | Main POCO power button | IN (pulls off) / OUT-LOW pulse | Wired straight across the phone's button (line idles ~1.8 V). 6 s hold powers on (bench 2026-11-03); 35 s forces a reset of a frozen SoC. Never driven HIGH. |
 | GP28 | Chassis fan tach | IN (PULL_UP), falling-edge IRQ | Fan's open-collector tach, 2 pulses/rev → `fan_rpm` in telemetry. |
 | GP29 | Chassis fan PWM | PWM 25 kHz, **not inverted** | Straight to the fan's PWM wire, no transistor: GPIO duty = fan duty. Undriven (bootloader, safe-boot) = fan at full speed; the firmware takes it over first thing in `main()`. |
-| — | Secondary POCO power button | not connected | `POCO2_BTN_PIN = None`. Must never share a fan pin (a fan PWM on the button line presses the phone). |
+| — | "poco 2" slot | not connected | `POCO2_BTN_PIN = None`; no second POCO exists. Must never share a fan pin (a fan PWM on a button line presses the phone). |
 | GP14, GP15 | unused, **dead** | — | Both pads are blown inside the RP2040 (2026-10-27: diode mode to GND 0.045 V instead of ~0.5 V, 11 Ω between the two pins, carrier wiring verified clean). Never assign them. |
 
 **Button wiring, verified on the bench** (2026-10-26 with the phone's

@@ -32,15 +32,15 @@ export interface Powerbox {
   uv_threshold?: number | null;
   uv_recover?: number | null;
   poco_alive?: boolean | null;
-  /** Secondary POCO liveness as reported to the powerbox by the backend */
+  /** Legacy firmware "p2" echo; there is no second POCO (single computer since 2026-11-04) */
   poco2_alive?: boolean | null;
   /** Powerbox state machine (fw >= 2.0): normal | shutdown | sleep */
   pm_state?: string;
   powerbox_hb?: number | null;
   /** Relay board states [ch1..ch8], true = load powered, null = unknown.
    *  ch1 = powerbox restart relay (always null, not a load), ch2 = MFD Pi,
-   *  ch3 = CAN hub (gateway + panda), ch4 = camera hub, ch5 = RS485 satellite
-   *  rail, ch6 = secondary POCO hub (reserved). Read back from the PCF8574 by
+   *  ch3 = CAN hub (gateway + panda), ch4 = camera hub (roadsense), ch5 = RS485
+   *  satellite rail, ch6-8 spare. Read back from the PCF8574 by
    *  the firmware (STATUS "rly", fw >= 2.1). */
   relays?: (boolean | null)[] | null;
   /** fw >= 2.1 boot diagnostics: machine.reset_cause() (1 power-on, 3 watchdog),
@@ -130,6 +130,32 @@ export interface Satellites {
   last_update_time?: number;
 }
 
+/** roadsense perception stack on this computer (backend.roadsense_power):
+ *  started with ACC, stopped after the key-off grace; its own API lives at
+ *  api_url (port api_port, 8090 on the car computer). temps = every thermal
+ *  zone of the phone in C (heat-model input). */
+export interface Roadsense {
+  enabled?: boolean;
+  /** off | camera_on | starting | running | grace | stopping */
+  state?: string;
+  /** auto (follow ACC) | on | off */
+  mode?: string;
+  desired?: boolean;
+  camera_power?: boolean | null;
+  api_ok?: boolean | null;
+  api_url?: string;
+  api_port?: number;
+  health?: Record<string, unknown> | null;
+  units?: Record<string, string> | null;
+  temps?: Record<string, number> | null;
+  hottest_zone?: string | null;
+  hottest_c?: number | null;
+  state_since?: number | null;
+  last_api_ok?: number | null;
+  restarts?: number;
+  last_error?: string | null;
+}
+
 export interface AppState {
   powerbox: Powerbox;
   vehicle: Vehicle;
@@ -137,6 +163,7 @@ export interface AppState {
   climate?: Climate;
   connection?: Connection;
   satellites?: Satellites;
+  roadsense?: Roadsense;
 }
 
 export type TimeRange = '1h' | '24h' | '7d';

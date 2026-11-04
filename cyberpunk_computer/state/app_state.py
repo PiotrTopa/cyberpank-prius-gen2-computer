@@ -352,16 +352,35 @@ class ConnectionState:
     mfd_last_ok_ping: Optional[float] = None  # last successful ping of the Pi
     mfd_power_cycles: int = 0                 # boot-timeout + watchdog VBUS cycles
     mfd_last_boot_s: Optional[float] = None   # last power-on -> reachable duration
-    # Secondary POCO (roadsense) ACC-follower mirror (backend.poco2_power): same
-    # phases as the MFD manager, but "power on" is a powerbox button press and
-    # "power off" is an SSH poweroff — the board has permanent power.
-    poco2_state: str = ""
-    poco2_reachable: Optional[bool] = None
-    poco2_state_since: Optional[float] = None
-    poco2_last_ok_ping: Optional[float] = None
-    poco2_boot_presses: int = 0               # button presses issued this boot attempt
-    poco2_last_boot_s: Optional[float] = None
 
+
+@dataclass(frozen=True)
+class RoadsenseState:
+    """roadsense perception stack on this computer (backend.roadsense_power).
+
+    Single-computer layout (2026-11-04): the stack (roadsense MIT core +
+    roadsense-signs AGPL sign provider) runs on the same POCO as this backend,
+    as systemd units under ``roadsense.target``, only while ACC is on. The
+    backend starts/stops it over systemctl and probes its HTTP API; this slice
+    mirrors that manager plus the phone's thermal zones (heat-model input).
+    """
+    enabled: bool = False
+    state: str = ""                      # off|camera_on|starting|running|grace|stopping
+    mode: str = "auto"                   # auto (follow ACC) | on | off
+    desired: bool = False                # what the mode/ACC currently asks for
+    camera_power: Optional[bool] = None  # camera hub relay (ch4) as commanded by the manager
+    api_ok: Optional[bool] = None        # /v1/health answered on the last probe
+    api_url: str = ""                    # roadsense API base URL (host-local view)
+    api_port: int = 0                    # roadsense API port on this computer (ours is 8080)
+    health: Optional[dict] = None        # trimmed /v1/health (fps, model_ms, env, speed_limit, ...)
+    units: Optional[dict] = None         # systemd unit -> active state
+    temps: Optional[dict] = None         # thermal zone type -> C (all zones, every tick)
+    hottest_zone: Optional[str] = None
+    hottest_c: Optional[float] = None
+    state_since: Optional[float] = None  # wall clock of the last phase change
+    last_api_ok: Optional[float] = None  # wall clock of the last good health probe
+    restarts: int = 0                    # automatic/operator restarts since backend start
+    last_error: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -550,7 +569,7 @@ RELAY_CH_MFD = 2          # MFD Raspberry Pi Zero (ssh poweroff + wait before cu
 RELAY_CH_CAN_HUB = 3      # USB hub carrying the CAN gateway AND the comma.ai panda
 RELAY_CH_CAM_HUB = 4      # USB hub (VIA): fvision dashcam / aux devices
 RELAY_CH_RS485 = 5        # RS485 satellite power (was the OUT2 MOSFET rail)
-RELAY_CH_POCO2_HUB = 6    # secondary POCO USB hub (reserved, unused for now)
+# ch6-8: spare (ch6 was once reserved for a second POCO; single-computer layout since 2026-11-04)
 RELAY_CHANNELS = 8
 
 
@@ -623,7 +642,7 @@ class PowerboxState:
     # powerbox state machine: normal (wakes a dead POCO) | shutdown (host is
     # halting) | sleep (no wake presses until ACC rises or a wake command).
     poco_alive: Optional[bool] = None # powerbox sees a live POCO heartbeat
-    poco2_alive: Optional[bool] = None # secondary POCO liveness as we reported it
+    poco2_alive: Optional[bool] = None # firmware "p2" echo (legacy field, no second POCO since 2026-11-04)
     pm_state: str = ""                # powerbox PM state: normal|shutdown|sleep
     powerbox_hb: Optional[int] = None # powerbox's rolling heartbeat counter (0-255)
     # Firmware boot diagnostics (fw >= 2.1): machine.reset_cause() of the
@@ -720,6 +739,7 @@ class AppState:
     satellites: SatellitesState = field(default_factory=SatellitesState)
     avc: AvcState = field(default_factory=AvcState)
     vision: VisionState = field(default_factory=VisionState)
+    roadsense: RoadsenseState = field(default_factory=RoadsenseState)
 
     # UI-only state (not from vehicle)
     screen_brightness: int = 100

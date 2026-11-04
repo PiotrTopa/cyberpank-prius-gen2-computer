@@ -33,7 +33,7 @@ omits their fields; the backend leaves `bmp_t`/`aht_*` as `None`.
 | 3 | NO | USB 2.0 hub `1a40:0101` with the CAN gateway (`2e8a:000a`, fw 3.2.0, powered from this hub) and the comma.ai panda (`bbaa:ddcc`, cuatro). On: 50 → 155 mA; hub enumerates ~6 s, gateway ~7 s (`GW_HB` 1 Hz, CAN LISTEN), panda ~9 s. | `port_power.gateway` (= the CAN hub; switching the gateway switches the panda). |
 | 4 | NO | USB 2.0 hub VIA `2109:2817`, first device the fvision dashcam (`1902:3241`, USB storage; 1280×720 JPEG via `VSFILE`, sector 896, JPEG at byte 8704; camera clock wrong). On: +84 mA, enumerates ~6 s; no VBUS back-feed. | `port_power.camera`; `set_relay` ch4. |
 | 5 | NO | RS485 satellite power — semantics kept from fw 2.0, **untested on this board**. | satellite wake-lock rule (`rs485_power`). |
-| 6–8 | NO | unassigned (6 reserved for a secondary POCO hub). | generic `set_relay`. |
+| 6–8 | NO | unassigned (single-computer layout since 2026-11-04: no second POCO, so nothing is reserved). | generic `set_relay`. |
 
 **Restart scope (Q3, accepted):** relay VCC comes from the RP2040, so during a
 hard restart (and any other reset) every NO relay drops: MFD Pi (hard cut),
@@ -51,7 +51,7 @@ converge the rest. The MFD manager recovers through its ON-state watchdog.
 
 **Main POCO power button:** **GP27**. Press = drive LOW; release = input, no pulls; never driven high (phone line ~1.8 V). 6 s hold boots from off (verified 2026-11-03). Press/force/wake semantics unchanged.
 
-**Secondary POCO button:** not connected (`POCO2_BTN_PIN = None`). `button`/`wake` for poco 2 → `ERROR POCO2_NC`, no press, no GPIO touched. Backend: `io.powerbox.POCO2_BUTTON_CONNECTED = False`; `Poco2PowerManager` stays off by default and only warns when enabled. To re-enable: assign a free pin (never GP28/GP29 = fan, never GP14/15 = dead), flip the constant.
+**"poco 2" command slot:** there is no second POCO (the one POCO runs the backend and roadsense; decision 2026-11-04). The firmware keeps the slot but refuses it (`POCO2_BTN_PIN = None`; `button`/`wake` for poco 2 → `ERROR POCO2_NC`, no GPIO touched). Backend: `io.powerbox.POCO2_BUTTON_CONNECTED = False`, no manager behind it. The roadsense stack is started/stopped on this POCO by `backend/roadsense_power.py` (camera hub = relay ch4).
 
 **GP14/GP15:** dead pads, never assigned.
 
@@ -65,7 +65,7 @@ converge the rest. The MFD manager recovers through its ON-state watchdog.
 6. **Tests** — `tests/test_powerbox_firmware.py` (firmware on CPython with stubs: pin map, NC, restart lock-out, read-back/re-assert, fan duty, poco2 rejection, reset cause), `tests/test_powerbox_io.py`, `tests/test_port_power.py`.
 7. **Read-back** — `pcf8574.RelayBoard`: wanted byte updated only after a successful write; `rly` from a chip read every STATUS (2 s); mismatch → re-write, `rly_fix` count, `rly_fix` PMEVENT on the first of a streak, `pcf_reset` flag when the chip read 0xFF; I2C errors → `ERROR RELAY_IO` + `rly_err`.
 8. **Host heartbeats** — unchanged: TX gated on `{"a":"hb","n":N}`. New: the boot banner is parked and sent once on the first host-present edge, so the backend sees exactly one `POWERBOX_READY` per boot.
-9. **Fan pins** — GP29 PWM non-inverted, GP28 tach; secondary button removed from GP28.
+9. **Fan pins** — GP29 PWM non-inverted, GP28 tach (the former second-POCO button pin).
 10. **Reset cause (Q5)** — `machine.reset_cause()` in the banner (`rc`), every STATUS (`rc`, `up`) and the `boot` event; backend mirrors `reset_cause`, `uptime_s`, `boot_count`. Cause of the bench resets (2026-11-03 ~13:03, 15:21, 15:22, 15:30, during rewiring) is still unknown — read `rc` from the car: 1 = power/brown-out, 3 = watchdog.
 
 ## Protocol delta (fw 2.0 → 2.1)

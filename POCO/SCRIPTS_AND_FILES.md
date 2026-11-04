@@ -24,6 +24,15 @@ or reverse-engineer where the flags/scripts live. Stock pmOS files are not liste
 
 Details in [POWER.md](POWER.md).
 
+## roadsense stack (installed from the roadsense / roadsense-signs repos, not from this overlay)
+
+| Path | Type | Purpose |
+|------|------|---------|
+| `/etc/systemd/system/roadsense.target` + `roadsense-*.service`, `roadsense.slice` | systemd (target NOT enabled) | perception stack; started/stopped by `prius-backend` on ACC (`backend/roadsense_power.py`) |
+| `/etc/roadsense/api.env` | env file | `ROADSENSE_API_PORT=8090` (8080 is the backend) |
+| `/etc/roadsense/*.json`, `/var/lib/roadsense/models`, `/run/roadsense/*.sock`, `/dev/shm/roadsense-frames` | config / models / runtime | see roadsense `docs/ARCHITECTURE.md` |
+| `/etc/prius/backend.env` `BACKEND_ROADSENSE_*` | env | manager knobs (enabled, port, grace, mode) |
+
 ## USB per-port power (powerbox / gateway recovery)
 
 | Path | Type | Purpose |

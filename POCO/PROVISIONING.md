@@ -43,7 +43,11 @@ cd POCO
 ./sync.sh --dry-run       # preview what rsync would change (no writes)
 ./sync.sh --packages      # also `apk add` the package list (needs network)
 ./sync.sh --usb           # also apply USB host + VBUS  (REBOOTS the phone)
+./sync.sh --core          # backend + power + udev only: no NetworkManager/WireGuard/
+                          # netwatch/wifi/clock-fallback, no display units, no secrets.env
 PHONE=user@10.200.0.5 ./sync.sh    # override target (default user@10.200.0.5)
+# target whose sudo asks for a password (bench POCO `poco`, 192.168.0.86):
+dotinfra vault exec poco_user_password -- env PHONE=user@192.168.0.86 ./sync.sh --core --app --sudo-stdin
 ```
 
 What happens under the hood:
