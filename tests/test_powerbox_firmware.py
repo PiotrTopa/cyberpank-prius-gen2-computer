@@ -310,7 +310,7 @@ def _cmd(fw, payload, cfg):
 
 class TestCommandSurface:
     def test_version_bumped(self, fw):
-        assert fw.main.VERSION == "2.1.1"
+        assert fw.main.VERSION == "2.2.0"
 
     def test_relay_command_sets_load_channels(self, fw, pm):
         with Recorder(fw) as rec:
@@ -448,3 +448,112 @@ class TestButtons:
             _cmd(fw, {"a": "p2", "alive": True}, pm.cfg)
         assert {"ack": "p2"} in rec.lines
         assert pm.pm.p2_alive() is True
+
+
+class TestButtonSafety:
+    """2026-11-04: an RP2040 reset pulls GP27 down (= button held) until code
+    releases it; the phone boot-looped while the firmware was not running."""
+
+    def test_force_and_max_hold(self, fw):
+        assert fw.main.POCO_BTN_FORCE_MS == 12000
+        assert fw.main.POCO_BTN_MAX_MS <= 15000
+        assert fw.main.clamp_press_ms(40000) == fw.main.POCO_BTN_MAX_MS
+
+    def test_press_released_even_if_interrupted(self, fw, pm, monkeypatch):
+        def boom(ms):
+            raise KeyboardInterrupt
+        monkeypatch.setattr(fw.main, "wdt_sleep_ms", boom)
+        FakePin.log.clear()
+        with Recorder(fw):
+            with pytest.raises(KeyboardInterrupt):
+                pm.pm.btn1.press(6000, "test")
+        assert FakePin.log[-1] == (27, FakePin.IN, None)
+
+    def test_active_high_polarity(self, fw, pm, monkeypatch):
+        monkeypatch.setattr(fw.main, "POCO_BTN_ACTIVE_HIGH", True)
+        FakePin.log.clear()
+        with Recorder(fw):
+            pm.pm.btn1.press(300, "test")
+        assert FakePin.log == [(27, FakePin.OUT, 1), (27, FakePin.OUT, 0)]
+
+    def test_boot_py_matches_main(self, fw):
+        src = open(os.path.join(POWERBOX_DIR, "boot.py")).read()
+        ns = {}
+        exec(compile(src, "boot.py", "exec"), {"__name__": "boot"}, ns)
+        assert ns["ACTIVE_HIGH"] == fw.main.POCO_BTN_ACTIVE_HIGH
+        assert ns["BTN_PIN"] == fw.main.POCO1_BTN_PIN
+        # boot.py leaves the button released
+        assert FakePin.log[-1][0] == 27 and FakePin.log[-1][1:] == (FakePin.IN, None)
+
+
+class TestFirmwareUpload:
+    def _put(self, fw, cfg, data, name="main.py", sha=None, chunk=100):
+        import base64, hashlib
+        sha = sha or hashlib.sha256(data).hexdigest()
+        _cmd(fw, {"a": "put_begin", "name": name, "size": len(data), "sha": sha}, cfg)
+        for k in range(0, (len(data) + chunk - 1) // chunk):
+            _cmd(fw, {"a": "put", "seq": k,
+                      "b64": base64.b64encode(data[k * chunk:(k + 1) * chunk]).decode()}, cfg)
+        _cmd(fw, {"a": "put_end"}, cfg)
+
+    def test_upload_swaps_and_keeps_backup(self, fw, pm, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "main.py").write_bytes(b"old")
+        data = bytes(range(256)) * 5
+        with Recorder(fw) as rec:
+            self._put(fw, pm.cfg, data)
+        assert (tmp_path / "main.py").read_bytes() == data
+        assert (tmp_path / "main.py.bak").read_bytes() == b"old"
+        assert not (tmp_path / "main.py.new").exists()
+        assert {"msg": "PUT", "st": "ok", "name": "main.py"} in rec.lines
+        assert not any(l.get("msg") == "ERROR" for l in rec.lines)
+
+    def test_bad_hash_leaves_old_file(self, fw, pm, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "main.py").write_bytes(b"old")
+        with Recorder(fw) as rec:
+            self._put(fw, pm.cfg, b"new firmware", sha="0" * 64)
+        assert (tmp_path / "main.py").read_bytes() == b"old"
+        assert not (tmp_path / "main.py.new").exists()
+        errs = [l for l in rec.lines if l.get("msg") == "ERROR"]
+        assert errs and errs[-1]["code"] == "PUT"
+
+    def test_duplicate_chunk_is_reacked_not_rewritten(self, fw, pm, tmp_path, monkeypatch):
+        import base64, hashlib
+        monkeypatch.chdir(tmp_path)
+        data = b"abcdefgh"
+        with Recorder(fw) as rec:
+            _cmd(fw, {"a": "put_begin", "name": "boot.py", "size": 8,
+                      "sha": hashlib.sha256(data).hexdigest()}, pm.cfg)
+            for seq, part in ((0, b"abcd"), (0, b"abcd"), (1, b"efgh")):
+                _cmd(fw, {"a": "put", "seq": seq, "b64": base64.b64encode(part).decode()}, pm.cfg)
+            _cmd(fw, {"a": "put_end"}, pm.cfg)
+        assert (tmp_path / "boot.py").read_bytes() == data
+        assert {"msg": "PUT", "st": "ok", "name": "boot.py"} in rec.lines
+
+    def test_unknown_name_refused(self, fw, pm, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        with Recorder(fw) as rec:
+            _cmd(fw, {"a": "put_begin", "name": "../x.py", "size": 1, "sha": "0" * 64}, pm.cfg)
+        assert rec.lines[-1]["code"] == "PUT"
+        assert list(tmp_path.iterdir()) == []
+
+    def test_reboot_releases_buttons_then_resets(self, fw, pm, monkeypatch):
+        called = []
+        monkeypatch.setattr(fw.main.machine, "reset", lambda: called.append("reset"))
+        FakePin.log.clear()
+        with Recorder(fw) as rec:
+            _cmd(fw, {"a": "reboot"}, pm.cfg)
+        assert {"ack": "reboot"} in rec.lines
+        assert (27, FakePin.IN, None) in FakePin.log
+        assert called == ["reset"]
+
+
+class TestBootPyRecovery:
+    def test_restores_main_after_interrupted_swap(self, fw, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "main.py.bak").write_bytes(b"old")
+        (tmp_path / "main.py.new").write_bytes(b"half")
+        src = open(os.path.join(POWERBOX_DIR, "boot.py")).read()
+        exec(compile(src, "boot.py", "exec"), {"__name__": "boot"})
+        assert (tmp_path / "main.py").read_bytes() == b"old"

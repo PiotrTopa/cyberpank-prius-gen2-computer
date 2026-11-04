@@ -143,6 +143,12 @@ if [ "$DO_APP" = 1 ]; then
         "$REPO_ROOT/cyberpunk_computer/" "$PHONE:$APP_DEST/cyberpunk_computer/" </dev/null
     # shellcheck disable=SC2086
     scp $SSH_OPTS "$REPO_ROOT/requirements.txt" "$PHONE:$APP_DEST/requirements.txt" </dev/null
+    # Powerbox firmware + its NDJSON flash tool, for prius-flash-powerbox.
+    # shellcheck disable=SC2086
+    ssh -n $SSH_OPTS "$PHONE" "mkdir -p $APP_DEST/powerbox"
+    rsync -rlpt -e "ssh $SSH_OPTS" \
+        "$REPO_ROOT"/powerbox/{main,boot,pcf8574,ina219,bmp280,ahtx0,pb_flash}.py \
+        "$PHONE:$APP_DEST/powerbox/" </dev/null
     # Dashboard (built on the dev box: `cd dashboard && npm ci && npm run build`);
     # the backend serves $APP_DEST/dashboard/dist at / when it exists.
     if [ -f "$REPO_ROOT/dashboard/dist/index.html" ]; then

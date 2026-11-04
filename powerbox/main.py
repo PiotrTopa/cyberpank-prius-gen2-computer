@@ -36,6 +36,15 @@ Inbound commands from the computer (device 0):
     {"id": 0, "d": {"a": "ping"}}    → {"msg":"PONG"}
     {"id": 0, "d": {"a": "getlog"}}  → PMLOG (power-event ring buffer)
     {"id": 0, "d": {"a": "i2c_scan"}}
+    Firmware update (no REPL needed; the firmware keeps running, the WDT fed
+    and the buttons released throughout; host tool powerbox/pb_flash.py):
+    {"id": 0, "d": {"a": "put_begin", "name": "main.py", "size": n, "sha": hex64}}
+            → {"msg":"PUT","st":"ready"}   (writes <name>.new)
+    {"id": 0, "d": {"a": "put", "seq": k, "b64": "..."}}  → {"msg":"PUT","seq":k}
+    {"id": 0, "d": {"a": "put_end"}}  → {"msg":"PUT","st":"ok"} after size+sha256
+            check; old file kept as <name>.bak, boot.py restores it if a swap
+            was interrupted. Errors: ERROR PUT.
+    {"id": 0, "d": {"a": "reboot"}}  → ack, buttons released, machine.reset()
 
 STATUS (every HEARTBEAT_TX_MS on id 0):
     {"msg":"STATUS","hb":n,"acc":0|1,"poco":0|1,"p2":0|1,"pm":"normal",
@@ -95,7 +104,10 @@ main POCO's "hb" in) lets each side detect if the other died: if the POCO stops
 heartbeating the firmware wakes it with the power button.
 """
 
+import binascii
+import hashlib
 import json
+import os
 import sys
 import time
 import select
@@ -107,7 +119,7 @@ import pcf8574                      # PCF8574 driver + RelayBoard (pin map, NC, 
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-VERSION = "2.1.1"
+VERSION = "2.2.0"
 
 # Device role — reported in the unified identify ("whoami") response and the
 # ready banner so the computer can discover which USB-CDC port is the powerbox
@@ -175,9 +187,18 @@ RESTART_ACK_DELAY_MS = 300
 # is pulled to GND. We "press" by driving the pin LOW; at ALL other times the
 # pin is an input with pulls off. Never drive it HIGH (3.3 V into a 1.8 V node).
 #
-# GP27 is an ADC pad (GP26-29), which resets with input disabled and no pulls,
-# so the button is untouched through the bootloader and WDT resets. Verified
-# on-bench 2026-11-03: idle ~1.8 V, a 6 s LOW boots the phone from off.
+# Every RP2040 pad (GP27 included) resets with its PULL-DOWN on, which the
+# phone reads as a held button: whenever this firmware is not running (REPL,
+# interrupted flash, bootloader) the phone boot-loops (seen 2026-11-04).
+# boot.py releases the line first thing on every reset; button presses release
+# it in a finally; Ctrl-C is disabled after the safe-boot window; firmware
+# updates go over NDJSON ("put", see below) so the REPL is never needed.
+# Verified on-bench 2026-11-03: idle ~1.8 V, a 6 s LOW boots the phone from off.
+#
+# POCO_BTN_ACTIVE_HIGH = True once the button is driven through an N-MOSFET
+# (GP27 -> ~100 R -> gate, ~100 k gate->GND, drain -> button line, source ->
+# GND): press = drive HIGH, release = drive LOW, and reset/bootloader leave the
+# MOSFET off by hardware. Keep ACTIVE_HIGH in boot.py in sync.
 # The secondary POCO's button is NOT connected for now (None disables it:
 # commands for poco 2 are refused with ERROR POCO2_NC). When it comes back,
 # assign a free non-fan, non-dead pin here — never GP28/GP29 (fan) or GP14/15.
@@ -186,7 +207,8 @@ POCO2_BTN_PIN = None
 POCO_BTN_PRESS_MS = 6000      # power-on hold (POCO F1 board: 3 s fails, 6 s boots)
 POCO_BTN_FORCE_MS = 12000     # forced hard restart hold (POCO F1: 12 s = one clean
                               # reboot; holding longer reboots it every ~8-10 s)
-POCO_BTN_MAX_MS = 40000
+POCO_BTN_ACTIVE_HIGH = False
+POCO_BTN_MAX_MS = 15000
 
 # Secondary POCO: it has permanent power and is normally off. Its ACC-follower
 # state machine (boot on key-on, key-off grace, clean shutdown over SSH) lives
@@ -591,8 +613,27 @@ _fan = None
 
 # ─── POCO power buttons ───────────────────────────────────────────────────────
 
+def btn_release(pin_no):
+    """Put a button line in its released state."""
+    if POCO_BTN_ACTIVE_HIGH:
+        Pin(pin_no, Pin.OUT, value=0)    # MOSFET gate low = off
+    else:
+        Pin(pin_no, Pin.IN, pull=None)   # input, pulls explicitly OFF
+
+
+def btn_drive(pin_no):
+    """Press a button line."""
+    Pin(pin_no, Pin.OUT, value=1 if POCO_BTN_ACTIVE_HIGH else 0)
+
+
+def release_all_buttons():
+    for pin_no in (POCO1_BTN_PIN, POCO2_BTN_PIN):
+        if pin_no is not None:
+            btn_release(pin_no)
+
+
 class Button:
-    """One phone power button on a GPIO: LOW = pressed, input/no-pulls = released.
+    """One phone power button on a GPIO (see btn_drive / btn_release).
 
     ``pin_no=None`` = button not connected: ``press`` is refused (returns
     False) and no GPIO is ever touched.
@@ -602,7 +643,7 @@ class Button:
         self.pin_no = pin_no
         self.poco = poco
         if pin_no is not None:
-            Pin(pin_no, Pin.IN, pull=None)   # released, pulls explicitly OFF
+            btn_release(pin_no)
         self.last_press_ms = None
 
     @property
@@ -616,9 +657,11 @@ class Button:
         log_event("btn", poco=self.poco, ms=ms, why=reason, **ctx)
         tx(ID_SYSTEM, {"msg": "POCO_BTN", "poco": self.poco, "ms": ms, "why": reason})
         set_led(*LED_PRESS)                   # RED = pressing NOW
-        Pin(self.pin_no, Pin.OUT, value=0)    # pull the button line to GND
-        wdt_sleep_ms(ms)                      # feeds the WDT during the hold
-        Pin(self.pin_no, Pin.IN, pull=None)   # release -> input, pulls off
+        try:
+            btn_drive(self.pin_no)
+            wdt_sleep_ms(ms)                  # feeds the WDT during the hold
+        finally:
+            btn_release(self.pin_no)          # never left pressed on an exception
         set_led(0, 0, 0)
         self.last_press_ms = time.ticks_ms()
         return True
@@ -962,6 +1005,93 @@ class Config:
         self._rxbuf = ""
 
 
+# ─── Firmware update over NDJSON ─────────────────────────────────────────────
+
+OTA_FILES = ("main.py", "boot.py", "pcf8574.py", "ina219.py", "bmp280.py", "ahtx0.py")
+
+
+def _rm(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+class Uploader:
+    """Receives one file in base64 chunks into <name>.new, then verifies its
+    size + sha256 and swaps it in (old copy -> <name>.bak)."""
+
+    def __init__(self):
+        self.f = None
+        self.name = None
+
+    def abort(self):
+        if self.f is not None:
+            try:
+                self.f.close()
+            except Exception:
+                pass
+            self.f = None
+            _rm(self.name + ".new")
+
+    def begin(self, name, size, sha):
+        self.abort()
+        if name not in OTA_FILES:
+            return "name"
+        try:
+            size = int(size)
+        except (TypeError, ValueError):
+            return "size"
+        if not isinstance(sha, str) or len(sha) != 64:
+            return "sha"
+        self.name, self.size, self.sha = name, size, sha.lower()
+        self.got, self.seq, self.h = 0, 0, hashlib.sha256()
+        self.f = open(name + ".new", "wb")
+        return None
+
+    def chunk(self, seq, b64):
+        """Returns (error, duplicate)."""
+        if self.f is None:
+            return "idle", False
+        if seq == self.seq - 1:
+            return None, True            # retransmit of an acked chunk
+        if seq != self.seq:
+            return "seq %s want %d" % (seq, self.seq), False
+        try:
+            data = binascii.a2b_base64(b64)
+        except Exception:
+            return "b64", False
+        self.f.write(data)
+        self.h.update(data)
+        self.got += len(data)
+        self.seq += 1
+        if self.got > self.size:
+            self.abort()
+            return "overflow", False
+        return None, False
+
+    def end(self):
+        if self.f is None:
+            return "idle"
+        self.f.close()
+        self.f = None
+        new = self.name + ".new"
+        digest = binascii.hexlify(self.h.digest()).decode()
+        if self.got != self.size or digest != self.sha:
+            _rm(new)
+            return "verify %d/%d" % (self.got, self.size)
+        _rm(self.name + ".bak")
+        try:
+            os.rename(self.name, self.name + ".bak")
+        except OSError:
+            pass                          # first upload of this file
+        os.rename(new, self.name)
+        return None
+
+
+_uploader = Uploader()
+
+
 def process_command(line: str, config: Config):
     """Parse and act on one inbound NDJSON command from the host."""
     try:
@@ -1070,6 +1200,35 @@ def process_command(line: str, config: Config):
     elif action == "out":
         tx_error("OUT_REMOVED", "no power rails since firmware 2.0; use relay")
 
+    elif action == "put_begin":
+        err = _uploader.begin(data.get("name"), data.get("size"), data.get("sha"))
+        if err:
+            tx_error("PUT", err)
+        else:
+            tx(ID_SYSTEM, {"msg": "PUT", "st": "ready", "name": _uploader.name})
+
+    elif action == "put":
+        err, _dup = _uploader.chunk(data.get("seq"), data.get("b64", ""))
+        if err:
+            tx_error("PUT", err)
+        else:
+            tx(ID_SYSTEM, {"msg": "PUT", "seq": data.get("seq")})
+
+    elif action == "put_end":
+        name = _uploader.name
+        err = _uploader.end()
+        if err:
+            tx_error("PUT", err)
+        else:
+            log_event("put", name=name)
+            tx(ID_SYSTEM, {"msg": "PUT", "st": "ok", "name": name})
+
+    elif action == "reboot":
+        tx_ack("reboot")
+        release_all_buttons()
+        wdt_sleep_ms(300)                 # let the ack drain over USB
+        machine.reset()
+
     elif action == "i2c_scan":
         if config.i2c is None:
             tx_error("I2C_SCAN", "no bus")
@@ -1088,6 +1247,7 @@ def poll_stdin(config: Config):
             line = sys.stdin.readline()
             if line:
                 process_command(line.strip(), config)
+            feed_wdt()                    # a streamed upload can keep us here
     except Exception:
         # select may not be available on all MicroPython ports;
         # fall back to non-blocking read
@@ -1149,7 +1309,18 @@ def main():
             time.sleep(1)
     except KeyboardInterrupt:
         print("Interrupt received during safe boot. Dropping to REPL.")
+        release_all_buttons()
         sys.exit(0)
+
+    # From here on Ctrl-C (0x03) is ordinary data: a stray or deliberate
+    # Ctrl-C can no longer drop the board into a REPL with the WDT armed.
+    # The REPL is reachable only in the SAFE_BOOT window above (no WDT yet);
+    # updates use the "put" commands instead.
+    try:
+        import micropython
+        micropython.kbd_intr(-1)
+    except Exception:
+        pass
 
     # I2C setup
     i2c, devices = setup_i2c()
@@ -1362,6 +1533,7 @@ def main():
             time.sleep_ms(config.interval_ms)
 
         except KeyboardInterrupt:
+            release_all_buttons()
             tx(ID_SYSTEM, {"msg": "INTERRUPTED"})
             sys.exit(0)
 

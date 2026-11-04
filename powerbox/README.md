@@ -323,33 +323,51 @@ The `prius` host has been configured to remotely manage and program the RP2040 w
    sudo uhubctl -f -l 1-1 -p 1 -a on
    ```
 
-## Flashing firmware (OTA, no BOOTSEL)
+## Flashing firmware (over the NDJSON link, firmware >= 2.2.0)
 
-`main.py` auto-runs at boot and the firmware soft-reboots on `Ctrl-C` (`sys.exit` →
-`MPY: soft reboot` → re-run), so there is **no stable REPL** and a plain
-`mpremote fs cp` fails with `could not enter raw repl` (mpremote's default soft-reset
-re-runs `main.py` and the streaming hides the raw-REPL prompt).
+Updates never use the REPL. The firmware receives files over its normal link
+(`put_begin` / `put` / `put_end`, then `reboot`; see the protocol block in
+`main.py`) while it keeps running, so the POCO button stays released and the
+WDT fed. Each file is checked on the board (size + sha256) before it replaces
+the old one (kept as `<name>.bak`; `boot.py` puts `main.py.bak` back if a swap
+was interrupted).
 
-Use the packaged wrapper on `prius` (proven reliable, succeeds on attempt 1–2):
+On the POCO (files synced by `POCO/sync.sh --app` to `/home/user/cyberpunk/powerbox`):
 
 ```bash
-sudo systemctl stop prius-backend            # release the USB-CDC port
-prius-flash-powerbox ~/cyberpunk_computer/powerbox/main.py
-sudo systemctl restart prius-backend         # within 60 s (POCO boot-grace) so the
-                                             # firmware doesn't pulse the POCO button
+sudo prius-flash-powerbox                    # main.py + boot.py; stops/starts prius-backend
 ```
 
-How it works: a pyserial `Ctrl-C` nudge drops the board into the *momentary*
-post-`sys.exit` REPL window, then `mpremote resume` (which **skips** the soft-reset)
-enters raw-REPL there and copies the file; once in raw-REPL the board is held (no
-auto-reboot), so the copy completes. The wrapper then verifies the on-device `VERSION`
-and `reset`s into the new firmware. Full write-up and pitfalls in [`../POCO/POWER.md`](../POCO/POWER.md). Do **not**
-close+reopen the port (DTR drop resets the board; reaching the REPL re-enumerates the
-CDC and kills the fd); 1200-baud touch does **not** trigger BOOTSEL on MicroPython
-RP2040. Only fall back to the BOOTSEL + `flash_nuke` reflash if the board never streams
-at all.
+From a bench host with the board on USB (nothing else may hold the port):
+
+```bash
+python3 powerbox/pb_flash.py powerbox/main.py powerbox/boot.py
+```
+
+`pb_flash.py` sends the host heartbeat itself, so the wake ladder never presses
+the POCO button during an update. A full update of `main.py` + `boot.py` takes
+~40 s including the reboot.
+
+### Why there is no REPL path any more
+
+Every RP2040 pad resets with its pull-down on. On GP27 (POCO button, active LOW)
+that reads as a held button whenever `main.py` is not running, and the phone
+boot-loops (2026-11-04). Hence:
+
+- `boot.py` releases GP27 first thing on every reset (and restores an interrupted
+  swap); the line is LOW only for the MicroPython start-up time after a reset.
+- `Button.press` releases in a `finally`; Ctrl-C handlers release before exiting.
+- After the 3 s safe-boot window Ctrl-C is disabled (`micropython.kbd_intr(-1)`):
+  a stray 0x03 cannot drop the board into a REPL with the WDT armed.
+- The REPL is reachable only by Ctrl-C inside the safe-boot window (no WDT yet).
+  **Disconnect the POCO button wire before doing that**, and before any BOOTSEL /
+  UF2 reflash of MicroPython itself: no code of ours runs then, so GP27 sits LOW.
+- `POCO_BTN_ACTIVE_HIGH` (main.py) / `ACTIVE_HIGH` (boot.py) switch to driving the
+  button through an N-MOSFET (GP27 → ~100 Ω → gate, ~100 kΩ gate→GND, drain →
+  button line, source → GND). With it, reset and bootloader leave the button
+  released by hardware. Set both to `True` only once the MOSFET is fitted.
 
 ## Rescue Scripts
-If the microcontroller hits a fast bootloop (e.g., due to an I2C initialization exception), use the provided rescue scripts to drop to REPL and delete the offending `main.py` before it crashes.
+If the microcontroller hits a fast bootloop (e.g., due to an I2C initialization exception), use the provided rescue scripts to drop to REPL and delete the offending `main.py` before it crashes. Disconnect the POCO button wire first (see above).
 * `rescue.py`: Python-based fast-interrupt via USB cycling and Ctrl-C spam.
 * `rescue.sh`: Shell script wrapper around `mpremote`.
