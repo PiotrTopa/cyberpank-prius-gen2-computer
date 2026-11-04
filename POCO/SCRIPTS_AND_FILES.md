@@ -65,7 +65,7 @@ Details in [POWER.md](POWER.md).
 | NM conn `prius-dev-wifi` | NetworkManager | legacy dev Wi-Fi client (SSID `in_the_middle_of_nowhere`), **autoconnect no** (unused) |
 | `/etc/NetworkManager/conf.d/99-unmanage-usb0.conf` | NM drop-in | leaves `usb0` unmanaged (USB lifeline) |
 | `/etc/NetworkManager/conf.d/90-dns-none.conf` | NM drop-in | `dns=none`, keep manual `/etc/resolv.conf` (1.1.1.1 / 9.9.9.9) |
-| `/usr/local/sbin/prius-netwatch` | sh script (755) | **VPN-over-SIM watchdog** `prius-netwatch {once\|status\|check}`. Pings WG server, escalates bounce-wg → bounce-wan → reboot on silent bearer loss |
+| `/usr/local/sbin/prius-netwatch` | sh script (755) | **VPN-over-SIM watchdog** `prius-netwatch {once\|status\|check}` (WAN profile = the active gsm connection, detected at run time). Pings WG server, escalates bounce-wg → bounce-wan → reboot on silent bearer loss |
 | `/run/prius-netwatch.fail` | tmpfs flag | consecutive-failure counter (resets on boot / on recovery) |
 | `/etc/systemd/system/prius-netwatch.service` | systemd oneshot | runs `prius-netwatch once` |
 | `/etc/systemd/system/prius-netwatch.timer` | systemd timer (enabled) | fires every 60 s (`OnBootSec=120`, `OnUnitActiveSec=60`) |

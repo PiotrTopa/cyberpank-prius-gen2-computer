@@ -11,6 +11,11 @@
 # This watchdog pings the WG server *through* the tunnel and, on sustained
 # failure, escalates: bounce WireGuard -> bounce mobile data -> reboot.
 #
+# 2026-11-04 (single-computer install): the bearer wedged again under full
+# roadsense load with the timer NOT enabled on the phone -> 30 min unreachable
+# until a manual check. The timer must be enabled (provision does it) and the
+# WAN profile is detected, not hard-coded.
+#
 # Observed 2026-07-08: an ~8h outage where the bearer wedged in BOTH directions
 # (the WG hub saw zero rx from the prius). Two lessons from live testing:
 #   1. A modem firmware reset (`mmcli --reset` + RF toggle) does NOT clear this
@@ -27,8 +32,16 @@
 set -u
 
 PEER_IP=10.200.0.1          # WG server wg0 address (reachable only via tunnel+WAN)
-WAN_CON=prius-wan
 WG_CON=wg-homelab
+# The SIM WAN profile: whichever gsm connection is active, else the first gsm
+# profile NetworkManager knows (the car phone has carried both `poco-wan` and
+# `prius-wan`; a hard-coded name bounced nothing during the 2026-11-04 outage).
+wan_con() {
+    n=$(timeout 10 nmcli -t -f NAME,TYPE con show --active 2>/dev/null | awk -F: '$2=="gsm"{print $1; exit}')
+    [ -n "$n" ] || n=$(timeout 10 nmcli -t -f NAME,TYPE con show 2>/dev/null | awk -F: '$2=="gsm"{print $1; exit}')
+    echo "${n:-prius-wan}"
+}
+WAN_CON=$(wan_con)
 STATE=/run/prius-netwatch.fail
 PING_CNT=2
 PING_TO=4

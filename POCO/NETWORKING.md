@@ -86,8 +86,12 @@ escalates on consecutive failures:
 | Consecutive fails | Action |
 |---|---|
 | 2 | bounce `wg-homelab` (cheap re-handshake) |
-| 4 and 7 | bounce `prius-wan` → re-establish the data bearer (new IP/route), then bring `wg-homelab` back up |
-| 11 | reboot (last resort; **skipped if uptime < 600 s** to avoid a boot-loop — cycles the WAN instead) |
+| 4 and 6 | bounce the SIM WAN (the **active gsm profile**, detected at run time — `poco-wan` or `prius-wan`) → re-establish the data bearer, then bring `wg-homelab` back up |
+| 8 | reboot (last resort; **skipped if uptime < 600 s** to avoid a boot-loop — cycles the WAN instead). A wedged QMI/rmnet bearer survives a WAN bounce and a modem reset; only the reboot clears it (2026-07-08, confirmed again 2026-11-04). |
+
+The timer **must be enabled** on the car phone: on 2026-11-04 the bearer wedged under full
+roadsense load with the timer disabled (it is part of the network layer that `sync.sh --core`
+skips) and the phone was unreachable for 30 min until a manual reboot.
 
 - Script `/usr/local/sbin/prius-netwatch` — `once` (timer entrypoint), `status`, `check`.
 - Fail counter in `/run/prius-netwatch.fail` (tmpfs — resets on boot, resets to 0 on any

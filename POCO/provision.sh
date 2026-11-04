@@ -37,13 +37,15 @@ for a in "$@"; do
 done
 
 # Files that belong to the car network layer / the display, skipped by --core.
+# prius-netwatch is deliberately CORE: on a phone with the SIM WAN as its only
+# channel the watchdog is what keeps it reachable (2026-11-04 wedge, timer was off).
 is_noncore() {
     case "$1" in
         etc/NetworkManager/*|etc/resolv.conf|etc/prius/sim-pin) return 0 ;;
         etc/systemd/system/prius-sim-unlock.service|usr/local/sbin/prius-sim-unlock) return 0 ;;
-        etc/systemd/system/prius-wifi.*|etc/systemd/system/prius-netwatch.*|etc/systemd/system/prius-clock-fallback.*) return 0 ;;
+        etc/systemd/system/prius-wifi.*|etc/systemd/system/prius-clock-fallback.*) return 0 ;;
         etc/systemd/system/prius-blank.service|etc/systemd/system/backlight-off.service) return 0 ;;
-        usr/local/sbin/prius-wifi|usr/local/sbin/prius-netwatch|usr/local/sbin/prius-clock-fallback|usr/local/sbin/prius-blankd) return 0 ;;
+        usr/local/sbin/prius-wifi|usr/local/sbin/prius-clock-fallback|usr/local/sbin/prius-blankd) return 0 ;;
     esac
     return 1
 }
@@ -182,8 +184,8 @@ if command -v udevadm >/dev/null 2>&1; then
     log "reloaded udev rules"
 fi
 if [ "$CORE" = 1 ]; then
-    UNITS="prius-power.service prius-power.path prius-backend.service"
-    PATHS="prius-power.path"
+    UNITS="prius-power.service prius-power.path prius-netwatch.service prius-netwatch.timer prius-backend.service"
+    PATHS="prius-power.path prius-netwatch.timer"
 else
     UNITS="prius-power.service prius-power.path prius-wifi.service prius-wifi.path \
            prius-netwatch.service prius-netwatch.timer prius-backend.service backlight-off.service \
