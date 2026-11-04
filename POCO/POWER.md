@@ -617,3 +617,19 @@ openable).
   SSH-over-cellular.
 - When you need to **work on the phone** (e.g. compiling), set `full` — `low` limits it to
   4× 1.2 GHz.
+
+## Thermal testing rules (bench, 2026-11-04)
+
+Facts and permissions for the heat-management work (fan policy for `low` / `full`,
+report in `docs/THERMAL_MODEL.md` once the lane delivers it):
+
+- The car POCO has **no screen and no battery** (battery amputated, 4.1 V fed to the
+  terminals, see `ARCHITECTURE.md`). The `qcom-battery` thermal zone is meaningless and
+  **no battery-temperature check is required**; the only thermal limit is the SoC die.
+- On the bench the stack may be **overridden completely** for a measurement: stop the
+  backend, stop roadsense, set the power mode by hand, pin the fan (`set_fan` /
+  `fan_auto` API). No risk; just return everything to automatic afterwards.
+- Thermal load generation must drive **CPU and GPU together**, so it reproduces the
+  real roadsense load (camera + road model on the Adreno + the CPU side). A CPU-only
+  burner is not representative. Record the powerbox `v`/`ma` draw with every run so the
+  loads are comparable.
