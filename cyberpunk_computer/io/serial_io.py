@@ -128,7 +128,11 @@ class SerialPort(BidirectionalPort):
         if not SERIAL_AVAILABLE:
             logger.error("pyserial not available")
             return False
-        
+        if self._running:
+            # Already started: the reader thread owns (re)connects.
+            return self._connected
+
+        opened = False
         try:
             s = serial.Serial(
                 port=self.config.port,
@@ -138,32 +142,44 @@ class SerialPort(BidirectionalPort):
             with self._serial_lock:
                 self._serial = s
             self._connected = True
-            self._running = True
-            
-            # Start background threads
-            self._reader_thread = threading.Thread(
-                target=self._reader_loop,
-                daemon=True,
-                name="SerialReader"
-            )
-            self._reader_thread.start()
-            
-            self._writer_thread = threading.Thread(
-                target=self._writer_loop,
-                daemon=True,
-                name="SerialWriter"
-            )
-            self._writer_thread.start()
-            
+            opened = True
+        except Exception as e:
+            if not self.config.auto_reconnect:
+                logger.error(f"Failed to open serial port: {e}")
+                return False
+            # Device absent (e.g. the gateway is unpowered at key-off, or the
+            # path is the hotplug "pending" placeholder). Start the threads
+            # anyway: the reader loop retries every reconnect_delay and
+            # retarget() only works when that loop is running. Without this
+            # the backend stayed deaf to the gateway for good whenever it was
+            # (re)started while the gateway was off (2026-11-04 key-on).
+            logger.warning(f"Serial port {self.config.port} not available yet "
+                           f"({e}); will connect when it appears")
+
+        self._running = True
+        self._last_reconnect_attempt = 0.0
+
+        # Start background threads
+        self._reader_thread = threading.Thread(
+            target=self._reader_loop,
+            daemon=True,
+            name="SerialReader"
+        )
+        self._reader_thread.start()
+
+        self._writer_thread = threading.Thread(
+            target=self._writer_loop,
+            daemon=True,
+            name="SerialWriter"
+        )
+        self._writer_thread.start()
+
+        if opened:
             logger.info(f"Serial port opened: {self.config.port}")
             if self._connect_hooks:
                 threading.Thread(target=self._run_connect_hooks, daemon=True,
                                  name="SerialConnectHooks").start()
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to open serial port: {e}")
-            return False
+        return opened
     
     def stop(self) -> None:
         """Stop serial communication and cleanup."""
@@ -382,8 +398,18 @@ class SerialPort(BidirectionalPort):
         self.config.port = new_port
         # Drop any current connection and clear the backoff so the reader loop
         # reconnects to the new path on its next iteration.
-        self._handle_disconnect()
+        if self._connected:
+            self._handle_disconnect()
+        else:
+            with self._serial_lock:
+                self._serial = None
         self._last_reconnect_attempt = 0.0
+        if not self._running:
+            # start() was never called (or failed before 2026-11-04): nothing
+            # would ever reconnect. Bring the threads up now.
+            logger.warning("Serial port %s retargeted before start(); starting",
+                           new_port)
+            self.start()
 
     def force_reconnect(self, attempt: int = 1) -> None:
         """Force the link down and trigger USB-level recovery (escalating).
