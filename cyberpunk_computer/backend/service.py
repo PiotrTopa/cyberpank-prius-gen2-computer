@@ -39,6 +39,7 @@ from ..io import (
     create_virtual_twin,
 )
 from ..io.powerbox import (
+    POCO2_BUTTON_CONNECTED,
     PowerboxCommander,
     PriusPowerController,
     register_powerbox_ingress,
@@ -172,9 +173,9 @@ class BackendConfig:
     # Automatic link recovery: when the staleness watchdog trips, force the
     # powerbox serial port to close+reopen. That toggles DTR, which RESETS the
     # RP2040 -> it reboots, re-enumerates USB-CDC and resumes streaming, clearing
-    # a silent wedge. Default OFF: resetting the MCU is only safe once OUT1
-    # survives an MCU reset (self-latch hardware). Enable on the target once that
-    # hardware mod is in place.
+    # a silent wedge. Since firmware 2.0 the box has no power rails, so an MCU
+    # reset is electrically harmless; it is still off by default because a
+    # reset storm keeps the link wedged (see powerbox_recover_max_cooldown_s).
     powerbox_auto_recover: bool = False
     # Minimum spacing between recovery attempts (s). Prevents a permanently dead
     # link from being reset in a tight loop while it re-enumerates. The spacing
@@ -188,9 +189,11 @@ class BackendConfig:
     # than recovering it (2026-08-31: 137 enumerations / 39 failures in 14 min,
     # attempt #23 and climbing). Back off instead, and let a human look.
     powerbox_recover_max_cooldown_s: float = 600.0
-    # Whether a tripped under-voltage also powers the POCO off locally. Off by
-    # default; the powerbox is expected to cut the rail. Enable on the target.
-    local_poweroff_on_undervoltage: bool = False
+    # Whether a tripped under-voltage powers the POCO off locally. Since
+    # firmware 2.0 the powerbox CANNOT cut power (the main POCO is only ever
+    # started through its button), so this is the only way the protection
+    # actually sheds the load. On by default; disable on dev machines.
+    local_poweroff_on_undervoltage: bool = True
     # Gateway link staleness watchdog (s). The gateway firmware (>= 2.28.0) emits
     # a ~1 Hz GW_HB liveness heartbeat. The gateway is power-cycled with ACC for
     # power saving, so when ignition drops it stops heartbeating and disappears
@@ -202,7 +205,7 @@ class BackendConfig:
     # pre-2.28.0 gateway that does not heartbeat. 0 disables.
     gateway_stale_s: float = 8.0
     # Gateway link auto-recovery: when heartbeats have been stale for
-    # gateway_recover_stale_s AND the gateway VBUS relay (ch4) is actually ON
+    # gateway_recover_stale_s AND the gateway VBUS relay (ch3, CAN hub) is actually ON
     # (i.e. it *should* be alive — not an ACC power-save cut), cold power-cycle
     # its relay to reboot the wedged MCU (USB resets don't — the firmware/CDC
     # TX stays dead; verified 2026-08-09: only a VBUS cycle restored GW_HB).
@@ -215,7 +218,7 @@ class BackendConfig:
     gateway_recover_max_cooldown_s: float = 1800.0  # backoff cap for a truly dead gateway
 
     # Cadence for polling the gateway's USB hub-port power via uhubctl so the UI
-    # can show/toggle it like the powerbox OUT rails. 0 disables the poll.
+    # can show/toggle it like a powerbox relay. 0 disables the poll.
     gateway_usb_poll_s: float = 10.0
 
     # ── MFD video board (Pi Zero 2W on the PPPS hub port) ────────────────────
@@ -225,6 +228,13 @@ class BackendConfig:
     # env vars — see backend.__main__.
     mfd_enabled: bool = False
     mfd_config: Optional[object] = None    # MfdPowerConfig; None -> defaults
+
+    # ── Secondary POCO (roadsense board, permanent power, button-started) ────
+    # ACC-follower like the MFD manager, but "power on" is a powerbox button
+    # press and "power off" an SSH poweroff (backend.poco2_power). Knobs map to
+    # BACKEND_POCO2_* env vars — see backend.__main__.
+    poco2_enabled: bool = False
+    poco2_config: Optional[object] = None  # Poco2PowerConfig; None -> defaults
 
     # ── USB hub port power (backend.port_power) ──────────────────────────────
     # Topology of hub port power control: the powerbox's socket has native PPPS
@@ -236,17 +246,17 @@ class BackendConfig:
     # after a hub reset (which cold-boots the powerbox and releases all relays).
     port_power_enforce_s: float = 15.0
 
-    # ── RS485 satellites (OUT2 rail power management + twin) ─────────────────
-    # The satellite subsystem: OUT2 wake-lock power rule (rail on while ACC is
+    # ── RS485 satellites (relay ch5 rail power management + twin) ────────────
+    # The satellite subsystem: rail wake-lock power rule (rail on while ACC is
     # on or jobs are pending), the serialized job queue, periodic scheduler and
     # the presence/config-sync supervisor. Requires powerbox_enabled for the
     # physical rail control; without a powerbox link it still tracks presence
     # and runs jobs (rail assumed up).
     satellites_enabled: bool = True
-    # Linger before OUT2 is actually dropped after the last wake-lock releases.
+    # Linger before the rail is actually dropped after the last wake-lock releases.
     # Absorbs bursts (queued jobs arriving back-to-back) and key-off bounce.
     satellite_linger_s: float = 10.0
-    # Re-send cadence while the powerbox out2 mirror disagrees with the rule.
+    # Re-send cadence while the powerbox rs485_power mirror disagrees with the rule.
     satellite_retry_s: float = 5.0
     # Mark a satellite twin node offline after this long without traffic.
     satellite_offline_after_s: float = 15.0
@@ -259,8 +269,9 @@ class BackendConfig:
     satellite_poll_payload: str = '{"a":"status"}'
 
     # ── Chassis fan control ──────────────────────────────────────────────────
-    # PWM fan on powerbox GPIO 14. Two cooperating controllers, final duty is
-    # the max of both:
+    # 4-wire fan driven by the powerbox (fw >= 2.1: 25 kHz PWM on GP29, not
+    # inverted, tach on GP28); the backend only sends a speed in percent. Two
+    # cooperating controllers, final speed is the max of both:
     #   1. POCO controller — delta between POCO die temp (max CPU/GPU) and the
     #      outside-of-box ambient (BMP2 @0x76; falls back to the in-box AHT20
     #      when BMP2 is absent, matching the historical behaviour).
@@ -269,15 +280,6 @@ class BackendConfig:
     #      the box so passively-cooled boards (MFD Pi Zero 2W, RP2040s) don't
     #      cook even when the POCO itself is idle/cool.
     chassis_fan_enabled: bool = True
-    chassis_fan_pin: int = 14             # powerbox GPIO pin driving the fan
-    # PWM frequency. The chassis fan is a 2-wire BLDC: its internal commutation
-    # electronics lose power in the PWM off-gaps above a few hundred Hz — at
-    # 500 Hz it buzzes and barely spins, ≥2 kHz it stalls entirely (coil buzz
-    # only), 25 kHz dead silent AND dead still. Low-frequency PWM is the
-    # correct drive for it: the rotor+electronics ride through slow gaps.
-    # Characterized on-car 2026-08-10: 15 Hz = quietest (no grind, no pulsing,
-    # smooth down to 20% duty); 30 Hz good; 100 Hz audible grind.
-    chassis_fan_freq: int = 15            # PWM frequency in Hz
     chassis_fan_tick_s: float = 2.0       # control loop cadence (seconds)
     # "full" power-mode profile (ACC on, heavy load)
     fan_full_start_temp: float = 50.0     # start fanning when poco_max > this (°C)
@@ -332,6 +334,10 @@ class BackendConfig:
 class BackendService:
     """Own the engine, metrics sink and API server for the headless backend."""
 
+    # Seconds between a POWERBOX_READY banner and the relay re-assert: the
+    # firmware sends the banner, then 3 s safe-boot, then I2C/PCF setup.
+    PP_REASSERT_DELAY_S = 6.0
+
     def __init__(self, config: BackendConfig) -> None:
         self.config = config
         self._stop = threading.Event()
@@ -382,17 +388,16 @@ class BackendService:
         self._vfd_clock_last: float = 0.0
         self._fan_active: bool = False      # hysteresis latch
         self._fan_box_active: bool = False  # box-purge hysteresis latch
-        self._fan_last_duty: int = -1       # last sent duty (avoid re-sending same value)
-        self._fan_last_freq: int = -1       # last sent PWM frequency (Hz)
+        self._fan_last_pct: float = -1.0    # last sent speed (avoid re-sending same value)
         self._fan_last_log_pct: float = -1.0  # edge-triggered logging
         self._fan_ema_temp: Optional[float] = None  # Simulated heatsink temp
 
-        # Gateway USB hub-port power telemetry mirror (relay ch4 via port_power).
+        # Gateway USB hub-port power telemetry mirror (relay ch3 = CAN hub, via port_power).
         self._gateway_usb_target: Optional[str] = None  # stable by-id path of the gateway board
         self._gwusb_last_poll: float = 0.0
         self._gwusb_loc: Optional[str] = None           # cached "HUB PORT" (e.g. "1-1.4 2")
 
-        # Gateway link auto-recovery (cold VBUS cycle via relay ch4).
+        # Gateway link auto-recovery (cold VBUS cycle via relay ch3, the CAN hub shared with the panda).
         self._gw_recover_off_at: Optional[float] = None  # VBUS-off timestamp; None = not mid-cycle
         self._gw_recover_last: float = 0.0               # last cycle start (cooldown)
         self._gw_recover_epoch: float = time.time()      # staleness reference when no HB seen yet
@@ -400,10 +405,16 @@ class BackendService:
 
         # MFD video board power manager (backend.mfd_power).
         self.mfd_power = None
+        # Secondary POCO power manager (backend.poco2_power).
+        self.poco2_power = None
 
         # USB hub port power controllers (backend.port_power.HubPortPower).
         self.port_power = None
         self._pp_enforce_last: float = 0.0
+        # Pending re-assert of every wanted relay state after a powerbox boot
+        # banner (the PCF wakes at 0xFF: every NO load dropped). Delayed a few
+        # seconds because the banner precedes the firmware's I2C/PCF setup.
+        self._pp_reassert_at: Optional[float] = None
 
         # AVC-LAN nav emulator (live gateway only) + status mirror cadence.
         self.nav_emulator = None
@@ -523,7 +534,7 @@ class BackendService:
         if cfg.powerbox_enabled:
             self._wire_powerbox(twin)
 
-        # RS485 satellites: OUT2 wake-lock power rules + job queue + twin.
+        # RS485 satellites: rail (relay ch5) wake-lock power rules + job queue + twin.
         if cfg.satellites_enabled:
             self._wire_satellites(twin)
 
@@ -536,7 +547,7 @@ class BackendService:
             self._wire_dashcam(twin)
 
         # (MFD power manager is wired later in build(), after the port power
-        # controllers exist — its VBUS goes through powerbox relay ch3.)
+        # controllers exist — its VBUS goes through powerbox relay ch2.)
 
         db = MetricsDatabase(cfg.db_path)
         sink = MetricsSink(
@@ -701,8 +712,8 @@ class BackendService:
 
         controller = PriusPowerController(flag_path=cfg.power_mode_flag)
         # Wire the powerbox's own serial link as the command output port so the
-        # commander can actually reach the firmware (shutdown, heartbeat, OUT2/3,
-        # power button). None in replay / when no powerbox port exists -> log-only.
+        # commander can actually reach the firmware (sleep/wake, heartbeat,
+        # relays, fan, power buttons). None in replay / no port -> log-only.
         commander = PowerboxCommander(output_port=self._powerbox_serial)
         self.power_controller = controller
         self.powerbox_commander = commander
@@ -727,7 +738,7 @@ class BackendService:
         )
 
         # MFD video board (Pi Zero 2W): ACC-follower USB port power manager.
-        # Its VBUS goes through powerbox relay ch3 (RelayPortPower handles the
+        # Its VBUS goes through powerbox relay ch2 (RelayPortPower handles the
         # data-off sequencing + lossy-command verification).
         if cfg.mfd_enabled:
             from .mfd_power import MfdPowerConfig, MfdPowerManager
@@ -757,27 +768,88 @@ class BackendService:
                 mfd_cfg.grace_s,
             )
 
+        # Secondary POCO (roadsense board): ACC-follower that starts it with a
+        # powerbox button press and shuts it down over SSH after the key-off
+        # grace. The powerbox itself never presses the secondary's button.
+        if cfg.poco2_enabled:
+            from .poco2_power import Poco2PowerConfig, Poco2PowerManager
+            from ..state.actions import SetPoco2StatusAction
+
+            p2_cfg = cfg.poco2_config or Poco2PowerConfig()
+
+            def _publish_poco2(status: dict) -> None:
+                twin.store.dispatch(SetPoco2StatusAction(
+                    state=status["state"],
+                    reachable=status["reachable"],
+                    state_since=status.get("state_since"),
+                    last_ok_ping=status.get("last_ok_ping"),
+                    boot_presses=status.get("boot_presses"),
+                    last_boot_s=status.get("last_boot_s"),
+                ))
+
+            self.poco2_power = Poco2PowerManager(
+                p2_cfg,
+                press=lambda ms: commander.press_button(ms, poco=2),
+                publish=_publish_poco2,
+                report_alive=commander.report_poco2_alive,
+            )
+            logger.info(
+                "Secondary POCO power manager wired (board=%s press=%dms grace=%.0fs)",
+                p2_cfg.board_ip, p2_cfg.press_ms, p2_cfg.grace_s,
+            )
+            if not POCO2_BUTTON_CONNECTED:
+                logger.warning(
+                    "Secondary POCO power manager enabled but the powerbox has NO "
+                    "secondary button wired (fw 2.1): presses are refused "
+                    "(ERROR POCO2_NC); only ping/ssh shutdown will work")
+
         def _powerbox_middleware(action, store) -> None:
             from ..state.actions import ActionSource
+            if type(action).__name__ == "SetPowerboxConnectionAction" and \
+                    getattr(action, "boot", False):
+                # The firmware (re)booted: every NO relay dropped (relay VCC
+                # is the RP2040's 5 V) and the PCF woke at 0xFF. Re-assert the
+                # wanted states once its I2C/PCF setup is done.
+                self._pp_reassert_at = time.time() + self.PP_REASSERT_DELAY_S
+                logger.warning(
+                    "Powerbox booted (reset_cause=%s): MFD/CAN/camera relays dropped — "
+                    "re-asserting wanted relay states in %.0fs",
+                    getattr(action, "reset_cause", None), self.PP_REASSERT_DELAY_S)
+                return
             if getattr(action, "source", None) == ActionSource.UI and self.powerbox_commander:
-                if type(action).__name__ == "SetOutAction":
-                    if action.channel == 2 and self.config.satellites_enabled:
-                        # OUT2 is owned by the satellite power rule (wake-locks);
-                        # translate a manual UI toggle into a manual hold so the
-                        # rule and the operator don't fight over the rail.
+                if type(action).__name__ == "PowerboxButtonAction":
+                    # Manual power-button press (main or secondary POCO).
+                    if int(action.poco) == 2 and not POCO2_BUTTON_CONNECTED:
+                        logger.warning("Secondary POCO button press ignored: not wired "
+                                       "on the powerbox (fw 2.1)")
+                    else:
+                        self.powerbox_commander.press_button(int(action.ms), poco=int(action.poco))
+                elif type(action).__name__ == "PowerboxHardRestartAction":
+                    logger.warning(
+                        "Powerbox HARD RESTART requested: the box cuts its own supply; "
+                        "MFD Pi, CAN hub (gateway + panda) and camera hub will drop "
+                        "and come back OFF until re-asserted")
+                    self.powerbox_commander.hard_restart()
+                elif type(action).__name__ == "SetRelayAction":
+                    # Manual relay control. Route through the port power
+                    # controllers (data-off sequencing + enforcement) where
+                    # one exists for the channel; raw command otherwise.
+                    from ..state.app_state import RELAY_CH_RESTART, RELAY_CH_RS485
+                    pp = self.port_power
+                    ch = int(action.channel)
+                    if ch == RELAY_CH_RESTART:
+                        logger.error(
+                            "Refusing relay ch%d: that is the powerbox's own restart "
+                            "relay, not a load (use powerbox_hard_restart)", ch)
+                    elif ch == RELAY_CH_RS485 and self.config.satellites_enabled:
+                        # The RS485 rail is owned by the satellite power rule
+                        # (wake-locks); translate a manual toggle into a manual
+                        # hold so the rule and the operator don't fight.
                         from ..state.actions import SatellitePowerHoldAction
                         store.dispatch(SatellitePowerHoldAction(
                             "manual:ui", acquire=action.on))
-                    else:
-                        self.powerbox_commander.set_out(action.channel, action.on)
-                elif type(action).__name__ == "SetRelayAction":
-                    # Manual USB-port relay control. Route through the port
-                    # power controllers (data-off sequencing + enforcement)
-                    # where one exists for the channel; raw command otherwise.
-                    pp = self.port_power
-                    ch = int(action.channel)
-                    if pp is not None and ch == pp.sdr.relay_ch:
-                        pp.sdr.set(action.on)
+                    elif pp is not None and ch == pp.camera.relay_ch:
+                        pp.camera.set(action.on)
                     elif pp is not None and ch == pp.gateway.relay_ch:
                         # Keep desired-state bookkeeping consistent with the
                         # UI path for the gateway.
@@ -795,11 +867,6 @@ class BackendService:
                             pp.mfd.set(action.on)
                     else:
                         self.powerbox_commander.set_relay(ch, action.on)
-                elif type(action).__name__ == "SetReadyModeAction":
-                    if action.on:
-                        self.powerbox_commander.press_button(3000)
-                    else:
-                        self.powerbox_commander.press_button(10000)
                 elif type(action).__name__ == "PowerboxI2cScanAction":
                     self.powerbox_commander.request_i2c_scan()
 
@@ -811,7 +878,7 @@ class BackendService:
                 return
             if type(action).__name__ != "SetGatewayUsbPowerAction":
                 return
-            # Gateway VBUS goes through powerbox relay ch4 (data-off sequencing
+            # Gateway VBUS goes through powerbox relay ch3 (CAN hub: gateway + panda) (data-off sequencing
             # + verification inside RelayPortPower). The desired state recorded
             # here is kept converged by _port_power_enforce_tick.
             if self.port_power is None:
@@ -825,13 +892,21 @@ class BackendService:
         twin.store.add_middleware(_system_middleware)
 
         def request_shutdown(reason: str) -> None:
+            # Tell the box first so it stops its wake ladder (it goes to
+            # "sleep" until ACC rises), then halt ourselves: since firmware
+            # 2.0 nothing else can shed the POCO's load.
             commander.request_power_off(reason=reason, grace_s=cfg.shutdown_grace_s)
-            if cfg.local_poweroff_on_undervoltage:
+            if cfg.replay_file:
+                # Replayed telemetry must never halt a developer's machine.
+                logger.warning("Under-voltage in replay mode — local poweroff suppressed (%s)", reason)
+            elif cfg.local_poweroff_on_undervoltage:
                 logger.warning("Triggering local poweroff: %s", reason)
                 try:
                     os.system("systemctl poweroff")  # noqa: S605 - controlled command
                 except Exception:
                     logger.exception("Local poweroff failed")
+            else:
+                logger.warning("Local poweroff disabled — POCO keeps running on %s", reason)
 
         twin.rules_engine.register(
             PowerModeRule(apply_mode=controller.set_for_ignition)
@@ -884,7 +959,7 @@ class BackendService:
     def _wire_satellites(self, twin: VirtualTwin) -> None:
         """Wire the RS485 satellite subsystem: power rules, job queue, twin.
 
-        Power model: the OUT2 rail is on iff at least one wake-lock holder is
+        Power model: the RS485 rail (relay ch5) is on iff at least one wake-lock holder is
         held — ``acc`` (ignition on), ``queue`` (jobs pending/running) or
         ``manual:*``. The queue serializes ALL satellite work (scheduled reads,
         event commands, config pushes), so overlapping jobs share one rail
@@ -911,12 +986,12 @@ class BackendService:
         )
         supervisor.seed()
 
-        # Rules: ACC wake-lock + holder-set -> physical OUT2 (via commander).
-        def _set_out2(on: bool) -> bool:
+        # Rules: ACC wake-lock + holder-set -> physical rail (relay ch5).
+        def _set_rail(on: bool) -> bool:
             if self.powerbox_commander is None:
-                logger.info("OUT2 -> %s (no powerbox commander, log-only)", on)
+                logger.info("RS485 rail -> %s (no powerbox commander, log-only)", on)
                 return False
-            return self.powerbox_commander.set_out(2, on)
+            return self.powerbox_commander.set_rs485_power(on)
 
         # Gateway (CAN/AVC + RS485 master) is bonded to the same wake-lock
         # logic: needed with ACC (CAN/AVC) and for satellite jobs (RS485).
@@ -928,7 +1003,7 @@ class BackendService:
 
         twin.rules_engine.register(SatelliteAccHoldRule())
         twin.rules_engine.register(SatellitePowerRule(
-            set_out2=_set_out2,
+            set_rail=_set_rail,
             linger_s=cfg.satellite_linger_s,
             retry_s=cfg.satellite_retry_s,
             set_gateway=_set_gateway,
@@ -1124,6 +1199,7 @@ class BackendService:
                     self._gateway_usb_power_tick()
                     self._port_power_enforce_tick()
                     self._mfd_power_tick()
+                    self._poco2_power_tick()
                     self._poco_power_tick()
                     self._chassis_fan_tick()
                     self._vfd_clock_tick()
@@ -1155,6 +1231,16 @@ class BackendService:
             self.mfd_power.tick(acc)
         except Exception:
             logger.exception("MFD power tick failed")
+
+    def _poco2_power_tick(self) -> None:
+        """Advance the secondary-POCO power manager (ACC follower)."""
+        if self.poco2_power is None or self.twin is None:
+            return
+        acc = bool(self.twin.store.state.powerbox.acc_on)
+        try:
+            self.poco2_power.tick(acc)
+        except Exception:
+            logger.exception("Secondary POCO power tick failed")
 
     def _powerbox_heartbeat_tick(self) -> None:
         """Send the POCO->powerbox heartbeat (rolling counter) on cadence.
@@ -1284,7 +1370,7 @@ class BackendService:
             )
 
     def _gateway_recover_tick(self) -> None:
-        """Auto-recover a wedged gateway by cold-cycling its VBUS relay (ch4).
+        """Auto-recover a wedged gateway by cold-cycling its VBUS relay (ch3, the CAN hub it shares with the panda).
 
         The gateway CDC link occasionally wedges: the board stays enumerated
         (USB resets re-attach ttyACM but don't reboot the MCU) yet GW_HB
@@ -1369,7 +1455,7 @@ class BackendService:
         """Mirror the gateway's actual VBUS state into the store.
 
         Ground truth now comes for free from the powerbox STATUS "rly"
-        telemetry (relay ch4 = gateway VBUS) — no uhubctl subprocess polling.
+        telemetry (relay ch3 = CAN hub VBUS) — no uhubctl subprocess polling.
         Dispatches an INTERNAL-sourced SetGatewayUsbPowerAction when the mirror
         drifts; INTERNAL does NOT re-trigger _system_middleware, it only
         reflects state for the UI. Desired-state enforcement itself lives in
@@ -1406,10 +1492,18 @@ class BackendService:
         cfg = self.config
         if self.port_power is None:
             return
+        now = time.time()
+        if self._pp_reassert_at is not None and now >= self._pp_reassert_at:
+            # Post-boot re-assert (POWERBOX_READY seen): push every wanted
+            # state unconditionally, then let the normal drift sweep verify.
+            self._pp_reassert_at = None
+            self._pp_enforce_last = now
+            n = self.port_power.reassert_all()
+            logger.info("Powerbox back: re-asserted %d relay port state(s)", n)
+            return
         interval = getattr(cfg, "port_power_enforce_s", 15.0)
         if interval <= 0:
             return
-        now = time.time()
         if (now - self._pp_enforce_last) < interval:
             return
         self._pp_enforce_last = now
@@ -1485,8 +1579,8 @@ class BackendService:
     def _chassis_fan_tick(self) -> None:
         """Intelligent chassis fan controller.
 
-        Drives a PWM fan on powerbox GPIO ``chassis_fan_pin``. Two cooperating
-        controllers share the fan; the final duty is the max of both:
+        Sends a speed in percent to the powerbox fan stage. Two cooperating
+        controllers share the fan; the final speed is the max of both:
 
         1. POCO: differential between the POCO die (max CPU/GPU, EMA-filtered)
            and the outside-of-box ambient (BMP2 @0x76, AHT20 fallback). Two
@@ -1511,15 +1605,13 @@ class BackendService:
             return
         pb = self.twin.store.state.powerbox
 
-        # Manual override: pin the fan to a fixed duty regardless of temperature.
+        # Manual override: pin the fan to a fixed speed regardless of temperature.
         # Set via the `set_fan` API command (SetFanOverrideAction); cleared with
-        # `fan_auto`. Bypasses the automatic controller entirely. An optional
-        # frequency override rides along for driver/noise characterization.
+        # `fan_auto`. Bypasses the automatic controller entirely.
         override = getattr(pb, "fan_override_pct", None)
         if override is not None:
             pct = max(0.0, min(100.0, float(override)))
-            self._set_fan_duty(int(pct / 100.0 * 65535),
-                               freq=getattr(pb, "fan_override_freq", None))
+            self._set_fan_pct(pct)
             temps = [t for t in (pb.poco_core_temp, pb.poco_gpu_temp) if t is not None]
             if temps:
                 self._publish_poco_ema_temp(max(temps), pct)
@@ -1540,7 +1632,7 @@ class BackendService:
 
             # Safety override: absolute raw temperature too high (ignore EMA delay).
             if poco_max_raw >= cfg.fan_safety_temp:
-                self._set_fan_duty(65535)  # 100%
+                self._set_fan_pct(100.0)
                 self._fan_ema_temp = poco_max_raw  # Keep EMA updated
                 self._publish_poco_ema_temp(self._fan_ema_temp, 100.0)
                 return
@@ -1628,8 +1720,7 @@ class BackendService:
         # Minimum duty when active: 15% (fan needs a minimum to spin up).
         if 0.0 < duty_pct < 15.0:
             duty_pct = 15.0
-        duty_raw = int(duty_pct / 100.0 * 65535)
-        self._set_fan_duty(duty_raw)
+        self._set_fan_pct(duty_pct)
 
         # Publish duty (and EMA temp when available) for dashboard visibility.
         if self.twin and self.twin.store:
@@ -1655,23 +1746,15 @@ class BackendService:
             fan_duty_pct=fan_duty_pct,
         ))
 
-    def _set_fan_duty(self, duty_raw: int, freq: Optional[int] = None) -> None:
-        """Send the fan duty to the powerbox, de-duplicating unchanged values.
-
-        ``freq`` overrides the configured PWM frequency (manual tuning); a
-        frequency change always forces a re-send even if the duty is unchanged.
-        """
-        eff_freq = int(freq) if freq else self.config.chassis_fan_freq
-        freq_changed = eff_freq != self._fan_last_freq
-        self._fan_last_freq = eff_freq
-        # Add a 1% (approx 655 units) deadband to prevent serial spam from EMA noise.
-        # Always send if turning exactly ON or exactly OFF, or on a freq change.
-        if self._fan_last_duty != -1 and not freq_changed:
-            if abs(duty_raw - self._fan_last_duty) < 655 and (duty_raw == 0) == (self._fan_last_duty == 0):
+    def _set_fan_pct(self, pct: float) -> None:
+        """Send the fan speed (percent) to the powerbox, de-duplicating
+        unchanged values (1 % deadband; on/off edges always sent)."""
+        pct = max(0.0, min(100.0, float(pct)))
+        if self._fan_last_pct >= 0:
+            if abs(pct - self._fan_last_pct) < 1.0 and (pct == 0) == (self._fan_last_pct == 0):
                 return
-                
-        self._fan_last_duty = duty_raw
-        duty_pct = round(duty_raw / 65535.0 * 100.0, 1)
+        self._fan_last_pct = pct
+        duty_pct = round(pct, 1)
         # Edge-triggered logging: log on meaningful changes (>5% or on/off).
         if abs(duty_pct - self._fan_last_log_pct) > 5.0 or \
                 (duty_pct == 0) != (self._fan_last_log_pct == 0):
@@ -1691,7 +1774,7 @@ class BackendService:
                 getattr(pb, 'power_mode', '?') if pb else '?',
             )
         if self.powerbox_commander:
-            self.powerbox_commander.set_fan(self.config.chassis_fan_pin, duty_raw, eff_freq)
+            self.powerbox_commander.set_fan(pct)
 
     def _powerbox_telemetry_fresh(self) -> bool:
         """True while the mirrored powerbox STATUS fields can be trusted.
@@ -1745,7 +1828,7 @@ class BackendService:
         )
         try:
             self._powerbox_serial.force_reconnect(attempt=self._pb_recover_attempts)
-            self._fan_last_duty = -1
+            self._fan_last_pct = -1.0
         except Exception:
             logger.exception("Powerbox force_reconnect failed")
 

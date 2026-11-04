@@ -352,6 +352,15 @@ class ConnectionState:
     mfd_last_ok_ping: Optional[float] = None  # last successful ping of the Pi
     mfd_power_cycles: int = 0                 # boot-timeout + watchdog VBUS cycles
     mfd_last_boot_s: Optional[float] = None   # last power-on -> reachable duration
+    # Secondary POCO (roadsense) ACC-follower mirror (backend.poco2_power): same
+    # phases as the MFD manager, but "power on" is a powerbox button press and
+    # "power off" is an SSH poweroff — the board has permanent power.
+    poco2_state: str = ""
+    poco2_reachable: Optional[bool] = None
+    poco2_state_since: Optional[float] = None
+    poco2_last_ok_ping: Optional[float] = None
+    poco2_boot_presses: int = 0               # button presses issued this boot attempt
+    poco2_last_boot_s: Optional[float] = None
 
 
 
@@ -531,6 +540,20 @@ class VFDSatelliteState:
     needs_config_send: bool = True  # Send config on startup/change
 
 
+# Relay board channels (8-channel PCF8574 board, firmware >= 2.1: board relay N
+# = firmware channel N; see powerbox/RELAY-CHANGE-PLAN.md). Relay 1 is wired NC
+# on the powerbox's OWN supply: energising it hard-restarts the powerbox (and
+# drops every NO relay with it). It is not a load — the firmware refuses it in
+# "relay" and only exposes it as the "hard_restart" command.
+RELAY_CH_RESTART = 1      # powerbox self-restart relay (NC) — never a load
+RELAY_CH_MFD = 2          # MFD Raspberry Pi Zero (ssh poweroff + wait before cut)
+RELAY_CH_CAN_HUB = 3      # USB hub carrying the CAN gateway AND the comma.ai panda
+RELAY_CH_CAM_HUB = 4      # USB hub (VIA): fvision dashcam / aux devices
+RELAY_CH_RS485 = 5        # RS485 satellite power (was the OUT2 MOSFET rail)
+RELAY_CH_POCO2_HUB = 6    # secondary POCO USB hub (reserved, unused for now)
+RELAY_CHANNELS = 8
+
+
 @dataclass(frozen=True)
 class PowerboxState:
     """
@@ -546,9 +569,10 @@ class PowerboxState:
       computer.
 
     The computer reacts to this: ACC drives the POCO power profile (full/low) and
-    a sustained under-voltage triggers a request for the powerbox to cut POCO
-    power so the battery is never deep-discharged. All fields are populated by the
-    ingress; ``undervoltage`` / ``shutdown_requested`` are set by the rules.
+    a sustained under-voltage triggers a clean local shutdown (the powerbox
+    cannot cut power since firmware 2.0 — it only stops waking the POCO until
+    ACC returns). All fields are populated by the ingress; ``undervoltage`` /
+    ``shutdown_requested`` are set by the rules.
     """
     connected: bool = False           # powerbox link present (NDJSON seen)
 
@@ -567,15 +591,15 @@ class PowerboxState:
     poco_ema_temp: Optional[float] = None    # max CPU/cluster temperature
     poco_gpu_temp: Optional[float] = None     # max GPU temperature
 
-    # Chassis fan state (PWM on powerbox GPIO 14)
-    fan_duty_pct: float = 0.0                 # current fan duty cycle (0-100%)
+    # Chassis fan (4-wire, 25 kHz non-inverted PWM on powerbox GP29, tach GP28)
+    fan_duty_pct: float = 0.0                 # commanded fan speed (0-100%)
     fan_override_pct: Optional[float] = None  # manual override (None = automatic)
-    fan_override_freq: Optional[int] = None   # manual PWM frequency override (Hz)
+    fan_rpm: Optional[int] = None             # measured tach RPM (firmware >= 2.0)
 
     # Environmental telemetry. Physical placement:
-    #   bmp  = BMP280 @0x77 INSIDE the computer box (chassis air, near POCO/Pi)
+    #   bmp  = BMP280 @0x77 INSIDE the computer box — NOT FITTED (stays None)
     #   bmp2 = BMP280 @0x76 OUTSIDE the box (cabin ambient reference)
-    #   aht  = AHT20 on the powerbox board — also INSIDE the box
+    #   aht  = AHT20 inside the box — NOT FITTED (stays None)
     bmp_t: Optional[float] = None     # box inside temperature (°C)
     bmp_p: Optional[float] = None     # box inside pressure (Pa)
     bmp2_t: Optional[float] = None    # outside-box / cabin ambient temperature (°C)
@@ -586,26 +610,42 @@ class PowerboxState:
 
     # Rule-computed protection state
     undervoltage: bool = False        # voltage sustained below the cut threshold
-    shutdown_requested: bool = False  # computer asked the powerbox to cut POCO power
+    shutdown_requested: bool = False  # a clean POCO shutdown was requested
     shutdown_reason: str = ""
     # Active protection thresholds (UI-configurable, persisted; None until wired)
     uv_threshold: Optional[float] = None  # trip below this (V)
     uv_recover: Optional[float] = None    # flag clears above this (V)
     power_mode: str = "low"           # POCO CPU power profile (low|full)
 
-    # Power-management GPIO mirror (from the powerbox STATUS heartbeat).
-    # OUT1 = master rail (POCO+RP2040+hub) latch; OUT2 = RS485 satellite power;
-    # OUT3 = spare. pm_state is the powerbox state machine: normal/shutdown/dead.
-    out1: Optional[bool] = None       # master rail latched on (HIGH)
-    out2: Optional[bool] = None       # RS485 satellite power on
-    out3: Optional[bool] = None       # spare rail on
+    # Power-management mirror (from the powerbox STATUS heartbeat, fw >= 2.0).
+    # There are no MOSFET rails any more: the box is always on, the main POCO
+    # is only ever started through its power button, and pm_state is the
+    # powerbox state machine: normal (wakes a dead POCO) | shutdown (host is
+    # halting) | sleep (no wake presses until ACC rises or a wake command).
     poco_alive: Optional[bool] = None # powerbox sees a live POCO heartbeat
-    pm_state: str = ""                # powerbox PM state: normal|shutdown|dead
+    poco2_alive: Optional[bool] = None # secondary POCO liveness as we reported it
+    pm_state: str = ""                # powerbox PM state: normal|shutdown|sleep
     powerbox_hb: Optional[int] = None # powerbox's rolling heartbeat counter (0-255)
-    # USB-port VBUS relay states from the STATUS "rly" array (firmware >= 1.7).
-    # (ch1, ch2, ch3, ch4), True = port powered. ch4=gateway, ch3=MFD Pi,
-    # ch2=RTL-SDR, ch1=spare. None until first STATUS with relay data.
+    # Firmware boot diagnostics (fw >= 2.1): machine.reset_cause() of the
+    # running firmware (1 = power-on/brown-out/hard_restart, 3 = watchdog),
+    # its uptime, and how many POWERBOX_READY banners this backend has seen
+    # (spontaneous resets show up here).
+    reset_cause: Optional[int] = None
+    uptime_s: Optional[int] = None
+    boot_count: int = 0
+    # Relay board states from the STATUS "rly" array: (ch1..ch8), True = load
+    # powered, None = unknown / not a load. Read back from the PCF8574 by the
+    # firmware. ch1 (restart relay) is always None; ch2=MFD Pi, ch3=CAN hub
+    # (gateway + panda), ch4=camera hub, ch5=RS485 satellite power, ch6=secondary
+    # POCO hub (reserved). None until the first STATUS with relay data.
     relays: Optional[tuple] = None
+    # Firmware counters: drift repairs (lost write / PCF reset re-asserted)
+    # and I2C errors on the relay expander.
+    relay_fix_count: Optional[int] = None
+    relay_err_count: Optional[int] = None
+    # RS485 satellite rail = relay RELAY_CH_RS485, derived from ``relays`` by
+    # the reducer so the satellite rules read one semantic field.
+    rs485_power: Optional[bool] = None
 
     last_update_time: float = 0.0
 
@@ -645,7 +685,7 @@ class SatellitesState:
         * ``"manual:*"`` — operator/API holds.
 
     ``power_requested`` is the rule-computed desired OUT2 value (observability;
-    the actual rail state is mirrored in ``powerbox.out2``).
+    the actual rail state is mirrored in ``powerbox.rs485_power``).
     """
     nodes: Mapping[int, SatelliteNode] = field(default_factory=dict)
     power_holders: FrozenSet[str] = frozenset()

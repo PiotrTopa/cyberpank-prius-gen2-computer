@@ -2,11 +2,18 @@
 MFD video board (Raspberry Pi Zero v1.3) power management.
 
 The MFD board generates the 15 kHz VGA666 video signal for the Prius Gen 2
-MFD. It hangs off the USB hub's PPPS-capable port (currently the only socket
-with genuinely switchable VBUS) and enumerates as a USB Ethernet gadget
-(``cdc_ether`` → ``usb0``, Pi static IP 192.168.100.2; the host side must be
-(re)configured to 192.168.100.1/24 after EVERY enumeration — kernel forgets
-the address when the gadget re-registers).
+MFD. Its 12 V comes through powerbox relay ch2 (``backend.port_power``
+RelayPortPower, injected as ``controller``; the legacy ``hub``/``port`` fields
+are only used by the direct ``prius-usb-power`` fallback) and it enumerates as
+a USB Ethernet gadget (``cdc_ether`` → ``usb0``, Pi static IP 192.168.100.2;
+the host side must be (re)configured to 192.168.100.1/24 after EVERY
+enumeration — kernel forgets the address when the gadget re-registers).
+
+Every hard cut risks the Pi's SD card, so the OFF path is always ``ssh
+poweroff`` → wait ``shutdown_wait_s`` (or until the gadget disappears) → cut.
+A powerbox hard restart drops the relay without that courtesy (relay VCC is
+the RP2040's 5 V); the manager then sees the board unreachable and recovers
+through its normal ON-state watchdog once the backend re-asserts the relay.
 
 Power policy (state machine, driven from the backend loop at a slow cadence):
 

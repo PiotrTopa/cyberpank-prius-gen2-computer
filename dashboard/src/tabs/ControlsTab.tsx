@@ -96,10 +96,10 @@ export function ControlsTab({ state, connected, now, satNodes, manualHeld }: {
         <p className="text-xs text-slate-600 text-center">Will send ACC wake via powerbox · coming soon</p>
       </Panel>
 
-      <Panel title="Satellite Rail (OUT2)" code="CTL-03" icon={SatelliteDish} tone="green"
+      <Panel title="Satellite Rail (relay 5)" code="CTL-03" icon={SatelliteDish} tone="green"
         right={
-          <Chip tone={pb.out2 == null ? 'dim' : pb.out2 ? 'green' : 'red'}>
-            {pb.out2 == null ? 'N/A' : pb.out2 ? 'LIVE' : 'OFF'}
+          <Chip tone={pb.rs485_power == null ? 'dim' : pb.rs485_power ? 'green' : 'red'}>
+            {pb.rs485_power == null ? 'N/A' : pb.rs485_power ? 'LIVE' : 'OFF'}
           </Chip>
         }>
         <div className="flex gap-3">

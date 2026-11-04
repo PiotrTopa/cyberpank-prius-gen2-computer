@@ -57,9 +57,10 @@ DEFAULT_PROBE_TIMEOUT = 3.0
 # Current hub (ActionStar 2101:8500 "DUB-H4 rev D1", 5 internal ports; port 1 is
 # the built-in HID LED controller). Rewired 2026-08-01: powerbox on internal
 # port 5 — the ONLY socket with real switchable VBUS (PPPS), so the host can
-# hard power-cycle a wedged powerbox; gateway on internal port 2 (VBUS via
-# powerbox relay ch4); MFD Pi on port 3 (relay ch3, non-serial); RTL-SDR on
-# port 4 (relay ch2, non-serial).
+# hard power-cycle a wedged powerbox; gateway on internal port 2 (its VBUS
+# comes through the CAN hub on powerbox relay ch3, shared with the panda); MFD
+# Pi on relay ch2 (non-serial); camera hub on relay ch4 (non-serial). Relay ch1
+# is the powerbox's own restart relay (see backend.port_power).
 # Override via BACKEND_USB_PORT_ROLES when ports move (e.g. new fully-PPPS hub).
 DEFAULT_PORT_ROLES: Dict[int, str] = {5: ROLE_POWERBOX, 2: ROLE_GATEWAY}
 

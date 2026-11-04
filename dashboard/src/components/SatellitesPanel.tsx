@@ -36,25 +36,25 @@ export function SatelliteNodeRow({ n, now, right }: {
   );
 }
 
-export function SatellitesPanel({ sats, nodes, holders, out2, now }: {
+export function SatellitesPanel({ sats, nodes, holders, rail, now }: {
   sats: Satellites;
   nodes: SatelliteNode[];
   holders: string[];
-  out2?: boolean | null;
+  rail?: boolean | null;
   now: number;
 }) {
-  const railOn = out2 === true;
+  const railOn = rail === true;
   const requested = sats.power_requested === true;
   // Rail vs desired mismatch = command in flight (or lost, being re-asserted).
-  const pending = out2 != null && requested !== railOn;
+  const pending = rail != null && requested !== railOn;
 
   return (
     <Panel
       title="RS485 Satellites" code="SAT-02" icon={SatelliteDish} tone="green"
       right={
-        <Chip tone={out2 == null ? 'dim' : railOn ? 'green' : 'dim'}>
-          <Dot tone={out2 == null ? 'dim' : railOn ? 'green' : 'dim'} pulse={railOn} />
-          OUT2 {out2 == null ? 'N/A' : railOn ? 'LIVE' : 'OFF'}
+        <Chip tone={rail == null ? 'dim' : railOn ? 'green' : 'dim'}>
+          <Dot tone={rail == null ? 'dim' : railOn ? 'green' : 'dim'} pulse={railOn} />
+          RAIL {rail == null ? 'N/A' : railOn ? 'LIVE' : 'OFF'}
           {pending && <span className="text-hud-amber">→{requested ? 'ON' : 'OFF'}</span>}
         </Chip>
       }

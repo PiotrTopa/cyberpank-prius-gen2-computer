@@ -130,7 +130,7 @@ export function OverviewTab({ state, hist, now, satNodes, satHolders, onOpenDebu
 
       <UsbHubPanel state={state} now={now} />
 
-      <SatellitesPanel sats={sats} nodes={satNodes} holders={satHolders} out2={pb.out2} now={now} />
+      <SatellitesPanel sats={sats} nodes={satNodes} holders={satHolders} rail={pb.rs485_power} now={now} />
     </div>
   );
 }

@@ -14,6 +14,8 @@ export interface Powerbox {
   fan_duty_pct?: number | null;
   /** Manual fan override in % (null/undefined = automatic control) */
   fan_override_pct?: number | null;
+  /** Chassis fan tach RPM (firmware >= 2.0) */
+  fan_rpm?: number | null;
   /** BMP280 @0x77 — INSIDE the computer box (chassis air) */
   bmp_t?: number;
   bmp_p?: number;
@@ -29,16 +31,27 @@ export interface Powerbox {
   shutdown_reason?: string;
   uv_threshold?: number | null;
   uv_recover?: number | null;
-  out1?: boolean | null;
-  out2?: boolean | null;
-  out3?: boolean | null;
   poco_alive?: boolean | null;
+  /** Secondary POCO liveness as reported to the powerbox by the backend */
+  poco2_alive?: boolean | null;
+  /** Powerbox state machine (fw >= 2.0): normal | shutdown | sleep */
   pm_state?: string;
   powerbox_hb?: number | null;
-  /** USB-port VBUS relay states [ch1..ch4], true = port powered.
-   *  ch4=gateway (socket 2), ch3=MFD Pi (socket 3), ch2=RTL-SDR (socket 4),
-   *  ch1=spare. From the powerbox STATUS "rly" telemetry (fw >= 1.7). */
+  /** Relay board states [ch1..ch8], true = load powered, null = unknown.
+   *  ch1 = powerbox restart relay (always null, not a load), ch2 = MFD Pi,
+   *  ch3 = CAN hub (gateway + panda), ch4 = camera hub, ch5 = RS485 satellite
+   *  rail, ch6 = secondary POCO hub (reserved). Read back from the PCF8574 by
+   *  the firmware (STATUS "rly", fw >= 2.1). */
   relays?: (boolean | null)[] | null;
+  /** fw >= 2.1 boot diagnostics: machine.reset_cause() (1 power-on, 3 watchdog),
+   *  firmware uptime, boot banners seen, relay drift repairs / I2C errors. */
+  reset_cause?: number | null;
+  uptime_s?: number | null;
+  boot_count?: number;
+  relay_fix_count?: number | null;
+  relay_err_count?: number | null;
+  /** RS485 satellite rail = relay ch5 (derived by the backend) */
+  rs485_power?: boolean | null;
   last_update_time?: number | null;
   power_mode?: string;
 }

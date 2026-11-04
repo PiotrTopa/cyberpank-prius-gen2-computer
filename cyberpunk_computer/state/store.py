@@ -772,6 +772,22 @@ class Store:
             )
             affected.add(StateSlice.CONNECTION)
 
+        elif action.type == ActionType.SET_POCO2_STATUS:
+            a = action  # type: SetPoco2StatusAction
+            self._state = replace(
+                self._state,
+                connection=replace(
+                    self._state.connection,
+                    poco2_state=a.state,
+                    poco2_reachable=a.reachable,
+                    poco2_state_since=getattr(a, "state_since", None),
+                    poco2_last_ok_ping=getattr(a, "last_ok_ping", None),
+                    poco2_boot_presses=getattr(a, "boot_presses", None) or 0,
+                    poco2_last_boot_s=getattr(a, "last_boot_s", None),
+                ),
+            )
+            affected.add(StateSlice.CONNECTION)
+
         
         # AVC Input reducers (buttons and touch)
         elif action.type == ActionType.AVC_BUTTON_PRESS:
@@ -1019,7 +1035,6 @@ class Store:
                 powerbox=replace(
                     self._state.powerbox,
                     fan_override_pct=action.pct,
-                    fan_override_freq=getattr(action, "freq", None),
                 ),
             )
             affected.add(StateSlice.POWERBOX)
@@ -1043,6 +1058,13 @@ class Store:
             if action.connected:
                 import time as _t
                 kwargs["last_update_time"] = _t.time()
+            if getattr(action, "boot", False):
+                # Genuine firmware boot banner: count it (spontaneous resets
+                # become visible) and remember why it reset.
+                kwargs["boot_count"] = self._state.powerbox.boot_count + 1
+                kwargs["uptime_s"] = 0
+                if getattr(action, "reset_cause", None) is not None:
+                    kwargs["reset_cause"] = action.reset_cause
             self._state = replace(
                 self._state,
                 powerbox=replace(self._state.powerbox, **kwargs),
@@ -1090,21 +1112,33 @@ class Store:
 
         elif action.type == ActionType.SET_POWERBOX_POWER_STATUS:
             import time as _t
+            from .app_state import RELAY_CH_RS485
             kwargs = {"connected": True, "last_update_time": _t.time()}
-            if action.out1 is not None:
-                kwargs["out1"] = action.out1
-            if action.out2 is not None:
-                kwargs["out2"] = action.out2
-            if action.out3 is not None:
-                kwargs["out3"] = action.out3
             if action.poco_alive is not None:
                 kwargs["poco_alive"] = action.poco_alive
+            if getattr(action, "poco2_alive", None) is not None:
+                kwargs["poco2_alive"] = action.poco2_alive
             if action.pm_state is not None:
                 kwargs["pm_state"] = action.pm_state
             if action.hb is not None:
                 kwargs["powerbox_hb"] = action.hb
+            if getattr(action, "fan_pct", None) is not None:
+                kwargs["fan_duty_pct"] = float(action.fan_pct)
+            if getattr(action, "fan_rpm", None) is not None:
+                kwargs["fan_rpm"] = int(action.fan_rpm)
+            for name in ("reset_cause", "uptime_s", "relay_fix_count", "relay_err_count"):
+                val = getattr(action, name, None)
+                if val is not None:
+                    kwargs[name] = int(val)
             if getattr(action, "relays", None) is not None:
-                kwargs["relays"] = tuple(action.relays)
+                relays = tuple(action.relays)
+                kwargs["relays"] = relays
+                # The RS485 satellite rail is one of the relay channels; keep
+                # the semantic mirror the satellite rules/queue read. A None
+                # entry (unknown) leaves the mirror unknown too.
+                if len(relays) >= RELAY_CH_RS485:
+                    rail = relays[RELAY_CH_RS485 - 1]
+                    kwargs["rs485_power"] = None if rail is None else bool(rail)
             self._state = replace(
                 self._state,
                 powerbox=replace(self._state.powerbox, **kwargs),

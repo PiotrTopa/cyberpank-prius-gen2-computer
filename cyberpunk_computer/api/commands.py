@@ -167,18 +167,28 @@ def _build_stop(params: Dict[str, Any]) -> Action:
     return SetReadyModeAction(False, source=ActionSource.UI)
 
 
-def _build_set_out(params: Dict[str, Any]) -> Action:
-    from ..state.actions import SetOutAction
-    ch = _as_int(_require(params, "channel"), "channel", 2, 3)
-    on = _as_bool(_require(params, "on"), "on")
-    return SetOutAction(ch, on, source=ActionSource.UI)
+def _build_powerbox_button(params: Dict[str, Any]) -> Action:
+    from ..state.actions import PowerboxButtonAction
+    poco = _as_int(params.get("poco", 1), "poco", 1, 2)
+    ms = _as_int(params.get("ms", 6000), "ms", 100, 40000)
+    return PowerboxButtonAction(poco, ms, source=ActionSource.UI)
 
 
 def _build_set_relay(params: Dict[str, Any]) -> Action:
     from ..state.actions import SetRelayAction
-    ch = _as_int(_require(params, "channel"), "channel", 1, 4)
+    from ..state.app_state import RELAY_CH_RESTART
+    ch = _as_int(_require(params, "channel"), "channel", 1, 8)
+    if ch == RELAY_CH_RESTART:
+        raise CommandError(
+            "channel %d is the powerbox's own restart relay, not a load; "
+            "use powerbox_hard_restart" % ch)
     on = _as_bool(_require(params, "on"), "on")
     return SetRelayAction(ch, on, source=ActionSource.UI)
+
+
+def _build_powerbox_hard_restart(params: Dict[str, Any]) -> Action:
+    from ..state.actions import PowerboxHardRestartAction
+    return PowerboxHardRestartAction(source=ActionSource.UI)
 
 
 def _build_input_event(params: Dict[str, Any]) -> Action:
@@ -193,10 +203,7 @@ def _build_input_event(params: Dict[str, Any]) -> Action:
 def _build_set_fan(params: Dict[str, Any]) -> Action:
     from ..state.actions import SetFanOverrideAction
     pct = _as_float(_require(params, "pct"), "pct", 0.0, 100.0)
-    freq = None
-    if params.get("freq") is not None:
-        freq = int(_as_float(params["freq"], "freq", 8.0, 100000.0))
-    return SetFanOverrideAction(pct, freq=freq, source=ActionSource.UI)
+    return SetFanOverrideAction(pct, source=ActionSource.UI)
 
 
 def _build_fan_auto(params: Dict[str, Any]) -> Action:
@@ -283,10 +290,14 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
     },
     "start": {"builder": _build_start, "description": "Remote start (enter READY).", "params": {}},
     "stop": {"builder": _build_stop, "description": "Leave READY mode.", "params": {}},
-    "set_out": {
-        "builder": _build_set_out,
-        "description": "Set powerbox OUT2 or OUT3.",
-        "params": {"channel": "int 2..3", "on": "bool"},
+    "powerbox_button": {
+        "builder": _build_powerbox_button,
+        "description": (
+            "Press a POCO power button through the powerbox. poco 1 = main "
+            "computer, 2 = secondary. ms 6000 boots an off phone, 35000 "
+            "force-resets a frozen one, 300 is a plain key tap."
+        ),
+        "params": {"poco": "int 1..2 (default 1)", "ms": "int 100..40000 (default 6000)"},
     },
     "input_event": {
         "builder": _build_input_event,
@@ -300,16 +311,29 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
     "set_relay": {
         "builder": _build_set_relay,
         "description": (
-            "Set a USB-port VBUS relay: ch2 = RTL-SDR (socket 4), ch1 = spare. "
-            "ch4 (gateway) redirects to the gateway power path; ch3 (MFD Pi) is "
-            "owned by the MFD manager and is refused. Actual state is mirrored "
-            "in powerbox.relays from the STATUS telemetry."
+            "Set a relay-board load channel: ch4 = camera hub (dashcam), "
+            "ch6 = secondary POCO hub (reserved), ch7/8 spare. ch3 (CAN hub: "
+            "gateway + panda) redirects to the gateway power path; ch2 (MFD "
+            "Pi) is owned by the MFD manager and is refused while it runs; "
+            "ch5 (RS485 rail) becomes a manual satellite hold; ch1 is the "
+            "powerbox restart relay and is rejected (use powerbox_hard_restart). "
+            "Actual state is mirrored in powerbox.relays from the STATUS telemetry."
         ),
-        "params": {"channel": "int 1..4", "on": "bool"},
+        "params": {"channel": "int 2..8", "on": "bool"},
+    },
+    "powerbox_hard_restart": {
+        "builder": _build_powerbox_hard_restart,
+        "description": (
+            "Hard-restart the powerbox through its own NC supply relay (ch1). "
+            "The box is back ~5 s later; EVERY NO relay drops with it (MFD Pi "
+            "hard cut, CAN hub with gateway + panda, camera hub) and comes back "
+            "OFF until the backend re-asserts the wanted states on the boot banner."
+        ),
+        "params": {},
     },
     "set_fan": {
         "builder": _build_set_fan,
-        "description": "Manually pin the chassis fan duty (overrides automatic control).",
+        "description": "Manually pin the chassis fan speed in % (overrides automatic control).",
         "params": {"pct": "float 0..100"},
     },
     "fan_auto": {
@@ -342,7 +366,7 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
     "satellite_power_hold": {
         "builder": _build_satellite_power_hold,
         "description": (
-            "Acquire/release a named manual wake-lock on the OUT2 satellite rail. "
+            "Acquire/release a named manual wake-lock on the RS485 satellite rail (relay ch5). "
             "The rail stays powered while any holder (acc/queue/manual) is held."
         ),
         "params": {"name": "string (holder name)", "on": "bool"},
@@ -350,7 +374,7 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
     "satellite_send": {
         "builder": _build_satellite_send,
         "description": (
-            "Enqueue a command to an RS485 satellite. Powers the OUT2 rail if "
+            "Enqueue a command to an RS485 satellite. Powers the satellite rail if "
             "needed, waits for the rail, sends the payload, and powers back "
             "down after the linger window (jobs are serialized, FIFO within "
             "priority — lower runs first)."

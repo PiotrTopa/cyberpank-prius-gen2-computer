@@ -1,18 +1,19 @@
 """
-Satellite job queue — serialized command execution + OUT2 power orchestration.
+Satellite job queue — serialized command execution + rail power orchestration.
 
-The RS485 satellites hang off the gateway on the OUT2-switched rail. Any work
+The RS485 satellites hang off the gateway on the relay-switched rail (relay
+ch5, ``powerbox.rs485_power``). Any work
 that needs a satellite (scheduled sensor reads, event-driven commands, config
 pushes, API requests) is expressed as a :class:`SatelliteJob` and submitted to
 the single :class:`SatelliteJobQueue`. The queue:
 
     * orders jobs by ``priority`` (lower first), FIFO within a priority level;
-    * holds the ``"queue"`` OUT2 wake-lock (see rules/satellite_power.py) while
+    * holds the ``"queue"`` rail wake-lock (see rules/satellite_power.py) while
       any job is pending or running, so back-to-back jobs — a temperature read
       finishing while a light-control job and an event command arrive — share
       ONE rail power-up with no flapping (the power rule adds a linger before
       the final OFF);
-    * per job, waits for the rail to actually come up (powerbox ``out2``
+    * per job, waits for the rail to actually come up (powerbox ``rs485_power``
       mirror) and for the ``requires_online`` satellites to report presence
       before calling ``start``; then polls ``poll`` until done or timeout;
     * mirrors depth + active job into ``SatellitesState`` for observability;
@@ -91,7 +92,7 @@ class JobContext:
 class SatelliteJob:
     """One unit of satellite work.
 
-    ``start`` is called once the OUT2 rail is up and every ``requires_online``
+    ``start`` is called once the satellite rail is up and every ``requires_online``
     node is present. If ``poll`` is None the job completes right after
     ``start``; otherwise ``poll`` is called each engine tick until it returns
     True (done) or ``timeout_s`` elapses (failed).
@@ -149,7 +150,7 @@ class SatelliteJobQueue:
     # ── producers ────────────────────────────────────────────────────────────
 
     def submit(self, job: SatelliteJob) -> None:
-        """Enqueue a job and (if needed) acquire the OUT2 power hold."""
+        """Enqueue a job and (if needed) acquire the rail power hold."""
         with self._lock:
             heapq.heappush(self._heap, (job.priority, next(self._seq), job))
         logger.info("Satellite job queued: %s (prio=%d, depth=%d)",
@@ -177,7 +178,7 @@ class SatelliteJobQueue:
             self._store.dispatch(SatellitePowerHoldAction(HOLDER_QUEUE, acquire=True))
 
     def _release_holder(self) -> None:
-        # The power rule lingers before actually dropping OUT2, so releasing
+        # The power rule lingers before actually dropping the rail, so releasing
         # promptly here does NOT flap the rail between close jobs.
         if self._holder_held:
             self._holder_held = False
@@ -194,9 +195,9 @@ class SatelliteJobQueue:
     def _rail_up(self, state: AppState) -> bool:
         # Trust the powerbox STATUS mirror; when no powerbox is attached
         # (dev/replay) fall back to "requested" so jobs still run.
-        out2 = state.powerbox.out2
-        if out2 is not None and state.powerbox.connected:
-            return bool(out2)
+        rail = state.powerbox.rs485_power
+        if rail is not None and state.powerbox.connected:
+            return bool(rail)
         return bool(state.satellites.power_requested or not state.powerbox.connected)
 
     def _nodes_ready(self, state: AppState, job: SatelliteJob) -> bool:
@@ -352,7 +353,7 @@ class SatelliteSupervisor:
 
     * Seeds the twin with the known satellites (SATELLITE_NAMES) and their
       persisted ``desired_config``.
-    * Marks nodes offline when their traffic goes stale or when the OUT2 rail
+    * Marks nodes offline when their traffic goes stale or when the satellite rail
       is known to be down (output-only satellites that never transmit simply
       stay offline in the twin — don't gate jobs on them).
     * When a node comes (back) online with ``config_synced == False`` (reducer
@@ -384,7 +385,7 @@ class SatelliteSupervisor:
     def tick(self) -> None:
         state = self._store.state
         now = time.time()
-        rail_down = state.powerbox.connected and state.powerbox.out2 is False
+        rail_down = state.powerbox.connected and state.powerbox.rs485_power is False
         for dev, node in state.satellites.nodes.items():
             if node.online and (
                 rail_down or (now - node.last_seen) > self._offline_after_s

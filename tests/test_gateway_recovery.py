@@ -1,7 +1,7 @@
 """Tests for BackendService._gateway_recover_tick — gateway VBUS auto-recovery.
 
 A wedged gateway MCU (enumerated but no GW_HB heartbeats) is only fixed by a
-cold VBUS cycle on relay ch4. The tick must:
+cold VBUS cycle on relay ch3 (the CAN hub). The tick must:
   * cycle only when stale long enough AND VBUS is actually on;
   * respect an operator's deliberate port-off (desired=False);
   * respect the cooldown;
@@ -16,7 +16,7 @@ from cyberpunk_computer.backend.service import BackendService, BackendConfig
 
 class FakeGateway:
     def __init__(self, powered=True, desired=None):
-        self.relay_ch = 4
+        self.relay_ch = 3
         self.powered = powered
         self._desired = desired
         self.calls = []

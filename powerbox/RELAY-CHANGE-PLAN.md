@@ -1,7 +1,8 @@
-# Relay board + I2C — current state and change plan
+# Relay board + I2C — current state
 
-Status: **OPEN — final port assignment not decided, no code changed yet.**
-Code changes go to one Fable lane once the open questions are answered.
+Status: **IMPLEMENTED in code (firmware 2.1.0 + backend), awaiting flash and
+bench verification.** Decisions of 2026-11-03 are final; this file is the
+current-state reference for the hardware and the code that drives it.
 
 ## Hardware as it is
 
@@ -9,57 +10,80 @@ Code changes go to one Fable lane once the open questions are answered.
 
 | Address | Device | Firmware field |
 |---|---|---|
-| `0x20` | PCF8574 relay expander | `rly` |
+| `0x20` | PCF8574 relay expander | `rly`, `rly_fix`, `rly_err` |
 | `0x40` | INA219 (sees the 12 V supply) | `v`, `ma`, `mah` |
 | `0x76` | BMP280, outside/cabin | `bmp2_t`, `bmp2_p` |
 
-The inside-box BMP280 (`0x77`) and the AHT20 (`0x38`) are not fitted.
+The inside-box BMP280 (`0x77`) and the AHT20 (`0x38`) are not fitted. The
+firmware binds only what answers the bus scan (no error for absent chips) and
+omits their fields; the backend leaves `bmp_t`/`aht_*` as `None`.
 
 **Relay board:** 8-channel opto board with 12 V coils (HW-281 type), active-low inputs.
-- IN1..IN8 go straight to PCF8574 P0..P7, so **board relay N = PCF pin P(N−1)**.
+- IN1..IN8 go straight to PCF8574 P0..P7, so **board relay N = PCF pin P(N−1) = firmware channel N** (`RELAY_PIN_MAP = {n: n-1}` in `pcf8574.py`).
 - JD-VCC = 12 V, always on; JD jumper removed.
-- VCC (opto/input side) comes from the **RP2040-Zero 5 V pin**. When the RP2040 is unpowered, all coils are released.
+- VCC (opto/input side) comes from the **RP2040-Zero 5 V pin**. When the RP2040 is unpowered or resetting, all NO coils are released.
 - PCF8574 power-up state is 0xFF, so all coils are released after any restart.
 
-**Loads:** only relay 1 is wired NC; relays 2–8 are NO. Tested so far: relays 1–4; relays 5–8 not assigned yet.
-- Relay 1 (NC): the powerbox's own supply, and nothing else. Energised = hard restart of the powerbox (below); de-energised (incl. RP2040 off or reset) = powered.
-- Relay 2 (NO): MFD Raspberry Pi Zero v1.3 (≈ +100–115 mA at 12 V while running). Tested: relay on → Pi draws within ~1 s → USB gadget link (host `enx021e4d000001`) and ping at 49–50 s; three hard off/on cycles gave one clean enumeration each, no xHCI wedge (Pi gadget binds late, see `cyberpunk-prius-gateway/raspberry_pi_config/README.md`). Every hard cut risks the SD card: the backend must keep `ssh … poweroff` + wait before cutting the relay.
-- Relay 3 (NO, fw ch2 with today's map): powers a USB 2.0 hub (`1a40:0101`, "USB2.0 HUB", on bench-hub port 3), with the CAN gateway (`2e8a:000a` "Prius Gateway", fw 3.2.0, hub port 3) and the comma.ai panda (`bbaa:ddcc`, hw type cuatro, fw `DEV-f120999e-DEBUG`, hub port 4) behind it. The gateway is powered from this hub, so relay 3 off = gateway off. The panda is for unsolicited CAN reading; its use is not designed yet. Tested 2026-11-03 off the car: relay on → 50 → 155 mA at 12 V; the hub enumerates at high speed within about 6 s, the gateway at about 7 s (sends `GW_HB` every second, CAN in LISTEN mode, no errors) and the panda at about 9 s (answers hw type, version and health; no CAN traffic, since no bus is connected).
-- Relay 4 (NO, fw ch1 with today's map): a second USB 2.0 hub (VIA Labs `2109:2817`, 4 ports, on bench-hub port 4), for several devices; first device: an fvision Android-dashcam (`1902:3241`, "Buildwin Media-Player", 2 GB). It is not UVC: it shows up as USB storage, and live 1280×720 JPEG frames are read with O_DIRECT from the file `VSFILE` (sector 896 of the disk, 384 sectors; the JPEG starts at byte 8704). Verified 2026-11-03 (frame grabbed); the camera's own clock is wrong (shows 2022). Tested 2026-11-03: with the relay off the hub is absent from USB; relay on → +84 mA at 12 V, high-speed enumeration in about 6 s. Its power comes only through the relay now (no VBUS back-feed from the upstream cable).
-- **Board relay 1 energised = hard restart of the powerbox.** The RP2040 loses power, the PCF comes back at 0xFF, relay 1 releases, and power returns by itself. Measured from command: USB drops after 0.4 s, re-enumerates after 1.0 s, firmware STATUS after 4.9 s (3 s of that is `SAFE_BOOT_DELAY_S`).
+**Loads** (relays 1–4 tested 2026-11-03; 5–8 not yet):
 
-**Chassis fan (bench-tested 2026-11-03, REPL):** ADDA AB07505HX110B00 (Dell 00G700), 5 V 0.40 A, 4-wire blower.
-- PWM now on **GP29** at 25 kHz, **not inverted** (GPIO duty = fan duty; no 2N7000 stage in the path).
-- Tach now on **GP28**, internal pull-up, falling edges, 2 pulses/rev.
-- Duty → RPM, full sweep 2026-11-03 (5 % steps, 4 s settle + 3 s count, up then down, no hysteresis, ±20 RPM):
+| Ch | Contact | Load | Backend model |
+|---|---|---|---|
+| 1 | **NC** | the powerbox's own supply, nothing else. Energised = hard restart (USB drops 0.4 s, re-enumerates 1.0 s, STATUS 4.9 s incl. 3 s safe-boot); de-energised (incl. RP2040 off/reset) = powered. | `powerbox_hard_restart` API → `{"a":"hard_restart"}`; never a port, refused by `set_relay`/`relay`. |
+| 2 | NO | MFD Raspberry Pi Zero v1.3 (≈100–115 mA @ 12 V). Pi draws within ~1 s; USB gadget (`enx021e4d000001`) + ping at 49–50 s; three hard cycles → clean enumeration each. Every hard cut risks the SD card. | `port_power.mfd` / `backend/mfd_power.py`: `ssh poweroff` + wait, then cut. |
+| 3 | NO | USB 2.0 hub `1a40:0101` with the CAN gateway (`2e8a:000a`, fw 3.2.0, powered from this hub) and the comma.ai panda (`bbaa:ddcc`, cuatro). On: 50 → 155 mA; hub enumerates ~6 s, gateway ~7 s (`GW_HB` 1 Hz, CAN LISTEN), panda ~9 s. | `port_power.gateway` (= the CAN hub; switching the gateway switches the panda). |
+| 4 | NO | USB 2.0 hub VIA `2109:2817`, first device the fvision dashcam (`1902:3241`, USB storage; 1280×720 JPEG via `VSFILE`, sector 896, JPEG at byte 8704; camera clock wrong). On: +84 mA, enumerates ~6 s; no VBUS back-feed. | `port_power.camera`; `set_relay` ch4. |
+| 5 | NO | RS485 satellite power — semantics kept from fw 2.0, **untested on this board**. | satellite wake-lock rule (`rs485_power`). |
+| 6–8 | NO | unassigned (6 reserved for a secondary POCO hub). | generic `set_relay`. |
 
-  | duty % | 0 | 5 | 10 | 15 | 20 | 25 | 30 | 35 | 40 | 45 | 50 |
-  |---|---|---|---|---|---|---|---|---|---|---|---|
-  | RPM | 0 | 255 | 650 | 1025 | 1475 | 1675 | 1965 | 2240 | 2505 | 2735 | 2965 |
+**Restart scope (Q3, accepted):** relay VCC comes from the RP2040, so during a
+hard restart (and any other reset) every NO relay drops: MFD Pi (hard cut),
+CAN hub (gateway + panda), camera hub. They come back **OFF**. The backend
+re-asserts its recorded desired states ~6 s after the `POWERBOX_READY` banner
+(`BackendService.PP_REASSERT_DELAY_S`, `HubPortPower.reassert_all`) and the
+15 s `rly` read-back enforce sweep plus the satellite rule's mirror-retry
+converge the rest. The MFD manager recovers through its ON-state watchdog.
 
-  | duty % | 55 | 60 | 65 | 70 | 75 | 80 | 85 | 90 | 95 | 100 |
-  |---|---|---|---|---|---|---|---|---|---|---|
-  | RPM | 3170 | 3380 | 3565 | 3745 | 3920 | 4085 | 4245 | 4400 | 4540 | 4680 |
+**Chassis fan** (ADDA AB07505HX110B00, Dell 00G700, 5 V 0.40 A, 4-wire blower):
+- PWM on **GP29** at 25 kHz, **not inverted** (GPIO duty = fan duty; no 2N7000). `FAN_PWM_INVERT = False`, `fan_duty_u16()` in `main.py`.
+- Tach on **GP28**, internal pull-up, falling edges, 2 pulses/rev.
+- 0 % stops the fan completely; 5 % ≈ 255 RPM; 100 % ≈ 4680 RPM. Full duty→RPM map in `powerbox/README.md`.
+- GP29 undriven (bootloader, 3 s safe-boot) = fan at full speed; the firmware sets the PWM first thing in `main()`.
 
-  0 % stops the fan completely (no minimum-speed floor); 5 % already turns it (~255 RPM). Near-linear up to ~50 %, flattening above.
+**Main POCO power button:** **GP27**. Press = drive LOW; release = input, no pulls; never driven high (phone line ~1.8 V). 6 s hold boots from off (verified 2026-11-03). Press/force/wake semantics unchanged.
 
-**Main POCO power button:** now on **GP27**. Tested 2026-11-03 from the REPL: the line idles high with no pull (the phone's ~1.8 V); a 6 s LOW (output 0), then release to an input with no pulls, booted the phone from off (kernel start 22:50:55, Wi-Fi + ssh about 35 s later). Never drive it high.
+**Secondary POCO button:** not connected (`POCO2_BTN_PIN = None`). `button`/`wake` for poco 2 → `ERROR POCO2_NC`, no press, no GPIO touched. Backend: `io.powerbox.POCO2_BUTTON_CONNECTED = False`; `Poco2PowerManager` stays off by default and only warns when enabled. To re-enable: assign a free pin (never GP28/GP29 = fan, never GP14/15 = dead), flip the constant.
 
-## What the code must take into account
+**GP14/GP15:** dead pads, never assigned.
 
-1. **Pin map.** `RELAY_PIN_MAP` (`main.py:146`) is `{1:3, 2:2, 3:1, 4:0, 5:4, 6:5, 7:6, 8:7}`, so firmware ch1..4 are reversed against the board (fw ch4 "GATEWAY" = board relay 1). Target: `{n: n-1}`, fw channel N = board relay N, with the `RELAY_CH_*` constants taken from the final port table.
-2. **NC contacts.** For an NC load, "on" means coil released (pin HIGH). `set_relay` and `relay_states` must keep `rly` meaning "1 = load powered".
-3. **Restart relay.** Expose it as a dedicated command (name TBD), not as an ordinary `relay ch=N`, so the backend cannot fire it by accident. Report it separately or leave it out of `rly`. Allow about 5 s until the board is back.
-4. **Backend mirrors the channel numbers.** `backend/port_power.py` (`gateway_relay_ch=4`, `mfd_relay_ch=3`, `sdr_relay_ch=2`), `backend/mfd_power.py` (ch3), RS485 = ch5 (`docs/SATELLITE_POWER.md`, `powerbox.rs485_power`). With the new map: MFD = ch2; gateway = ch3 (the relay-3 hub, shared with the panda, so switching the gateway also switches the panda); ch1 is the powerbox restart, not a load, so the backend must not treat it as the gateway. The repo has **uncommitted backend changes**: build on them, don't discard them.
-5. **Docs.** `main.py` header (around lines 41 and 130–145), README, `POCO/POWER.md`: the relay table, NC loads, VCC-from-RP2040, the restart relay.
-6. **Tests.** `.venv/bin/python -m pytest tests` (pygame test `--ignore`). Add cases for the pin map, NC inversion, and the restart channel being rejected by plain `relay`.
-7. **Relay state is not read back from the chip.** `relay_states()` returns the cached byte `self._port`, and `PCF8574.pin()` updates that cache *before* the I2C write. Observed 2026-11-02: after an off/on cycle of relay 2 the firmware reported `rly` ch on while the relay was physically off (Pi drawing nothing); resending the command fixed it. The PCF either reset or a write failed silently. The code must update the cache only after a successful write, report `rly` from a chip read-back, and periodically re-assert the wanted state (or detect a PCF reset by reading it back).
-9. **Fan pins moved.** Firmware has the fan on GP27 (PWM, inverted for the 2N7000) and GP26 (tach), and the POCO power buttons on GP29 (main) / GP28 (secondary). On the bench the fan is now GP29 PWM (non-inverted) + GP28 tach, and the main POCO button is GP27. The final pin table must settle where the secondary POCO button goes (they must never sit on the fan pins: a fan PWM on a button line presses the phone's power button), update `FAN_PWM_PIN`/`FAN_TACH_PIN`, drop the duty inversion, and fix the header pin docs.
-8. **Host heartbeats.** Firmware TX is gated on them (`{"a":"hb","n":N}`). Without heartbeats the port is silent. Bench tools must send them.
+## What the code does (plan items, all implemented)
 
-## Open questions
+1. **Pin map** — `pcf8574.RELAY_PIN_MAP = {n: n-1}`; `RELAY_CH_MFD = 2`, `RELAY_CH_CAN_HUB = 3`, `RELAY_CH_CAM_HUB = 4`, `RELAY_CH_RS485 = 5` in `main.py` and `state/app_state.py`.
+2. **NC contacts** — generic per-channel flag `pcf8574.RELAY_NC = (1,)`; `relay_level()`/`relay_is_on()` keep `on`/`rly` meaning "load powered".
+3. **Restart relay** — `{"a":"hard_restart"}` only (`RELAY_RESTRICTED`); `relay ch=1` → `ERROR RELAY`; `rly[0]` is `null`. Ack first, coil energised on the next tick (`RESTART_ACK_DELAY_MS`); if still alive 3 s later the coil is released and `ERROR RESTART_FAILED` sent.
+4. **Backend channels** — `PortPowerConfig(gateway_relay_ch=3, mfd_relay_ch=2, camera_relay_ch=4)`; `RelayPortPower`/`HubPortPower.build` refuse ch1; `build_relay_command(1)` raises; `set_relay` API rejects ch1; `SetGatewayUsbPowerAction` = CAN hub.
+5. **Docs** — `main.py` header, `powerbox/README.md`, `POCO/POWER.md`, `docs/SATELLITE_POWER.md`, this file.
+6. **Tests** — `tests/test_powerbox_firmware.py` (firmware on CPython with stubs: pin map, NC, restart lock-out, read-back/re-assert, fan duty, poco2 rejection, reset cause), `tests/test_powerbox_io.py`, `tests/test_port_power.py`.
+7. **Read-back** — `pcf8574.RelayBoard`: wanted byte updated only after a successful write; `rly` from a chip read every STATUS (2 s); mismatch → re-write, `rly_fix` count, `rly_fix` PMEVENT on the first of a streak, `pcf_reset` flag when the chip read 0xFF; I2C errors → `ERROR RELAY_IO` + `rly_err`.
+8. **Host heartbeats** — unchanged: TX gated on `{"a":"hb","n":N}`. New: the boot banner is parked and sent once on the first host-present edge, so the backend sees exactly one `POWERBOX_READY` per boot.
+9. **Fan pins** — GP29 PWM non-inverted, GP28 tach; secondary button removed from GP28.
+10. **Reset cause (Q5)** — `machine.reset_cause()` in the banner (`rc`), every STATUS (`rc`, `up`) and the `boot` event; backend mirrors `reset_cause`, `uptime_s`, `boot_count`. Cause of the bench resets (2026-11-03 ~13:03, 15:21, 15:22, 15:30, during rewiring) is still unknown — read `rc` from the car: 1 = power/brown-out, 3 = watchdog.
 
-- Q1. Final port table: which load on which board relay (1–8), NO or NC for each?
-- Q3. Restart scope. Relay VCC comes from the RP2040 5 V, so while the powerbox restarts every NO relay releases: the MFD Pi (hard cut) and the relay-3 hub (gateway + panda) drop too. Is that acceptable, or does the restart need to keep them up?
-- Q5. Spontaneous powerbox resets: on 2026-11-03 the RP2040 re-enumerated by itself several times (about 13:03, 15:21, 15:22, 15:30, during bench rewiring). Each reset releases every relay (MFD, gateway hub, camera hub drop). Cause not known (wiring transients, WDT, brown-out?); `getlog` / the reset cause should be checked before the car.
-- Q4. Fit the inside-box BMP280 `0x77` / AHT20 `0x38`, or drop them from the firmware?
+## Protocol delta (fw 2.0 → 2.1)
+
+- New command `{"a":"hard_restart"}` → `{"ack":"hard_restart"}`, then `{"msg":"HARD_RESTART","up":s}`, then power drops.
+- `{"a":"relay","ch":1,...}` → `ERROR RELAY` (was: switched the gateway socket under the old reversed map).
+- `{"a":"button"|"wake","poco":2}` → `ERROR POCO2_NC` (was: pressed GP28).
+- STATUS: `rly` entries may be `null` (ch1 always), plus `rc`, `up`, `rly_fix`, `rly_err`; `rly` omitted when the read-back failed.
+- `POWERBOX_READY` carries `rc` and is delivered once the host heartbeats.
+- New errors: `RELAY` (refused channel), `RELAY_IO`, `RESTART_FAILED`, `POCO1_NC`/`POCO2_NC`, `BMP280_READ`/`AHT20_READ` (sensor dropped).
+- `SENSOR_OK` for the PCF8574 includes the adopted `port` byte.
+
+## Bench verification checklist (after flashing `pcf8574.py` + `main.py`)
+
+1. Banner: `POWERBOX_READY` with `ver 2.1.0` and `rc` arrives once the heartbeat daemon runs; STATUS shows `rc`, `up`, `rly: [null,0,0,0,0,0,0,0]`, `rly_fix 0`, `rly_err 0`.
+2. Fan: boot → fan stops (0 %); `{"a":"fan","pct":50}` → ~2965 RPM in `fan_rpm`; 100 % → ~4680; 0 % → stops.
+3. Relays: `relay ch 2/3/4 on` powers the right load (Pi draws, CAN hub + gateway + panda enumerate, camera hub enumerates); `rly` reflects it; `relay ch 1` → `ERROR RELAY`, nothing moves.
+4. Read-back: pull the PCF's power or short a line briefly → `rly_fix` increments, `rly_fix` PMEVENT, load restored.
+5. `hard_restart`: ack, `HARD_RESTART`, USB gone ~0.4 s, STATUS back ~5 s with `rc = 1`; relays 2–4 come back off; the backend (if running) re-asserts them ~6 s after the banner.
+6. Button: `{"a":"button","poco":1,"ms":300}` → one press event on the phone; `poco:2` → `ERROR POCO2_NC`, GP28 tach unaffected.
+7. Watch `rc`/`boot_count` over a long bench run for the spontaneous resets.

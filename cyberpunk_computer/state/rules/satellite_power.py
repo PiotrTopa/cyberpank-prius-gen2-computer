@@ -1,7 +1,7 @@
 """
-Satellite power rules — OUT2 (RS485 satellite rail) wake-lock state machine.
+Satellite power rules — RS485 satellite rail (relay ch5) wake-lock state machine.
 
-The OUT2 rail policy is: **powered iff at least one named holder is held**
+The rail policy is: **powered iff at least one named holder is held**
 (``SatellitesState.power_holders``). Holders are wake-locks:
 
     * ``"acc"``      — held while the ignition (ACC) is on, so satellites are
@@ -14,21 +14,22 @@ The OUT2 rail policy is: **powered iff at least one named holder is held**
     * ``"manual:*"`` — operator/API holds.
 
 :class:`SatellitePowerRule` translates the holder set into the physical rail:
-it calls the injected ``set_out2`` (PowerboxCommander.set_out(2, …)) on
-transitions, applies a linger before powering OFF (debounces key-off/burst
+it calls the injected ``set_rail`` (PowerboxCommander.set_relay(RELAY_CH_RS485, …))
+on transitions, applies a linger before powering OFF (debounces key-off/burst
 gaps), and re-asserts the command while the powerbox STATUS mirror
-(``powerbox.out2``) disagrees — the STATUS heartbeat arrives at ~1 Hz, which
+(``powerbox.rs485_power``, derived from the ``rly`` array) disagrees — the
+STATUS heartbeat arrives at ~1 Hz, which
 also provides the rule's re-evaluation clock for linger/retry timing.
 
 The gateway board (CAN/AVC-LAN + RS485 master) shares exactly the same
 logical requirement — needed when ACC is on (CAN/AVC) and when satellite jobs
 run (RS485) — so the rule also drives the optional ``set_gateway`` callback
-(USB hub-port power) in lockstep with OUT2. There is no separate manual
+(USB hub-port power) in lockstep with the rail. There is no separate manual
 gateway control; its convergence/reassert is handled by the backend's
 gateway-USB desired-state poll.
 
 Both rules dispatch observability actions only; the actual rail truth remains
-``powerbox.out2``.
+``powerbox.rs485_power``.
 """
 
 from __future__ import annotations
@@ -53,7 +54,7 @@ HOLDER_QUEUE = "queue"
 
 
 class SatelliteAccHoldRule(StateRule):
-    """Hold the OUT2 rail while the ignition (ACC) is on.
+    """Hold the satellite rail while the ignition (ACC) is on.
 
     Acquires the ``"acc"`` holder on the OFF->ON edge and releases it on
     ON->OFF (the power-off itself is further debounced by the linger in
@@ -88,27 +89,27 @@ class SatelliteAccHoldRule(StateRule):
 
 
 class SatellitePowerRule(StateRule):
-    """Drive the physical OUT2 rail from the wake-lock holder set.
+    """Drive the physical RS485 satellite rail (relay ch5) from the holder set.
 
     * desired = ``bool(power_holders)``;
     * ON is applied immediately;
     * OFF is applied only after ``linger_s`` of the holder set staying empty
       (re-checked on every POWERBOX/SATELLITES update — the powerbox STATUS
       heartbeat at ~1 Hz guarantees progress);
-    * while the powerbox ``out2`` mirror disagrees with the applied value the
-      command is re-sent every ``retry_s`` (handles a lost serial command or a
-      powerbox reboot back to its boot default).
+    * while the powerbox ``rs485_power`` mirror disagrees with the applied
+      value the command is re-sent every ``retry_s`` (handles a lost serial
+      command or a relay board that cold-booted with every coil released).
     """
 
     def __init__(
         self,
-        set_out2: Callable[[bool], bool],
+        set_rail: Callable[[bool], bool],
         linger_s: float = 10.0,
         retry_s: float = 5.0,
         clock: Callable[[], float] = time.monotonic,
         set_gateway: Optional[Callable[[bool], None]] = None,
     ):
-        self._set_out2 = set_out2
+        self._set_rail = set_rail
         self._set_gateway = set_gateway
         self._linger_s = linger_s
         self._retry_s = retry_s
@@ -133,9 +134,9 @@ class SatellitePowerRule(StateRule):
     def _apply(self, on: bool, store: Store, reason: str) -> None:
         now = self._clock()
         try:
-            self._set_out2(on)
+            self._set_rail(on)
         except Exception:
-            logger.exception("SatellitePowerRule set_out2(%s) failed", on)
+            logger.exception("SatellitePowerRule set_rail(%s) failed", on)
             return
         first = self._applied is not on
         self._applied = on
@@ -148,7 +149,7 @@ class SatellitePowerRule(StateRule):
                     self._set_gateway(on)
                 except Exception:
                     logger.exception("SatellitePowerRule set_gateway(%s) failed", on)
-            logger.info("Satellite rail OUT2 -> %s (%s)", "ON" if on else "OFF", reason)
+            logger.info("Satellite rail (relay ch5) -> %s (%s)", "ON" if on else "OFF", reason)
             store.dispatch(SetSatellitePowerAction(on))
 
     def evaluate(
@@ -172,7 +173,7 @@ class SatellitePowerRule(StateRule):
                 self._apply(False, store, "no holders for %.0fs" % self._linger_s)
 
         # Re-assert while the powerbox mirror disagrees with what we commanded.
-        actual = new_state.powerbox.out2
+        actual = new_state.powerbox.rs485_power
         if (
             self._applied is not None
             and actual is not None
@@ -180,4 +181,4 @@ class SatellitePowerRule(StateRule):
             and (now - self._last_send) >= self._retry_s
         ):
             self._apply(self._applied, store,
-                        "reassert (mirror out2=%s)" % actual)
+                        "reassert (mirror rs485_power=%s)" % actual)

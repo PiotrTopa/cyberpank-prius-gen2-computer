@@ -98,6 +98,7 @@ class ActionType(Enum):
     SET_POWER_CHART_TIME_BASE = auto()
     SET_GATEWAY_USB_POWER = auto()
     SET_MFD_STATUS = auto()  # MFD video board power manager status (backend)
+    SET_POCO2_STATUS = auto()  # secondary POCO power manager status (backend)
     
     # VFD Satellite actions (device 110)
     UPDATE_VFD_SATELLITE = auto()  # Update VFD computed state
@@ -113,8 +114,9 @@ class ActionType(Enum):
     SET_POWERBOX_POWER_MODE = auto()   # POCO CPU power profile (rule)
     SET_POWERBOX_POWER_STATUS = auto()
     SET_POCO_TELEMETRY = auto() # OUT1/2/3 + POCO heartbeat (powerbox STATUS)
-    SET_OUT = auto()
-    SET_RELAY = auto()                # USB-port VBUS relay (PCF8574 ch 1-4)
+    POWERBOX_BUTTON = auto()          # press a POCO power button via the powerbox
+    POWERBOX_HARD_RESTART = auto()    # powerbox self-power-cut (restart relay)
+    SET_RELAY = auto()                # relay board load channel (PCF8574 ch 2-8)
     INPUT_EVENT = auto()              # human-interface event (frontend/satellite HID)
     SET_FAN_OVERRIDE = auto()   # manual chassis-fan override (None = auto)
 
@@ -1203,12 +1205,24 @@ class SetPowerboxIgnitionAction(Action):
 
 @dataclass
 class SetPowerboxConnectionAction(Action):
-    """Powerbox link present/absent."""
-    connected: bool = False
+    """Powerbox link present/absent.
 
-    def __init__(self, connected: bool, source: ActionSource = ActionSource.GATEWAY):
+    ``boot=True`` marks a genuine POWERBOX_READY banner (the firmware just
+    (re)booted: every NO relay has dropped and the backend must re-assert its
+    wanted relay states); ``reset_cause`` is the firmware's
+    ``machine.reset_cause()`` when it reports one.
+    """
+    connected: bool = False
+    boot: bool = False
+    reset_cause: Optional[int] = None
+
+    def __init__(self, connected: bool, boot: bool = False,
+                 reset_cause: Optional[int] = None,
+                 source: ActionSource = ActionSource.GATEWAY):
         super().__init__(ActionType.SET_POWERBOX_CONNECTION, source)
         self.connected = connected
+        self.boot = bool(boot)
+        self.reset_cause = reset_cause
 
 
 @dataclass
@@ -1264,39 +1278,53 @@ class SetPowerboxPowerModeAction(Action):
 
 @dataclass
 class SetPowerboxPowerStatusAction(Action):
-    """Mirror the powerbox STATUS heartbeat: OUT rail states + POCO liveness.
+    """Mirror the powerbox STATUS heartbeat (firmware >= 2.0).
 
-    Populated from the powerbox firmware's periodic STATUS message
-    (``{"msg":"STATUS","hb":n,"out1":1,"out2":1,"out3":0,"poco":1,"pm":"normal"}``).
-    Any field left None is not updated.
+    Populated from the firmware's periodic STATUS message
+    (``{"msg":"STATUS","hb":n,"acc":1,"poco":1,"p2":0,"pm":"normal","rc":1,
+    "up":123,"fan":40,"rpm":2100,"rly":[null,1,...],"rly_fix":0,"rly_err":0}``).
+    Any field left None is not updated. ``relays`` entries may be None
+    (unknown / not a load — ch1 is the powerbox restart relay).
     """
-    out1: Optional[bool] = None
-    out2: Optional[bool] = None
-    out3: Optional[bool] = None
     poco_alive: Optional[bool] = None
+    poco2_alive: Optional[bool] = None
     pm_state: Optional[str] = None
     hb: Optional[int] = None
-    relays: Optional[tuple] = None    # USB-port relay states (ch1..ch4), 1=powered
+    relays: Optional[tuple] = None    # relay states (ch1..ch8), True=powered, None=unknown
+    fan_pct: Optional[float] = None   # fan speed the firmware is applying
+    fan_rpm: Optional[int] = None     # measured tach RPM
+    reset_cause: Optional[int] = None # machine.reset_cause() of the running firmware
+    uptime_s: Optional[int] = None    # firmware uptime (s)
+    relay_fix_count: Optional[int] = None  # relay drift repairs since boot
+    relay_err_count: Optional[int] = None  # relay expander I2C errors since boot
 
     def __init__(
         self,
-        out1: Optional[bool] = None,
-        out2: Optional[bool] = None,
-        out3: Optional[bool] = None,
         poco_alive: Optional[bool] = None,
         pm_state: Optional[str] = None,
         hb: Optional[int] = None,
         relays: Optional[tuple] = None,
+        poco2_alive: Optional[bool] = None,
+        fan_pct: Optional[float] = None,
+        fan_rpm: Optional[int] = None,
+        reset_cause: Optional[int] = None,
+        uptime_s: Optional[int] = None,
+        relay_fix_count: Optional[int] = None,
+        relay_err_count: Optional[int] = None,
         source: ActionSource = ActionSource.GATEWAY,
     ):
         super().__init__(ActionType.SET_POWERBOX_POWER_STATUS, source)
-        self.out1 = out1
-        self.out2 = out2
-        self.out3 = out3
         self.poco_alive = poco_alive
+        self.poco2_alive = poco2_alive
         self.pm_state = pm_state
         self.hb = hb
         self.relays = tuple(relays) if relays is not None else None
+        self.fan_pct = fan_pct
+        self.fan_rpm = fan_rpm
+        self.reset_cause = reset_cause
+        self.uptime_s = uptime_s
+        self.relay_fix_count = relay_fix_count
+        self.relay_err_count = relay_err_count
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1342,25 +1370,50 @@ class SetPocoTelemetryAction(Action):
         self.poco_ema_temp = poco_ema_temp
         self.fan_duty_pct = fan_duty_pct
 
-class SetOutAction(Action):
-    """Set OUT2 or OUT3 state."""
-    def __init__(self, channel: int, on: bool, source: ActionSource = ActionSource.UI):
-        super().__init__(ActionType.SET_OUT, source)
-        self.channel = channel
-        self.on = on
+class PowerboxButtonAction(Action):
+    """Press a POCO power button through the powerbox.
+
+    ``poco`` 1 = main computer, 2 = secondary; ``ms`` is the hold: 6000 powers
+    an off phone on, 35000 force-resets a frozen one, a few hundred ms is a
+    plain key press (ignored by the main POCO's logind).
+    """
+    def __init__(self, poco: int = 1, ms: int = 6000,
+                 source: ActionSource = ActionSource.UI):
+        super().__init__(ActionType.POWERBOX_BUTTON, source)
+        self.poco = 2 if int(poco) == 2 else 1
+        self.ms = int(ms)
 
 
 class SetRelayAction(Action):
-    """Set a USB-port VBUS relay (PCF8574 ch 1-4; ch2 = RTL-SDR, ch1 = spare).
+    """Set a relay-board load channel (PCF8574 ch 2-8; ch2 = MFD Pi, ch3 =
+    CAN hub (gateway + panda), ch4 = camera hub, ch5 = RS485 rail, ch6 =
+    secondary POCO hub (reserved), ch7/8 spare).
 
-    Gateway (ch4) and MFD Pi (ch3) are owned by their managers — UI toggles for
-    those go through SetGatewayUsbPowerAction / the MFD manager instead. State
-    mirror comes from the powerbox STATUS ``rly`` telemetry (PowerboxState.relays).
+    ch1 is the powerbox's own restart relay and is REFUSED (use
+    PowerboxHardRestartAction). The CAN hub (ch3), MFD Pi (ch2) and the RS485
+    rail (ch5) are owned by their managers/rules — UI toggles for those go
+    through SetGatewayUsbPowerAction, the MFD manager and a manual satellite
+    hold instead. State mirror comes from the powerbox STATUS ``rly``
+    telemetry (PowerboxState.relays).
     """
     def __init__(self, channel: int, on: bool, source: ActionSource = ActionSource.UI):
         super().__init__(ActionType.SET_RELAY, source)
         self.channel = channel
         self.on = on
+
+
+class PowerboxHardRestartAction(Action):
+    """Hard-restart the powerbox through its NC self-supply relay (ch1).
+
+    The firmware acks, then cuts its own power ~0.3 s later; it is back
+    ~5 s after that (3 s of safe-boot). Relay VCC comes from the RP2040, so
+    EVERY NO relay drops with it: the MFD Pi (hard cut — prefer a clean MFD
+    shutdown first), the CAN hub (gateway + panda) and the camera hub all lose
+    power and come back OFF; the backend re-asserts its wanted relay states on
+    the POWERBOX_READY banner.
+    """
+    def __init__(self, source: ActionSource = ActionSource.UI):
+        super().__init__(ActionType.POWERBOX_HARD_RESTART, source)
 
 
 class InputEventAction(Action):
@@ -1382,7 +1435,8 @@ class InputEventAction(Action):
 
 
 class SetGatewayUsbPowerAction(Action):
-    """Toggle gateway USB port power (powerbox relay ch4 via RelayPortPower)."""
+    """Toggle gateway USB power (powerbox relay ch3 = the CAN hub carrying the
+    gateway AND the comma.ai panda, via RelayPortPower)."""
     def __init__(self, on: bool, source: ActionSource = ActionSource.UI):
         super().__init__(ActionType.SET_GATEWAY_USB_POWER, source)
         self.on = on
@@ -1417,18 +1471,40 @@ class SetMfdStatusAction(Action):
 
 
 class SetFanOverrideAction(Action):
-    """Manually override the chassis fan duty (and optionally PWM frequency).
+    """Manually override the chassis fan speed.
 
-    ``pct`` in 0..100 pins the fan to that duty regardless of temperature;
+    ``pct`` in 0..100 pins the fan to that speed regardless of temperature;
     ``pct=None`` clears the override and returns the fan to automatic control.
-    ``freq`` (Hz) pins the PWM frequency while the override is active — used
-    for driver/noise characterization; None keeps the configured frequency.
+    (The PWM frequency is fixed in the firmware since 2.0: 25 kHz, 4-wire fan.)
     """
-    def __init__(self, pct: Optional[float], freq: Optional[int] = None,
-                 source: ActionSource = ActionSource.UI):
+    def __init__(self, pct: Optional[float], source: ActionSource = ActionSource.UI):
         super().__init__(ActionType.SET_FAN_OVERRIDE, source)
         self.pct = pct
-        self.freq = freq
+
+
+class SetPoco2StatusAction(Action):
+    """Mirror the secondary-POCO power manager status (backend.poco2_power).
+
+    Same shape as :class:`SetMfdStatusAction`; ``boot_presses`` counts the
+    button presses issued in the current boot attempt.
+    """
+    def __init__(
+        self,
+        state: str,
+        reachable: "Optional[bool]" = None,
+        state_since: "Optional[float]" = None,
+        last_ok_ping: "Optional[float]" = None,
+        boot_presses: "Optional[int]" = None,
+        last_boot_s: "Optional[float]" = None,
+        source: ActionSource = ActionSource.INTERNAL,
+    ):
+        super().__init__(ActionType.SET_POCO2_STATUS, source)
+        self.state = state
+        self.reachable = reachable
+        self.state_since = state_since
+        self.last_ok_ping = last_ok_ping
+        self.boot_presses = boot_presses
+        self.last_boot_s = last_boot_s
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1436,9 +1512,9 @@ class SetFanOverrideAction(Action):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class SatellitePowerHoldAction(Action):
-    """Acquire (``acquire=True``) or release a named OUT2 wake-lock holder.
+    """Acquire (``acquire=True``) or release a named satellite-rail wake-lock.
 
-    The OUT2 satellite rail stays powered while at least one holder is held
+    The RS485 satellite rail (relay ch5) stays powered while at least one holder is held
     (``"acc"``, ``"queue"``, ``"manual:<name>"`` …). See SatellitesState.
     """
     def __init__(self, holder: str, acquire: bool, source: ActionSource = ActionSource.INTERNAL):

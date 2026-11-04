@@ -81,11 +81,11 @@ export function DebugDrawer({ pb, conn, state, now, onClose }: {
             </span>
           </div>
 
-          <Section title="Power Rails (MOSFET drivers)" icon={CircuitBoard}>
+          <Section title="Relay board & buttons (fw 2.0)" icon={CircuitBoard}>
             <div className="flex flex-col gap-2">
-              <Rail name="OUT1 · GP29" desc="Master rail — POCO + RP2040 + hub (latch)" val={pb.out1} />
-              <Rail name="OUT2 · GP28" desc="RS485 satellite power" val={pb.out2} />
-              <Rail name="OUT3 · GP27" desc="Spare" val={pb.out3} />
+              <Rail name="RS485 rail · relay 5" desc="Satellite power (wake-lock rule)" val={pb.rs485_power} />
+              <Rail name="Secondary POCO · GP28" desc="Backend ACC-follower, button-started" val={pb.poco2_alive} />
+              <Rail name="Fan · GP29 pwm / GP28 tach" desc={`${pb.fan_duty_pct?.toFixed(0) ?? '--'} % · ${pb.fan_rpm ?? '--'} rpm`} val={pb.fan_duty_pct != null ? pb.fan_duty_pct > 0 : null} />
             </div>
           </Section>
 

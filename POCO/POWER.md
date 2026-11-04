@@ -187,27 +187,49 @@ disabling the deepest cpuidle states or wiring up ramoops.
 - Invariants that must hold in **every** profile: system **loggable over SSH**, **modem ON**,
   **USB ON**, OTG serial + WireGuard alive. Only "everything else" gets trimmed when we optimise.
 
-## Powerbox power management (OUT rails, POCO control, heartbeat)
+## Powerbox power management (relay board, POCO button, heartbeat)
 
-The powerbox RP2040 switches the whole computer's power and coordinates a clean
-shutdown with the POCO. Three active-high MOSFET rails (all downstream of the
-INA219 shunt) plus the POCO power button are controlled. Full pinout and wire
-protocol live in [`powerbox/README.md`](../powerbox/README.md); the behaviour the
-POCO side depends on:
+The powerbox RP2040-Zero (firmware 2.1) starts/wakes the main POCO through its
+power button, switches the loads on an 8-channel relay board and coordinates
+a clean shutdown with the POCO. There are **no MOSFET rails any more**: the
+powerbox, its hub and the POCO bucks sit on the permanent 12 V feed. Full
+pinout and wire protocol live in [`powerbox/README.md`](../powerbox/README.md);
+the behaviour the POCO side depends on:
 
-| Rail | Pin  | Drives | Default | Behaviour |
-|------|------|--------|---------|-----------|
-| OUT1 | GP29 | POCO + RP2040 + USB-hub 5 V (master) | **latched HIGH** | `computer_power = OUT1 OR ACC`. LOW = **suicide**. |
-| OUT2 | GP28 | RS485 satellite power | ON | Backend-managed wake-lock rail (see below). |
-| OUT3 | GP27 | Spare | OFF | Unused. |
-| GP15 | —    | POCO power button (short-to-GND) | high-Z | LOW pulse = press (~3 s on, ~10 s force-reboot). |
+| Relay | Contact | Load | After any powerbox restart | Backend owner |
+|-------|---------|------|----------------------------|---------------|
+| 1 | **NC** | the powerbox's **own** supply — `{"a":"hard_restart"}` only, refused by `relay` | n/a (it *is* the restart) | `powerbox_hard_restart` API command |
+| 2 | NO | MFD Raspberry Pi Zero | OFF | `backend/mfd_power.py` (ssh poweroff + wait, then cut) |
+| 3 | NO | USB hub: CAN gateway **and** comma.ai panda | OFF | gateway power path (`SetGatewayUsbPowerAction`, satellite wake-locks) |
+| 4 | NO | USB hub (VIA): fvision dashcam / aux | OFF | `set_relay` ch4 (`port_power.camera`) |
+| 5 | NO | RS485 satellite power | OFF | `state/rules/satellite_power.py` wake-locks |
+| 6-8 | NO | unassigned (6 reserved for a secondary POCO hub) | OFF | `set_relay` |
 
-**Auto-start + latch.** The rail is OR-ed with ACC, so the RP2040 boots
-automatically when the ignition is ON. The firmware drives OUT1 HIGH immediately
-to *latch* the rail, holding power after ACC drops for a graceful shutdown.
+| Pin | Function | Idle | Behaviour |
+|-----|----------|------|-----------|
+| GP27 | main POCO power button (short-to-GND) | input, pulls off | LOW pulse = press (6 s powers on, 35 s forces a reset). Never driven high (phone line ~1.8 V). |
+| — | secondary POCO button | not connected | `button`/`wake` for poco 2 → `ERROR POCO2_NC`, no press. |
+| GP29 / GP28 | chassis fan PWM (25 kHz, not inverted) / tach | 0 % at boot | fan runs flat out while the firmware is not driving GP29 (bootloader, 3 s safe-boot). |
 
-**OUT2 satellite rail (backend wake-locks).** The firmware boots OUT2 ON
-(fail-safe) but never manages it; policy lives in the backend
+**Restart scope.** Relay opto VCC is the RP2040's 5 V, so whenever the RP2040
+is unpowered or restarting (spontaneous reset, `hard_restart`, WDT, reflash
+VBUS cut) **every NO relay releases**: the MFD Pi gets a hard cut, the CAN hub
+(gateway + panda) and the camera hub drop. The PCF8574 wakes at 0xFF, so all
+loads come back **OFF**; the backend re-asserts its wanted states ~6 s after
+the `POWERBOX_READY` banner (`BackendService._pp_reassert_at`) and the
+periodic `rly` read-back/enforce sweep converges the rest. `hard_restart`
+measured 2026-11-03: USB gone after 0.4 s, re-enumerated after 1.0 s, first
+STATUS after 4.9 s.
+
+**Reset cause.** The firmware reports `machine.reset_cause()` as `rc` in the
+boot banner, in every STATUS and in the `boot` event of `getlog` (1 = power-on
+/ brown-out / hard_restart, 3 = watchdog or `machine.reset()`), plus `up`
+(uptime s). The backend mirrors them as `powerbox.reset_cause`,
+`powerbox.uptime_s` and counts banners in `powerbox.boot_count`, so the
+spontaneous resets seen on the bench (2026-11-03) can be attributed.
+
+**RS485 satellite rail (relay ch5, backend wake-locks).** The firmware never
+manages it; policy lives in the backend
 (`state/rules/satellite_power.py` + `backend/satellites.py`). The rail is ON iff
 at least one named wake-lock is held: `acc` (ignition on → satellites always
 ready), `queue` (the satellite job queue has pending/running work — scheduled
@@ -217,42 +239,46 @@ flaps, and sustained 12 V under-voltage cancels queued key-off work outright.
 Jobs are serialized through one priority queue (FIFO within priority), which
 also matches the half-duplex RS485 bus. See `docs/VIRTUAL_TWIN_ARCHITECTURE.md`.
 
-**Suicide.** Driving OUT1 LOW removes the latch; once ACC is also gone the whole
-computer powers off, protecting the 12 V battery. This happens after a
-shutdown is requested — either the backend's `UndervoltageProtectionRule`
-(< 11.0 V for 5 s → sends `{"a":"off"}`) or the firmware's last-resort backstop
-(< 10.0 V for 20 s, only if the backend is dead) — and the POCO is confirmed off
-(heartbeat lost) **or** the grace timeout elapses.
+**Shutdown and sleep (no suicide path).** The box cannot cut the POCO's power.
+When a shutdown is requested — the backend's `UndervoltageProtectionRule`
+(sends `{"a":"off"}` and runs `systemctl poweroff` when
+`local_poweroff_on_undervoltage` is set) or the firmware's last-resort backstop
+(< 10.0 V for 20 s, only if the backend is dead, which sends `SHUTDOWN` to the
+host) — the firmware enters `shutdown`, waits for the heartbeat to stop (≥ 25 s)
+or the grace, then `sleep`: no wake presses until ACC rises or `{"a":"wake"}`.
+An off phone draws next to nothing, which is the point.
 
-**Graceful POCO shutdown.** "Switching off the POCO" is an OS poweroff (the
-backend runs `systemctl poweroff` when `local_poweroff_on_undervoltage` is set);
-the rail stays up until the firmware suicides. The firmware never cuts OUT1 to
-power the POCO down — only the OS does the clean shutdown, then OUT1 drops.
+**Bidirectional heartbeat.** The powerbox emits a `STATUS` message (~2 s) with a
+rolling counter, POCO liveness, PM state, reset cause/uptime, fan duty/RPM and
+the relay read-back; the backend sends `{"a":"hb","n":N}` (~2 s,
+`powerbox_heartbeat_s`). If the POCO's counter stops advancing for 15 s the
+powerbox considers it dead and — past the 20 s boot grace and a 5 min cooldown —
+holds GP27 LOW for 6 s to **wake** it (two unanswered presses, then a 35 s
+forced reset). Waking is disabled during a shutdown so we never fight our own
+poweroff. Firmware TX is gated on these heartbeats: without them the port is
+silent (bench tools must send them, see `powerbox/relay_bringup_test.py`).
 
-**Bidirectional heartbeat.** The powerbox emits a `STATUS` message (~1 s) with a
-rolling counter + OUT states + POCO liveness; the backend sends `{"a":"hb","n":N}`
-(~2 s, `powerbox_heartbeat_s`). If the POCO's counter stops advancing for 15 s the
-powerbox considers it dead and — past the 60 s boot grace and a 60 s cooldown —
-pulses GP15 ~3 s to **wake** it. Waking is disabled during a shutdown so we never
-fight our own poweroff.
-
-These mirror into `state.powerbox` (`out1`/`out2`/`out3`, `poco_alive`,
-`pm_state`, `powerbox_hb`) and onto the dashboard **Power Control** panel.
+These mirror into `state.powerbox` (`relays`, `rs485_power`, `poco_alive`,
+`pm_state`, `powerbox_hb`, `reset_cause`, `uptime_s`, `boot_count`,
+`relay_fix_count`, `relay_err_count`) and onto the dashboard.
 
 ## USB per-port power (powerbox / gateway recovery)
 
 The RP2040 **powerbox** and **gateway** talk to the backend over USB-CDC behind
 the car's USB hub.
 
-**Power model.** The powerbox MCU is **bus-powered** — it runs off USB VBUS, with
-no direct 12 V line to the MCU — **but that USB bus is itself fed from the OUT1
-12 V rail**. The full chain is:
+**Power model (fw 2.x).** The powerbox MCU is **bus-powered** — it runs off USB
+VBUS, with no direct 12 V line to the MCU. The hub's 5 V buck sits on the
+permanent 12 V feed, through the powerbox's own **NC relay 1**: the chain is
 
 ```
-OUT1 (12 V rail)  →  USB hub 5 V  →  VBUS  →  powerbox MCU
+12 V (permanent)  →  relay 1 (NC, released = closed)  →  hub 5 V buck  →  VBUS  →  powerbox MCU
 ```
 
-Two consequences follow from this single chain:
+so the box is always on; energising relay 1 (`{"a":"hard_restart"}`) is the
+only thing that cuts it, and it self-restores because the PCF8574 wakes at
+0xFF (coil released). Any MCU reset is electrically harmless — but it releases
+every NO relay (relay opto VCC is the RP2040's 5 V), see the table above.
 
 * **Cold reset via VBUS — one switchable socket only.** The replacement hub
   (labeled **D-Link DUB-H4 rev D1**) is an **ActionStar `2101:8500`** inside
@@ -268,26 +294,22 @@ Two consequences follow from this single chain:
     cut; a `prius-usb-power cycle` there is a true cold reset.
   - The powerbox on any other socket gets **data-only** off/cycle; recover it
     via DTR-pulse serial reset / `mpremote` / its firmware WDT, or ultimately
-    by dropping OUT1 (whole-computer power path).
+    with `{"a":"hard_restart"}` (relay 1 cuts the box's own supply; fw 2.1).
   - `hubcycle` (all-ports gang off) does **not** cut the non-switchable
     sockets on this hub — it only worked on the old rev F1.
   *(History: the previous hub was a DUB-H4 rev F1 — Terminus FE1.1s
   `1a40:0101`, fully ganged — per-port off was data-only there too, but
   `hubcycle` really gang-cut all VBUS. If hub hardware changes again, re-test
   which sockets actually switch before trusting the docs.)*
-* **Self-latch / suicide.** OUT1 is driven by the powerbox MCU *and* gates the hub
-  that powers it. On ACC the rail comes up via the `OUT1 OR ACC` term, the MCU
-  boots and immediately drives OUT1 HIGH to **latch its own (and POCO's) power**,
-  so it keeps running after ACC is removed. A commanded shutdown / "suicide" drops
-  OUT1 → the hub loses 5 V → the MCU loses VBUS and dies. **A brief MCU reset with
-  ACC off is NOT fatal:** the OUT1 rail has a **hardware >30 s hold-up** that keeps
-  it energised across the reset, and the rebooting firmware re-drives OUT1 (3 s
-  safe-boot then latch) well inside that window. So reflashing, a DTR-pulse serial
-  reset, the WDT, and a soft reboot are all safe with ACC off. What still drops the
-  rail with ACC off is a *sustained* power loss beyond the hold-up — a VBUS cut held
-  longer than ~30 s (`prius-usb-power cycle` uses ≥ 4 s, which is fine), or a
-  commanded suicide. (Historically, before the hold-up hardware, any MCU reset with
-  ACC off was fatal — see commit `783e80a`, which removed the now-obsolete
+* **MCU resets are harmless to the box, not to its loads.** Reflashing, a
+  DTR-pulse serial reset, the WDT and a soft reboot never take the box down
+  (there is no latch to lose), but every one of them releases the NO relays
+  for the duration of the reset plus the 3 s safe-boot: the MFD Pi gets a hard
+  cut, the CAN hub (gateway + panda) and the camera hub drop, and the backend
+  must re-assert them afterwards (it does so on the `POWERBOX_READY` banner).
+  Prefer a clean MFD shutdown before deliberate resets. (Historically — fw 1.x
+  — the box latched its own OUT1 rail and a reset with ACC off was fatal; see
+  commit `783e80a`, which removed the now-obsolete
   `powerbox_recover_requires_acc` guard.)
 
 > When checking whether a reset happened, read a **fresh** state sample: after a
@@ -350,15 +372,14 @@ streaming, clearing the wedge. It is gated by three `BackendConfig` fields:
 
 | Field | Default | Meaning |
 |-------|---------|---------|
-| `powerbox_auto_recover` | `False` | Master switch (set to `1` via `BACKEND_POWERBOX_AUTO_RECOVER` on prius). Safe now that OUT1 has the >30 s hold-up hardware: recovery re-enumerates the board via a parent-hub unbind/bind and the rail survives the transient. |
+| `powerbox_auto_recover` | `False` | Master switch (set to `1` via `BACKEND_POWERBOX_AUTO_RECOVER` on prius). Electrically safe (fw 2.x: the box is always powered), but the reset releases every NO relay for a few seconds — MFD Pi hard cut, CAN/camera hubs drop — until the backend re-asserts them. |
 | `powerbox_recover_cooldown_s` | `20.0` | Minimum spacing between forced resets, so a permanently dead link is not reset in a tight loop while it re-enumerates. |
 | `powerbox_stale_s` | `15.0` | No-frame timeout before the link is marked stale and recovery is triggered. |
 
 With the defaults the watchdog only *reports* the stall (no MCU reset). Enabling
 recovery is the same risk as a manual `prius-usb-power cycle` and carries the
-same precondition: **the rail must survive the reset** (ACC on, or the OUT1
-self-latch hardware in place). To recover by hand instead, follow *Recovery
-procedure & caveat* below.
+same side effect: **every NO relay drops during the reset**. To recover by hand
+instead, follow *Recovery procedure & caveat* below.
 
 Recovery / control is per **hub port** via [`uhubctl`](https://github.com/mvp/uhubctl)
 (apk package `uhubctl`), wrapped by `prius-usb-power`.
@@ -469,11 +490,11 @@ Reliable hands-off recipe (used by `/usr/local/sbin/prius-flash-powerbox`):
      (raw-REPL does not auto-reboot), so the copy completes.
    - It typically succeeds on the first or second attempt.
 3. Verify: `mpremote resume connect <by-id> exec "..."` reading the `VERSION` line.
-4. `mpremote resume connect <by-id> reset` to boot the new firmware. `OUT1` latches
-   HIGH in the first lines of `main()`, so the computer keeps power through the reset.
+4. `mpremote resume connect <by-id> reset` to boot the new firmware (fw 2.x: the
+   box is always powered; a reset only releases every NO relay for a few seconds).
 5. `sudo systemctl restart prius-backend` immediately — the new firmware's POCO
-   boot-grace is 60 s, and the backend must resume 2 s heartbeats within it or the
-   firmware will pulse the POCO power button (GP15). Restarting at once is well inside
+   boot-grace is 20 s, and the backend must resume 2 s heartbeats within it or the
+   firmware will pulse the POCO power button (GP27). Restarting at once is well inside
    the window.
 
 Do **not** `close()` + reopen the pyserial port between landing and copying: dropping
@@ -509,7 +530,7 @@ sudo mount -t vfat "$RP" /mnt/rp2
 sudo cp RPI_PICO-vX.Y.Z.uf2 /mnt/rp2/ && sync      # clean MicroPython
 sleep 8                                             # boots to 2e8a:0005, empty FS
 # then upload firmware via mpremote (main.py only):
-mpremote connect /dev/ttyACM0 fs cp ina219.py ahtx0.py bmp280.py main.py :
+mpremote connect /dev/ttyACM0 fs cp ina219.py ahtx0.py bmp280.py pcf8574.py main.py :
 ```
 
 Notes: re-detect the block node after **each** UF2 (it changes, e.g. `sdg1`→`sdh1`);

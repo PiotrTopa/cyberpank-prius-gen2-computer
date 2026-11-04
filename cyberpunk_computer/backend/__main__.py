@@ -66,6 +66,38 @@ def _build_mfd():
     )
 
 
+def _build_poco2():
+    """Secondary-POCO power manager config from BACKEND_POCO2_* env vars.
+
+    Returns ``(enabled, Poco2PowerConfig | None)``:
+
+        BACKEND_POCO2_ENABLED=1
+        BACKEND_POCO2_IP=192.168.0.86     # how the main POCO reaches it
+        BACKEND_POCO2_SSH_USER=user
+        BACKEND_POCO2_PRESS_MS=6000       # power-on hold (3 s does not boot it)
+        BACKEND_POCO2_GRACE_S=600         # key-off grace before shutdown
+        BACKEND_POCO2_BOOT_TIMEOUT_S=150  # per press, before pressing again
+        BACKEND_POCO2_MAX_BOOT_PRESSES=2
+        BACKEND_POCO2_SHUTDOWN_WAIT_S=60
+    """
+    enabled = os.environ.get("BACKEND_POCO2_ENABLED", "0").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    if not enabled:
+        return False, None
+    from .poco2_power import Poco2PowerConfig
+    env = os.environ.get
+    return True, Poco2PowerConfig(
+        board_ip=env("BACKEND_POCO2_IP", "192.168.0.86"),
+        ssh_user=env("BACKEND_POCO2_SSH_USER", "user"),
+        press_ms=int(env("BACKEND_POCO2_PRESS_MS", "6000")),
+        grace_s=float(env("BACKEND_POCO2_GRACE_S", "600")),
+        boot_timeout_s=float(env("BACKEND_POCO2_BOOT_TIMEOUT_S", "150")),
+        max_boot_presses=int(env("BACKEND_POCO2_MAX_BOOT_PRESSES", "2")),
+        shutdown_wait_s=float(env("BACKEND_POCO2_SHUTDOWN_WAIT_S", "60")),
+    )
+
+
 def _build_dashcam() -> dict:
     """Dashcam vision config from env (io.dashcam_ingest; disabled by default):
 
@@ -122,6 +154,7 @@ def _build_recording(args: argparse.Namespace) -> RecordingConfig:
 
 def _build_config(args: argparse.Namespace) -> BackendConfig:
     mfd_enabled, mfd_config = _build_mfd()
+    poco2_enabled, poco2_config = _build_poco2()
     return BackendConfig(
         **_build_dashcam(),
         gateway_port=args.gateway_port,
@@ -148,10 +181,9 @@ def _build_config(args: argparse.Namespace) -> BackendConfig:
         undervoltage_recover=args.undervoltage_recover,
         undervoltage_confirm_s=args.undervoltage_confirm,
         shutdown_grace_s=args.shutdown_grace,
-        local_poweroff_on_undervoltage=args.local_poweroff,
+        local_poweroff_on_undervoltage=not args.no_local_poweroff,
         powerbox_auto_recover=args.powerbox_auto_recover,
         powerbox_stale_s=args.powerbox_stale_s,
-        chassis_fan_freq=args.chassis_fan_freq,
         fan_full_start_delta=args.fan_full_start_delta,
         fan_full_stop_delta=args.fan_full_stop_delta,
         fan_full_max_pct=args.fan_full_max_pct,
@@ -161,6 +193,8 @@ def _build_config(args: argparse.Namespace) -> BackendConfig:
         fan_ema_alpha_down=args.fan_ema_alpha_down,
         mfd_enabled=mfd_enabled,
         mfd_config=mfd_config,
+        poco2_enabled=poco2_enabled,
+        poco2_config=poco2_config,
         verbose=args.verbose,
     )
 
@@ -205,13 +239,6 @@ def main() -> None:
     )
     parser.add_argument("--db", default="data/metrics.db", help="metrics SQLite path")
     parser.add_argument("--tick-hz", type=float, default=50.0, help="engine loop rate")
-    parser.add_argument(
-        "--chassis-fan-freq", type=int, default=15,
-        help="PWM frequency for the chassis fan in Hz. The 2-wire BLDC fan's "
-             "internal commutation dies above a few hundred Hz (coil buzz, no "
-             "rotation ≥2 kHz) — low-frequency PWM is the correct drive; 15 Hz "
-             "measured quietest (characterized on-car 2026-08-10)."
-    )
 
     # Replay (run off a recorded NDJSON log instead of the live gateway)
     replay = parser.add_argument_group("replay")
@@ -319,12 +346,14 @@ def main() -> None:
         "--shutdown-grace",
         type=int,
         default=30,
-        help="grace seconds given to the OS before the powerbox cuts the rail",
+        help="grace seconds reported to the powerbox with the shutdown notice "
+             "(it stops waking the POCO for at least this long)",
     )
     parser.add_argument(
-        "--local-poweroff",
+        "--no-local-poweroff",
         action="store_true",
-        help="also run 'systemctl poweroff' locally when under-voltage trips",
+        help="do NOT run 'systemctl poweroff' locally when under-voltage trips "
+             "(dev machines; on the car it is the only way to shed the load)",
     )
     parser.add_argument(
         "--powerbox-stale-s",

@@ -171,13 +171,16 @@ class TestHubPortPower:
             send_relay=lambda ch, on: True,
             get_relays=lambda: (0, 0, 0, 0),
         )
-        assert hub.gateway.relay_ch == 4
+        # fw 2.1 board: relay N = channel N. ch3 = CAN hub (gateway + panda),
+        # ch2 = MFD Pi, ch4 = camera hub; ch1 (restart) is never a port.
+        assert hub.gateway.relay_ch == 3
         assert hub.gateway.data_port == 2
-        assert hub.mfd.relay_ch == 3
+        assert hub.mfd.relay_ch == 2
         assert hub.mfd.data_port == 3
-        assert hub.sdr.relay_ch == 2
-        assert hub.sdr.data_port == 4
+        assert hub.camera.relay_ch == 4
+        assert hub.camera.data_port == 4
         assert hub.powerbox.port == 5
+        assert 1 not in {c.relay_ch for c in hub.relay_ports}
 
     def test_enforce_all_survives_errors(self):
         hub = HubPortPower.build(
@@ -187,7 +190,45 @@ class TestHubPortPower:
         )
         hub.gateway.enforce = mock.Mock(side_effect=RuntimeError("boom"))
         hub.mfd.enforce = mock.Mock()
-        hub.sdr.enforce = mock.Mock()
+        hub.camera.enforce = mock.Mock()
         hub.enforce_all()  # must not raise
         hub.mfd.enforce.assert_called_once()
-        hub.sdr.enforce.assert_called_once()
+        hub.camera.enforce.assert_called_once()
+
+    def test_restart_relay_can_never_back_a_port(self):
+        import pytest
+        with pytest.raises(ValueError):
+            RelayPortPower("x", relay_ch=1, hub="1-1", data_port=2,
+                           send_relay=lambda ch, on: True, get_relays=lambda: None)
+        with pytest.raises(ValueError):
+            HubPortPower.build(PortPowerConfig(camera_relay_ch=1),
+                               send_relay=lambda ch, on: True, get_relays=lambda: None)
+        with pytest.raises(ValueError):
+            HubPortPower.build(PortPowerConfig(camera_relay_ch=3),  # duplicate of gateway
+                               send_relay=lambda ch, on: True, get_relays=lambda: None)
+
+    def test_reassert_all_after_powerbox_boot(self):
+        """After a powerbox (re)boot every NO relay is released: the recorded
+        desired states must be pushed again regardless of the mirror."""
+        sent = []
+        hub = HubPortPower.build(
+            PortPowerConfig(),
+            send_relay=lambda ch, on: (sent.append((ch, on)), True)[1],
+            get_relays=lambda: (None, 1, 1, 0, 0, 0, 0, 0),  # stale mirror: all fine
+            runner=_runner_recorder([]),
+        )
+        hub.gateway.set(True)
+        hub.mfd.set(True)
+        sent.clear()
+        assert hub.reassert_all() == 2          # camera has no desired state
+        assert sorted(sent) == [(2, True), (3, True)]
+
+    def test_read_treats_null_mirror_entry_as_unknown(self):
+        hub = HubPortPower.build(
+            PortPowerConfig(),
+            send_relay=lambda ch, on: True,
+            get_relays=lambda: (None, True, None, False, False, False, False, False),
+        )
+        assert hub.mfd.read() is True
+        assert hub.gateway.read() is None
+        assert hub.camera.read() is False

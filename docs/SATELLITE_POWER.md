@@ -1,55 +1,62 @@
 # RS485 Satellite Power Management & Twin Model
 
-How the backend manages the **OUT2 satellite rail** and models each RS485
+How the backend manages the **RS485 satellite rail** (powerbox relay channel 5) and models each RS485
 satellite in the virtual twin. Code: `state/rules/satellite_power.py`,
 `backend/satellites.py`, `SatellitesState` in `state/app_state.py`.
 
 ## Hardware recap
 
 ```
-Prius 12V ──► powerbox RP2040 ──OUT2 (GP28, MOSFET)──► RS485 satellites
+Prius 12V ──► powerbox relay board ──relay ch5 (PCF8574)──► RS485 satellites
                                                         ├─ 106 DRL controller
 POCO ◄─USB─► gateway RP2040 ◄────RS485 half-duplex────► ├─ 107 rain/light sensor
                                                         └─ 110 VFD display
 ```
 
-* OUT2 is switched by the powerbox firmware on host command
-  (`{"a":"out","ch":2,"on":…}`); firmware boots it **ON** as a fail-safe and
-  never applies policy itself.
+* relay ch5 is switched by the powerbox firmware on host command
+  (`{"a":"relay","ch":5,"on":b}`); the firmware never applies policy itself.
+  The relay board's PCF8574 wakes with every coil released, so after any
+  powerbox restart (including the firmware's `hard_restart` self-power-cut,
+  which drops every NO relay) the rail is **OFF** until the rule re-asserts it
+  through the mirror-disagreement retry below. Relay 5 is the board's untested
+  channel (fw 2.1 bench 2026-11-03: relays 1-4 verified, 5-8 not yet).
 * Satellites talk NDJSON through the **gateway** (device ids 100–199).
 * The rail state is mirrored back in the powerbox `STATUS` heartbeat
-  (`powerbox.out2`, ~1 Hz).
+  (`powerbox.rs485_power`, derived from the STATUS `rly` array, ~1 Hz).
 
 ## Power model: wake-locks
 
-`SatellitesState.power_holders` is a set of named wake-locks. **OUT2 is on iff
+`SatellitesState.power_holders` is a set of named wake-locks. **the rail is on iff
 the set is non-empty.** Holders:
 
 | Holder      | Held by | Meaning |
 |-------------|---------|---------|
 | `acc`       | `SatelliteAccHoldRule` | Ignition on → satellites always ready. |
 | `queue`     | `SatelliteJobQueue`    | Jobs pending/running (key-off work). |
-| `manual:*`  | API `satellite_power_hold`, UI OUT2 toggle | Operator holds. |
+| `manual:*`  | API `satellite_power_hold`, UI rail toggle / `set_relay` ch5 | Operator holds. |
 
 `SatellitePowerRule` (watches SATELLITES + POWERBOX) turns the holder set into
-the physical rail via `PowerboxCommander.set_out(2, …)`:
+the physical rail via `PowerboxCommander.set_rs485_power(…)` (relay ch5):
 
 * ON is applied immediately;
 * OFF only after a **linger** (default 10 s) of the set staying empty —
   absorbs key-off bounce and back-to-back jobs (no rail flapping);
-* while the `powerbox.out2` mirror disagrees, the command is re-sent every
+* while the `powerbox.rs485_power` mirror disagrees, the command is re-sent every
   `satellite_retry_s` (recovers lost serial commands / powerbox reboots).
 
 ### Gateway USB power is bonded to the same wake-locks
 
 The gateway board (CAN/AVC-LAN bridge **and** RS485 master) has exactly the
-same logical requirement as OUT2: needed when ACC is on (CAN/AVC traffic) and
+same logical requirement as the rail: needed when ACC is on (CAN/AVC traffic) and
 whenever satellite jobs run (RS485). So `SatellitePowerRule` also drives the
-gateway's USB hub-port power (via `SetGatewayUsbPowerAction` →
-`prius-usb-power`) on the same ON/OFF edges — there is **no separate manual
-gateway power control** (the old `gateway_power` API command was removed).
-Convergence/retry for the gateway port is owned by the backend's
-`_gateway_usb_power_tick` desired-state poll (uhubctl ground truth, ~10 s).
+gateway's power (via `SetGatewayUsbPowerAction` → `backend.port_power`
+`RelayPortPower`, powerbox relay **ch3** = the USB hub that carries the gateway
+**and** the comma.ai panda, so both switch together) on the same ON/OFF edges —
+there is **no separate manual gateway power control** (the old `gateway_power`
+API command was removed). Convergence/retry for the gateway port is owned by
+the backend's `_port_power_enforce_tick` (desired vs the powerbox `rly`
+read-back, ~15 s) plus an unconditional re-assert ~6 s after a
+`POWERBOX_READY` boot banner.
 
 ## Job queue: one FIFO-within-priority queue for all satellite work
 
@@ -63,7 +70,7 @@ The queue:
 1. acquires the `queue` wake-lock while non-empty (one shared power-up for
    overlapping jobs — a temperature read finishing while a light-control job
    arrives never cycles the rail);
-2. per job waits for the rail (`powerbox.out2`) and the job's
+2. per job waits for the rail (`powerbox.rs485_power`) and the job's
    `requires_online` satellites to report presence, then calls `start`; jobs
    with a `poll` callback run until done/timeout;
 3. releases the lock when drained (the rule's linger provides the OFF delay);
@@ -110,8 +117,8 @@ Each satellite is a `SatelliteNode` in `SatellitesState.nodes`:
 ## Observability
 
 `SatellitesState` mirrors everything for the UI/API (auto-serialized in the
-state snapshot): `power_holders`, `power_requested` (desired OUT2 —
-ground truth stays `powerbox.out2`), `queue_depth`, `active_job`, and the
+state snapshot): `power_holders`, `power_requested` (desired the RS485 rail —
+ground truth stays `powerbox.rs485_power`), `queue_depth`, `active_job`, and the
 per-node twin.
 
 ## Backend config knobs (`BackendConfig`)

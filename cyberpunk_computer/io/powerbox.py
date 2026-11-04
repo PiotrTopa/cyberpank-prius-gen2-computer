@@ -14,16 +14,18 @@ This module provides:
 
     * :func:`parse_powerbox_message` — decode a raw powerbox payload to Actions;
     * :func:`register_powerbox_ingress` — wire those parsers into an IngressController;
-    * :func:`build_power_off_command` — the command the computer sends back to the
-      powerbox to cut POCO power;
+    * :func:`build_power_off_command` — tells the powerbox the POCO is shutting
+      itself down (the box then sleeps instead of waking it; it cannot cut power
+      since firmware 2.0);
     * :class:`PowerboxCommander` — sends powerbox commands over an OutputPort;
     * :class:`PriusPowerController` — applies the POCO power profile (full/low) by
       writing the ``/etc/prius/power-mode`` flag the ``prius-power`` unit watches.
 
-The powerbox firmware/protocol is still being built; the wire formats here are the
-computer's expectation and are tolerant of key/unit variants so the firmware can
-settle without breaking ingest. No transport is required for the parsers/rules to
-be unit-tested.
+The wire formats match powerbox firmware 2.1 (2026-11-03: board relay N =
+channel N, ch1 = the box's own NC restart relay exposed only as
+``hard_restart``, ``rly`` read back from the PCF8574 with ``null`` for ch1,
+``rc``/``up`` boot diagnostics) and stay tolerant of key/unit variants. No
+transport is required for the parsers/rules to be unit-tested.
 """
 
 from __future__ import annotations
@@ -45,6 +47,28 @@ from ..state.actions import (
     SetPowerboxPowerStatusAction,
     SetPowerboxTelemetryAction,
 )
+from ..state.app_state import (  # noqa: F401
+    RELAY_CH_CAM_HUB,
+    RELAY_CH_CAN_HUB,
+    RELAY_CH_MFD,
+    RELAY_CH_POCO2_HUB,
+    RELAY_CH_RESTART,
+    RELAY_CH_RS485,
+    RELAY_CHANNELS,
+)
+
+# Power-button hold times (ms) for the POCO F1 boards, measured on the bench
+# 2026-10-26: 3 s does NOT boot a board from off, 6 s does; ~35 s force-resets
+# a frozen SoC. A few hundred ms is a plain key press (logind ignores it).
+BUTTON_POWER_ON_MS = 6000
+BUTTON_FORCE_MS = 35000
+BUTTON_TAP_MS = 300
+
+# The secondary POCO's power button is NOT wired on the powerbox (fw 2.1:
+# GP28 became the fan tach, POCO2_BTN_PIN = None). Commands for poco 2 are
+# refused by the firmware with ERROR POCO2_NC; the backend treats them as
+# inert. Flip to True (and set the firmware pin) when it is connected again.
+POCO2_BUTTON_CONNECTED = False
 
 if TYPE_CHECKING:  # avoid import cycles at runtime
     from .ingress import IngressController
@@ -106,6 +130,7 @@ def parse_power_telemetry(data: dict) -> List[Action]:
         bmp_t, bmp_p           BMP280 @0x77 box-inside temperature (C), pressure (Pa)
         bmp2_t, bmp2_p         BMP280 @0x76 outside-box temperature (C), pressure (Pa)
         aht_t, aht_h           AHT20 box-inside temperature (C), relative humidity (%)
+        fan_pct, fan_rpm       chassis fan: applied speed (%) and tach RPM (fw >= 2.0)
     """
     voltage = _coerce_float(data.get("v", data.get("voltage", data.get("volt"))))
     if voltage is None:
@@ -132,15 +157,23 @@ def parse_power_telemetry(data: dict) -> List[Action]:
     aht_t = _coerce_float(data.get("aht_t"))
     aht_h = _coerce_float(data.get("aht_h"))
     energy_mah = _coerce_float(data.get("mah"))
+    fan_pct = _coerce_float(data.get("fan_pct"))
+    fan_rpm = _coerce_float(data.get("fan_rpm"))
 
-    if (voltage is None and current is None and power is None and bmp_t is None
+    actions: List[Action] = []
+    if not (voltage is None and current is None and power is None and bmp_t is None
             and bmp2_t is None and aht_t is None and energy_mah is None):
-        return []
-    return [SetPowerboxTelemetryAction(
-        voltage=voltage, current=current, power=power,
-        bmp_t=bmp_t, bmp_p=bmp_p, bmp2_t=bmp2_t, bmp2_p=bmp2_p,
-        aht_t=aht_t, aht_h=aht_h, energy_mah=energy_mah
-    )]
+        actions.append(SetPowerboxTelemetryAction(
+            voltage=voltage, current=current, power=power,
+            bmp_t=bmp_t, bmp_p=bmp_p, bmp2_t=bmp2_t, bmp2_p=bmp2_p,
+            aht_t=aht_t, aht_h=aht_h, energy_mah=energy_mah
+        ))
+    if fan_pct is not None or fan_rpm is not None:
+        actions.append(SetPowerboxPowerStatusAction(
+            fan_pct=fan_pct,
+            fan_rpm=int(fan_rpm) if fan_rpm is not None else None,
+        ))
+    return actions
 
 
 def parse_power_event(data: dict) -> List[Action]:
@@ -189,16 +222,29 @@ def parse_powerbox_system(data: dict) -> List[Action]:
         # DEBUG otherwise, so it does not bury watchdog/recovery events.
         global _last_identity_logged
         identity = (role, ver)
-        if is_boot or identity != _last_identity_logged:
+        rc = data.get("rc")
+        try:
+            rc = int(rc) if rc is not None else None
+        except (TypeError, ValueError):
+            rc = None
+        if is_boot:
+            # fw >= 2.1 reports machine.reset_cause(): 1 = power-on (incl.
+            # brown-out and hard_restart), 3 = watchdog. Every NO relay
+            # dropped with this boot — the service re-asserts them.
+            logger.warning("Powerbox BOOTED: role=%s v%s reset_cause=%s — relay loads dropped",
+                           role, ver, rc)
+            _last_identity_logged = identity
+        elif identity != _last_identity_logged:
             _last_identity_logged = identity
             logger.info("Powerbox %s: role=%s v%s", kind, role, ver)
         else:
             logger.debug("Powerbox %s (re-announce): role=%s v%s", kind, role, ver)
-        return [SetPowerboxConnectionAction(connected=True)]
+        return [SetPowerboxConnectionAction(connected=True, boot=is_boot, reset_cause=rc)]
 
     if msg == "STATUS":
-        # Periodic power-management heartbeat: OUT rail states + POCO liveness +
-        # rolling counter + state machine. Any missing key stays None (no update).
+        # Periodic power-management heartbeat (fw >= 2.0): POCO liveness (main
+        # from its heartbeat, secondary as we reported it), rolling counter,
+        # state machine, fan, relay board. Any missing key stays None.
         def _b(key):
             return _coerce_bool(data[key]) if key in data else None
         hb = data.get("hb")
@@ -207,23 +253,39 @@ def parse_powerbox_system(data: dict) -> List[Action]:
         except (TypeError, ValueError):
             hb = None
         pm = data.get("pm")
-        # USB-port relay states (firmware >= 1.7.0): "rly": [ch1..ch4] of 0/1,
-        # 1 = port powered. Ground truth for RelayPortPower verification.
+        # Relay board states: "rly": [ch1..ch8] of 0/1/null, 1 = load powered,
+        # null = unknown / not a load (ch1 = restart relay, fw >= 2.1). Read
+        # back from the PCF8574 by the firmware — ground truth for
+        # RelayPortPower verification and the RS485 rail. Omitted by the
+        # firmware when the read-back failed (rly_err then counts up).
         relays = None
         rly = data.get("rly")
         if isinstance(rly, (list, tuple)) and rly:
-            relays = tuple(bool(_coerce_bool(v)) for v in rly)
+            relays = tuple(_coerce_bool(v) for v in rly)
+        fan_rpm = _coerce_float(data.get("rpm"))
+
+        def _i(key):
+            try:
+                return int(data[key]) if data.get(key) is not None else None
+            except (TypeError, ValueError):
+                return None
         return [SetPowerboxPowerStatusAction(
-            out1=_b("out1"), out2=_b("out2"), out3=_b("out3"),
             poco_alive=_b("poco"),
+            poco2_alive=_b("p2"),
             pm_state=str(pm) if pm is not None else None,
             hb=hb,
             relays=relays,
+            fan_pct=_coerce_float(data.get("fan")),
+            fan_rpm=int(fan_rpm) if fan_rpm is not None else None,
+            reset_cause=_i("rc"),
+            uptime_s=_i("up"),
+            relay_fix_count=_i("rly_fix"),
+            relay_err_count=_i("rly_err"),
         )]
 
     if msg == "PMLOG":
         # Firmware power-event timeline (fw >= 1.15.0): boot / button presses /
-        # shutdown / suicide with uptime + voltage. The single most useful
+        # shutdown / sleep with uptime + voltage. The single most useful
         # cold-boot diagnostic — it's the record of what the firmware did while
         # the POCO (and this logger) were OFF. Log each event on its own line.
         events = data.get("events") or []
@@ -248,6 +310,11 @@ def parse_powerbox_system(data: dict) -> List[Action]:
                     {k: v for k, v in data.items() if k != "msg"})
         return []
 
+    if msg == "HARD_RESTART":
+        logger.warning("Powerbox HARD_RESTART: cutting its own supply now (uptime %ss); "
+                       "MFD/CAN/camera relays drop, box back in ~5 s", data.get("up"))
+        return []
+
     if msg in ("POCO_BTN", "INTERRUPTED"):
         # Power-button actuation (wake ladder / manual press) and REPL drops.
         # Invaluable for cold-boot debugging: shows EXACTLY when and how long
@@ -256,7 +323,7 @@ def parse_powerbox_system(data: dict) -> List[Action]:
                     {k: v for k, v in data.items() if k != "msg"})
         return []
 
-    if msg in ("I2C_OK", "I2C_SCAN", "SENSOR_OK", "IDLE", "FAN"):
+    if msg in ("I2C_OK", "I2C_SCAN", "SENSOR_OK", "IDLE", "FAN", "FAN_ON", "WDT_ON"):
         # Boot/diagnostic messages (bus scan results, per-chip detection,
         # applied fan PWM readback). Surface them in the journal — invaluable
         # for bench wiring / PWM characterization work.
@@ -264,11 +331,16 @@ def parse_powerbox_system(data: dict) -> List[Action]:
                     {k: v for k, v in data.items() if k != "msg"})
         return []
 
-    if msg in ("SHUTDOWN", "SUICIDE"):
-        # Powerbox is tearing down power. Reflect the state machine so the
-        # dashboard/operator can see it; the rail states follow in STATUS.
+    if msg in ("SHUTDOWN", "SLEEP"):
+        # SHUTDOWN: the firmware's under-voltage backstop fired (or it echoes
+        # our "off") — the POCO must halt itself. SLEEP: the box stopped waking
+        # the POCO until ACC rises or a "wake" command. Mirror the state.
         logger.warning("Powerbox %s: %s", msg, data.get("reason", ""))
         return [SetPowerboxPowerStatusAction(pm_state=msg.lower())]
+
+    if msg == "ERROR":
+        logger.warning("Powerbox ERROR %s: %s", data.get("code"), data.get("detail", ""))
+        return []
 
     ack = data.get("ack")
     if ack:
@@ -314,10 +386,12 @@ POWERBOX_LOCAL_SYSTEM = 0
 
 
 def build_power_off_command(reason: str = "undervoltage", grace_s: int = 30) -> OutgoingCommand:
-    """Command the powerbox to shut down (and ultimately suicide) POCO power.
+    """Tell the powerbox the POCO is shutting itself down.
 
-    ``grace_s`` gives the OS time to shut down cleanly before the powerbox drops
-    the master rail (OUT1).
+    Since firmware 2.0 the box cannot cut power: on "off" it stops waking the
+    POCO (state "shutdown", then "sleep" once the heartbeat is gone or
+    ``grace_s`` elapsed) until ACC rises again or a "wake" command arrives.
+    The caller is responsible for the actual OS halt.
     """
     return OutgoingCommand(
         device_id=POWERBOX_LOCAL_SYSTEM,
@@ -337,33 +411,67 @@ def build_heartbeat_command(counter: int) -> OutgoingCommand:
     )
 
 
-def build_out_command(channel: int, on: bool) -> OutgoingCommand:
-    """Set a controllable rail: OUT2 (RS485 satellites) or OUT3 (spare).
-
-    OUT1 (master rail) is intentionally not controllable this way — it is only
-    dropped by the powerbox's own shutdown/suicide path.
-    """
+def build_wake_command(poco: int = 1) -> OutgoingCommand:
+    """Leave the powerbox "sleep" state and re-arm the main POCO wake ladder
+    (``poco=1``), or press the secondary's power-on hold (``poco=2``)."""
     return OutgoingCommand(
         device_id=POWERBOX_LOCAL_SYSTEM,
         command_type="power",
-        payload={"a": "out", "ch": int(channel), "on": bool(on)},
-        priority=50,
+        payload={"a": "wake", "poco": 2 if int(poco) == 2 else 1},
+        priority=60,
+    )
+
+
+def build_poco2_alive_command(alive: bool) -> OutgoingCommand:
+    """Report the secondary POCO's liveness to the powerbox (echoed in STATUS
+    ``p2``; the box never presses the secondary on its own)."""
+    return OutgoingCommand(
+        device_id=POWERBOX_LOCAL_SYSTEM,
+        command_type="power",
+        payload={"a": "p2", "alive": bool(alive)},
+        priority=10,
     )
 
 
 def build_relay_command(channel: int, on: bool) -> OutgoingCommand:
-    """Set a USB-port VBUS relay (ch 1-4 on the PCF8574 expander).
+    """Set a relay-board LOAD channel (ch 2-8 on the PCF8574 expander).
 
-    Channel map (bring-up 2026-08-01): ch4 = gateway (socket 2), ch3 = MFD Pi
-    (socket 3), ch2 = RTL-SDR (socket 4), ch1 = spare. The link is lossy —
-    callers must verify against the ``rly`` STATUS telemetry and retry
-    (see backend.port_power.RelayPortPower).
+    Channel map (fw >= 2.1, board relay N = channel N): ch2 = MFD Pi, ch3 =
+    CAN hub (gateway + comma.ai panda), ch4 = camera hub (dashcam), ch5 =
+    RS485 satellite power, ch6 = secondary POCO hub (reserved), ch7/8 spare.
+    ch1 is the powerbox's own NC restart relay: refused here (ValueError) and
+    by the firmware; see :func:`build_hard_restart_command`. The link is
+    lossy — callers must verify against the ``rly`` STATUS telemetry and
+    retry (see backend.port_power.RelayPortPower).
+    """
+    channel = int(channel)
+    if channel == RELAY_CH_RESTART:
+        raise ValueError("relay ch%d is the powerbox restart relay, not a load; "
+                         "use build_hard_restart_command()" % channel)
+    if not 1 <= channel <= RELAY_CHANNELS:
+        raise ValueError("relay channel out of range: %d" % channel)
+    return OutgoingCommand(
+        device_id=POWERBOX_LOCAL_SYSTEM,
+        command_type="power",
+        payload={"a": "relay", "ch": channel, "on": bool(on)},
+        priority=50,
+    )
+
+
+def build_hard_restart_command() -> OutgoingCommand:
+    """Hard-restart the powerbox via its NC self-supply relay (fw >= 2.1).
+
+    The firmware acks ``hard_restart``, then energises relay 1 and loses its
+    own power; USB drops ~0.4 s later and the next STATUS arrives ~5 s after
+    the command. Relay VCC is the RP2040's 5 V, so every NO relay (MFD Pi,
+    CAN hub, camera hub) drops too and comes back OFF — the service
+    re-asserts wanted states on the POWERBOX_READY banner.
     """
     return OutgoingCommand(
         device_id=POWERBOX_LOCAL_SYSTEM,
         command_type="power",
-        payload={"a": "relay", "ch": int(channel), "on": bool(on)},
-        priority=50,
+        payload={"a": "hard_restart"},
+        priority=100,
     )
 
 
@@ -386,7 +494,7 @@ def build_pmlog_command() -> OutgoingCommand:
     """Ask the firmware to dump its power-event ring buffer (fw >= 1.15.0).
 
     The reply is an ID_SYSTEM ``PMLOG`` message carrying the boot / button /
-    shutdown / suicide timeline the host could not observe live (it was OFF
+    shutdown / sleep timeline the host could not observe live (it was OFF
     during the cold boot). Logged by :func:`parse_powerbox_system`.
     """
     return OutgoingCommand(
@@ -397,26 +505,27 @@ def build_pmlog_command() -> OutgoingCommand:
     )
 
 
-def build_button_command(ms: int = 3000) -> OutgoingCommand:
-    """Pulse the POCO power button: ~3000 ms = power on, ~10000 ms = force reboot."""
+def build_button_command(ms: int = BUTTON_POWER_ON_MS, poco: int = 1) -> OutgoingCommand:
+    """Pulse a POCO power button: ``poco`` 1 = main (GP27), 2 = secondary
+    (not wired in fw 2.1 — the firmware answers ERROR POCO2_NC and does not
+    press; see POCO2_BUTTON_CONNECTED). BUTTON_POWER_ON_MS boots an off
+    phone, BUTTON_FORCE_MS resets a frozen one."""
     return OutgoingCommand(
         device_id=POWERBOX_LOCAL_SYSTEM,
         command_type="power",
-        payload={"a": "button", "ms": int(ms)},
+        payload={"a": "button", "poco": 2 if int(poco) == 2 else 1, "ms": int(ms)},
         priority=60,
     )
 
 
-def build_fan_command(pin: int, duty: int, freq: int = 25000) -> OutgoingCommand:
-    """Set the chassis fan PWM duty cycle.
-
-    ``pin`` is the RP2040 GPIO driving the fan MOSFET (14 for the chassis fan).
-    ``duty`` is the raw duty_u16 value (0-65535).
-    """
+def build_fan_command(pct: float) -> OutgoingCommand:
+    """Set the chassis fan speed in percent (fw >= 2.1: 25 kHz 4-wire PWM on
+    GP29, NOT inverted — GPIO duty = fan duty; 0 % stops the fan)."""
+    pct = max(0, min(100, int(round(float(pct)))))
     return OutgoingCommand(
         device_id=POWERBOX_LOCAL_SYSTEM,
         command_type="power",
-        payload={"a": "fan", "pin": int(pin), "duty": int(duty), "freq": int(freq)},
+        payload={"a": "fan", "pct": pct},
         priority=20,
     )
 
@@ -450,16 +559,33 @@ class PowerboxCommander:
     def send_heartbeat(self, counter: int) -> bool:
         return self._send(build_heartbeat_command(counter), "heartbeat")
 
-    def set_out(self, channel: int, on: bool) -> bool:
-        return self._send(build_out_command(channel, on),
-                          "out%d=%s" % (channel, "on" if on else "off"), warn=True)
-
     def set_relay(self, channel: int, on: bool) -> bool:
-        return self._send(build_relay_command(channel, on),
-                          "relay%d=%s" % (channel, "on" if on else "off"), warn=True)
+        try:
+            cmd = build_relay_command(channel, on)
+        except ValueError as exc:
+            logger.error("Powerbox relay command refused: %s", exc)
+            return False
+        return self._send(cmd, "relay%d=%s" % (int(channel), "on" if on else "off"),
+                          warn=True)
 
-    def press_button(self, ms: int = 3000) -> bool:
-        return self._send(build_button_command(ms), "power-button %dms" % ms, warn=True)
+    def set_rs485_power(self, on: bool) -> bool:
+        """RS485 satellite rail = relay RELAY_CH_RS485."""
+        return self.set_relay(RELAY_CH_RS485, on)
+
+    def hard_restart(self) -> bool:
+        """Cut the powerbox's own supply (restart relay). Drops every NO relay."""
+        return self._send(build_hard_restart_command(), "hard_restart", warn=True)
+
+    def press_button(self, ms: int = BUTTON_POWER_ON_MS, poco: int = 1) -> bool:
+        return self._send(build_button_command(ms, poco),
+                          "power-button poco%d %dms" % (poco, ms), warn=True)
+
+    def wake(self, poco: int = 1) -> bool:
+        return self._send(build_wake_command(poco), "wake poco%d" % poco, warn=True)
+
+    def report_poco2_alive(self, alive: bool) -> bool:
+        return self._send(build_poco2_alive_command(alive),
+                          "p2 alive=%s" % alive)
 
     def request_i2c_scan(self) -> bool:
         return self._send(build_i2c_scan_command(), "i2c_scan", warn=True)
@@ -467,9 +593,8 @@ class PowerboxCommander:
     def request_pmlog(self) -> bool:
         return self._send(build_pmlog_command(), "getlog", warn=True)
 
-    def set_fan(self, pin: int, duty: int, freq: int = 25000) -> bool:
-        return self._send(build_fan_command(pin, duty, freq),
-                          "fan pin%d duty=%d freq=%d" % (pin, duty, freq))
+    def set_fan(self, pct: float) -> bool:
+        return self._send(build_fan_command(pct), "fan %.0f%%" % float(pct))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

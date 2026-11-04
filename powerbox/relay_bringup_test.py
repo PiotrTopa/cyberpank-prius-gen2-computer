@@ -13,9 +13,12 @@ Usage:
     sudo chmod a+rw /dev/ttyACM0        # reset on re-enumeration
     nohup python3 relay_bringup_test.py daemon >/tmp/relay-daemon.out 2>&1 &
 
-    python3 relay_bringup_test.py cmd 1 on     # energise relay ch1
-    python3 relay_bringup_test.py cmd 1 off
+    python3 relay_bringup_test.py cmd 2 on     # power relay ch2 (MFD Pi)
+    python3 relay_bringup_test.py cmd 2 off
     python3 relay_bringup_test.py cmd whoami   # any bare action word
+    python3 relay_bringup_test.py cmd hard_restart  # fw 2.1: cut the box's
+                                               # own supply (relay 1, NC);
+                                               # "cmd 1 on" is REFUSED
     python3 relay_bringup_test.py cmd quit     # stop the daemon
 
     tail -f /tmp/relay-log                     # acks / errors / rly changes

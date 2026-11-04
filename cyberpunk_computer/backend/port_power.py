@@ -2,13 +2,22 @@
 USB hub port power control — one abstraction over the two very different ways
 this car powers a hub socket on and off.
 
-Topology (ActionStar 2101:8500 hub ``1-1``; bring-up verified 2026-08-01):
+Topology (ActionStar 2101:8500 hub ``1-1``; relay numbers per the 2026-11-03
+board, powerbox/RELAY-CHANGE-PLAN.md: board relay N = firmware channel N):
 
-    socket 1 -> internal port 5 : POWERBOX  — the only socket with real
+    socket 1 -> internal port 5 : POWERBOX   — the only socket with real
                 native per-port VBUS switching (uhubctl PPPS)
-    socket 2 -> internal port 2 : GATEWAY   — VBUS via relay ch4
-    socket 3 -> internal port 3 : MFD PI    — VBUS via relay ch3
-    socket 4 -> internal port 4 : RTL-SDR   — VBUS via relay ch2
+    socket 2 -> internal port 2 : GATEWAY    — 12 V via relay ch3 = the CAN
+                hub that carries the gateway AND the comma.ai panda (one port)
+    socket 3 -> internal port 3 : MFD PI     — 12 V via relay ch2
+    socket 4 -> internal port 4 : CAMERA HUB — 12 V via relay ch4 (VIA hub,
+                fvision dashcam / aux devices)
+    relay ch1 (NC) is the powerbox's OWN supply = hard restart; never a port.
+    relay ch5 is the RS485 satellite rail (state/rules/satellite_power.py).
+
+The internal data-port numbers above are the pre-rework socket positions;
+verify them with ``uhubctl`` after the rewiring and override via
+PortPowerConfig if a device moved sockets.
 
 Two controller flavours:
 
@@ -45,6 +54,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Sequence
 
+from ..state.app_state import (
+    RELAY_CH_CAM_HUB,
+    RELAY_CH_CAN_HUB,
+    RELAY_CH_MFD,
+    RELAY_CH_RESTART,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -53,12 +69,13 @@ class PortPowerConfig:
     """Static description of the hub power topology (defaults = current car)."""
     hub: str = "1-1"                # hub location for uhubctl / sysfs
     powerbox_port: int = 5          # native-PPS internal port (powerbox socket)
-    gateway_relay_ch: int = 4
+    gateway_relay_ch: int = RELAY_CH_CAN_HUB   # CAN hub: gateway + panda
     gateway_data_port: int = 2      # internal hub port carrying the gateway
-    mfd_relay_ch: int = 3
+    mfd_relay_ch: int = RELAY_CH_MFD
     mfd_data_port: int = 3
-    sdr_relay_ch: int = 2
-    sdr_data_port: int = 4
+    camera_relay_ch: int = RELAY_CH_CAM_HUB    # VIA hub: dashcam / aux
+    camera_data_port: int = 4
+    restart_relay_ch: int = RELAY_CH_RESTART   # never a port (guarded)
 
 
 def _default_runner(cmd, timeout=10):
@@ -171,8 +188,12 @@ class RelayPortPower:
         clock: Callable[[], float] = time.monotonic,
         telemetry_fresh: Optional[Callable[[], bool]] = None,
     ) -> None:
+        if int(relay_ch) == RELAY_CH_RESTART:
+            raise ValueError(
+                "relay ch%d is the powerbox's own restart relay and cannot back a "
+                "port (%s)" % (relay_ch, name))
         self.name = name
-        self.relay_ch = relay_ch
+        self.relay_ch = int(relay_ch)
         self.hub = hub
         self.data_port = data_port
         self._send_relay = send_relay
@@ -314,11 +335,16 @@ class RelayPortPower:
 
 @dataclass
 class HubPortPower:
-    """The car's full set of port power controllers, built from one config."""
+    """The car's full set of port power controllers, built from one config.
+
+    ``gateway`` is the CAN hub (relay ch3): switching it switches the gateway
+    AND the comma.ai panda together. ``camera`` is the VIA hub (relay ch4)
+    with the dashcam. ``mfd`` is the Pi Zero (relay ch2).
+    """
     powerbox: UhubctlPortPower
     gateway: RelayPortPower
     mfd: RelayPortPower
-    sdr: RelayPortPower
+    camera: RelayPortPower
 
     @classmethod
     def build(
@@ -329,6 +355,13 @@ class HubPortPower:
         runner: Optional[Callable] = None,
         telemetry_fresh: Optional[Callable[[], bool]] = None,
     ) -> "HubPortPower":
+        chans = (config.gateway_relay_ch, config.mfd_relay_ch, config.camera_relay_ch)
+        if config.restart_relay_ch in chans:
+            raise ValueError("PortPowerConfig assigns the powerbox restart relay "
+                             "(ch%d) to a port" % config.restart_relay_ch)
+        if len(set(chans)) != len(chans):
+            raise ValueError("PortPowerConfig assigns one relay to two ports: %r" % (chans,))
+
         def relay(name: str, ch: int, data_port: int) -> RelayPortPower:
             return RelayPortPower(
                 name, ch, config.hub, data_port,
@@ -339,12 +372,34 @@ class HubPortPower:
             powerbox=UhubctlPortPower(config.hub, config.powerbox_port, runner=runner),
             gateway=relay("gateway", config.gateway_relay_ch, config.gateway_data_port),
             mfd=relay("mfd", config.mfd_relay_ch, config.mfd_data_port),
-            sdr=relay("sdr", config.sdr_relay_ch, config.sdr_data_port),
+            camera=relay("camera", config.camera_relay_ch, config.camera_data_port),
         )
 
+    @property
+    def relay_ports(self) -> tuple:
+        return (self.gateway, self.mfd, self.camera)
+
     def enforce_all(self) -> None:
-        for c in (self.gateway, self.mfd, self.sdr):
+        for c in self.relay_ports:
             try:
                 c.enforce()
             except Exception:
                 logger.exception("Port power enforce failed (%s)", c.name)
+
+    def reassert_all(self) -> int:
+        """Re-send every recorded desired state unconditionally.
+
+        Called after a powerbox boot banner: the PCF8574 woke at 0xFF, so
+        every NO load is OFF regardless of what the (now stale) ``rly`` mirror
+        said. Returns the number of ports re-applied.
+        """
+        n = 0
+        for c in self.relay_ports:
+            if c.desired is None:
+                continue
+            try:
+                c._apply(c.desired)
+                n += 1
+            except Exception:
+                logger.exception("Port power re-assert failed (%s)", c.name)
+        return n

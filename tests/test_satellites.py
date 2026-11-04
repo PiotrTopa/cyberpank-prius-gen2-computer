@@ -1,5 +1,5 @@
 """
-Tests for the RS485 satellite subsystem: OUT2 wake-lock power rules, the
+Tests for the RS485 satellite subsystem: rail (relay ch5) wake-lock power rules, the
 priority job queue (FIFO within priority), presence tracking and the
 config-re-push supervisor.
 """
@@ -34,6 +34,14 @@ from cyberpunk_computer.backend.satellites import (
     SatelliteSupervisor,
     command_job,
 )
+
+
+def rly(rs485: bool, n: int = 8) -> tuple:
+    """Relay-board mirror with only the RS485 channel (ch5) set."""
+    from cyberpunk_computer.state.app_state import RELAY_CH_RS485
+    r = [False] * n
+    r[RELAY_CH_RS485 - 1] = rs485
+    return tuple(r)
 
 
 class FakeClock:
@@ -123,7 +131,7 @@ class TestSatellitePowerRule:
         store = make_store()
         clock = FakeClock()
         calls = []
-        rule = SatellitePowerRule(set_out2=calls.append, linger_s=10.0, clock=clock)
+        rule = SatellitePowerRule(set_rail=calls.append, linger_s=10.0, clock=clock)
 
         # Acquire -> ON immediately.
         old = store.state
@@ -158,7 +166,7 @@ class TestSatellitePowerRule:
         store = make_store()
         clock = FakeClock()
         calls = []
-        rule = SatellitePowerRule(set_out2=calls.append, linger_s=10.0,
+        rule = SatellitePowerRule(set_rail=calls.append, linger_s=10.0,
                                   retry_s=5.0, clock=clock)
 
         old = store.state
@@ -167,7 +175,7 @@ class TestSatellitePowerRule:
         assert calls == [True]
 
         # Powerbox says OUT2 is off (e.g. rebooted) -> re-send after retry_s.
-        store.dispatch(SetPowerboxPowerStatusAction(out2=False))
+        store.dispatch(SetPowerboxPowerStatusAction(relays=rly(rs485=False)))
         run_rule(rule, store, store.state)
         assert calls == [True]  # within retry window: no spam
         clock.advance(6.0)
@@ -177,9 +185,9 @@ class TestSatellitePowerRule:
     def test_gateway_bonded_to_rail_edges_only(self):
         store = make_store()
         clock = FakeClock()
-        out2_calls = []
+        rail_calls = []
         gw_calls = []
-        rule = SatellitePowerRule(set_out2=out2_calls.append, linger_s=10.0,
+        rule = SatellitePowerRule(set_rail=rail_calls.append, linger_s=10.0,
                                   retry_s=5.0, clock=clock,
                                   set_gateway=gw_calls.append)
 
@@ -187,25 +195,25 @@ class TestSatellitePowerRule:
         old = store.state
         store.dispatch(SatellitePowerHoldAction("acc", acquire=True))
         run_rule(rule, store, old)
-        assert out2_calls == [True]
+        assert rail_calls == [True]
         assert gw_calls == [True]
 
         # Mirror-mismatch reassert re-sends OUT2 but NOT the gateway
         # (gateway convergence is owned by the backend enforcement poll).
-        store.dispatch(SetPowerboxPowerStatusAction(out2=False))
+        store.dispatch(SetPowerboxPowerStatusAction(relays=rly(rs485=False)))
         clock.advance(6.0)
         run_rule(rule, store, store.state)
-        assert out2_calls == [True, True]
+        assert rail_calls == [True, True]
         assert gw_calls == [True]
 
         # OFF edge after linger: both commanded off.
-        store.dispatch(SetPowerboxPowerStatusAction(out2=True))
+        store.dispatch(SetPowerboxPowerStatusAction(relays=rly(rs485=True)))
         old = store.state
         store.dispatch(SatellitePowerHoldAction("acc", acquire=False))
         run_rule(rule, store, old)
         clock.advance(11.0)
         run_rule(rule, store, store.state)
-        assert out2_calls == [True, True, False]
+        assert rail_calls == [True, True, False]
         assert gw_calls == [True, False]
 
 
@@ -221,7 +229,7 @@ def make_queue(store=None, port=None, clock=None):
 
 
 def rail_up(store):
-    store.dispatch(SetPowerboxPowerStatusAction(out2=True))
+    store.dispatch(SetPowerboxPowerStatusAction(relays=rly(rs485=True)))
 
 
 class TestSatelliteJobQueue:
@@ -263,7 +271,7 @@ class TestSatelliteJobQueue:
             start=lambda ctx: started.append(1),
         ))
         # Rail down, node offline -> must not start.
-        store.dispatch(SetPowerboxPowerStatusAction(out2=False))
+        store.dispatch(SetPowerboxPowerStatusAction(relays=rly(rs485=False)))
         for _ in range(3):
             queue.tick()
         assert not started
@@ -278,7 +286,7 @@ class TestSatelliteJobQueue:
 
     def test_ready_timeout_fails_job(self):
         queue, store, port, clock = make_queue()
-        store.dispatch(SetPowerboxPowerStatusAction(out2=False))
+        store.dispatch(SetPowerboxPowerStatusAction(relays=rly(rs485=False)))
         results = []
         queue.submit(SatelliteJob(
             name="doomed", start=lambda ctx: None,
@@ -400,7 +408,7 @@ class TestSatelliteSupervisor:
         queue, store, port, clock = make_queue()
         sup = SatelliteSupervisor(queue, store, offline_after_s=15.0)
         store.dispatch(UpdateSatelliteNodeAction(107, seen=True))
-        store.dispatch(SetPowerboxPowerStatusAction(out2=False))
+        store.dispatch(SetPowerboxPowerStatusAction(relays=rly(rs485=False)))
         sup.tick()
         assert not store.state.satellites.nodes[107].online
 
