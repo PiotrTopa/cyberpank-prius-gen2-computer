@@ -107,7 +107,7 @@ import pcf8574                      # PCF8574 driver + RelayBoard (pin map, NC, 
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-VERSION = "2.1.0"
+VERSION = "2.1.1"
 
 # Device role — reported in the unified identify ("whoami") response and the
 # ready banner so the computer can discover which USB-CDC port is the powerbox
@@ -184,7 +184,8 @@ RESTART_ACK_DELAY_MS = 300
 POCO1_BTN_PIN = 27
 POCO2_BTN_PIN = None
 POCO_BTN_PRESS_MS = 6000      # power-on hold (POCO F1 board: 3 s fails, 6 s boots)
-POCO_BTN_FORCE_MS = 35000     # forced hard power-cycle hold (POCO F1: ~30-40 s)
+POCO_BTN_FORCE_MS = 12000     # forced hard restart hold (POCO F1: 12 s = one clean
+                              # reboot; holding longer reboots it every ~8-10 s)
 POCO_BTN_MAX_MS = 40000
 
 # Secondary POCO: it has permanent power and is normally off. Its ACC-follower
@@ -241,9 +242,9 @@ POCO_BOOT_GRACE_MS = 20000
 POCO_WAKE_COOLDOWN_MS = 300000
 # Wake escalation: a power-on press only boots a POCO that is OFF. A POCO whose
 # SoC has FROZEN (kernel hang — observed 2x on 2026-07-10) ignores short presses;
-# only a long (~35 s) forced power-cycle recovers it. After this many wake
+# only a forced hard restart (12 s hold) recovers it. After this many wake
 # presses with no heartbeat recovery, one force press fires and the ladder
-# restarts with normal presses (a force press leaves an OFF phone off).
+# restarts with normal presses.
 POCO_WAKE_SHORT_TRIES = 2
 
 # Firmware-local under-voltage backstop. The backend's UndervoltageProtectionRule
@@ -929,8 +930,8 @@ class PowerManager:
         elif self.state == "normal" and self.poco_should_run:
             # Wake a dead main POCO with its button (after boot grace + cooldown).
             # Ladder: power-on presses boot an off POCO; if those never bring
-            # the heartbeat back the SoC is likely FROZEN and only a long forced
-            # power-cycle recovers it. The cooldown (5 min) exceeds the POCO's
+            # the heartbeat back the SoC is likely FROZEN and only a forced
+            # hard restart recovers it. The cooldown (5 min) exceeds the POCO's
             # boot -> first-heartbeat time so a booting phone is never pressed
             # again before it can report alive.
             past_boot = time.ticks_diff(now, self.boot_ms) >= self.boot_grace_ms
@@ -942,8 +943,8 @@ class PowerManager:
                     self._press(1, POCO_BTN_PRESS_MS, "wake")
                     self.wake_tries += 1
                 else:
-                    # Frozen-SoC recovery: long forced power-cycle. It leaves
-                    # the phone OFF, so restart the ladder with normal presses.
+                    # Frozen-SoC recovery: forced hard restart (the phone
+                    # reboots by itself), then the ladder starts over.
                     self._press(1, POCO_BTN_FORCE_MS, "force")
                     self.wake_tries = 0
 

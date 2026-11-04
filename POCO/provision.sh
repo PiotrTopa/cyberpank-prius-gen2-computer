@@ -39,7 +39,8 @@ done
 # Files that belong to the car network layer / the display, skipped by --core.
 is_noncore() {
     case "$1" in
-        etc/NetworkManager/*|etc/resolv.conf) return 0 ;;
+        etc/NetworkManager/*|etc/resolv.conf|etc/prius/sim-pin) return 0 ;;
+        etc/systemd/system/prius-sim-unlock.service|usr/local/sbin/prius-sim-unlock) return 0 ;;
         etc/systemd/system/prius-wifi.*|etc/systemd/system/prius-netwatch.*|etc/systemd/system/prius-clock-fallback.*) return 0 ;;
         etc/systemd/system/prius-blank.service|etc/systemd/system/backlight-off.service) return 0 ;;
         usr/local/sbin/prius-wifi|usr/local/sbin/prius-netwatch|usr/local/sbin/prius-clock-fallback|usr/local/sbin/prius-blankd) return 0 ;;
@@ -73,6 +74,7 @@ log "installing rootfs overlay from $SRC"
     case "$rel" in
         usr/local/sbin/*)                         mode=755 ;;
         etc/NetworkManager/system-connections/*)  mode=600 ;;
+        etc/prius/sim-pin)                        mode=600 ;;
         *)                                        mode=644 ;;
     esac
     install -D -m "$mode" -o root -g root "$SRC/$rel" "$dst"
@@ -89,7 +91,7 @@ done
 
 # --- 3. seed flag files (create-if-missing; never clobber live state) ---------
 mkdir -p /etc/prius
-for kv in power-mode:full wifi-mode:off usb-mode:host; do
+for kv in power-mode:full wifi-mode:ap usb-mode:host; do
     k=${kv%%:*}; v=${kv#*:}
     if [ ! -f "/etc/prius/$k" ]; then
         echo "$v" > "/etc/prius/$k"
@@ -141,6 +143,19 @@ BACKEND_ROADSENSE_ENABLED=1
 BACKEND_ROADSENSE_API_PORT=8090
 BACKEND_ROADSENSE_GRACE_S=30
 BACKEND_ROADSENSE_MODE=auto
+
+# USB topology (main hub 1-1 = Terminus 1a40:0101, 4 ports, cabled 2026-11-04):
+# port 1 powerbox, port 2 MFD Pi (relay ch2), port 3 CAN hub with the gateway +
+# panda (relay ch3), port 4 VIA camera hub (relay ch4). The gateway sits one
+# hub level down, so it is found by whoami probing (fallback), not by port.
+BACKEND_HUB=1-1
+BACKEND_USB_PORT_ROLES=1:powerbox
+BACKEND_USB_PROBE_FALLBACK=1
+BACKEND_PP_POWERBOX_PORT=1
+BACKEND_PP_MFD_PORT=2
+BACKEND_PP_GATEWAY_PORT=3
+BACKEND_PP_CAMERA_PORT=4
+BACKEND_MFD_PORT=2
 EOF
     log "seeded /etc/prius/backend.env"
 fi
@@ -148,6 +163,9 @@ fi
 # --- 4. activate systemd units + NetworkManager ------------------------------
 log "reloading systemd + enabling units"
 systemctl daemon-reload
+# CPU/memory layout (prius.slice on cpu3; roadsense/system/user slices off it):
+# slices pick up AllowedCPUs on daemon-reload; services move into prius.slice
+# at their next (re)start.
 
 # Firewall: the overlay ships /etc/nftables.d/50_prius_backend.nft (8080-8082);
 # pmOS loads nftables with policy drop, so reload it when it is running.
@@ -168,8 +186,9 @@ if [ "$CORE" = 1 ]; then
     PATHS="prius-power.path"
 else
     UNITS="prius-power.service prius-power.path prius-wifi.service prius-wifi.path \
-           prius-netwatch.service prius-netwatch.timer prius-backend.service backlight-off.service"
-    PATHS="prius-power.path prius-wifi.path prius-netwatch.timer"
+           prius-netwatch.service prius-netwatch.timer prius-backend.service backlight-off.service \
+           prius-clock-fallback.timer prius-sim-unlock.service"
+    PATHS="prius-power.path prius-wifi.path prius-netwatch.timer prius-clock-fallback.timer"
 fi
 for u in $UNITS; do
     systemctl enable "$u" >/dev/null 2>&1 || log "  (enable $u skipped)"

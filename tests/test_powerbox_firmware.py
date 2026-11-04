@@ -310,7 +310,7 @@ def _cmd(fw, payload, cfg):
 
 class TestCommandSurface:
     def test_version_bumped(self, fw):
-        assert fw.main.VERSION == "2.1.0"
+        assert fw.main.VERSION == "2.1.1"
 
     def test_relay_command_sets_load_channels(self, fw, pm):
         with Recorder(fw) as rec:

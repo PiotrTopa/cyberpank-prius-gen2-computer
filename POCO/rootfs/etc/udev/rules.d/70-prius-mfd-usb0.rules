@@ -1,0 +1,5 @@
+# MFD Pi USB Ethernet gadget (CDC ECM, host-side MAC fixed by the Pi's
+# usb-gadget-ecm.sh): always name it usb0, whatever the kernel/udev naming
+# policy would pick (enx021e4d000001). The backend (BACKEND_MFD_IFACE=usb0),
+# NetworkManager's unmanaged list and the nftables usb* accept rule rely on it.
+SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="02:1e:4d:00:00:01", NAME="usb0"

@@ -10,6 +10,8 @@ Surface (versioned under /api/v1), designed for the future Android dashboard:
     GET  /api/v1/metrics              time-series history (auto/raw/1m/1h/1d)
     GET  /api/v1/events               discrete power/vehicle events
     POST /api/v1/commands/{name}      send a command to the vehicle/twin
+    GET  /api/v1/roadsense[/...]      roadsense perception API front (see
+                                      api.roadsense_proxy; only when wired)
 
 All /api/v1 routes (and the WS) require a Bearer token when one is configured.
 Blocking SQLite reads run in a thread pool (per-thread connections) so the event
@@ -67,6 +69,7 @@ def create_app(
     db: MetricsDatabase,
     auth_token: Optional[str] = None,
     on_startup=None,
+    roadsense_url: Optional[str] = None,
 ) -> FastAPI:
     """Build the FastAPI app wired to the bridge and metrics database."""
     app = FastAPI(title="CyberPunk Prius Backend", version="1.0.0")
@@ -217,6 +220,19 @@ def create_app(
             logger.debug("WebSocket stream closed", exc_info=True)
         finally:
             bridge.unregister_client(client)
+
+    # ── roadsense front (same computer, loopback-only upstream) ─────────────
+
+    if roadsense_url:
+        from .roadsense_proxy import ProxyConfig, register as register_roadsense
+
+        register_roadsense(
+            app,
+            ProxyConfig(base_url=roadsense_url),
+            API_PREFIX + "/roadsense",
+            require_auth,
+            lambda ws: (not auth_token) or _ws_authorized(ws, auth_token),
+        )
 
     # ── dashboard ────────────────────────────────────────────────────────────
 

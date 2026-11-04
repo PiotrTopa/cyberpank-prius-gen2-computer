@@ -13,10 +13,15 @@ persistent-keepalive=25
 allowed-ips=10.200.0.0/24;192.168.0.0/24;
 
 [ipv4]
-address1=10.200.0.5/32
-dns=1.1.1.1;
-dns-search=~;
+address1=${WG_ADDRESS}
+# No DNS on the tunnel: resolved would send queries through wg, which is down
+# while the clock is stale (the hub drops back-dated handshakes) -> NTP cannot
+# resolve -> clock never fixes. DNS lives on the LTE link (prius-wan).
 method=manual
+# Above Wi-Fi (600) and LTE (800): on a home LAN the connected 192.168.0.0/24
+# route of wlan0 must win over the tunnel's AllowedIPs route, or replies to LAN
+# clients would leave through wg (and be dropped by the hub).
+route-metric=900
 
 [ipv6]
 addr-gen-mode=default

@@ -1,0 +1,16 @@
+[Unit]
+Description=Unlock the SIM PIN over QMI so LTE (prius-wan) can attach
+Documentation=file:///home/user/cyberpunk/POCO/NETWORKING.md
+After=ModemManager.service
+Wants=ModemManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# small helper: runs with the backend on its dedicated core
+Slice=prius.slice
+ExecStart=/usr/local/sbin/prius-sim-unlock
+TimeoutStartSec=240
+
+[Install]
+WantedBy=multi-user.target

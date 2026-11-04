@@ -46,9 +46,11 @@ always-on Linux machine mounted in the car. It:
   OTG serial listener. Power saving is done by scaling CPU instead (see [POWER.md](POWER.md)).
 - **No battery gauge / coulomb counting.** Battery is amputated; charge % is meaningless.
   We do not read or trust battery state.
-- **WAN = cellular SIM.** Wi-Fi is `off` in production, but a `prius-wifi` toggle can put the
-  single radio into **client** (join home Wi-Fi) or **AP** (serve SSID `prius`) mode on
-  demand without disturbing the SIM WAN or VPN. Remote access normally rides the SIM + VPN.
+- **WAN = cellular SIM.** Remote access rides LTE + WireGuard (`10.200.0.14`). Wi-Fi runs
+  the **AP** (SSID `prius`, `10.42.0.1`) by default; `prius-wifi client|off` changes the
+  single radio without disturbing the SIM WAN or VPN. DNS sits on the LTE link, never on
+  the tunnel: the RTC is not persisted, and the hub drops handshakes stamped earlier than
+  the last one, so the clock must be fixable (NTP) while the tunnel is still down.
 - **USB = OTG host only** (future): RP2040 IO board + AVC-LAN/CAN gateways behind a hub.
   ⚠️ Enabling host mode will drop the current USB lifeline to the build box — only do it
   once VPN-over-SIM is proven as the sole channel.

@@ -1,0 +1,19 @@
+[Unit]
+Description=Prius car computer: backend + small helpers on a dedicated core
+Documentation=file:///home/user/cyberpunk/POCO/ARCHITECTURE.md
+Before=slices.target
+
+[Slice]
+# The backend is the small, latency-critical application on this phone (50 Hz
+# engine loop, powerbox/gateway serial links, API). It gets cpu3 to itself:
+# a Silver core, so it stays online in every power profile (key-off `low`
+# offlines only cpu4-7). The roadsense stack (roadsense.slice) and the rest of
+# the system (system.slice, user.slice) are kept off cpu3 by the drop-ins
+# 50-prius-cpus.conf next to this file.
+AllowedCPUs=3
+CPUWeight=1000
+IOWeight=1000
+# Memory is capped per service (prius-backend.service MemoryMax=512M); this is
+# only a backstop for the whole group (backend + oneshot helpers).
+MemoryMax=640M
+TasksMax=256

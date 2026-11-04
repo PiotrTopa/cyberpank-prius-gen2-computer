@@ -1,0 +1,59 @@
+#!/bin/sh
+# prius-sim-unlock - verify the SIM PIN over QMI after boot so LTE can attach.
+#
+# Why not ModemManager/NetworkManager's PIN: on the POCO F1 the SIM sits in
+# physical slot 2 and MM's unlock addresses slot 1 (QMI 'Internal' error). The
+# provisioning session can be unlocked directly with qmicli; MM is restarted
+# afterwards so it re-reads the (now unlocked) card and NM's prius-wan
+# connection autoconnects.
+#
+# Safety: a wrong PIN burns one of 3 attempts. This script tries AT MOST ONCE
+# per boot, only when the card reports 'enabled-not-verified' with all 3
+# retries left, and never again after a failure (stamp in /run).
+#
+# PIN: /etc/prius/sim-pin (root-only, rendered by sync.sh from secrets.env).
+set -u
+PIN_FILE=/etc/prius/sim-pin
+DEV=${PRIUS_QMI_DEV:-qrtr://0}
+STAMP=/run/prius-sim-unlock.failed
+WAIT_S=${PRIUS_SIM_WAIT_S:-120}
+
+log() { echo "prius-sim-unlock: $*"; }
+
+[ -r "$PIN_FILE" ] || { log "no $PIN_FILE; nothing to do"; exit 0; }
+PIN=$(tr -d ' \t\r\n' < "$PIN_FILE")
+case "$PIN" in ''|0000|*[!0-9]*) log "no usable PIN in $PIN_FILE; nothing to do"; exit 0 ;; esac
+[ -e "$STAMP" ] && { log "an unlock already failed this boot; not retrying (protects the PIN counter)"; exit 1; }
+command -v qmicli >/dev/null 2>&1 || { log "qmicli missing"; exit 1; }
+
+status=""
+i=0
+while [ "$i" -lt "$WAIT_S" ]; do
+    status=$(timeout 20 qmicli -d "$DEV" --uim-get-card-status 2>/dev/null) && \
+        echo "$status" | grep -q "PIN1 state" && break
+    i=$((i + 5)); sleep 5
+done
+[ -n "$status" ] || { log "modem/UIM not reachable on $DEV after ${WAIT_S}s"; exit 1; }
+
+# The provisioning (Primary GW) application's PIN1 block.
+pin1=$(echo "$status" | sed -n "s/.*PIN1 state: '\([^']*\)'.*/\1/p" | head -1)
+retries=$(echo "$status" | sed -n "s/.*PIN1 retries: '\([0-9]*\)'.*/\1/p" | head -1)
+case "$pin1" in
+    enabled-verified|disabled) log "PIN1 $pin1; nothing to do"; exit 0 ;;
+    enabled-not-verified) ;;
+    *) log "unexpected PIN1 state '$pin1'; not touching the card"; exit 1 ;;
+esac
+if [ "${retries:-0}" -lt 3 ]; then
+    log "PIN1 has only ${retries:-?} retries left; refusing to try (unlock by hand)"
+    touch "$STAMP"; exit 1
+fi
+
+log "verifying PIN1 on the provisioning session"
+if timeout 30 qmicli -d "$DEV" --uim-verify-pin="PIN1,$PIN,session-type=primary-gw-provisioning" >/dev/null 2>&1; then
+    log "PIN1 verified; restarting ModemManager"
+    systemctl restart ModemManager.service || true
+    exit 0
+fi
+touch "$STAMP"
+log "PIN1 verification FAILED; not retrying this boot"
+exit 1

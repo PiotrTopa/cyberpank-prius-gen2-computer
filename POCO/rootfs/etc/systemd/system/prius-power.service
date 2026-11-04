@@ -3,6 +3,8 @@ Description=Apply Prius power profile from /etc/prius/power-mode
 After=multi-user.target
 
 [Service]
+# small helper: runs with the backend on its dedicated core
+Slice=prius.slice
 Type=oneshot
 ExecStart=/usr/local/sbin/prius-power apply
 

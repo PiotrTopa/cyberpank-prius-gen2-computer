@@ -571,6 +571,13 @@ class BackendService:
         bridge.on_state(twin.store.state)
 
 
+        # roadsense front: the backend re-publishes the stack's API (bound to
+        # loopback on this phone) under /api/v1/roadsense.
+        roadsense_url = None
+        if cfg.roadsense_enabled:
+            from .roadsense_power import RoadsenseConfig as _RsCfg
+            _rs = cfg.roadsense_config or _RsCfg()
+            roadsense_url = "http://%s:%d" % (_rs.api_host, _rs.api_port)
         api = ApiServer(
             bridge,
             db,
@@ -578,6 +585,7 @@ class BackendService:
             port=cfg.api_port,
             auth_token=cfg.auth_token,
             log_level="debug" if cfg.verbose else "info",
+            roadsense_url=roadsense_url,
         )
         
         zmq_srv = ZmqServer(

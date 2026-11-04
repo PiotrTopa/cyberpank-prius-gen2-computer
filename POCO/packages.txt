@@ -28,6 +28,8 @@ networkmanager-cli
 networkmanager-wifi
 networkmanager-wwan
 modemmanager
+libqmi
+# ^ qmicli: prius-sim-unlock (SIM in slot 2, MM cannot unlock it)
 wireguard-tools
 wpa_supplicant
 dnsmasq

@@ -5,6 +5,8 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+# small helper: runs with the backend on its dedicated core
+Slice=prius.slice
 Type=oneshot
 ExecStart=/usr/local/sbin/prius-clock-fallback
 StandardOutput=journal

@@ -49,7 +49,7 @@ converge the rest. The MFD manager recovers through its ON-state watchdog.
 - 0 % stops the fan completely; 5 % ≈ 255 RPM; 100 % ≈ 4680 RPM. Full duty→RPM map in `powerbox/README.md`.
 - GP29 undriven (bootloader, 3 s safe-boot) = fan at full speed; the firmware sets the PWM first thing in `main()`.
 
-**Main POCO power button:** **GP27**. Press = drive LOW; release = input, no pulls; never driven high (phone line ~1.8 V). 6 s hold boots from off (verified 2026-11-03). Press/force/wake semantics unchanged.
+**Main POCO power button:** **GP27**. Press = drive LOW; release = input, no pulls; never driven high (phone line ~1.8 V). 6 s hold boots from off (verified 2026-11-03). Force press = 12 s hold = one clean hard restart (fw 2.1.1; the former 35 s hold rebooted the phone ~4 times, verified 2026-11-04).
 
 **"poco 2" command slot:** there is no second POCO (the one POCO runs the backend and roadsense; decision 2026-11-04). The firmware keeps the slot but refuses it (`POCO2_BTN_PIN = None`; `button`/`wake` for poco 2 → `ERROR POCO2_NC`, no GPIO touched). Backend: `io.powerbox.POCO2_BUTTON_CONNECTED = False`, no manager behind it. The roadsense stack is started/stopped on this POCO by `backend/roadsense_power.py` (camera hub = relay ch4).
 

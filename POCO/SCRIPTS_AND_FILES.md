@@ -57,7 +57,7 @@ Details in [POWER.md](POWER.md).
 | NM conn `wg-homelab` | NetworkManager | brings up the WireGuard tunnel, autoconnect yes |
 | NM conn `prius-wan` | NetworkManager | SIM WAN, APN `internet`, `gsm.pin` (value in secrets.env), metric 800, autoconnect yes |
 | `/usr/local/sbin/prius-wifi` | sh script (755) | Wi-Fi mode toggle `prius-wifi {client\|ap\|off\|apply\|status}`. Never touches WAN/VPN |
-| `/etc/prius/wifi-mode` | flag file (664) | single source of truth: `client`/`ap`/`off`. Default `off` |
+| `/etc/prius/wifi-mode` | flag file (664) | single source of truth: `client`/`ap`/`off`. Default `ap` (hotspot; main access is LTE + WireGuard) |
 | `/etc/systemd/system/prius-wifi.service` | systemd oneshot (enabled) | runs `prius-wifi apply` on boot/trigger |
 | `/etc/systemd/system/prius-wifi.path` | systemd path (enabled) | watches `/etc/prius/wifi-mode`, triggers the service on change |
 | NM conn `prius-home-wifi` | NetworkManager | Wi-Fi client (SSID `in_the_center_of_nowhere`), metric 600, **autoconnect no** (toggle) |

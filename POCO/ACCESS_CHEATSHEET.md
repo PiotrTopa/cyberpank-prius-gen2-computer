@@ -35,8 +35,8 @@ echo low  | sudo tee /etc/prius/power-mode
 
 ```bash
 sudo prius-wifi client     # join home Wi-Fi (SSID in_the_center_of_nowhere)
-sudo prius-wifi ap         # become access point (SSID 'prius', 2.4 GHz, 10.42.0.1/24)
-sudo prius-wifi off        # radio off (production default)
+sudo prius-wifi ap         # become access point (SSID 'prius', 2.4 GHz, 10.42.0.1/24) (default)
+sudo prius-wifi off        # radio off
 sudo prius-wifi status     # show current mode + wlan0 state
 
 # flag-only (systemd path watcher applies):

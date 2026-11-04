@@ -23,7 +23,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
-PHONE="${PHONE:-user@10.200.0.5}"
+PHONE="${PHONE:-user@10.200.0.5}"   # car POCO: PHONE=user@192.168.0.86 (Wi-Fi) or its WG address
 APP_DEST="${APP_DEST:-/home/user/cyberpunk}"
 SSH_OPTS="${SSH_OPTS:--o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new}"
 
@@ -77,6 +77,8 @@ elif [ -f "$SECRETS" ]; then
     sed 's/\r$//' "$SECRETS" > "$SECRETS_CLEAN"
     # shellcheck disable=SC1090
     set -a; . "$SECRETS_CLEAN"; set +a
+    # Per-device WireGuard address (the old car POCO was 10.200.0.5/32).
+    export WG_ADDRESS="${WG_ADDRESS:-10.200.0.5/32}"
 else
     echo "ERROR: $SECRETS missing — copy secrets.env.example and fill it in (or use --core)" >&2; exit 1
 fi
@@ -141,6 +143,16 @@ if [ "$DO_APP" = 1 ]; then
         "$REPO_ROOT/cyberpunk_computer/" "$PHONE:$APP_DEST/cyberpunk_computer/" </dev/null
     # shellcheck disable=SC2086
     scp $SSH_OPTS "$REPO_ROOT/requirements.txt" "$PHONE:$APP_DEST/requirements.txt" </dev/null
+    # Dashboard (built on the dev box: `cd dashboard && npm ci && npm run build`);
+    # the backend serves $APP_DEST/dashboard/dist at / when it exists.
+    if [ -f "$REPO_ROOT/dashboard/dist/index.html" ]; then
+        # shellcheck disable=SC2086
+        ssh -n $SSH_OPTS "$PHONE" "mkdir -p $APP_DEST/dashboard/dist"
+        rsync -rlpt --delete -e "ssh $SSH_OPTS" \
+            "$REPO_ROOT/dashboard/dist/" "$PHONE:$APP_DEST/dashboard/dist/" </dev/null
+    else
+        echo "sync: dashboard/dist not built; skipping the dashboard"
+    fi
     # shellcheck disable=SC2086
     rsudo "/usr/local/sbin/prius-backend ensure-venv && systemctl restart prius-backend.service"
 fi

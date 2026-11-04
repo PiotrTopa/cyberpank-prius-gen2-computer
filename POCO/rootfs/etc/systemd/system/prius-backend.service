@@ -18,12 +18,18 @@ ExecStart=/usr/local/sbin/prius-backend run
 Restart=always
 RestartSec=5
 
-# Single computer: the roadsense perception stack (roadsense.slice, CPUWeight
-# 100, Nice -5 daemons pinned to the big cores) shares this phone. Keep the
-# 50 Hz engine loop, the serial links and the API responsive under that load.
+# Single computer: the roadsense perception stack (roadsense.slice) shares
+# this phone. The backend runs in prius.slice on its own core (cpu3, online in
+# every power profile; roadsense/system/user slices are kept off it) and is the
+# small application here: capped at 512 MB (reclaim pressure from 448 MB),
+# protected from reclaim below 160 MB when roadsense fills the RAM.
+Slice=prius.slice
 CPUWeight=1000
 IOWeight=1000
 Nice=-10
+MemoryLow=160M
+MemoryHigh=448M
+MemoryMax=512M
 
 StandardOutput=journal
 StandardError=journal

@@ -8,6 +8,8 @@ apn=internet
 pin=${SIM_PIN}
 
 [ipv4]
+# The carrier pushes no DNS; NTP and the HTTPS clock fallback need it.
+dns=1.1.1.1;9.9.9.9;
 method=auto
 route-metric=800
 

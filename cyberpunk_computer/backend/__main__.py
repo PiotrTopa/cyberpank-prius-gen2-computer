@@ -110,6 +110,41 @@ def _build_roadsense():
     )
 
 
+def _env_flag(name: str, default: str = "0") -> bool:
+    return (os.environ.get(name, default) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _build_port_power():
+    """Hub socket topology from env (None -> PortPowerConfig defaults)::
+
+        BACKEND_HUB=1-1                  # main hub location (also restricts discovery)
+        BACKEND_PP_POWERBOX_PORT=5       # main-hub port of the powerbox (native PPPS)
+        BACKEND_PP_GATEWAY_PORT=2        # main-hub port of the CAN hub (relay ch3)
+        BACKEND_PP_MFD_PORT=3            # main-hub port of the MFD Pi (relay ch2)
+        BACKEND_PP_CAMERA_PORT=4         # main-hub port of the camera hub (relay ch4)
+
+    Only keys that are set override the defaults; nothing set -> ``None``.
+    """
+    keys = {
+        "powerbox_port": "BACKEND_PP_POWERBOX_PORT",
+        "gateway_data_port": "BACKEND_PP_GATEWAY_PORT",
+        "mfd_data_port": "BACKEND_PP_MFD_PORT",
+        "camera_data_port": "BACKEND_PP_CAMERA_PORT",
+    }
+    kw = {}
+    for field_name, var in keys.items():
+        raw = (os.environ.get(var) or "").strip()
+        if raw:
+            kw[field_name] = int(raw)
+    hub = (os.environ.get("BACKEND_HUB") or "").strip()
+    if not kw and not hub:
+        return None
+    from .port_power import PortPowerConfig
+    if hub:
+        kw["hub"] = hub
+    return PortPowerConfig(**kw)
+
+
 def _build_dashcam() -> dict:
     """Dashcam vision config from env (io.dashcam_ingest; disabled by default):
 
@@ -175,6 +210,10 @@ def _build_config(args: argparse.Namespace) -> BackendConfig:
         usb_hotplug=not args.no_usb_hotplug,
         usb_hub=args.usb_hub or os.environ.get("BACKEND_HUB"),
         usb_port_roles=parse_port_roles(args.usb_port_roles or os.environ.get("BACKEND_USB_PORT_ROLES")),
+        # whoami probing for roles the hub-port map does not cover (e.g. the
+        # gateway behind the CAN hub, one hub level down).
+        usb_probe_fallback=_env_flag("BACKEND_USB_PROBE_FALLBACK"),
+        port_power_config=_build_port_power(),
         serial_baudrate=args.baudrate,
         api_host=args.api_host,
         api_port=args.api_port,

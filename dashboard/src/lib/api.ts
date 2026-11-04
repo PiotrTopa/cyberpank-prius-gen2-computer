@@ -1,8 +1,8 @@
 export const WS_URL = import.meta.env.DEV
-  ? 'ws://10.200.0.5:8080/api/v1/stream'
+  ? 'ws://10.200.0.14:8080/api/v1/stream'
   : `ws://${window.location.host}/api/v1/stream`;
 
-export const API_URL = import.meta.env.DEV ? 'http://10.200.0.5:8080/api/v1' : `/api/v1`;
+export const API_URL = import.meta.env.DEV ? 'http://10.200.0.14:8080/api/v1' : `/api/v1`;
 
 import { toast } from './toast';
 

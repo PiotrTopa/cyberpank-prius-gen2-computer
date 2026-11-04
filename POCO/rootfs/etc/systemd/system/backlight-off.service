@@ -3,7 +3,7 @@ Description=Turn off display backlight (headless box)
 After=multi-user.target systemd-backlight@backlight:backlight.service
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c "echo 0 > /sys/class/backlight/backlight/brightness"
+ExecStart=/bin/sh -c "for b in /sys/class/backlight/*/brightness; do [ -w \"$$b\" ] && echo 0 > \"$$b\"; done; exit 0"
 RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
