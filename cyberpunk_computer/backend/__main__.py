@@ -200,6 +200,24 @@ def _build_recording(args: argparse.Namespace) -> RecordingConfig:
     )
 
 
+def _build_fan_policy(args: argparse.Namespace):
+    """Chassis fan policy: the defaults live in backend/fan_policy.py (derived
+    in docs/THERMAL_MODEL.md); each --fan-* flag overrides one number."""
+    from dataclasses import replace
+    from .fan_policy import FanPolicyConfig
+    cfg = FanPolicyConfig()
+
+    def pick(prefix):
+        keys = ("on", "off", "full", "min_pct", "max_pct")
+        names = ("on_c", "off_c", "full_c", "min_pct", "max_pct")
+        vals = ((n, getattr(args, "fan_%s_%s" % (prefix, k))) for n, k in zip(names, keys))
+        return {n: v for n, v in vals if v is not None}
+
+    top = {k: v for k, v in (("safety_ctrl_c", args.fan_safety_temp), ("tau_s", args.fan_tau))
+           if v is not None}
+    return replace(cfg, full=replace(cfg.full, **pick("full")), low=replace(cfg.low, **pick("low")), **top)
+
+
 def _build_config(args: argparse.Namespace) -> BackendConfig:
     mfd_enabled, mfd_config = _build_mfd()
     roadsense_enabled, roadsense_config = _build_roadsense()
@@ -236,13 +254,7 @@ def _build_config(args: argparse.Namespace) -> BackendConfig:
         local_poweroff_on_undervoltage=not args.no_local_poweroff,
         powerbox_auto_recover=args.powerbox_auto_recover,
         powerbox_stale_s=args.powerbox_stale_s,
-        fan_full_start_delta=args.fan_full_start_delta,
-        fan_full_stop_delta=args.fan_full_stop_delta,
-        fan_full_max_pct=args.fan_full_max_pct,
-        fan_full_ramp_range=args.fan_full_ramp_range,
-        fan_safety_temp=args.fan_safety_temp,
-        fan_ema_alpha_up=args.fan_ema_alpha_up,
-        fan_ema_alpha_down=args.fan_ema_alpha_down,
+        fan_policy=_build_fan_policy(args),
         mfd_enabled=mfd_enabled,
         mfd_config=mfd_config,
         roadsense_enabled=roadsense_enabled,
@@ -422,15 +434,24 @@ def main() -> None:
         help="enable powerbox auto-recovery (force MCU reset via DTR toggle)",
     )
     
-    # Chassis Fan Configuration
-    fan = parser.add_argument_group("chassis fan")
-    fan.add_argument("--fan-full-start-delta", type=float, default=5.0, help="Delta T (°C) to start fan (full mode)")
-    fan.add_argument("--fan-full-stop-delta", type=float, default=3.0, help="Delta T (°C) to stop fan (full mode)")
-    fan.add_argument("--fan-full-max-pct", type=float, default=100.0, help="Max fan duty pct (full mode)")
-    fan.add_argument("--fan-full-ramp-range", type=float, default=10.0, help="Delta T range to ramp from 0 to max (full mode)")
-    fan.add_argument("--fan-safety-temp", type=float, default=70.0, help="Absolute POCO temp to override and force 100%% duty (°C)")
-    fan.add_argument("--fan-ema-alpha-up", type=float, default=0.03, help="EMA filter rise coefficient (default 0.03 ~= 65s heatsink at 2s tick)")
-    fan.add_argument("--fan-ema-alpha-down", type=float, default=0.03, help="EMA filter fall coefficient (default 0.03 ~= 65s heatsink at 2s tick)")
+    # Chassis fan policy overrides (defaults: backend/fan_policy.py, docs/THERMAL_MODEL.md)
+    fan = parser.add_argument_group("chassis fan", "override one number of the fan policy; "
+                                    "unset = the measured default in backend/fan_policy.py")
+    for prof in ("full", "low"):
+        fan.add_argument("--fan-%s-on" % prof, dest="fan_%s_on" % prof, type=float, default=None,
+                         help="control °C that engages the fan (%s profile)" % prof)
+        fan.add_argument("--fan-%s-off" % prof, dest="fan_%s_off" % prof, type=float, default=None,
+                         help="control °C that releases the fan (%s profile)" % prof)
+        fan.add_argument("--fan-%s-full" % prof, dest="fan_%s_full" % prof, type=float, default=None,
+                         help="control °C at which duty reaches max (%s profile)" % prof)
+        fan.add_argument("--fan-%s-min-pct" % prof, dest="fan_%s_min_pct" % prof, type=float, default=None,
+                         help="duty floor while engaged (%s profile)" % prof)
+        fan.add_argument("--fan-%s-max-pct" % prof, dest="fan_%s_max_pct" % prof, type=float, default=None,
+                         help="duty ceiling (%s profile)" % prof)
+    fan.add_argument("--fan-safety-temp", type=float, default=None,
+                     help="filtered control °C that forces 100 %%")
+    fan.add_argument("--fan-tau", type=float, default=None,
+                     help="low-pass time constant of the control temperature in s")
 
     parser.add_argument("-v", "--verbose", action="store_true", help="verbose logging")
     args = parser.parse_args()
