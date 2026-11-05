@@ -9,6 +9,7 @@ In this system:
 - **Video Output:** DPI (Display Parallel Interface) via a custom resistor-ladder DAC (VGA666 / Gert VGA pinout).
 - **Format:** 480x240 @ 60 Hz progressive scan (262 total scanlines, matching 525-line NTSC field timing).
 - **Sync:** Negative polarity composite sync (C-Sync) fed to the MFD sync input.
+- **Sync source since 2026-11-05: the DPI block's combined sync on GPIO1 (header pin 28, also named ID_SC), jumpered to the MFD sync line with the 74HC86 removed.** GPIO2 (VSYNC) is stuck high electrically: it stays high when forced to output low, while GPIO3 and GPIO26 obey the same test, so XOR combining cannot produce a vertical pulse. Cause open (the chip was to be out when this was re-tested; a VGA666 short or the Pi pad remain). User confirmed a stable picture. The XOR description below is the earlier wiring.
 - **Sync combiner (on the VGA666 board, DIP-14 socket): a 74HC86 XOR gate** merges the Pi's separate
   H-sync (GPIO 3) and V-sync (GPIO 2) into the composite sync. The socket is wired for the 74HC86 pinout
   (VCC pin 14, GND pin 7). An LM339 (also DIP-14, used in the AVC-LAN gateway PHY) does NOT fit this socket:
@@ -97,14 +98,18 @@ enable_dpi_lcd=1
 display_default_lcd=1
 dpi_group=2
 dpi_mode=87
-dpi_output_format=0x05          # RGB666 config 1 — the VGA666 is wired for config 1 (see below)
+dpi_output_format=0x105         # RGB666 config 1 (low nibble 5) + combined sync on GPIO1 (bit 8)
+gpio=1=a2                       # GPIO1 = DE function, carries the combined sync
 dpi_timings=480 1 24 46 60 240 1 4 3 15 0 0 0 60 0 9600000 1
 ```
 
 `cmdline.txt` carries `fbcon=map:99 logo.nologo` (keeps the console off fb0) and
 `modules-load=dwc2,g_ether net.ifnames=0` (USB Ethernet gadget `usb0`).
 
-**`dpi_output_format` must be `0x05`.** `0x06` (RGB666 config 2) lands the DPI bit lanes on the wrong
+`dtoverlay=vga666` returns GPIO2 to VSYNC at boot and a `gpio=2=ip` line does not override it, so
+`vsync-pin-release.service` sets it to input.
+
+**The low nibble of `dpi_output_format` must be `5`.** `0x06` (RGB666 config 2) lands the DPI bit lanes on the wrong
 DAC rungs: gray51 renders saturated green, gray128 blue, gray204 pink, the G ramp black — the "green
 cast" chased with software gains until the photo-based calibration of 2026-09-08 found the real cause
 (commit cfca489). Earlier versions of this section listed `vga666-6bpc` + `0x00017`; that was never
