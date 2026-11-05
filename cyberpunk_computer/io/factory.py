@@ -99,58 +99,78 @@ class VirtualTwin:
     avc_scheduler: Optional[object] = None    # comm.avc.ThreadScheduler shared by AVC senders
     _enable_solicited: bool = False  # Whether to send solicited CAN subscriptions
 
-    # Solicited subscription watchdog
-    _SOLICITED_TIMEOUT: float = 15.0   # Seconds without solicited responses before re-init
-    _RESUB_COOLDOWN: float = 30.0      # Minimum seconds between re-init attempts
-    _CAN_ALIVE_WINDOW: float = 5.0     # CAN must be active within this window to trigger resub
+    # Solicited subscription watchdog (all monotonic seconds)
+    _SOLICITED_TIMEOUT: float = 15.0   # no solicited reply for this long -> re-setup
+    _RESUB_COOLDOWN: float = 30.0      # base spacing between watchdog re-setups
+    _RESUB_COOLDOWN_MAX: float = 300.0 # backoff cap while the ECUs stay silent
+    _GATEWAY_ALIVE_WINDOW: float = 5.0 # a GW_HB this recent = gateway is up
 
     def __post_init__(self) -> None:
-        """Initialize mutable watchdog state."""
-        self._last_resub_time: float = 0.0
-        self._resub_count: int = 0
-        self._solicited_was_active: bool = False  # Track if we ever received solicited data
+        """Initialize mutable solicited-setup state."""
+        import threading
+        self._setup_lock = threading.Lock()
+        self._setup_pending: Optional[str] = None   # reason, set from any thread
+        self._last_setup_mono: float = 0.0
+        self._setup_count: int = 0
+        self._resub_count: int = 0                  # consecutive watchdog re-setups
+        self._last_resub_mono: float = 0.0
     
     def start(self) -> bool:
         """Start all components."""
         result = self.ingress.start()
         
-        # Initialize solicited CAN subscriptions after connection
-        if result and self._enable_solicited:
-            self._init_solicited_subscriptions()
+        # Solicited CAN setup goes out on the engine thread (update()) once
+        # the gateway port is actually open. The serial connect hook requests
+        # it on every (re)open and the ingress on every gateway (re)boot, so a
+        # gateway that is unpowered at backend start (key-off, pending
+        # placeholder path) is configured the moment it appears.
+        if result and self._enable_solicited and self.output_port.is_connected():
+            self.request_solicited_setup("start")
         
         return result
-    
-    def _init_solicited_subscriptions(self) -> None:
+
+    # ── solicited CAN (gateway) setup lifecycle ─────────────────────────
+
+    def request_solicited_setup(self, reason: str) -> None:
+        """Ask for the CAN mode + subscriptions to be (re)sent on the next
+        engine tick. Thread-safe; repeated requests coalesce."""
+        if not self._enable_solicited:
+            return
+        with self._setup_lock:
+            if self._setup_pending is None:
+                self._setup_pending = reason
+        logger.info("Solicited CAN setup requested (%s)", reason)
+
+    def _init_solicited_subscriptions(self, clear_first: bool = False) -> int:
         """
-        Initialize solicited CAN subscriptions for key PIDs.
-        
-        Uses subscription group definitions from comm.subscription_groups.
-        Respects user-configured data source settings for toggleable groups.
-        Core drivetrain PIDs are always subscribed.
+        Send the solicited CAN setup: normal mode, core drivetrain slots, the
+        toggleable groups the user enabled. Returns the number of commands
+        queued (0 when the port is down — the connect hook re-requests then).
+
+        No sleeps: the serial writer preserves order and the gateway handles
+        each line synchronously, and this runs on the engine thread.
         """
         from .ports import OutgoingCommand, DEVICE_CAN
         from ..comm.subscription_groups import CORE_GROUP, TOGGLEABLE_GROUPS
         from ..persistence import get_settings
-        
-        logger.info("Initializing solicited CAN subscriptions...")
-        
+
+        if not self.output_port.is_connected():
+            logger.warning("Solicited CAN setup skipped: gateway port not connected")
+            return 0
+
+        def send(command_type: str, payload: dict) -> bool:
+            return self.output_port.send(OutgoingCommand(
+                device_id=DEVICE_CAN, command_type=command_type, payload=payload))
+
+        sent = 0
+        if clear_first:
+            sent += send("unsub", {"a": "unsub", "slot": "all"})
         # Switch to normal (active) CAN mode
-        self.output_port.send(OutgoingCommand(
-            device_id=DEVICE_CAN,
-            command_type="mode",
-            payload={"a": "mode", "m": "normal"}
-        ))
-        
-        import time
-        time.sleep(0.1)
+        sent += send("mode", {"a": "mode", "m": "normal"})
         
         # Always subscribe core drivetrain
         for slot_def in CORE_GROUP.slots:
-            self.output_port.send(OutgoingCommand(
-                device_id=DEVICE_CAN,
-                command_type="sub",
-                payload=slot_def.payload,
-            ))
+            sent += send("sub", slot_def.payload)
         
         # Subscribe toggleable groups based on user settings
         ds = get_settings().data_sources
@@ -158,32 +178,81 @@ class VirtualTwin:
         for group in TOGGLEABLE_GROUPS:
             if ds.is_group_enabled(group.key):
                 for slot_def in group.slots:
-                    self.output_port.send(OutgoingCommand(
-                        device_id=DEVICE_CAN,
-                        command_type="sub",
-                        payload=slot_def.payload,
-                    ))
+                    sent += send("sub", slot_def.payload)
                 enabled_names.append(group.key)
             else:
-                logger.info("Skipping disabled group: %s", group.key)
+                logger.debug("Skipping disabled group: %s", group.key)
         
         core_labels = ", ".join(s.label for s in CORE_GROUP.slots)
         logger.info(
-            "Solicited CAN subscriptions initialized "
-            "(core: %s | enabled: %s)",
-            core_labels, ", ".join(enabled_names) or "none",
+            "Solicited CAN setup sent: %d commands (core: %s | enabled: %s)",
+            sent, core_labels, ", ".join(enabled_names) or "none",
         )
-        
-        # Wait for writer thread to actually send the commands
-        time.sleep(0.5)
-        
-        # Log serial stats to confirm commands were sent
-        if hasattr(self.output_port, '_ports'):
-            for p in self.output_port._ports:
-                if hasattr(p, 'stats'):
-                    logger.info(f"Serial stats after sub init: {p.stats}")
-        elif hasattr(self.output_port, 'stats'):
-            logger.info(f"Serial stats after sub init: {self.output_port.stats}")
+        return sent
+
+    def _solicited_tick(self) -> None:
+        """Engine-thread half of the lifecycle: perform a requested setup, and
+        re-setup when the gateway is alive but the subscriptions went quiet
+        (ECUs lost the diagnostic session, gateway reboot we did not see, a
+        dropped line at setup time)."""
+        import time as _time
+        now = _time.monotonic()
+        stats = self.ingress.stats
+
+        with self._setup_lock:
+            reason, self._setup_pending = self._setup_pending, None
+        if reason is not None:
+            n = self._init_solicited_subscriptions(clear_first=False)
+            if n:
+                self._setup_count += 1
+                self._last_setup_mono = now
+            else:
+                # Port went away between the request and the tick: the next
+                # connect hook requests again. Nothing to retry here.
+                pass
+            return
+
+        # A solicited reply since the last re-setup proves the link works.
+        if stats.last_solicited_mono > self._last_resub_mono:
+            self._resub_count = 0
+
+        gateway_alive = (now - stats.last_heartbeat_mono) < self._GATEWAY_ALIVE_WINDOW \
+            if stats.last_heartbeat_mono else False
+        if not gateway_alive or not self.output_port.is_connected():
+            return
+        reference = max(self._last_setup_mono, stats.last_solicited_mono)
+        if reference <= 0.0:
+            return      # nothing sent yet (a request is on its way)
+        silent_for = now - reference
+        if silent_for < self._SOLICITED_TIMEOUT:
+            return
+        cooldown = min(self._RESUB_COOLDOWN * (2 ** self._resub_count), self._RESUB_COOLDOWN_MAX)
+        if (now - self._last_resub_mono) < cooldown:
+            return
+
+        self._last_resub_mono = now
+        self._resub_count += 1
+        logger.warning(
+            "Solicited watchdog: gateway alive but no solicited reply for %.0fs — "
+            "re-sending CAN setup (attempt #%d, next in >=%.0fs)",
+            silent_for, self._resub_count,
+            min(self._RESUB_COOLDOWN * (2 ** self._resub_count), self._RESUB_COOLDOWN_MAX),
+        )
+        try:
+            if self._init_solicited_subscriptions(clear_first=True):
+                self._setup_count += 1
+                self._last_setup_mono = now
+        except Exception as e:
+            logger.error(f"Solicited watchdog re-setup failed: {e}")
+
+    @property
+    def solicited_status(self) -> dict:
+        return {
+            "enabled": self._enable_solicited,
+            "setups": self._setup_count,
+            "watchdog_resubs": self._resub_count,
+            "pending": self._setup_pending,
+        }
     
     def subscribe_group(self, group) -> None:
         """Subscribe to all slots in a subscription group.
@@ -241,9 +310,6 @@ class VirtualTwin:
             payload={"a": "unsub", "slot": "all"}
         ))
         
-        import time
-        time.sleep(0.05)
-        
         # Switch back to listen-only mode (passive sniffing)
         self.output_port.send(OutgoingCommand(
             device_id=DEVICE_CAN,
@@ -282,68 +348,11 @@ class VirtualTwin:
         """
         count = self.ingress.update()
 
-        # Solicited subscription watchdog
+        # Solicited setup / watchdog (engine thread)
         if self._enable_solicited:
-            self._check_solicited_watchdog()
+            self._solicited_tick()
 
         return count
-
-    def _check_solicited_watchdog(self) -> None:
-        """
-        Detect lost solicited subscriptions and re-initialize.
-
-        Triggers when:
-        1. CAN bus is alive (unsolicited messages flowing) — car is ON
-        2. No solicited response received for _SOLICITED_TIMEOUT seconds
-        3. Cooldown period has elapsed since last re-init
-
-        This handles the case where the car was turned OFF (ECUs lost
-        diagnostic session state) while the board computer stayed on,
-        and the car was turned back ON.
-        """
-        import time as _time
-        now = _time.time()
-        stats = self.ingress.stats
-
-        # Track that solicited data was ever active
-        if stats.last_solicited_time > 0:
-            self._solicited_was_active = True
-
-        # Only run watchdog if solicited was previously active
-        if not self._solicited_was_active:
-            return
-
-        # Is the CAN bus alive? (unsolicited messages arriving recently)
-        can_alive = (now - stats.last_can_time) < self._CAN_ALIVE_WINDOW
-        if not can_alive:
-            return  # Car is probably OFF, don't try to resub
-
-        # Are solicited responses stale?
-        solicited_age = now - stats.last_solicited_time
-        if solicited_age < self._SOLICITED_TIMEOUT:
-            return  # Subscriptions are working fine
-
-        # Cooldown check
-        if (now - self._last_resub_time) < self._RESUB_COOLDOWN:
-            return
-
-        # ─── Re-initialize subscriptions ──────────────────────────
-        self._last_resub_time = now
-        self._resub_count += 1
-        logger.warning(
-            f"Solicited watchdog: no response for {solicited_age:.0f}s, "
-            f"re-initializing subscriptions (attempt #{self._resub_count})"
-        )
-        print(f"[WATCHDOG] Solicited responses lost for {solicited_age:.0f}s — re-subscribing (#{self._resub_count})")
-
-        try:
-            self._cleanup_solicited_subscriptions()
-            import time as _t2
-            _t2.sleep(0.2)
-            self._init_solicited_subscriptions()
-        except Exception as e:
-            logger.error(f"Solicited watchdog re-init failed: {e}")
-            print(f"[WATCHDOG] Re-subscribe failed: {e}")
 
 
 def create_virtual_twin(config: VirtualTwinConfig) -> VirtualTwin:
@@ -461,7 +470,7 @@ def create_virtual_twin(config: VirtualTwinConfig) -> VirtualTwin:
     from .persistence_middleware import create_persistence_middleware
     store.add_middleware(create_persistence_middleware(settings_mgr))
     
-    return VirtualTwin(
+    twin = VirtualTwin(
         store=store,
         input_port=input_port,
         output_port=output_port,
@@ -474,6 +483,17 @@ def create_virtual_twin(config: VirtualTwinConfig) -> VirtualTwin:
         avc_scheduler=avc_scheduler,
         _enable_solicited=enable_solicited
     )
+
+    if enable_solicited:
+        # Re-send the solicited setup whenever the gateway (re)appears or
+        # (re)boots: serial (re)open, GATEWAY_READY banner, GW_HB uptime reset.
+        if isinstance(input_port, SerialPort):
+            input_port.add_connect_hook(
+                lambda: twin.request_solicited_setup("gateway serial connected"))
+        ingress.add_gateway_reset_listener(
+            lambda reason: twin.request_solicited_setup("gateway reset: " + reason))
+
+    return twin
 
 
 def _create_production_io(config: VirtualTwinConfig):

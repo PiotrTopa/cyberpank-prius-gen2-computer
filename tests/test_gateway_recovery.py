@@ -41,12 +41,16 @@ def make_service(hb_age_s=60.0, stale=True, powered=True, desired=None, hb_seen=
     svc._gw_stale = stale
     svc._gw_recover_off_at = None
     svc._gw_recover_last = 0.0
-    svc._gw_recover_epoch = time.time() - hb_age_s
+    svc._gw_recover_epoch = time.monotonic() - hb_age_s
+    svc._start_time = time.monotonic() - hb_age_s
     svc._gw_recover_attempts = 0
-    svc._gw_vbus_on_at = time.time() - hb_age_s   # VBUS on since the last HB
+    svc._gw_vbus_on_at = time.monotonic() - hb_age_s   # VBUS on since the last HB
     gw = FakeGateway(powered=powered, desired=desired)
     svc.port_power = types.SimpleNamespace(gateway=gw)
+    # The state carries a wall-clock heartbeat stamp (display); the service
+    # ages it on the monotonic clock from when it last changed (_mono_seen).
     last_hb = (time.time() - hb_age_s) if hb_seen else None
+    svc._seen_marks = {"gateway_hb": (last_hb, time.monotonic() - hb_age_s)} if hb_seen else {}
     conn = types.SimpleNamespace(last_heartbeat_time=last_hb)
     svc.twin = types.SimpleNamespace(
         store=types.SimpleNamespace(state=types.SimpleNamespace(connection=conn))
@@ -84,7 +88,7 @@ def test_vbus_edge_resets_after_recovery_repower():
     svc.config.gateway_recover_cooldown_s = 0.0
     svc._gateway_recover_tick()
     assert gw.calls == [False]
-    svc._gw_recover_off_at = time.time() - 10.0   # off window elapsed
+    svc._gw_recover_off_at = time.monotonic() - 10.0   # off window elapsed
     svc._gateway_recover_tick()
     assert gw.calls == [False, True]
     svc._gateway_recover_tick()                   # VBUS-on edge just now
@@ -98,7 +102,7 @@ def test_repowers_after_off_window():
     svc._gateway_recover_tick()
     assert gw.calls == [False]
     # Force the off window to elapse.
-    svc._gw_recover_off_at = time.time() - svc.config.gateway_recover_off_s - 1
+    svc._gw_recover_off_at = time.monotonic() - svc.config.gateway_recover_off_s - 1
     svc._gateway_recover_tick()
     assert gw.calls == [False, True]
     assert svc._gw_recover_off_at is None
@@ -125,7 +129,7 @@ def test_skips_when_operator_wants_port_off():
 
 def test_respects_cooldown():
     svc, gw = make_service()
-    svc._gw_recover_last = time.time()  # a cycle just happened
+    svc._gw_recover_last = time.monotonic()  # a cycle just happened
     svc._gateway_recover_tick()
     assert gw.calls == []
 
@@ -164,23 +168,36 @@ def test_backoff_doubles_and_heartbeat_resets_it():
 
     def cycle():
         svc._gateway_recover_tick()          # off
-        svc._gw_recover_off_at = time.time() - cfg.gateway_recover_off_s - 1
+        svc._gw_recover_off_at = time.monotonic() - cfg.gateway_recover_off_s - 1
         svc._gateway_recover_tick()          # on
         svc._gateway_recover_tick()          # VBUS-on edge observed...
-        svc._gw_vbus_on_at = time.time() - 60.0   # ...a full stale window ago
+        svc._gw_vbus_on_at = time.monotonic() - 60.0   # ...a full stale window ago
 
     cycle()
     assert svc._gw_recover_attempts == 1
     # Base cooldown elapsed but backoff (2x) not: no new cycle.
-    svc._gw_recover_last = time.time() - cfg.gateway_recover_cooldown_s - 1
+    svc._gw_recover_last = time.monotonic() - cfg.gateway_recover_cooldown_s - 1
     svc._gateway_recover_tick()
     assert svc._gw_recover_attempts == 1
     # Doubled cooldown elapsed: second attempt fires.
-    svc._gw_recover_last = time.time() - 2 * cfg.gateway_recover_cooldown_s - 1
+    svc._gw_recover_last = time.monotonic() - 2 * cfg.gateway_recover_cooldown_s - 1
     cycle()
     assert svc._gw_recover_attempts == 2
     # A heartbeat newer than the last cycle resets the backoff.
-    svc.twin.store.state.connection.last_heartbeat_time = time.time() - 60.0
-    svc._gw_recover_last = time.time() - 130.0
+    new_hb = time.time() - 60.0
+    svc.twin.store.state.connection.last_heartbeat_time = new_hb
+    svc._seen_marks["gateway_hb"] = (new_hb, time.monotonic() - 60.0)
+    svc._gw_recover_last = time.monotonic() - 130.0
     svc._gateway_recover_tick()  # 60s stale again; attempts reset then increment
     assert svc._gw_recover_attempts == 1
+
+
+def test_wall_clock_step_does_not_trip_recovery():
+    """NTP stepping the wall clock forward (no RTC on the phone) must not make
+    a heartbeat that arrived 1 s ago look hours old (2026-11-05 14:18 incident)."""
+    svc, gw = make_service(hb_age_s=1.0)
+    conn = svc.twin.store.state.connection
+    conn.last_heartbeat_time += 91117.7      # the stamp itself jumps with the clock
+    svc._gw_stale = False
+    svc._gateway_recover_tick()
+    assert gw.calls == []

@@ -29,6 +29,11 @@ BACKEND_AUTH_TOKEN=
 BACKEND_AUTO_DISCOVER=1
 BACKEND_USB_HOTPLUG=1
 BACKEND_POWERBOX_AUTO_RECOVER=1
+# comma.ai panda on the CAN hub: broadcast CAN listener (SAFETY_SILENT). The
+# gateway carries only solicited traffic. 0 disables; BACKEND_PANDA_BUS=N
+# restricts to one panda bus (default any).
+BACKEND_PANDA_ENABLED=1
+BACKEND_PANDA_BUS=
 BACKEND_EXTRA_ARGS=
 
 # Trip recording (rotating per-trip NDJSON logs). Off by default.
@@ -86,6 +91,8 @@ run() {
     { [ "$BACKEND_AUTO_DISCOVER" = "0" ] || [ "$BACKEND_AUTO_DISCOVER" = "false" ]; } && set -- "$@" --no-auto-discover
     { [ "$BACKEND_USB_HOTPLUG" = "0" ] || [ "$BACKEND_USB_HOTPLUG" = "false" ]; } && set -- "$@" --no-usb-hotplug
     { [ "$BACKEND_POWERBOX_AUTO_RECOVER" = "1" ] || [ "$BACKEND_POWERBOX_AUTO_RECOVER" = "true" ]; } && set -- "$@" --powerbox-auto-recover
+    { [ "$BACKEND_PANDA_ENABLED" = "0" ] || [ "$BACKEND_PANDA_ENABLED" = "false" ]; } && set -- "$@" --no-panda
+    [ -n "$BACKEND_PANDA_BUS" ] && set -- "$@" --panda-bus "$BACKEND_PANDA_BUS"
     if [ "$BACKEND_RECORD" = "1" ] || [ "$BACKEND_RECORD" = "true" ]; then
         set -- "$@" --record \
             --record-dir "$BACKEND_RECORD_DIR" \

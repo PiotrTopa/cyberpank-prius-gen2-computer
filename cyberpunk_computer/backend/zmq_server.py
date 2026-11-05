@@ -79,11 +79,11 @@ class ZmqServer:
     def state_due(self) -> bool:
         """True when a state frame would be accepted now (lets the caller skip
         serializing the whole AppState on every dispatch)."""
-        return time.time() - self._last_state_ts >= self.state_min_interval
+        return time.monotonic() - self._last_state_ts >= self.state_min_interval
 
     def enqueue_state(self, envelope: dict):
         """Queue a state envelope, latest-only + rate-limited."""
-        now = time.time()
+        now = time.monotonic()
         if now - self._last_state_ts < self.state_min_interval:
             return
         self._last_state_ts = now

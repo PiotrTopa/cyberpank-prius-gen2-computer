@@ -9,6 +9,7 @@ The Store is the single source of truth. It:
 """
 
 import logging
+import threading
 from dataclasses import replace
 from typing import Callable, Dict, List, Optional, Set
 from enum import Enum, auto
@@ -104,6 +105,13 @@ class Store:
         self._middleware: List[Middleware] = []
         self._dispatching = False
         self._pending_actions: List[Action] = []
+        # Dispatch lock. The engine thread is the main dispatcher; the panda
+        # CAN reader (io.panda_can -> ingress.ingest_broadcast_can) dispatches
+        # broadcast frames from its own thread for latency. Re-entrant so
+        # middleware/subscribers may dispatch (queued via _dispatching as
+        # before); another thread simply waits for the current dispatch,
+        # including its queued follow-ups, to finish.
+        self._lock = threading.RLock()
         self._verbose = verbose
         self._replay_speed: float = 1.0
         
@@ -177,6 +185,10 @@ class Store:
         Args:
             action: Action describing the state change
         """
+        with self._lock:
+            self._dispatch_locked(action)
+
+    def _dispatch_locked(self, action: Action) -> None:
         if self._dispatching:
             # Queue action if we're already dispatching
             self._pending_actions.append(action)
@@ -215,7 +227,7 @@ class Store:
             # Process any queued actions
             while self._pending_actions:
                 pending = self._pending_actions.pop(0)
-                self.dispatch(pending)
+                self._dispatch_locked(pending)
     
     def _reduce(self, action: Action) -> Set[StateSlice]:
         """
@@ -740,6 +752,13 @@ class Store:
                 )
             )
             affected.add(StateSlice.CONNECTION)
+
+        elif action.type == ActionType.SET_PANDA_STATE:
+            conn = self._state.connection
+            fields = {k: v for k, v in action.fields.items() if k.startswith("panda_") and hasattr(conn, k)}
+            if fields:
+                self._state = replace(self._state, connection=replace(conn, **fields))
+                affected.add(StateSlice.CONNECTION)
 
         elif action.type == ActionType.SET_GATEWAY_USB_POWER:
             a = action  # type: SetGatewayUsbPowerAction

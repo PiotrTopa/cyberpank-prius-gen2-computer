@@ -77,32 +77,33 @@ class MetricsSink:
 
     def _run(self) -> None:
         conn = self._db.connect()
-        next_rollup = time.time() + self._rollup_interval
-        next_prune = time.time() + self._prune_interval
+        # Cadence on the monotonic clock; rows are stamped with the wall clock.
+        next_rollup = time.monotonic() + self._rollup_interval
+        next_prune = time.monotonic() + self._prune_interval
         try:
             while not self._stop.is_set():
-                tick_start = time.time()
+                tick_start = time.monotonic()
                 try:
-                    self._sample_once(conn, tick_start)
+                    self._sample_once(conn, time.time())
                 except Exception:
                     logger.exception("Metrics sample failed")
 
-                now = time.time()
+                now = time.monotonic()
                 if now >= next_rollup:
                     next_rollup = now + self._rollup_interval
                     try:
-                        self._db.rollup(conn, now)
+                        self._db.rollup(conn, time.time())
                     except Exception:
                         logger.exception("Metrics rollup failed")
                 if now >= next_prune:
                     next_prune = now + self._prune_interval
                     try:
-                        self._db.prune(conn, now)
+                        self._db.prune(conn, time.time())
                     except Exception:
                         logger.exception("Metrics prune failed")
 
                 # Sleep the remainder of the interval, staying responsive to stop.
-                elapsed = time.time() - tick_start
+                elapsed = time.monotonic() - tick_start
                 self._stop.wait(max(0.0, self._sample_interval - elapsed))
         finally:
             conn.close()

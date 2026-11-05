@@ -461,6 +461,44 @@ for _name in _climate_button_names():
     }
 
 
+def _build_gateway_can_tx(params: Dict[str, Any]) -> Action:
+    from ..state.actions import GatewayCanTxAction
+    raw_id = _require(params, "id")
+    try:
+        can_id = int(raw_id, 16) if isinstance(raw_id, str) else int(raw_id)
+    except (TypeError, ValueError):
+        raise CommandError("id must be an int or hex string")
+    data = params.get("data") or []
+    if not isinstance(data, list) or len(data) > 8:
+        raise CommandError("data must be a list of up to 8 bytes")
+    try:
+        payload = bytes(int(b, 16) if isinstance(b, str) else int(b) for b in data)
+    except (TypeError, ValueError):
+        raise CommandError("data bytes must be ints or hex strings")
+    if any(b < 0 or b > 255 for b in payload):
+        raise CommandError("data bytes must be 0..255")
+    return GatewayCanTxAction(can_id, payload, bench=bool(params.get("bench", True)))
+
+
+def _build_panda_bench(params: Dict[str, Any]) -> Action:
+    from ..state.actions import PandaBenchAction
+    return PandaBenchAction(reset=bool(params.get("reset", True)))
+
+
+COMMANDS["gateway_can_tx"] = {
+    "builder": _build_gateway_can_tx,
+    "description": "BENCH ONLY: transmit one raw CAN frame through the gateway "
+                   "(isolated segment, never on the car bus). The panda's receipt "
+                   "of the same frame is timed into connection.panda_bench.",
+    "params": {"id": "int or hex string", "data": "list of 0..8 bytes", "bench": "bool (default true)"},
+}
+COMMANDS["panda_bench"] = {
+    "builder": _build_panda_bench,
+    "description": "Reset the gateway->panda bench latency counters.",
+    "params": {"reset": "bool (default true)"},
+}
+
+
 def build_command(name: str, params: Dict[str, Any]) -> Action:
     """Build the Action for ``name`` from ``params``.
 

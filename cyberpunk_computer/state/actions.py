@@ -97,6 +97,9 @@ class ActionType(Enum):
     SET_AMBIENT_COLOR = auto()
     SET_POWER_CHART_TIME_BASE = auto()
     SET_GATEWAY_USB_POWER = auto()
+    SET_PANDA_STATE = auto()  # partial update of the panda fields in ConnectionState
+    GATEWAY_CAN_TX = auto()   # raw CAN frame through the gateway (bench only)
+    PANDA_BENCH = auto()      # bench bookkeeping (reset counters)
     SET_MFD_STATUS = auto()  # MFD video board power manager status (backend)
     SET_ROADSENSE_STATE = auto()  # partial update of RoadsenseState (backend.roadsense_power)
     
@@ -956,6 +959,36 @@ class SetConnectionStateAction(Action):
         self.gateway_uptime_s = gateway_uptime_s
         self.last_heartbeat_time = last_heartbeat_time
         self.last_message_time = last_message_time
+
+
+class GatewayCanTxAction(Action):
+    """Ask the gateway to transmit one raw CAN frame (``{"a":"tx"}``). Bench
+    tool for the panda<->gateway loop on an isolated segment; never used in
+    normal operation (the gateway's active traffic is the solicited set)."""
+
+    def __init__(self, can_id: int, data: bytes, bench: bool = True,
+                 source: ActionSource = ActionSource.UI):
+        super().__init__(ActionType.GATEWAY_CAN_TX, source)
+        self.can_id = int(can_id)
+        self.data = bytes(data)
+        self.bench = bench
+
+
+class PandaBenchAction(Action):
+    """Reset the gateway->panda bench counters."""
+
+    def __init__(self, reset: bool = True, source: ActionSource = ActionSource.UI):
+        super().__init__(ActionType.PANDA_BENCH, source)
+        self.reset = reset
+
+
+class SetPandaStateAction(Action):
+    """Partial update of the ``panda_*`` fields of ConnectionState (backend
+    mirror of io.panda_can; only the given fields change)."""
+
+    def __init__(self, source: ActionSource = ActionSource.INTERNAL, **fields):
+        super().__init__(ActionType.SET_PANDA_STATE, source)
+        self.fields = fields
 
 
 # ─────────────────────────────────────────────────────────────────────────────

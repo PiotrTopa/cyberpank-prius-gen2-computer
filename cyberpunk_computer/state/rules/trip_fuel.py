@@ -45,7 +45,7 @@ class TripFuelConsumptionRule(StateRule):
         new_state: AppState,
         store: Store,
     ) -> None:
-        now = time.time()
+        now = time.monotonic()   # dt only; a wall-clock step must not integrate hours of fuel
         vehicle = new_state.vehicle
 
         flow_rate = vehicle.fuel_flow_rate if vehicle.fuel_flow_rate is not None else 0.0

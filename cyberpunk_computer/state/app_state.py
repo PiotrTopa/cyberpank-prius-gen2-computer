@@ -352,6 +352,25 @@ class ConnectionState:
     mfd_last_ok_ping: Optional[float] = None  # last successful ping of the Pi
     mfd_power_cycles: int = 0                 # boot-timeout + watchdog VBUS cycles
     mfd_last_boot_s: Optional[float] = None   # last power-on -> reachable duration
+    # comma.ai panda — the broadcast (unsolicited) CAN listener (io.panda_can).
+    # Mirrored ~1 Hz by the backend; the gateway above carries solicited
+    # traffic only. panda_safety_mode 0 = SILENT (bus monitor, no ACK/TX).
+    panda_enabled: bool = False
+    panda_connected: bool = False
+    panda_serial: Optional[str] = None
+    panda_fw: Optional[str] = None
+    panda_safety_mode: Optional[int] = None
+    panda_power_save: Optional[bool] = None
+    panda_frames: int = 0                     # accepted frames since backend start
+    panda_fps: Optional[float] = None         # rolling 1 s frame rate
+    panda_bus_counts: Optional[Mapping[int, int]] = None  # frames per panda bus
+    panda_last_frame_time: Optional[float] = None  # wall clock (display only)
+    panda_last_error: Optional[str] = None
+    panda_decoded: int = 0                    # frames the decoder knew
+    panda_dispatched: int = 0                 # frames that updated the state
+    panda_fw_format: Optional[str] = None     # USB CAN packet format seen ("v2"/"v4")
+    panda_can_rx_errs: Optional[int] = None   # fw v9 health: CAN rx error counter
+    panda_bench: Optional[Mapping[str, object]] = None  # gateway->panda loop latency (bench)
 
 
 @dataclass(frozen=True)

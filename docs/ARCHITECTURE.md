@@ -291,25 +291,32 @@ The application uses a **Virtual Twin** pattern with abstracted IO:
 
 See [VIRTUAL_TWIN_ARCHITECTURE.md](./VIRTUAL_TWIN_ARCHITECTURE.md) for complete details.
 
-### Gateway Connection
+### CAN ingress: two flows (2026-11-05)
 
-```python
-class GatewayConnection:
-    """Manages serial connection to the Gateway."""
-    
-    def __init__(self, port: str, baudrate: int = 1_000_000):
-        self.port = port
-        self.baudrate = baudrate
-        
-    async def connect(self) -> bool:
-        """Establish connection to Gateway."""
-        
-    async def send(self, device_id: int, data: dict) -> None:
-        """Send message to Gateway."""
-        
-    async def receive(self) -> AsyncIterator[dict]:
-        """Receive messages from Gateway."""
-```
+The vehicle bus reaches the backend through two independent devices on the
+CAN hub (powerbox relay ch3):
+
+| Flow | Device | Traffic | Path into the state |
+|---|---|---|---|
+| **Unsolicited / broadcast** | comma.ai panda (`bbaa:ddcc`, `io/panda_can.py`, libusb-1.0 via ctypes) | every broadcast frame: 0x03B battery, 0x3CB SOC, 0x0B4 speed, 0x120 gear, steering, wheel speeds, ... | panda reader thread → `IngressController.ingest_broadcast_can` → `CANDecoder` → `Store.dispatch` (the Store has a re-entrant lock). No input-port queue, no engine tick: ~0.15 ms decode+dispatch on a desktop, ≈0.5 ms on the POCO. |
+| **Solicited** | RP2040 gateway (`io/serial_io.py`, `comm/subscription_groups.py`) | periodic OBD/UDS subscriptions, one-shot requests, DTC scans | serial reader → `RawMessage` queue → engine tick → `IngressController._handle_can_message` (unchanged) |
+
+Why two devices: gateway firmware 3.x forwards no passive frames unless its
+`sniff` mode is on, and `sniff` disables `req`/`sub`/`tx`, so one device
+cannot do both. The panda is always put in **SAFETY_SILENT** (bus monitor:
+no ACK, no TX; the backend never writes to its CAN TX endpoint) and
+heartbeated every second (the firmware power-saves its transceivers 2 s after
+the heartbeat stops). Without the panda the backend behaves as before: no
+broadcast values, solicited data unaffected; `connection.panda_*` in the state
+shows link, firmware, frame rate, per-bus counts.
+
+Solicited setup lifecycle (`io/factory.py::VirtualTwin`): the CAN mode +
+subscriptions are (re)sent on every gateway serial (re)connect, on the
+`GATEWAY_READY` banner, on a `GW_HB` uptime regression (reboot with the
+banner missed), and by a watchdog while the gateway heartbeats but no
+subscription answers (15 s, 30 s → 300 s backoff). All ages in the backend
+use `time.monotonic()`; the wall-clock stamps in the state are for display
+only (the phone has no RTC and NTP steps the clock by hours at boot).
 
 ### Data Flow
 

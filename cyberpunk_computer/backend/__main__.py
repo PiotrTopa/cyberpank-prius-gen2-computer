@@ -260,6 +260,13 @@ def _build_config(args: argparse.Namespace) -> BackendConfig:
         roadsense_enabled=roadsense_enabled,
         roadsense_config=roadsense_config,
         acc_off_debounce_s=float(os.environ.get("BACKEND_ACC_OFF_DEBOUNCE_S", "3")),
+        panda_enabled=(not args.no_panda) and _env_flag("BACKEND_PANDA_ENABLED", "1"),
+        panda_bus=args.panda_bus if args.panda_bus is not None
+        else (int(os.environ["BACKEND_PANDA_BUS"]) if (os.environ.get("BACKEND_PANDA_BUS") or "").strip() else None),
+        panda_dedupe_s=args.panda_dedupe_s if args.panda_dedupe_s is not None
+        else float(os.environ.get("BACKEND_PANDA_DEDUPE_S") or 0.25),
+        # 0 = SILENT (default). 19 = NOOUTPUT (ACKs): bench only, see service.py.
+        panda_safety_mode=int(os.environ.get("BACKEND_PANDA_SAFETY_MODE") or 0),
         verbose=args.verbose,
     )
 
@@ -304,6 +311,18 @@ def main() -> None:
     )
     parser.add_argument("--db", default="data/metrics.db", help="metrics SQLite path")
     parser.add_argument("--tick-hz", type=float, default=50.0, help="engine loop rate")
+
+    # comma.ai panda: broadcast (unsolicited) CAN listener, SAFETY_SILENT.
+    panda = parser.add_argument_group("panda (broadcast CAN)")
+    panda.add_argument("--no-panda", action="store_true",
+                       help="do not read broadcast CAN from the comma.ai panda "
+                            "(or BACKEND_PANDA_ENABLED=0)")
+    panda.add_argument("--panda-bus", type=int, default=None,
+                       help="accept frames from this panda bus only (default: any; "
+                            "or BACKEND_PANDA_BUS)")
+    panda.add_argument("--panda-dedupe-s", type=float, default=None,
+                       help="drop an identical payload repeated within this many "
+                            "seconds (default 0.25; or BACKEND_PANDA_DEDUPE_S)")
 
     # Replay (run off a recorded NDJSON log instead of the live gateway)
     replay = parser.add_argument_group("replay")

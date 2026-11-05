@@ -61,7 +61,7 @@ def create_persistence_middleware(settings_mgr: "SettingsManager"):
             return
 
         _dirty = True
-        now = time.time()
+        now = time.monotonic()
 
         if now - _last_save_time >= SAVE_DEBOUNCE_SECONDS:
             _flush(store)

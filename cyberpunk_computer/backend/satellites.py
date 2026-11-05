@@ -367,11 +367,24 @@ class SatelliteSupervisor:
         store: Store,
         desired_configs: Optional[Dict[int, dict]] = None,
         offline_after_s: float = 15.0,
+        clock: Callable[[], float] = time.monotonic,
     ):
         self._queue = queue
         self._store = store
         self._offline_after_s = offline_after_s
         self._desired = dict(desired_configs or {})
+        self._clock = clock
+        # node.last_seen is a wall-clock stamp (display). Presence ages on the
+        # monotonic clock from the moment the stamp was last seen to change,
+        # so an NTP step cannot mark every satellite offline.
+        self._seen_marks: Dict[int, tuple] = {}
+
+    def _seen_mono(self, dev: int, last_seen: float, now: float) -> float:
+        mark = self._seen_marks.get(dev)
+        if mark is None or (last_seen and last_seen != mark[0]):
+            mark = (last_seen, now)
+            self._seen_marks[dev] = mark
+        return mark[1]
 
     def seed(self) -> None:
         """Publish the known-satellite registry + persisted configs as twin nodes."""
@@ -384,11 +397,12 @@ class SatelliteSupervisor:
 
     def tick(self) -> None:
         state = self._store.state
-        now = time.time()
+        now = self._clock()
         rail_down = state.powerbox.connected and state.powerbox.rs485_power is False
         for dev, node in state.satellites.nodes.items():
+            seen = self._seen_mono(dev, node.last_seen, now)
             if node.online and (
-                rail_down or (now - node.last_seen) > self._offline_after_s
+                rail_down or (now - seen) > self._offline_after_s
             ):
                 self._store.dispatch(UpdateSatelliteNodeAction(
                     dev, online=False, source=ActionSource.INTERNAL))

@@ -27,6 +27,7 @@ from typing import Optional
 from ..io import (
     DEVICE_POWERBOX_BASE,
     DEVICE_VFD,
+    DEVICE_CAN,
     ExecutionMode,
     MultiInputPort,
     OutgoingCommand,
@@ -52,7 +53,10 @@ from ..io.discovery import (
 )
 from ..io.usb_monitor import UsbSerialMonitor
 from ..io.powerbox import reset_identity_log as reset_powerbox_identity_log
-from ..state.actions import SetPowerboxConnectionAction, SetConnectionStateAction
+from ..state.actions import (
+    SetPowerboxConnectionAction, SetConnectionStateAction, SetPandaStateAction,
+)
+from ..io.panda_can import PandaCanSource, PandaCanConfig
 from ..metrics import MetricsDatabase, MetricsSink
 from ..state.store import StateSlice
 from ..state.rules.power_management import (
@@ -217,6 +221,19 @@ class BackendConfig:
     gateway_recover_off_s: float = 5.0      # VBUS off duration
     gateway_recover_cooldown_s: float = 120.0  # base spacing; doubles per failed attempt
     gateway_recover_max_cooldown_s: float = 1800.0  # backoff cap for a truly dead gateway
+    # comma.ai panda = the broadcast (unsolicited) CAN listener, USB bbaa:ddcc on
+    # the same CAN hub (relay ch3) as the gateway. Frames go from its reader
+    # thread straight into the decoder/store (io.panda_can). Always
+    # SAFETY_SILENT: bus monitor, no ACK, no TX. panda_bus=None accepts every
+    # panda bus (the car test tells which one carries the Prius HS-CAN).
+    panda_enabled: bool = True
+    panda_bus: Optional[int] = None
+    panda_dedupe_s: float = 0.25        # identical payload repeated within this -> dropped
+    panda_status_s: float = 1.0         # state mirror cadence
+    # 0 = SAFETY_SILENT (always, in the car). 19 = SAFETY_NOOUTPUT: the panda
+    # ACKs frames so the gateway can transmit on a two-node bench segment;
+    # BENCH ONLY (BACKEND_PANDA_SAFETY_MODE=19), never with the car attached.
+    panda_safety_mode: int = 0
 
     # Cadence for polling the gateway's USB hub-port power via uhubctl so the UI
     # can show/toggle it like a powerbox relay. 0 disables the poll.
@@ -344,7 +361,14 @@ class BackendService:
         # running attempt counter (reset once fresh frames resume).
         self._pb_recover_last: float = 0.0
         self._pb_recover_attempts: int = 0
-        self._start_time: float = time.time()
+        # Monotonic. Every watchdog/cadence below ages against
+        # time.monotonic(): the wall clock on the phone (no RTC) is stepped by
+        # hours when NTP first syncs, which on 2026-11-05 made a healthy
+        # powerbox/gateway look 91117 s stale and cold-cycled the CAN hub.
+        self._start_time: float = time.monotonic()
+        # Wall-clock stamps from the store (display) -> monotonic "last seen a
+        # change" marks for the link watchdogs (see _mono_age).
+        self._seen_marks: dict = {}
 
         # Gateway link staleness watchdog: latched True once heartbeats stop,
         # cleared when they resume (edge-triggered logging).
@@ -367,7 +391,7 @@ class BackendService:
         # Gateway link auto-recovery (cold VBUS cycle via relay ch3, the CAN hub shared with the panda).
         self._gw_recover_off_at: Optional[float] = None  # VBUS-off timestamp; None = not mid-cycle
         self._gw_recover_last: float = 0.0               # last cycle start (cooldown)
-        self._gw_recover_epoch: float = time.time()      # staleness reference when no HB seen yet
+        self._gw_recover_epoch: float = time.monotonic() # staleness reference when no HB seen yet (monotonic)
         self._gw_recover_attempts: int = 0               # consecutive cycles without a heartbeat
         self._gw_vbus_on_at: Optional[float] = None      # when relay ch3 VBUS was last seen coming on
 
@@ -397,6 +421,11 @@ class BackendService:
 
         # Dashcam auto-light ingest (optional, io.dashcam_ingest).
         self.dashcam = None
+
+        # comma.ai panda broadcast CAN source (io.panda_can) + status mirror.
+        self.panda: Optional[PandaCanSource] = None
+        self._panda_status_last: float = 0.0
+        self._panda_last_mirror: Optional[tuple] = None
 
     # ── composition ────────────────────────────────────────────────────────
 
@@ -471,6 +500,18 @@ class BackendService:
         # so replies leave within milliseconds of the display's request).
         if self._gateway_serial is not None and cfg.nav_emulation:
             self._wire_nav_emulator(self._gateway_serial)
+
+        # Broadcast CAN from the panda (live mode only; a replay already holds
+        # the frames). Reader thread -> ingress.ingest_broadcast_can -> store.
+        if cfg.panda_enabled and not cfg.replay_file:
+            twin.ingress.set_broadcast_dedupe(cfg.panda_dedupe_s)
+            self.panda = PandaCanSource(
+                on_frame=twin.ingress.ingest_broadcast_can,
+                config=PandaCanConfig(bus=cfg.panda_bus, safety_mode=cfg.panda_safety_mode),
+            )
+            twin.store.add_middleware(self._panda_bench_middleware)
+            logger.info("Panda broadcast CAN source enabled (bus=%s, dedupe %.2fs)",
+                        "any" if cfg.panda_bus is None else cfg.panda_bus, cfg.panda_dedupe_s)
 
         # Optional powerbox seam: merge a second serial device into the ingress,
         # offset into the reserved DEVICE_POWERBOX_BASE id range. Not used in
@@ -649,7 +690,7 @@ class BackendService:
 
     def _avc_tick(self) -> None:
         """Mirror nav-emulator / climate-remote status into AvcState (1 Hz)."""
-        now = time.time()
+        now = time.monotonic()
         if now - self._avc_tick_last < 1.0 or self.twin is None:
             return
         self._avc_tick_last = now
@@ -804,7 +845,7 @@ class BackendService:
                 # The firmware (re)booted: every NO relay dropped (relay VCC
                 # is the RP2040's 5 V) and the PCF woke at 0xFF. Re-assert the
                 # wanted states once its I2C/PCF setup is done.
-                self._pp_reassert_at = time.time() + self.PP_REASSERT_DELAY_S
+                self._pp_reassert_at = time.monotonic() + self.PP_REASSERT_DELAY_S
                 logger.warning(
                     "Powerbox booted (reset_cause=%s): MFD/CAN/camera relays dropped — "
                     "re-asserting wanted relay states in %.0fs",
@@ -1084,11 +1125,11 @@ class BackendService:
         """
         if self.twin is None:
             return
-        now = time.time()
+        now = time.monotonic()
         if now - self._vfd_clock_last < 60.0:
             return
         self._vfd_clock_last = now
-        lt = time.localtime(now)
+        lt = time.localtime()
         self.twin.egress.send_command(OutgoingCommand(
             device_id=DEVICE_VFD,
             command_type="K",
@@ -1105,7 +1146,7 @@ class BackendService:
             return
         self.satellite_queue.tick()
         self.satellite_scheduler.tick()
-        now = time.time()
+        now = time.monotonic()
         # Supervisor (presence aging + config sync) needs only ~1 Hz.
         if (now - self._satellite_sup_last) >= 1.0:
             self._satellite_sup_last = now
@@ -1179,6 +1220,12 @@ class BackendService:
         logger.info("Starting backend service")
         if not self.twin.start():
             logger.warning("Virtual twin failed to start (gateway not connected?)")
+        if self.panda is not None:
+            if self.panda.start():
+                self.twin.store.dispatch(SetPandaStateAction(panda_enabled=True))
+            else:
+                logger.error("Panda broadcast CAN source failed to start (libusb-1.0 missing?)")
+                self.panda = None
         if self.recorder is not None:
             self.recorder.start()
         self.sink.start()
@@ -1205,7 +1252,7 @@ class BackendService:
 
         try:
             while not self._stop.is_set():
-                loop_start = time.time()
+                loop_start = time.monotonic()
                 try:
                     self.twin.update()
                     self.bridge.drain_commands()
@@ -1223,6 +1270,7 @@ class BackendService:
                     self._vfd_clock_tick()
                     self._satellite_tick()
                     self._avc_tick()
+                    self._panda_tick()
                     self._dashcam_tick()
                     if self.recorder is not None:
                         self.recorder.tick()
@@ -1230,7 +1278,7 @@ class BackendService:
                     logger.exception("Engine loop iteration failed")
                 
                 period = 1.0 / max(1.0, self.config.tick_hz)
-                elapsed = time.time() - loop_start
+                elapsed = time.monotonic() - loop_start
                 if elapsed < period:
                     self._stop.wait(period - elapsed)
         finally:
@@ -1323,7 +1371,7 @@ class BackendService:
         interval = cfg.powerbox_heartbeat_s
         if interval <= 0:
             return
-        now = time.time()
+        now = time.monotonic()
         if (now - self._pb_hb_last) < interval:
             return
         self._pb_hb_last = now
@@ -1336,6 +1384,83 @@ class BackendService:
         if not self._pb_pmlog_fetched:
             self._pb_pmlog_fetched = True
             self.powerbox_commander.request_pmlog()
+
+    # ── monotonic ageing of wall-clock state stamps ───────────────────────
+
+    def _mono_seen(self, key: str, wall_stamp: Optional[float]) -> float:
+        """Monotonic time at which ``wall_stamp`` (a ``time.time()`` value the
+        reducers store for display) was last seen to CHANGE; the backend start
+        when it never changed. Watchdogs age against this, never against the
+        wall clock: the phone has no RTC and NTP steps the clock by hours."""
+        mark = self._seen_marks.get(key)
+        if mark is None:
+            # First observation: a live stamp counts as fresh now, an empty
+            # one ages from backend start.
+            mark = (wall_stamp or None, time.monotonic() if wall_stamp else self._start_time)
+            self._seen_marks[key] = mark
+        elif wall_stamp and wall_stamp != mark[0]:
+            mark = (wall_stamp, time.monotonic())
+            self._seen_marks[key] = mark
+        return mark[1]
+
+    def _mono_age(self, key: str, wall_stamp: Optional[float]) -> float:
+        return time.monotonic() - self._mono_seen(key, wall_stamp)
+
+    # ── panda bench (gateway tx -> panda rx on an isolated segment) ──────
+
+    def _panda_bench_middleware(self, action, _store) -> None:
+        name = type(action).__name__
+        if name == "GatewayCanTxAction":
+            if self.twin is None:
+                return
+            if action.bench:
+                self.twin.ingress.bench_mark_tx(action.can_id, action.data)
+            ok = self.twin.output_port.send(OutgoingCommand(
+                device_id=DEVICE_CAN, command_type="tx",
+                payload={"a": "tx", "i": "0x%03X" % action.can_id, "d": list(action.data)}))
+            if not ok:
+                logger.warning("gateway_can_tx 0x%03X: gateway port not connected", action.can_id)
+        elif name == "PandaBenchAction":
+            if self.twin is not None and action.reset:
+                self.twin.ingress.bench_reset()
+
+    # ── panda status mirror ──────────────────────────────────────────────
+
+    def _panda_tick(self) -> None:
+        """Mirror the panda link/counters into ConnectionState (~1 Hz)."""
+        if self.panda is None or self.twin is None:
+            return
+        now = time.monotonic()
+        if now - self._panda_status_last < self.config.panda_status_s:
+            return
+        self._panda_status_last = now
+        st = self.panda.status()
+        ist = self.twin.ingress.stats
+        fields = dict(
+            panda_enabled=True,
+            panda_connected=st.connected,
+            panda_serial=st.serial or None,
+            panda_fw=st.fw_version or None,
+            panda_safety_mode=st.safety_mode,
+            panda_power_save=st.power_save,
+            panda_frames=st.frames,
+            panda_fps=round(self.panda.fps, 1) if st.connected else None,
+            panda_bus_counts=dict(st.bus_counts) if st.bus_counts else None,
+            panda_last_frame_time=st.last_frame_wall or None,
+            panda_last_error=st.last_error or None,
+            panda_decoded=ist.broadcast_decoded,
+            panda_dispatched=ist.broadcast_dispatched,
+            panda_fw_format=st.packet_format or None,
+            panda_can_rx_errs=st.can_rx_errs,
+            panda_bench=self.twin.ingress.bench_results(),
+        )
+        bench = fields["panda_bench"]
+        key = (st.connected, st.frames, st.last_error, ist.broadcast_dispatched,
+               bench["n"], bench["lost"], bench["pending"])
+        if key == self._panda_last_mirror:
+            return
+        self._panda_last_mirror = key
+        self.twin.store.dispatch(SetPandaStateAction(**fields))
 
     def _powerbox_watchdog_tick(self) -> None:
         """Flip powerbox.connected -> False when the link goes silent, and
@@ -1364,10 +1489,7 @@ class BackendService:
         if stale_s <= 0:
             return
         pb = self.twin.store.state.powerbox
-        last = pb.last_update_time
-        if last <= 0:
-            last = self._start_time
-        age = time.time() - last
+        age = self._mono_age("powerbox_frame", pb.last_update_time)
         if age > stale_s:
             if not self._pb_stale:
                 self._pb_stale = True
@@ -1418,7 +1540,7 @@ class BackendService:
         last = conn.last_heartbeat_time
         if not last:
             return  # no heartbeat ever seen — don't arm (old fw / not present)
-        age = time.time() - last
+        age = self._mono_age("gateway_hb", last)
         if age > stale_s:
             if not self._gw_stale:
                 self._gw_stale = True
@@ -1467,7 +1589,7 @@ class BackendService:
         if not cfg.gateway_auto_recover or self.port_power is None or self.twin is None:
             return
         gw = self.port_power.gateway
-        now = time.time()
+        now = time.monotonic()
 
         # VBUS edge: a board that has just been (re)powered needs its boot time
         # before silence means "wedged". Key-on turns relay ch3 back on after
@@ -1491,10 +1613,11 @@ class BackendService:
 
         conn = self.twin.store.state.connection
         last = conn.last_heartbeat_time
+        hb_mono = self._mono_seen("gateway_hb", last) if last else 0.0
         if last:
             if not self._gw_stale:
                 return
-            since = last
+            since = hb_mono
         else:
             # No heartbeat ever seen this boot: either the gateway was already
             # wedged before we started (recoverable) or it runs pre-2.28.0
@@ -1508,7 +1631,7 @@ class BackendService:
         if age < cfg.gateway_recover_stale_s:
             return
         # A heartbeat after the last cycle proves recovery worked — reset backoff.
-        if last and last > self._gw_recover_last:
+        if last and hb_mono > self._gw_recover_last:
             self._gw_recover_attempts = 0
         cooldown = min(
             cfg.gateway_recover_cooldown_s * (2 ** self._gw_recover_attempts),
@@ -1549,7 +1672,7 @@ class BackendService:
         interval = getattr(cfg, "gateway_usb_poll_s", 10.0)
         if interval <= 0:
             return
-        now = time.time()
+        now = time.monotonic()
         if (now - self._gwusb_last_poll) < interval:
             return
         self._gwusb_last_poll = now
@@ -1578,7 +1701,7 @@ class BackendService:
         # Every tick: finish pending OFF sequences (data-off right after the
         # device has dropped off the bus — see RelayPortPower.tick).
         self.port_power.tick_all()
-        now = time.time()
+        now = time.monotonic()
         if self._pp_reassert_at is not None and now >= self._pp_reassert_at:
             # Post-boot re-assert (POWERBOX_READY seen): push every wanted
             # state unconditionally, then let the normal drift sweep verify.
@@ -1637,7 +1760,7 @@ class BackendService:
 
     def _poco_power_tick(self) -> None:
         """Poll POCO's internal battery + thermal telemetry from sysfs (~1 Hz)."""
-        now = time.time()
+        now = time.monotonic()
         if now - self._poco_poll_last < 1.0:
             return
         self._poco_poll_last = now
@@ -1677,7 +1800,7 @@ class BackendService:
             return
         if self.powerbox_commander is None:
             return
-        now = time.time()
+        now = time.monotonic()
         if now - self._fan_last_tick < cfg.chassis_fan_tick_s:
             return
         self._fan_last_tick = now
@@ -1762,9 +1885,7 @@ class BackendService:
         if stale_s <= 0:
             return True
         last = self.twin.store.state.powerbox.last_update_time
-        if last <= 0:
-            last = self._start_time
-        return (time.time() - last) <= stale_s
+        return self._mono_age("powerbox_frame", last) <= stale_s
 
     def _maybe_recover_powerbox(self, pb, age: float) -> None:
         """Force a powerbox serial reset to clear a wedged link, if enabled.
@@ -1778,7 +1899,7 @@ class BackendService:
         if self._powerbox_serial is None:
             return
             
-        now = time.time()
+        now = time.monotonic()
         if self._pb_recover_attempts < 0:
             self._pb_recover_attempts = 0
         # Exponential backoff: 20s, 40s, 80s … capped. Resets to the base
@@ -1806,6 +1927,11 @@ class BackendService:
 
     def _shutdown(self) -> None:
         logger.info("Shutting down backend service")
+        if self.panda is not None:
+            try:
+                self.panda.stop()
+            except Exception:
+                logger.exception("Error stopping panda CAN source")
         if self._usb_monitor is not None:
             try:
                 self._usb_monitor.stop()

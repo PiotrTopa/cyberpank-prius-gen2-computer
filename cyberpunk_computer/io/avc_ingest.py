@@ -57,7 +57,7 @@ EventSink = Callable[[str, Dict], None]
 
 class AvcIngest:
     def __init__(self, fresh_s: float = FRESH_S,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.monotonic) -> None:
         self.decoder = AvcDecoder()
         self.fresh_s = fresh_s
         self._clock = clock

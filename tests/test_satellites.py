@@ -403,22 +403,36 @@ class TestSatelliteSupervisor:
 
     def test_stale_node_marked_offline(self):
         queue, store, port, clock = make_queue()
-        sup = SatelliteSupervisor(queue, store, offline_after_s=15.0)
+        sup = SatelliteSupervisor(queue, store, offline_after_s=15.0, clock=clock)
         store.dispatch(UpdateSatelliteNodeAction(107, seen=True))
         assert store.state.satellites.nodes[107].online
 
-        # Fake staleness by rewriting last_seen far in the past.
+        # Presence ages on the supervisor's (monotonic) clock from the moment
+        # the node was last seen, not on the wall-clock stamp in the state.
+        sup.tick()
+        assert store.state.satellites.nodes[107].online
+        clock.advance(60)
+        sup.tick()
+        assert not store.state.satellites.nodes[107].online
+
+    def test_wall_clock_step_does_not_mark_offline(self):
+        queue, store, port, clock = make_queue()
+        sup = SatelliteSupervisor(queue, store, offline_after_s=15.0, clock=clock)
+        store.dispatch(UpdateSatelliteNodeAction(107, seen=True))
+        sup.tick()
+        # NTP steps the wall clock forward by a day; the node was seen 1 s ago.
         import dataclasses
         node = store.state.satellites.nodes[107]
         store._state = dataclasses.replace(
             store._state,
             satellites=dataclasses.replace(
                 store._state.satellites,
-                nodes={107: dataclasses.replace(node, last_seen=time.time() - 60)},
+                nodes={107: dataclasses.replace(node, last_seen=node.last_seen + 86400)},
             ),
         )
+        clock.advance(1)
         sup.tick()
-        assert not store.state.satellites.nodes[107].online
+        assert store.state.satellites.nodes[107].online
 
     def test_rail_down_marks_nodes_offline(self):
         queue, store, port, clock = make_queue()

@@ -74,8 +74,20 @@ class IngressStats:
     system_messages: int = 0
     errors: int = 0
     last_message_time: float = 0.0
-    last_can_time: float = 0.0       # Any CAN message (unsolicited or solicited)
-    last_solicited_time: float = 0.0  # Last successful solicited response
+    last_can_time: float = 0.0       # Any CAN message (unsolicited or solicited), wall clock
+    last_solicited_time: float = 0.0  # Last successful solicited response, wall clock
+    # Monotonic twins of the stamps above: ages/watchdogs must never use the
+    # wall clock (the phone has no RTC; NTP steps the clock by hours at boot).
+    last_can_mono: float = 0.0
+    last_solicited_mono: float = 0.0
+    last_heartbeat_mono: float = 0.0  # last GW_HB / GATEWAY_READY seen
+    gateway_resets: int = 0          # GATEWAY_READY banners + uptime regressions
+    # Broadcast (panda) fast path — see ingest_broadcast_can
+    broadcast_frames: int = 0
+    broadcast_decoded: int = 0
+    broadcast_dispatched: int = 0
+    broadcast_deduped: int = 0
+    broadcast_skipped_unknown: int = 0
 
 
 class IngressController:
@@ -108,6 +120,28 @@ class IngressController:
         # AVC-LAN (gateway fw 3.x, AVC_MAP.md): decoder + AVC-priority freshness
         self._avc = AvcIngest()
         self._can_decoder = CANDecoder()
+
+        # Broadcast fast path (comma.ai panda, io.panda_can). Runs on the panda
+        # reader thread, so it gets its own decoder instance and its own
+        # per-id caches; the Store serialises the dispatches.
+        self._bcast_decoder = CANDecoder()
+        self._bcast_dedupe_s: float = 0.25
+        self._bcast_last: Dict[int, tuple] = {}        # id -> (payload, t_mono)
+        self._bcast_unknown: Dict[int, list] = {}      # id -> [misses, t_mono]
+        self._BCAST_UNKNOWN_AFTER = 3                  # misses before an id is skipped
+        self._BCAST_UNKNOWN_TTL_S = 60.0               # ...and retried after this long
+
+        # Gateway reset listeners: fn(reason) on GATEWAY_READY and on a GW_HB
+        # uptime regression (the gateway's RAM tables — solicited subscriptions,
+        # AVC auto-reply slots — are gone and must be re-sent).
+        self._gateway_reset_listeners: List[Callable[[str], None]] = []
+        self._last_gateway_uptime: Optional[float] = None
+
+        # Bench latency correlation (gateway tx -> panda rx), see
+        # bench_mark_tx(): (can_id, payload) -> monotonic send time.
+        self._bench_pending: Dict[tuple, float] = {}
+        self._bench_samples: List[float] = []
+        self._bench_lost: int = 0
         
         # Satellite message handlers (device_id -> handler)
         self._satellite_handlers: Dict[int, Callable[[dict], List[Action]]] = {}
@@ -181,6 +215,53 @@ class IngressController:
         """Add a message logging callback. Multiple callbacks are supported."""
         self._message_log_callbacks.append(callback)
     
+    def add_gateway_reset_listener(self, fn: Callable[[str], None]) -> None:
+        """``fn(reason)`` whenever the gateway is seen (re)booting."""
+        self._gateway_reset_listeners.append(fn)
+
+    def _notify_gateway_reset(self, reason: str) -> None:
+        self._stats.gateway_resets += 1
+        for fn in list(self._gateway_reset_listeners):
+            try:
+                fn(reason)
+            except Exception:
+                logger.exception("Gateway reset listener failed")
+
+    def bench_mark_tx(self, can_id: int, data: bytes, t_mono: Optional[float] = None) -> None:
+        """Record that the backend just asked the gateway to transmit this
+        frame; when the panda delivers the same (id, payload) the round-trip
+        host->gateway->CAN->panda->host is logged as a latency sample."""
+        key = (can_id, bytes(data))
+        if key in self._bench_pending:
+            self._bench_lost += 1
+        if len(self._bench_pending) > 256:
+            self._bench_lost += len(self._bench_pending)
+            self._bench_pending.clear()
+        self._bench_pending[key] = t_mono if t_mono is not None else time.monotonic()
+
+    def bench_results(self) -> dict:
+        s = sorted(self._bench_samples)
+        n = len(s)
+        return {
+            "n": n,
+            "lost": self._bench_lost,
+            "pending": len(self._bench_pending),
+            "last_ms": round(self._bench_samples[-1] * 1000, 2) if n else None,
+            "mean_ms": round(sum(s) / n * 1000, 2) if n else None,
+            "p50_ms": round(s[n // 2] * 1000, 2) if n else None,
+            "p99_ms": round(s[min(n - 1, int(n * 0.99))] * 1000, 2) if n else None,
+            "max_ms": round(s[-1] * 1000, 2) if n else None,
+        }
+
+    def bench_reset(self) -> None:
+        self._bench_pending.clear()
+        self._bench_samples.clear()
+        self._bench_lost = 0
+
+    def set_broadcast_dedupe(self, seconds: float) -> None:
+        """Suppress a repeated identical broadcast payload for this long (0 = off)."""
+        self._bcast_dedupe_s = max(0.0, float(seconds))
+
     def register_satellite_handler(
         self,
         device_id: int,
@@ -300,6 +381,8 @@ class IngressController:
             
             logger.info(f"Gateway ready: v{version}, CAN={can_ready}")
             self._last_gateway_identity = ("gateway", version)
+            self._stats.last_heartbeat_mono = time.monotonic()
+            self._last_gateway_uptime = 0.0
             
             self._store.dispatch(SetConnectionStateAction(
                 connected=True,
@@ -309,6 +392,8 @@ class IngressController:
                 last_message_time=now,
                 source=ActionSource.GATEWAY
             ))
+            # The banner means a fresh boot: whatever we configured is gone.
+            self._notify_gateway_reset("GATEWAY_READY")
         
         elif message_text == "GW_HB":
             # Rolling liveness heartbeat (gateway firmware >= 2.28.0), ~1 Hz.
@@ -327,6 +412,7 @@ class IngressController:
                     "Gateway heartbeat n=%s up=%ss",
                     data.get("n"), data.get("up"),
                 )
+            self._stats.last_heartbeat_mono = time.monotonic()
             self._store.dispatch(SetConnectionStateAction(
                 connected=True,
                 gateway_version=version,
@@ -337,6 +423,15 @@ class IngressController:
                 last_message_time=now,
                 source=ActionSource.GATEWAY
             ))
+            # Uptime going backwards = the gateway rebooted and we missed the
+            # GATEWAY_READY banner (port reopened late, line dropped).
+            up = data.get("up")
+            if isinstance(up, (int, float)):
+                prev = self._last_gateway_uptime
+                self._last_gateway_uptime = float(up)
+                if prev is not None and up < prev:
+                    logger.warning("Gateway uptime went %.0fs -> %.0fs: rebooted", prev, up)
+                    self._notify_gateway_reset("uptime reset")
         
         elif message_text.upper() == "IDENT" and \
                 str(data.get("role", "gateway")).lower() in ("gateway", ""):
@@ -365,13 +460,17 @@ class IngressController:
         """Handle CAN bus messages."""
         self._stats.can_messages += 1
         self._stats.last_can_time = time.time()
+        self._stats.last_can_mono = time.monotonic()
         
         can_id_raw = msg.data.get("i")
         action = msg.data.get("a")  # Check if it's a subscription response
 
-        # Track solicited response timestamps for watchdog
-        if action == "sub":
+        # Track solicited response timestamps for the subscription watchdog.
+        # Gateway fw 3.x answers subscriptions AND one-shot requests with
+        # "a":"resp" (fw 2.x used "sub"); an error reply is not a response.
+        if action in ("sub", "resp") and not msg.data.get("err"):
             self._stats.last_solicited_time = time.time()
+            self._stats.last_solicited_mono = time.monotonic()
         
         # Normalize CAN ID for comparison (handle both string and int)
         can_id_int = None
@@ -427,6 +526,91 @@ class IngressController:
         if actions:
             self._dispatch_actions(actions)
     
+    def ingest_broadcast_can(self, can_id: int, data: bytes, bus: int = 0,
+                             t_wall: Optional[float] = None,
+                             t_mono: Optional[float] = None) -> bool:
+        """Broadcast-frame fast path (panda reader thread -> decoder -> store).
+
+        Bypasses the input-port queue and the engine tick on purpose: the
+        frame is decoded and dispatched here, on the caller's thread, so the
+        state reflects the bus within the decode+dispatch time (sub-ms on the
+        phone for the hot ids) instead of a 20 ms tick later. The Store
+        serialises concurrent dispatches.
+
+        Two cheap filters keep the full-bus rate affordable:
+        * ids the decoder does not know are skipped after a few misses
+          (retried every minute, so a decoder gaining an id is picked up);
+        * an identical payload repeated within ``dedupe_s`` is dropped — the
+          state already holds that value; freshness is kept because every
+          id still comes through at least every ``dedupe_s`` while it repeats.
+
+        Returns True when the frame reached the store.
+        """
+        now_m = t_mono if t_mono is not None else time.monotonic()
+        now_w = t_wall if t_wall is not None else time.time()
+        st = self._stats
+        st.broadcast_frames += 1
+        st.can_messages += 1
+        st.last_can_time = now_w
+        st.last_can_mono = now_m
+
+        if self._bench_pending:
+            t_tx = self._bench_pending.pop((can_id, bytes(data)), None)
+            if t_tx is not None:
+                self._bench_samples.append(now_m - t_tx)
+                if len(self._bench_samples) > 2000:
+                    del self._bench_samples[:1000]
+
+        neg = self._bcast_unknown.get(can_id)
+        if neg is not None and neg[0] >= self._BCAST_UNKNOWN_AFTER:
+            if now_m - neg[1] < self._BCAST_UNKNOWN_TTL_S:
+                st.broadcast_skipped_unknown += 1
+                return False
+            neg[0] = 0          # TTL elapsed: give the id another chance
+
+        if self._bcast_dedupe_s > 0.0:
+            last = self._bcast_last.get(can_id)
+            if last is not None and last[0] == data and (now_m - last[1]) < self._bcast_dedupe_s:
+                st.broadcast_deduped += 1
+                return False
+            self._bcast_last[can_id] = (data, now_m)
+
+        raw = {"i": "0x%03X" % can_id, "d": list(data), "ts": int(now_w * 1000), "bus": bus}
+        if self._message_log_callbacks:
+            msg = RawMessage(device_id=DEVICE_CAN, timestamp=now_w, data=raw)
+            for cb in self._message_log_callbacks:
+                try:
+                    cb(msg, "IN")
+                except Exception:
+                    logger.exception("Message log callback failed")
+
+        try:
+            decoded = self._bcast_decoder.decode(raw)
+        except Exception as e:
+            logger.error("Broadcast CAN decode error for 0x%03X: %s", can_id, e)
+            st.errors += 1
+            return False
+        if decoded is None or decoded.msg_type == CANMessageType.UNKNOWN:
+            if neg is None:
+                self._bcast_unknown[can_id] = [1, now_m]
+            else:
+                neg[0] += 1
+                neg[1] = now_m
+            return False
+        if neg is not None:
+            self._bcast_unknown.pop(can_id, None)
+        st.broadcast_decoded += 1
+        try:
+            actions = self._can_message_to_actions(decoded)
+            if actions:
+                self._dispatch_actions(actions)
+                st.broadcast_dispatched += 1
+                return True
+        except Exception as e:
+            logger.error("Broadcast CAN dispatch error for 0x%03X: %s", can_id, e)
+            st.errors += 1
+        return False
+
     def _handle_avc_message(self, msg: RawMessage) -> None:
         """Handle AVC-LAN frames (gateway fw 3.x; comm.avc tables)."""
         self._stats.avc_messages += 1
@@ -447,7 +631,7 @@ class IngressController:
         # edge, which triggers the config re-push (see
         # backend.satellites.SatelliteSupervisor).
         if DEVICE_SATELLITE_BASE <= device_id < DEVICE_POWERBOX_BASE:
-            now = time.time()
+            now = time.monotonic()
             last = self._satellite_seen_dispatch.get(device_id, 0.0)
             if (now - last) >= self._satellite_seen_min_interval:
                 self._satellite_seen_dispatch[device_id] = now
@@ -578,7 +762,11 @@ class IngressController:
         
         # Vehicle Speed
         elif msg.msg_type == CANMessageType.VEHICLE_SPEED:
-            speed = msg.values.get("speed_kph") or msg.values.get("speed")
+            # 0.0 is a valid speed (`or` used to drop it, so the state could
+            # not return to 0 from the broadcast path).
+            speed = msg.values.get("speed_kph")
+            if speed is None:
+                speed = msg.values.get("speed")
             if speed is not None and speed < 300:
                 actions.append(SetSpeedAction(speed, ActionSource.GATEWAY))
         
@@ -1125,7 +1313,7 @@ class IngressController:
         self._dtc_scan_pending_ecus = {name for _, name in DTC_ECUS}
         self._dtc_scan_results = []
         self._dtc_scan_mode = mode
-        self._dtc_scan_start_time = time.time()
+        self._dtc_scan_start_time = time.monotonic()
         
         # Dispatch scan-in-progress state
         self._store.dispatch(SetDTCScanStateAction(in_progress=True))
@@ -1186,7 +1374,7 @@ class IngressController:
         if not self._dtc_scan_pending_ecus:
             return
         
-        elapsed = time.time() - self._dtc_scan_start_time
+        elapsed = time.monotonic() - self._dtc_scan_start_time
         if elapsed > self._DTC_SCAN_TIMEOUT:
             logger.warning(
                 f"DTC scan timeout after {elapsed:.1f}s, "
