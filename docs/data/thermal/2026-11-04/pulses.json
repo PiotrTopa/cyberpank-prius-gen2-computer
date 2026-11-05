@@ -1,0 +1,1046 @@
+{
+ "P100": {
+  "fan": 100,
+  "rpm": 4784.55,
+  "t_amb": 24.864999999999995,
+  "base_die": 30.66,
+  "base_mem": 30.871666666666666,
+  "base_pm": 28.442000000000004,
+  "p_idle": 1.0021833333333334,
+  "pulses": [
+   {
+    "pulse_s": 60,
+    "p_load": 4.080981818181818,
+    "e_in_j": 181.323,
+    "die_end": 53.760000000000005,
+    "mem_end": 45.57000000000001,
+    "pm_end": 38.629999999999995,
+    "die_fall_30": 12.799999999999997,
+    "die_fall_60": 13.799999999999997,
+    "die_120_excess": 0.14000000000000057,
+    "mem_120_excess": 0.32833333333333314,
+    "sink_c": 33.98,
+    "die_300_excess": NaN,
+    "fits": {
+     "die": {
+      "tinf": 31.06,
+      "a_fast": 8.93,
+      "tau_fast": 3.1,
+      "a_slow": 6.35,
+      "tau_slow": 22.7,
+      "rmse": 0.196
+     },
+     "mem": {
+      "tinf": 31.32,
+      "a_fast": 8.13,
+      "tau_fast": 3.4,
+      "a_slow": 5.89,
+      "tau_slow": 22.6,
+      "rmse": 0.212
+     },
+     "pm": {
+      "tinf": 28.62,
+      "a_fast": 6.9,
+      "tau_fast": 10.6,
+      "a_slow": 3.06,
+      "tau_slow": 44.9,
+      "rmse": 0.068
+     }
+    },
+    "cool_s": 120.1,
+    "cool_reason": "criterion",
+    "tainted": [
+     "acc_off",
+     "power_mode_low"
+    ],
+    "f0_ghz": 1.7663999999999995,
+    "fg_mhz": 694.9,
+    "online": "0-7"
+   },
+   {
+    "pulse_s": 120,
+    "p_load": 3.958278260869565,
+    "e_in_j": 351.421,
+    "die_end": 52.510000000000005,
+    "mem_end": 44.830000000000005,
+    "pm_end": 38.922999999999995,
+    "die_fall_30": 12.199999999999996,
+    "die_fall_60": 12.799999999999997,
+    "die_120_excess": 0.8399999999999999,
+    "mem_120_excess": 0.9283333333333346,
+    "sink_c": 34.72,
+    "die_300_excess": NaN,
+    "fits": {
+     "die": {
+      "tinf": 31.55,
+      "a_fast": 7.64,
+      "tau_fast": 3.4,
+      "a_slow": 6.43,
+      "tau_slow": 23.6,
+      "rmse": 0.198
+     },
+     "mem": {
+      "tinf": 31.66,
+      "a_fast": 7.31,
+      "tau_fast": 3.7,
+      "a_slow": 5.58,
+      "tau_slow": 27.3,
+      "rmse": 0.193
+     },
+     "pm": {
+      "tinf": 28.45,
+      "a_fast": 6.94,
+      "tau_fast": 12.1,
+      "a_slow": 3.19,
+      "tau_slow": 77.2,
+      "rmse": 0.063
+     }
+    },
+    "cool_s": 120.1,
+    "cool_reason": "criterion",
+    "tainted": [
+     "acc_off",
+     "power_mode_low"
+    ],
+    "f0_ghz": 1.7663999999999995,
+    "fg_mhz": 694.9,
+    "online": "0-7"
+   },
+   {
+    "pulse_s": 240,
+    "p_load": 3.9673601694915255,
+    "e_in_j": 711.7468166666666,
+    "die_end": 56.07000000000001,
+    "mem_end": 48.27,
+    "pm_end": 40.596,
+    "die_fall_30": 12.799999999999997,
+    "die_fall_60": 14.799999999999997,
+    "die_120_excess": 0.8399999999999999,
+    "mem_120_excess": 0.6283333333333339,
+    "sink_c": 35.56,
+    "die_300_excess": NaN,
+    "fits": {
+     "die": {
+      "tinf": 31.68,
+      "a_fast": 9.85,
+      "tau_fast": 3.2,
+      "a_slow": 8.11,
+      "tau_slow": 25.1,
+      "rmse": 0.155
+     },
+     "mem": {
+      "tinf": 31.63,
+      "a_fast": 9.47,
+      "tau_fast": 4.2,
+      "a_slow": 6.72,
+      "tau_slow": 31.8,
+      "rmse": 0.188
+     },
+     "pm": {
+      "tinf": 29.02,
+      "a_fast": 6.47,
+      "tau_fast": 10.3,
+      "a_slow": 5.33,
+      "tau_slow": 42.9,
+      "rmse": 0.061
+     }
+    },
+    "cool_s": 120.1,
+    "cool_reason": "criterion",
+    "tainted": [
+     "acc_off",
+     "power_mode_low"
+    ],
+    "f0_ghz": 1.7663999999999995,
+    "fg_mhz": 694.9,
+    "online": "0-7"
+   },
+   {
+    "pulse_s": 480,
+    "p_load": 4.254132631578948,
+    "e_in_j": 1557.989,
+    "die_end": 58.39,
+    "mem_end": 50.58,
+    "pm_end": 42.621,
+    "die_fall_30": 16.400000000000006,
+    "die_fall_60": 18.1,
+    "die_120_excess": 1.1400000000000006,
+    "mem_120_excess": 1.2283333333333353,
+    "sink_c": 36.60000000000001,
+    "die_300_excess": NaN,
+    "fits": {
+     "die": {
+      "tinf": 31.81,
+      "a_fast": 11.75,
+      "tau_fast": 3.7,
+      "a_slow": 8.3,
+      "tau_slow": 30.4,
+      "rmse": 0.215
+     },
+     "mem": {
+      "tinf": 31.81,
+      "a_fast": 10.63,
+      "tau_fast": 4.6,
+      "a_slow": 7.11,
+      "tau_slow": 36.4,
+      "rmse": 0.235
+     },
+     "pm": {
+      "tinf": 28.96,
+      "a_fast": 8.37,
+      "tau_fast": 11.8,
+      "a_slow": 5.23,
+      "tau_slow": 60.9,
+      "rmse": 0.063
+     }
+    },
+    "cool_s": 132.1,
+    "cool_reason": "criterion",
+    "tainted": [
+     "acc_off",
+     "power_mode_low"
+    ],
+    "f0_ghz": 1.7663999999999995,
+    "fg_mhz": 710.0,
+    "online": "0-7"
+   },
+   {
+    "pulse_s": 900,
+    "p_load": 4.221969866071428,
+    "e_in_j": 2896.633816666667,
+    "die_end": 55.64,
+    "mem_end": 47.989999999999995,
+    "pm_end": 40.687,
+    "die_fall_30": 13.100000000000001,
+    "die_fall_60": 13.799999999999997,
+    "die_120_excess": 0.8399999999999999,
+    "mem_120_excess": 0.6283333333333339,
+    "sink_c": 35.379999999999995,
+    "die_300_excess": NaN,
+    "fits": {
+     "die": {
+      "tinf": 31.43,
+      "a_fast": 10.1,
+      "tau_fast": 4.4,
+      "a_slow": 6.61,
+      "tau_slow": 31.5,
+      "rmse": 0.175
+     },
+     "mem": {
+      "tinf": 31.45,
+      "a_fast": 9.95,
+      "tau_fast": 5.4,
+      "a_slow": 5.57,
+      "tau_slow": 38.1,
+      "rmse": 0.198
+     },
+     "pm": {
+      "tinf": 28.72,
+      "a_fast": 7.55,
+      "tau_fast": 11.4,
+      "a_slow": 4.49,
+      "tau_slow": 56.8,
+      "rmse": 0.074
+     }
+    },
+    "cool_s": 120.1,
+    "cool_reason": "criterion",
+    "tainted": [
+     "acc_off",
+     "power_mode_low"
+    ],
+    "f0_ghz": 1.7663999999999995,
+    "fg_mhz": 700.1333333333333,
+    "online": "0-7"
+   }
+  ],
+  "charge_die": {
+   "a_inf": 7.5,
+   "tau_charge": 36.3
+  },
+  "charge_mem": {
+   "a_inf": 6.28,
+   "tau_charge": 23.6
+  },
+  "charge_pm": {
+   "a_inf": 4.98,
+   "tau_charge": 78.8
+  },
+  "charge_sink": {
+   "a_inf": 5.22,
+   "tau_charge": 67.8,
+   "points": {
+    "60": 3.32,
+    "120": 4.06,
+    "240": 4.9,
+    "480": 5.94,
+    "900": 4.72
+   }
+  },
+  "r_tot_die": 7.289251457551579,
+  "r_step_die": 7.7582783038592,
+  "r_step_mem": 5.3166050479675615,
+  "r_step_pm": 3.8030471509509947,
+  "p_net": 3.219786532738095,
+  "r_mass": 1.6212254902379912,
+  "c_mass": 41.82021588498905
+ },
+ "P070": {
+  "fan": 70,
+  "rpm": 3829.983333333333,
+  "t_amb": 25.014000000000003,
+  "base_die": 30.916666666666668,
+  "base_mem": 31.138333333333335,
+  "base_pm": 28.68966666666667,
+  "p_idle": 1.0163,
+  "pulses": [
+   {
+    "pulse_s": 60,
+    "p_load": 4.00949090909091,
+    "e_in_j": 176.98999999999998,
+    "die_end": 54.03000000000001,
+    "mem_end": 46.06,
+    "pm_end": 38.889,
+    "die_fall_30": 12.800000000000004,
+    "die_fall_60": 13.5,
+    "die_120_excess": 0.28333333333333144,
+    "mem_120_excess": 0.3616666666666646,
+    "sink_c": 34.160000000000004,
+    "die_300_excess": NaN,
+    "fits": {
+     "die": {
+      "tinf": 31.52,
+      "a_fast": 9.69,
+      "tau_fast": 3.6,
+      "a_slow": 5.77,
+      "tau_slow": 22.8,
+      "rmse": 0.169
+     },
+     "mem": {
+      "tinf": 31.56,
+      "a_fast": 9.26,
+      "tau_fast": 3.6,
+      "a_slow": 5.08,
+      "tau_slow": 28.0,
+      "rmse": 0.18
+     },
+     "pm": {
+      "tinf": 29.02,
+      "a_fast": 6.44,
+      "tau_fast": 9.3,
+      "a_slow": 3.58,
+      "tau_slow": 39.1,
+      "rmse": 0.063
+     }
+    },
+    "cool_s": 120.1,
+    "cool_reason": "criterion",
+    "tainted": [
+     "acc_off",
+     "power_mode_low"
+    ],
+    "f0_ghz": 1.7663999999999995,
+    "fg_mhz": 694.9,
+    "online": "0-7"
+   },
+   {
+    "pulse_s": 120,
+    "p_load": 3.9728956521739125,
+    "e_in_j": 351.40200000000004,
+    "die_end": 52.9,
+    "mem_end": 45.11,
+    "pm_end": 39.25000000000001,
+    "die_fall_30": 11.799999999999997,
+    "die_fall_60": 12.799999999999997,
+    "die_120_excess": 0.5833333333333321,
+    "mem_120_excess": 0.6616666666666653,
+    "sink_c": 34.980000000000004,
+    "die_300_excess": NaN,
+    "fits": {
+     "die": {
+      "tinf": 31.71,
+      "a_fast": 8.14,
+      "tau_fast": 3.4,
+      "a_slow": 6.01,
+      "tau_slow": 26.7,
+      "rmse": 0.18
+     },
+     "mem": {
+      "tinf": 31.9,
+      "a_fast": 7.49,
+      "tau_fast": 3.3,
+      "a_slow": 5.69,
+      "tau_slow": 28.6,
+      "rmse": 0.172
+     },
+     "pm": {
+      "tinf": 29.24,
+      "a_fast": 5.74,
+      "tau_fast": 9.7,
+      "a_slow": 4.09,
+      "tau_slow": 45.7,
+      "rmse": 0.072
+     }
+    },
+    "cool_s": 120.2,
+    "cool_reason": "criterion",
+    "tainted": [
+     "acc_off",
+     "power_mode_low"
+    ],
+    "f0_ghz": 1.7663999999999995,
+    "fg_mhz": 679.8,
+    "online": "0-7"
+   },
+   {
+    "pulse_s": 240,
+    "p_load": 3.957629787234043,
+    "e_in_j": 700.448,
+    "die_end": 56.67999999999999,
+    "mem_end": 48.89,
+    "pm_end": 41.06999999999999,
+    "die_fall_30": 13.200000000000003,
+    "die_fall_60": 14.5,
+    "die_120_excess": 0.8833333333333329,
+    "mem_120_excess": 0.961666666666666,
+    "sink_c": 35.9,
+    "die_300_excess": NaN,
+    "fits": {
+     "die": {
+      "tinf": 31.64,
+      "a_fast": 11.44,
+      "tau_fast": 4.8,
+      "a_slow": 6.3,
+      "tau_slow": 38.8,
+      "rmse": 0.186
+     },
+     "mem": {
+      "tinf": 31.98,
+      "a_fast": 10.31,
+      "tau_fast": 3.8,
+      "a_slow": 6.88,
+      "tau_slow": 31.8,
+      "rmse": 0.225
+     },
+     "pm": {
+      "tinf": 28.9,
+      "a_fast": 7.82,
+      "tau_fast": 10.9,
+      "a_slow": 4.79,
+      "tau_slow": 63.3,
+      "rmse": 0.063
+     }
+    },
+    "cool_s": 120.1,
+    "cool_reason": "criterion",
+    "tainted": [
+     "acc_off",
+     "power_mode_low"
+    ],
+    "f0_ghz": 1.7663999999999995,
+    "fg_mhz": 694.9,
+    "online": "0-7"
+   },
+   {
+    "pulse_s": 480,
+    "p_load": 4.244694736842105,
+    "e_in_j": 1548.5259999999998,
+    "die_end": 58.739999999999995,
+    "mem_end": 50.660000000000004,
+    "pm_end": 42.977000000000004,
+    "die_fall_30": 16.1,
+    "die_fall_60": 17.700000000000003,
+    "die_120_excess": 1.1833333333333336,
+    "mem_120_excess": 1.3616666666666646,
+    "sink_c": 37.06,
+    "die_300_excess": NaN,
+    "fits": {
+     "die": {
+      "tinf": 31.99,
+      "a_fast": 12.36,
+      "tau_fast": 3.9,
+      "a_slow": 7.91,
+      "tau_slow": 37.4,
+      "rmse": 0.376
+     },
+     "mem": {
+      "tinf": 32.14,
+      "a_fast": 11.57,
+      "tau_fast": 4.0,
+      "a_slow": 7.36,
+      "tau_slow": 38.3,
+      "rmse": 0.219
+     },
+     "pm": {
+      "tinf": 29.0,
+      "a_fast": 8.53,
+      "tau_fast": 11.3,
+      "a_slow": 5.57,
+      "tau_slow": 73.9,
+      "rmse": 0.072
+     }
+    },
+    "cool_s": 145.2,
+    "cool_reason": "criterion",
+    "tainted": [
+     "acc_off",
+     "power_mode_low"
+    ],
+    "f0_ghz": 1.7663999999999995,
+    "fg_mhz": 710.0,
+    "online": "0-7"
+   }
+  ],
+  "charge_die": {
+   "a_inf": 6.93,
+   "tau_charge": 38.1
+  },
+  "charge_mem": {
+   "a_inf": 7.04,
+   "tau_charge": 54.7
+  },
+  "charge_pm": {
+   "a_inf": 5.18,
+   "tau_charge": 60.8
+  },
+  "charge_sink": {
+   "a_inf": 5.82,
+   "tau_charge": 90.7,
+   "points": {
+    "60": 3.24,
+    "120": 4.06,
+    "240": 4.98,
+    "480": 6.14
+   }
+  },
+  "r_tot_die": 7.945447691979585,
+  "r_step_die": 8.61831826691338,
+  "r_step_mem": 6.046864853262038,
+  "r_step_pm": 4.425522433885725,
+  "p_net": 3.2283947368421044,
+  "r_mass": 1.8027535274985944,
+  "c_mass": 50.311924850786745
+ },
+ "P040": {
+  "fan": 40,
+  "rpm": 2525.366666666667,
+  "t_amb": 25.40683333333334,
+  "base_die": 31.985,
+  "base_mem": 32.21166666666666,
+  "base_pm": 29.818,
+  "p_idle": 1.0523833333333334,
+  "pulses": [
+   {
+    "pulse_s": 60,
+    "p_load": 4.09150909090909,
+    "e_in_j": 181.73100000000002,
+    "die_end": 54.83,
+    "mem_end": 46.85000000000001,
+    "pm_end": 39.765,
+    "die_fall_30": 12.100000000000001,
+    "die_fall_60": 13.100000000000001,
+    "die_120_excess": 0.11500000000000199,
+    "mem_120_excess": -0.11166666666665748,
+    "sink_c": 35.160000000000004,
+    "die_300_excess": NaN,
+    "fits": {
+     "die": {
+      "tinf": 31.93,
+      "a_fast": 9.12,
+      "tau_fast": 3.8,
+      "a_slow": 6.12,
+      "tau_slow": 26.5,
+      "rmse": 0.177
+     },
+     "mem": {
+      "tinf": 32.14,
+      "a_fast": 8.57,
+      "tau_fast": 4.3,
+      "a_slow": 5.53,
+      "tau_slow": 27.3,
+      "rmse": 0.222
+     },
+     "pm": {
+      "tinf": 29.18,
+      "a_fast": 7.33,
+      "tau_fast": 11.7,
+      "a_slow": 3.14,
+      "tau_slow": 64.8,
+      "rmse": 0.057
+     }
+    },
+    "cool_s": 120.1,
+    "cool_reason": "criterion",
+    "tainted": [
+     "acc_off",
+     "power_mode_low"
+    ],
+    "f0_ghz": 1.7663999999999995,
+    "fg_mhz": 691.4,
+    "online": "0-7"
+   },
+   {
+    "pulse_s": 120,
+    "p_load": 3.967660869565218,
+    "e_in_j": 347.737,
+    "die_end": 53.64,
+    "mem_end": 45.42,
+    "pm_end": 39.787,
+    "die_fall_30": 11.5,
+    "die_fall_60": 12.5,
+    "die_120_excess": 0.5150000000000006,
+    "mem_120_excess": -0.11166666666665748,
+    "sink_c": 35.56,
+    "die_300_excess": NaN,
+    "fits": {
+     "die": {
+      "tinf": 32.0,
+      "a_fast": 8.31,
+      "tau_fast": 3.9,
+      "a_slow": 5.93,
+      "tau_slow": 32.9,
+      "rmse": 0.231
+     },
+     "mem": {
+      "tinf": 31.95,
+      "a_fast": 7.84,
+      "tau_fast": 5.0,
+      "a_slow": 5.14,
+      "tau_slow": 40.3,
+      "rmse": 0.224
+     },
+     "pm": {
+      "tinf": 28.63,
+      "a_fast": 7.0,
+      "tau_fast": 12.7,
+      "a_slow": 3.79,
+      "tau_slow": 108.7,
+      "rmse": 0.069
+     }
+    },
+    "cool_s": 120.1,
+    "cool_reason": "criterion",
+    "tainted": [
+     "acc_off",
+     "power_mode_low"
+    ],
+    "f0_ghz": 1.7663999999999995,
+    "fg_mhz": 685.0333333333333,
+    "online": "0-7"
+   },
+   {
+    "pulse_s": 240,
+    "p_load": 3.95075744680851,
+    "e_in_j": 693.425,
+    "die_end": 56.92,
+    "mem_end": 49.07000000000001,
+    "pm_end": 41.55200000000001,
+    "die_fall_30": 16.4,
+    "die_fall_60": 18.0,
+    "die_120_excess": 0.5150000000000006,
+    "mem_120_excess": -0.11166666666665748,
+    "sink_c": 37.12,
+    "die_300_excess": NaN,
+    "fits": {
+     "die": {
+      "tinf": 32.54,
+      "a_fast": 10.76,
+      "tau_fast": 2.8,
+      "a_slow": 8.37,
+      "tau_slow": 27.2,
+      "rmse": 0.235
+     },
+     "mem": {
+      "tinf": 32.63,
+      "a_fast": 10.48,
+      "tau_fast": 4.1,
+      "a_slow": 6.78,
+      "tau_slow": 33.2,
+      "rmse": 0.233
+     },
+     "pm": {
+      "tinf": 28.94,
+      "a_fast": 8.04,
+      "tau_fast": 12.8,
+      "a_slow": 4.81,
+      "tau_slow": 92.4,
+      "rmse": 0.068
+     }
+    },
+    "cool_s": 120.1,
+    "cool_reason": "criterion",
+    "tainted": [
+     "acc_off",
+     "power_mode_low"
+    ],
+    "f0_ghz": 1.7663999999999995,
+    "fg_mhz": 694.9,
+    "online": "0-7"
+   },
+   {
+    "pulse_s": 480,
+    "p_load": 4.259046315789473,
+    "e_in_j": 1535.938,
+    "die_end": 60.25,
+    "mem_end": 52.05,
+    "pm_end": 44.238,
+    "die_fall_30": 15.799999999999997,
+    "die_fall_60": 16.799999999999997,
+    "die_120_excess": 1.5150000000000006,
+    "mem_120_excess": 1.5883333333333383,
+    "sink_c": 38.519999999999996,
+    "die_300_excess": NaN,
+    "fits": {
+     "die": {
+      "tinf": 32.73,
+      "a_fast": 12.73,
+      "tau_fast": 5.6,
+      "a_slow": 6.94,
+      "tau_slow": 57.1,
+      "rmse": 0.517
+     },
+     "mem": {
+      "tinf": 32.87,
+      "a_fast": 12.41,
+      "tau_fast": 5.9,
+      "a_slow": 6.24,
+      "tau_slow": 59.1,
+      "rmse": 0.249
+     },
+     "pm": {
+      "tinf": 28.87,
+      "a_fast": 9.43,
+      "tau_fast": 12.7,
+      "a_slow": 6.08,
+      "tau_slow": 134.2,
+      "rmse": 0.079
+     }
+    },
+    "cool_s": 163.3,
+    "cool_reason": "criterion",
+    "tainted": [
+     "acc_off",
+     "power_mode_low"
+    ],
+    "f0_ghz": 1.7663999999999995,
+    "fg_mhz": 710.0,
+    "online": "0-7"
+   }
+  ],
+  "charge_die": {
+   "a_inf": 7.33,
+   "tau_charge": 39.8
+  },
+  "charge_mem": {
+   "a_inf": 6.18,
+   "tau_charge": 31.3
+  },
+  "charge_pm": {
+   "a_inf": 5.78,
+   "tau_charge": 99.9
+  },
+  "charge_sink": {
+   "a_inf": 6.42,
+   "tau_charge": 125.0,
+   "points": {
+    "60": 3.18,
+    "120": 3.58,
+    "240": 5.13,
+    "480": 6.53
+   }
+  },
+  "r_tot_die": 8.180978576704677,
+  "r_step_die": 8.814459191576924,
+  "r_step_mem": 6.186597544509709,
+  "r_step_pm": 4.496886663454422,
+  "p_net": 3.20666298245614,
+  "r_mass": 2.0020813023146595,
+  "c_mass": 62.43502691698093
+ },
+ "P000": {
+  "fan": 0,
+  "rpm": 0.0,
+  "t_amb": 25.87016666666666,
+  "base_die": 32.92999999999999,
+  "base_mem": 33.23166666666667,
+  "base_pm": 30.691666666666666,
+  "p_idle": 1.05335,
+  "pulses": [
+   {
+    "pulse_s": 60,
+    "p_load": 4.120454545454545,
+    "e_in_j": 181.12900000000005,
+    "die_end": 57.05999999999999,
+    "mem_end": 48.89999999999999,
+    "pm_end": 41.626000000000005,
+    "die_fall_30": 13.200000000000003,
+    "die_fall_60": 14.5,
+    "die_120_excess": 2.470000000000006,
+    "mem_120_excess": 2.1683333333333294,
+    "sink_c": 37.60000000000001,
+    "die_300_excess": 2.170000000000009,
+    "fits": {
+     "die": {
+      "tinf": 35.28,
+      "a_fast": 9.35,
+      "tau_fast": 3.1,
+      "a_slow": 5.86,
+      "tau_slow": 18.8,
+      "rmse": 0.24
+     },
+     "mem": {
+      "tinf": 35.41,
+      "a_fast": 8.49,
+      "tau_fast": 3.2,
+      "a_slow": 5.51,
+      "tau_slow": 17.7,
+      "rmse": 0.212
+     },
+     "pm": {
+      "tinf": 32.89,
+      "a_fast": 8.19,
+      "tau_fast": 12.3,
+      "a_slow": 0.67,
+      "tau_slow": 96.9,
+      "rmse": 0.085
+     }
+    },
+    "cool_s": 300.5,
+    "cool_reason": "criterion",
+    "tainted": [
+     "acc_off",
+     "power_mode_low"
+    ],
+    "f0_ghz": 1.7663999999999995,
+    "fg_mhz": 700.1333333333333,
+    "online": "0-7"
+   },
+   {
+    "pulse_s": 120,
+    "p_load": 4.017513043478261,
+    "e_in_j": 353.54600000000005,
+    "die_end": 58.55,
+    "mem_end": 50.58,
+    "pm_end": 44.489000000000004,
+    "die_fall_30": 10.5,
+    "die_fall_60": 11.800000000000004,
+    "die_120_excess": 4.77000000000001,
+    "mem_120_excess": 4.868333333333332,
+    "sink_c": 40.7,
+    "die_300_excess": 3.7700000000000102,
+    "fits": {
+     "die": {
+      "tinf": 35.73,
+      "a_fast": 10.25,
+      "tau_fast": 8.6,
+      "a_slow": 3.77,
+      "tau_slow": 229.0,
+      "rmse": 0.378
+     },
+     "mem": {
+      "tinf": 35.96,
+      "a_fast": 9.6,
+      "tau_fast": 8.8,
+      "a_slow": 3.43,
+      "tau_slow": 234.4,
+      "rmse": 0.234
+     },
+     "pm": {
+      "tinf": 33.27,
+      "a_fast": 7.46,
+      "tau_fast": 13.5,
+      "a_slow": 3.46,
+      "tau_slow": 278.1,
+      "rmse": 0.086
+     }
+    },
+    "cool_s": 600.1,
+    "cool_reason": "cap",
+    "tainted": [
+     "acc_off",
+     "power_mode_low"
+    ],
+    "f0_ghz": 1.7663999999999995,
+    "fg_mhz": 700.1333333333333,
+    "online": "0-7"
+   },
+   {
+    "pulse_s": 240,
+    "p_load": 4.045123404255319,
+    "e_in_j": 715.985,
+    "die_end": 64.95,
+    "mem_end": 56.9,
+    "pm_end": 48.73199999999999,
+    "die_fall_30": 14.699999999999996,
+    "die_fall_60": 16.4,
+    "die_120_excess": 7.070000000000007,
+    "mem_120_excess": 7.1683333333333294,
+    "sink_c": 44.18,
+    "die_300_excess": 5.170000000000009,
+    "fits": {
+     "die": {
+      "tinf": 35.98,
+      "a_fast": 13.86,
+      "tau_fast": 7.7,
+      "a_slow": 6.74,
+      "tau_slow": 258.5,
+      "rmse": 0.271
+     },
+     "mem": {
+      "tinf": 36.29,
+      "a_fast": 12.98,
+      "tau_fast": 7.7,
+      "a_slow": 6.36,
+      "tau_slow": 253.5,
+      "rmse": 0.261
+     },
+     "pm": {
+      "tinf": 33.33,
+      "a_fast": 9.18,
+      "tau_fast": 13.6,
+      "a_slow": 6.53,
+      "tau_slow": 308.9,
+      "rmse": 0.078
+     }
+    },
+    "cool_s": 601.0,
+    "cool_reason": "cap",
+    "tainted": [
+     "acc_off",
+     "power_mode_low"
+    ],
+    "f0_ghz": 1.7663999999999995,
+    "fg_mhz": 694.9,
+    "online": "0-7"
+   },
+   {
+    "pulse_s": 480,
+    "p_load": 4.443905263157895,
+    "e_in_j": 1622.674,
+    "die_end": 72.06,
+    "mem_end": 63.52,
+    "pm_end": 55.00899999999999,
+    "die_fall_30": 23.699999999999996,
+    "die_fall_60": 26.299999999999997,
+    "die_120_excess": 10.670000000000009,
+    "mem_120_excess": 10.76833333333333,
+    "sink_c": 49.22,
+    "die_300_excess": 7.77000000000001,
+    "fits": {
+     "die": {
+      "tinf": 36.73,
+      "a_fast": 19.23,
+      "tau_fast": 5.5,
+      "a_slow": 11.29,
+      "tau_slow": 263.4,
+      "rmse": 0.705
+     },
+     "mem": {
+      "tinf": 36.87,
+      "a_fast": 14.49,
+      "tau_fast": 7.4,
+      "a_slow": 10.79,
+      "tau_slow": 269.7,
+      "rmse": 0.27
+     },
+     "pm": {
+      "tinf": 33.87,
+      "a_fast": 10.2,
+      "tau_fast": 13.6,
+      "a_slow": 10.97,
+      "tau_slow": 310.4,
+      "rmse": 0.098
+     }
+    },
+    "cool_s": 601.0,
+    "cool_reason": "cap",
+    "tainted": [
+     "acc_off",
+     "power_mode_low"
+    ],
+    "f0_ghz": 1.7663999999999995,
+    "fg_mhz": 710.0,
+    "online": "0-7"
+   },
+   {
+    "pulse_s": 900,
+    "p_load": 4.481936383928571,
+    "e_in_j": 3081.32065,
+    "die_end": 79.83000000000001,
+    "mem_end": 62.6,
+    "pm_end": 55.940999999999995,
+    "die_fall_30": 14.5,
+    "die_fall_60": 16.400000000000006,
+    "die_120_excess": 12.070000000000007,
+    "mem_120_excess": 12.068333333333328,
+    "sink_c": 50.8,
+    "die_300_excess": 8.370000000000005,
+    "fits": {
+     "die": {
+      "tinf": 36.52,
+      "a_fast": 12.87,
+      "tau_fast": 7.8,
+      "a_slow": 13.26,
+      "tau_slow": 310.1,
+      "rmse": 0.47
+     },
+     "mem": {
+      "tinf": 36.57,
+      "a_fast": 11.59,
+      "tau_fast": 8.6,
+      "a_slow": 13.04,
+      "tau_slow": 317.9,
+      "rmse": 0.253
+     },
+     "pm": {
+      "tinf": 33.9,
+      "a_fast": 8.56,
+      "tau_fast": 14.1,
+      "a_slow": 13.09,
+      "tau_slow": 335.4,
+      "rmse": 0.085
+     }
+    },
+    "cool_s": 601.0,
+    "cool_reason": "cap",
+    "tainted": [
+     "acc_off",
+     "power_mode_low"
+    ],
+    "f0_ghz": 1.7663999999999995,
+    "fg_mhz": 626.9,
+    "online": "0-7"
+   }
+  ],
+  "charge_die": {
+   "a_inf": 13.69,
+   "tau_charge": 286.2
+  },
+  "charge_mem": {
+   "a_inf": 13.7,
+   "tau_charge": 317.2
+  },
+  "charge_pm": {
+   "a_inf": 15.45,
+   "tau_charge": 441.9
+  },
+  "charge_sink": {
+   "a_inf": 18.23,
+   "tau_charge": 226.8,
+   "points": {
+    "60": 4.67,
+    "120": 7.77,
+    "240": 11.25,
+    "480": 16.29,
+    "900": 17.87
+   }
+  },
+  "r_tot_die": 12.03940188147778,
+  "r_step_die": 13.679106998686928,
+  "r_step_mem": 8.56572652536824,
+  "r_step_pm": 7.364356765718101,
+  "p_net": 3.428586383928571,
+  "r_mass": 5.317060140427774,
+  "c_mass": 42.65515040455293
+ }
+}
