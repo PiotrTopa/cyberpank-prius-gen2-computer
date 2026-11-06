@@ -8,7 +8,7 @@ Instead we keep the system awake and scale the **CPU** between two profiles:
 
 | Profile | Meaning | What it does | `cpus online` |
 |---------|---------|--------------|----------------|
-| `low`  | ignition OFF / resting | offline Gold cluster (`cpu4-7`); Silver cluster `schedutil`, capped to 1.2 GHz; DSI display kept blanked | `0-3` |
+| `low`  | ignition OFF / resting | offline Gold cluster (`cpu4-7`); Silver cluster `schedutil`, capped to 1.2 GHz; DSI display kept blanked; Wi-Fi kept up for the grace period, then suspended | `0-3` |
 | `full` | ignition ON / active   | all cores online; `schedutil`, max clocks on both clusters; DSI display kept blanked | `0-7` |
 
 Across **both** profiles the modem, WireGuard, SSH, and OTG serial stay fully alive.
@@ -22,6 +22,16 @@ The GPU (`freedreno`) auto-idles to `cur=0` on its own (`simple_ondemand`) — w
 - Governors available: `ondemand userspace performance schedutil` — **no `powersave`**,
   so low mode is achieved by **offlining the Gold cluster + capping Silver**, not a governor.
 - GPU `5000000.gpu` (freedreno) idles to `cur=0` via `simple_ondemand`.
+
+## Wi-Fi grace at key-off (since 2026-11-06)
+
+`prius-power low` no longer suspends Wi-Fi at once. It arms a transient systemd timer
+(`prius-wifi-suspend.timer`, via `systemd-run --on-active`) that runs `prius-wifi suspend`
+after the grace period in `/etc/prius/wifi-grace` (a systemd time span; default `20min`,
+`0` = immediate as before). So the AP stays usable for 20 min after the car is switched off,
+even though the CPU profile is already `low`. `prius-power full` cancels the pending timer and
+resumes Wi-Fi; every new `low` re-arms the full period. A boot with the flag at `low` also
+gives 20 min of Wi-Fi. `prius-power status` shows the pending suspend and its wall-clock time.
 
 ## The mode flag
 

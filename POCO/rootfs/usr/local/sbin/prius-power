@@ -1,9 +1,12 @@
 #!/bin/sh
 # prius-power - Prius computer power profiles. Never suspends the system:
 # keeps modem (cellular), WireGuard, SSH and USB/OTG serial listening alive.
-#   low  : key OFF  - offline Gold cluster, cap Silver cluster (lowest idle draw),
-#                     Wi-Fi radio suspended (prius-wifi suspend; the wifi-mode flag is kept)
-#   full : key ON   - all cores online, full clocks, Wi-Fi back per /etc/prius/wifi-mode
+#   low  : key OFF  - offline Gold cluster, cap Silver cluster (lowest idle draw);
+#                     Wi-Fi stays up for a grace period (/etc/prius/wifi-grace, default
+#                     20min) and is then suspended by a transient timer
+#                     (prius-wifi-suspend.timer -> prius-wifi suspend; wifi-mode flag kept)
+#   full : key ON   - all cores online, full clocks, the pending Wi-Fi suspend is
+#                     cancelled and Wi-Fi comes back per /etc/prius/wifi-mode
 # The backend writes /etc/prius/power-mode at key-off (deferred until the
 # roadsense stack is down, since it pins cpu4-7) and at key-on; prius-power.path
 # then runs `prius-power apply`.
@@ -13,6 +16,30 @@ FLAG=/etc/prius/power-mode
 CPU=/sys/devices/system/cpu
 LITTLE_MAX_LOW=1228800     # cap Silver cluster (~1.2 GHz) in low mode
 BIG_CORES="4 5 6 7"        # Gold cluster, offlined in low mode
+WIFI_GRACE_FILE=/etc/prius/wifi-grace   # systemd time span, e.g. 20min, 0 = immediate
+WIFI_SUSPEND_UNIT=prius-wifi-suspend    # transient timer/service pair (systemd-run)
+
+wifi_grace() { tr -d ' \n' < "$WIFI_GRACE_FILE" 2>/dev/null || true; }
+
+# Cancel a pending Wi-Fi suspend (stopping a transient timer removes it).
+wifi_suspend_cancel() {
+    systemctl stop "$WIFI_SUSPEND_UNIT.timer" "$WIFI_SUSPEND_UNIT.service" >/dev/null 2>&1 || true
+}
+
+# Suspend Wi-Fi after the grace period; every call re-arms the full period.
+wifi_suspend_later() {
+    g=$(wifi_grace); [ -n "$g" ] || g=20min
+    wifi_suspend_cancel
+    if [ "$g" = 0 ] || [ "$g" = 0s ]; then
+        /usr/local/sbin/prius-wifi suspend; return
+    fi
+    if ! systemd-run --quiet --collect --unit="$WIFI_SUSPEND_UNIT" --on-active="$g" \
+            --timer-property=AccuracySec=15s --description="Prius Wi-Fi suspend after key-off grace ($g)" \
+            /usr/local/sbin/prius-wifi suspend; then
+        echo "prius-power: could not arm the Wi-Fi grace timer, suspending now" >&2
+        /usr/local/sbin/prius-wifi suspend
+    fi
+}
 
 set_gov() {
     [ -w "$1/scaling_governor" ] && echo "$2" > "$1/scaling_governor" 2>/dev/null || true
@@ -44,7 +71,7 @@ apply_low() {
     for n in $BIG_CORES; do
         [ -w "$CPU/cpu$n/online" ] && echo 0 > "$CPU/cpu$n/online" 2>/dev/null || true
     done
-    /usr/local/sbin/prius-wifi suspend
+    wifi_suspend_later
     display_off
 }
 
@@ -57,6 +84,7 @@ apply_full() {
     for n in $BIG_CORES; do
         [ -w "$CPU/cpu$n/online" ] && echo 1 > "$CPU/cpu$n/online" 2>/dev/null || true
     done
+    wifi_suspend_cancel
     /usr/local/sbin/prius-wifi resume
     for p in "$CPU"/cpufreq/policy*; do
         [ -d "$p" ] || continue
@@ -79,6 +107,9 @@ status() {
     if command -v systemctl >/dev/null 2>&1; then
         systemctl is-active --quiet prius-blank.service 2>/dev/null && ds=blanked || ds=on
         echo "  display : $ds"
+    fi
+    if systemctl is-active --quiet "$WIFI_SUSPEND_UNIT.timer" 2>/dev/null; then
+        echo "  wifi    : suspend pending ($(systemctl show -p NextElapseUSecRealtime --value "$WIFI_SUSPEND_UNIT.timer" 2>/dev/null)), grace $(wifi_grace)"
     fi
 }
 

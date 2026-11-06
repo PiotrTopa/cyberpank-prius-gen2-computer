@@ -93,7 +93,7 @@ done
 
 # --- 3. seed flag files (create-if-missing; never clobber live state) ---------
 mkdir -p /etc/prius
-for kv in power-mode:full wifi-mode:ap usb-mode:host; do
+for kv in power-mode:full wifi-mode:ap usb-mode:host wifi-grace:20min; do
     k=${kv%%:*}; v=${kv#*:}
     if [ ! -f "/etc/prius/$k" ]; then
         echo "$v" > "/etc/prius/$k"
