@@ -99,6 +99,7 @@ class ActionType(Enum):
     SET_GATEWAY_USB_POWER = auto()
     SET_PANDA_STATE = auto()  # partial update of the panda fields in ConnectionState
     GATEWAY_CAN_TX = auto()   # raw CAN frame through the gateway (bench only)
+    DTC_COMMAND = auto()      # request a DTC scan / clear (backend runs it)
     PANDA_BENCH = auto()      # bench bookkeeping (reset counters)
     SET_MFD_STATUS = auto()  # MFD video board power manager status (backend)
     SET_ROADSENSE_STATE = auto()  # partial update of RoadsenseState (backend.roadsense_power)
@@ -972,6 +973,20 @@ class GatewayCanTxAction(Action):
         self.can_id = int(can_id)
         self.data = bytes(data)
         self.bench = bench
+
+
+class DtcCommandAction(Action):
+    """Ask the backend to scan (Mode 03 stored / 07 pending) or clear (Mode 04)
+    DTCs. The MFD is a remote frontend without a gateway link, so its DTC
+    screen sends this as the ``dtc`` command; the backend runs the scan."""
+
+    OPS = ("scan", "scan_pending", "clear")
+
+    def __init__(self, op: str, source: ActionSource = ActionSource.UI):
+        super().__init__(ActionType.DTC_COMMAND, source)
+        if op not in self.OPS:
+            raise ValueError("dtc op must be one of %s" % (self.OPS,))
+        self.op = op
 
 
 class PandaBenchAction(Action):

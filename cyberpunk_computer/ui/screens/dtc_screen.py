@@ -219,7 +219,8 @@ class DTCScreen(Screen):
         if self.app and hasattr(self.app, '_virtual_twin') and self.app._virtual_twin:
             vt = self.app._virtual_twin
             start = getattr(vt.ingress, "start_dtc_scan", None)
-            if start is None:  # remote frontend: no local ingress (yet)
+            if start is None:  # remote frontend (MFD): the backend runs the scan
+                self._remote_dtc(vt, "scan")
                 return
             start(output_port=vt.output_port, mode=0x03)
 
@@ -230,10 +231,16 @@ class DTCScreen(Screen):
         if self.app and hasattr(self.app, '_virtual_twin') and self.app._virtual_twin:
             vt = self.app._virtual_twin
             clear = getattr(vt.ingress, "clear_dtcs", None)
-            if clear is None:  # remote frontend: no local ingress (yet)
+            if clear is None:  # remote frontend (MFD): the backend runs the clear
+                self._remote_dtc(vt, "clear")
+                self._clear_confirm = False
                 return
             clear(output_port=vt.output_port)
             self._clear_confirm = False
+
+    def _remote_dtc(self, vt, op: str) -> None:
+        from ...state.actions import DtcCommandAction
+        vt.store.dispatch(DtcCommandAction(op))
 
     def handle_input(self, event) -> bool:
         """Handle input — bottom button bar navigation."""

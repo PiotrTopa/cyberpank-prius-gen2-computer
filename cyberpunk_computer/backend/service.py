@@ -1423,6 +1423,18 @@ class BackendService:
         elif name == "PandaBenchAction":
             if self.twin is not None and action.reset:
                 self.twin.ingress.bench_reset()
+        elif name == "DtcCommandAction":
+            if self.twin is None:
+                return
+            ing, out = self.twin.ingress, self.twin.output_port
+            if not out.is_connected():
+                logger.warning("dtc %s: gateway port not connected", action.op)
+                return
+            logger.info("DTC command from UI: %s", action.op)
+            if action.op == "clear":
+                ing.clear_dtcs(output_port=out)
+            else:
+                ing.start_dtc_scan(output_port=out, mode=0x07 if action.op == "scan_pending" else 0x03)
 
     # ── panda status mirror ──────────────────────────────────────────────
 

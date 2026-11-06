@@ -195,6 +195,8 @@ def _translate(action: Action) -> Optional[Tuple[str, Dict]]:
         return "set_climate", {"air_direction": action.direction}
     if isinstance(action, SetReadyModeAction):
         return "set_ready", {"on": action.ready}
+    if type(action).__name__ == "DtcCommandAction":
+        return "dtc", {"op": action.op}
     return None
 
 

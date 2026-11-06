@@ -499,6 +499,22 @@ COMMANDS["panda_bench"] = {
 }
 
 
+def _build_dtc(params: Dict[str, Any]) -> Action:
+    from ..state.actions import DtcCommandAction
+    op = str(params.get("op", "scan"))
+    if op not in DtcCommandAction.OPS:
+        raise CommandError("op must be one of %s" % ", ".join(DtcCommandAction.OPS))
+    return DtcCommandAction(op, source=ActionSource.UI)
+
+
+COMMANDS["dtc"] = {
+    "builder": _build_dtc,
+    "description": "DTC scan (Mode 03), pending scan (Mode 07) or clear (Mode 04 + rescan) "
+                   "across the engine, hybrid, HV battery and airbag ECUs through the gateway.",
+    "params": {"op": "scan | scan_pending | clear (default scan)"},
+}
+
+
 def build_command(name: str, params: Dict[str, Any]) -> Action:
     """Build the Action for ``name`` from ``params``.
 

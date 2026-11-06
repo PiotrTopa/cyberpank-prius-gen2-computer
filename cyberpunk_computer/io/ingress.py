@@ -1438,8 +1438,15 @@ class IngressController:
         if self._solicited_debug:
             print(f"[DTC] {ecu_name}: mode=0x{dtc_mode:02X}, count={values.get('dtc_count', 0)}, codes={[d[0] for d in dtcs]}")
         
-        # Accumulate results
-        self._dtc_scan_results.extend(dtcs)
+        # A reply that arrives after the scan completed (gateway retry, slow
+        # ECU) must not start a second, partial "scan complete".
+        if not self._dtc_scan_mode:
+            return actions
+        # Accumulate results, once per (code, ECU): an ECU answering twice
+        # (retried request) must not double its codes.
+        for d in dtcs:
+            if d not in self._dtc_scan_results:
+                self._dtc_scan_results.append(d)
         self._dtc_scan_pending_ecus.discard(ecu_name)
         
         # If all ECUs responded, complete the scan
