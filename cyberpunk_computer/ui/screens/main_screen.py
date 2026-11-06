@@ -1671,18 +1671,42 @@ class MainScreen(Screen):
             self._exit_all_edit_modes()
         self._pointer_ctx = True
         try:
+            # CLIMATE / LIGHTS: a tap opens the settings page (user request
+            # 2026-11-06); the inline quick-edit moved to the long press.
+            # Controls with their own tap handler (the LIGHTS toggle) keep it.
+            page = self._page_action_for(target)
+            if page is not None:
+                if target.on_click(x, y):
+                    return True
+                self._reset_activity()
+                page()
+                return True
             return super().pointer_click(target, x, y)
         finally:
             self._pointer_ctx = False
 
     def pointer_long_press(self, target, x: int, y: int) -> bool:
+        from ...input.manager import InputEvent as IE
         if self._editing_frame() is not None:
             self._exit_all_edit_modes()
         self._pointer_ctx = True
         try:
+            if self._page_action_for(target) is not None:
+                if target.on_long_press(x, y):
+                    return True
+                return self.pointer_activate(target, IE.PRESS_LIGHT)   # quick-edit
             return super().pointer_long_press(target, x, y)
         finally:
             self._pointer_ctx = False
+
+    def _page_action_for(self, target):
+        """The page-opening action for a tap on CLIMATE or LIGHTS, else None."""
+        owner = self._owner_frame(target)
+        if owner is self._climate_frame:
+            return self._on_climate_action
+        if owner is self._lights_frame:
+            return self._on_lights_action
+        return None
 
     # -- volume slider ------------------------------------------------------------
 
