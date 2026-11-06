@@ -22,6 +22,24 @@ WIFI_SUSPEND_UNIT=prius-wifi-suspend    # transient timer/service pair (systemd-
 wifi_grace() { tr -d ' \n' < "$WIFI_GRACE_FILE" 2>/dev/null || true; }
 
 # Cancel a pending Wi-Fi suspend (stopping a transient timer removes it).
+# prius-netwatch (LTE/tunnel watchdog, may reboot the phone) runs only with
+# the car OFF: armed NETWATCH_GRACE (/etc/prius/netwatch-grace, default 20min)
+# after key-off, stopped at key-on. User decision 2026-11-06.
+NETWATCH_GRACE_FILE=/etc/prius/netwatch-grace
+NETWATCH_ARM_UNIT=prius-netwatch-arm
+netwatch_stop() {
+    systemctl stop "$NETWATCH_ARM_UNIT.timer" "$NETWATCH_ARM_UNIT.service" >/dev/null 2>&1 || true
+    systemctl stop prius-netwatch.timer prius-netwatch.service >/dev/null 2>&1 || true
+}
+netwatch_later() {
+    g=$(tr -d ' \n' < "$NETWATCH_GRACE_FILE" 2>/dev/null || true); [ -n "$g" ] || g=20min
+    systemctl stop "$NETWATCH_ARM_UNIT.timer" "$NETWATCH_ARM_UNIT.service" >/dev/null 2>&1 || true
+    systemctl is-active --quiet prius-netwatch.timer && return 0
+    systemd-run --quiet --collect --unit="$NETWATCH_ARM_UNIT" --on-active="$g" \
+        --timer-property=AccuracySec=15s --description="Arm prius-netwatch after key-off grace ($g)" \
+        systemctl start prius-netwatch.timer || echo "prius-power: could not arm netwatch" >&2
+}
+
 wifi_suspend_cancel() {
     systemctl stop "$WIFI_SUSPEND_UNIT.timer" "$WIFI_SUSPEND_UNIT.service" >/dev/null 2>&1 || true
 }
@@ -72,6 +90,7 @@ apply_low() {
         [ -w "$CPU/cpu$n/online" ] && echo 0 > "$CPU/cpu$n/online" 2>/dev/null || true
     done
     wifi_suspend_later
+    netwatch_later
     display_off
 }
 
@@ -85,6 +104,7 @@ apply_full() {
         [ -w "$CPU/cpu$n/online" ] && echo 1 > "$CPU/cpu$n/online" 2>/dev/null || true
     done
     wifi_suspend_cancel
+    netwatch_stop
     /usr/local/sbin/prius-wifi resume
     for p in "$CPU"/cpufreq/policy*; do
         [ -d "$p" ] || continue
@@ -108,8 +128,12 @@ status() {
         systemctl is-active --quiet prius-blank.service 2>/dev/null && ds=blanked || ds=on
         echo "  display : $ds"
     fi
+    if systemctl is-active --quiet prius-netwatch.timer 2>/dev/null; then echo "  netwatch: active"
+    elif systemctl is-active --quiet "$NETWATCH_ARM_UNIT.timer" 2>/dev/null; then
+        echo "  netwatch: armed, starts in $(systemctl list-timers --no-legend "$NETWATCH_ARM_UNIT.timer" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="left"){print $(i-2), $(i-1); exit}}')"
+    else echo "  netwatch: off"; fi
     if systemctl is-active --quiet "$WIFI_SUSPEND_UNIT.timer" 2>/dev/null; then
-        echo "  wifi    : suspend pending ($(systemctl show -p NextElapseUSecRealtime --value "$WIFI_SUSPEND_UNIT.timer" 2>/dev/null)), grace $(wifi_grace)"
+        echo "  wifi    : suspend pending, in $(systemctl list-timers --no-legend "$WIFI_SUSPEND_UNIT.timer" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="left"){print $(i-2), $(i-1); exit}}') (grace $(wifi_grace))"
     fi
 }
 

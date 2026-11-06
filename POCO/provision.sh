@@ -37,9 +37,9 @@ for a in "$@"; do
 done
 
 # Files that belong to the car network layer / the display, skipped by --core.
-# prius-netwatch is RETIRED (user decision 2026-11-06): its reboot-as-last-resort
-# caused more outages than it fixed (hung reboots, MFD/relay drops). Provisioning
-# never installs or enables it and masks it on every run.
+# prius-netwatch is installed but never enabled: prius-power starts its timer
+# 20 min after key-off and stops it at key-on (user decision 2026-11-06; an
+# always-on netwatch rebooted the phone mid-drive).
 is_noncore() {
     case "$1" in
         etc/NetworkManager/*|etc/resolv.conf|etc/prius/sim-pin) return 0 ;;
@@ -94,7 +94,7 @@ done
 
 # --- 3. seed flag files (create-if-missing; never clobber live state) ---------
 mkdir -p /etc/prius
-for kv in power-mode:full wifi-mode:ap usb-mode:host wifi-grace:20min; do
+for kv in power-mode:full wifi-mode:ap usb-mode:host wifi-grace:20min netwatch-grace:20min; do
     k=${kv%%:*}; v=${kv#*:}
     if [ ! -f "/etc/prius/$k" ]; then
         echo "$v" > "/etc/prius/$k"
@@ -193,9 +193,8 @@ else
            prius-clock-fallback.timer prius-sim-unlock.service"
     PATHS="prius-power.path prius-wifi.path prius-clock-fallback.timer"
 fi
-# netwatch stays off for good: never deploy its units, mask them.
-rm -f /etc/systemd/system/prius-netwatch.timer /etc/systemd/system/prius-netwatch.service 2>/dev/null || true
-systemctl mask prius-netwatch.timer prius-netwatch.service >/dev/null 2>&1 || true
+# netwatch is owned by prius-power (ACC off + grace); never enabled at boot.
+systemctl disable prius-netwatch.timer >/dev/null 2>&1 || true
 for u in $UNITS; do
     systemctl enable "$u" >/dev/null 2>&1 || log "  (enable $u skipped)"
 done

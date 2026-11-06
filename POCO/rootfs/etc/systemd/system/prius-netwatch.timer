@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Prius VPN-over-SIM watchdog every minute (ACC off only: started by prius-power 20 min after key-off, stopped at key-on)
+
+[Timer]
+OnActiveSec=60
+OnUnitActiveSec=60
+AccuracySec=5s
+Persistent=false
+
+# No [Install]: never enabled at boot; prius-power owns it.
