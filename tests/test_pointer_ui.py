@@ -130,12 +130,27 @@ def main_screen(app=None):
     return MainScreen(SIZE, app)
 
 
-def test_tap_frame_focuses_and_activates():
+def test_tap_climate_and_lights_open_their_pages():
+    opened = []
+    app = FakeApp()
+    m = main_screen(app)
+    app.current_screen = m
+    app.push_screen = lambda s: opened.append(type(s).__name__)
+    pc, clock = make(lambda: m)
+    assert tap(pc, clock, *center(m._climate_frame.rect)) == "click"
+    assert opened == ["ClimateScreen"]
+    assert not m._editing_target_temp
+    assert tap(pc, clock, m._lights_frame.rect.x + 20, m._lights_frame.rect.y + 40) == "click"
+    assert opened[-1] == "LightsScreen"
+    assert not m._editing_lights
+
+
+def test_long_press_climate_quick_edits():
     m = main_screen()
     pc, clock = make(lambda: m)
     assert not m.focus_manager.focus_visible
 
-    assert tap(pc, clock, *center(m._climate_frame.rect)) == "click"
+    assert long_press(pc, clock, *center(m._climate_frame.rect)) == "long"
     assert m.focus_manager.focused_widget is m._climate_frame
     assert m.focus_manager.focus_visible
     assert m._editing_target_temp            # PRESS_LIGHT = quick temp edit
@@ -158,7 +173,7 @@ def test_tap_other_frame_ends_edit_and_activates_it():
     pc, clock = make(lambda: m)
     tap(pc, clock, *center(m._audio_frame.rect))
     assert m._editing_volume
-    tap(pc, clock, m._lights_frame.rect.x + 20, m._lights_frame.rect.y + 40)
+    long_press(pc, clock, m._lights_frame.rect.x + 20, m._lights_frame.rect.y + 40)
     assert not m._editing_volume
     assert m._editing_lights
     assert m.focus_manager.focused_widget is m._lights_frame
@@ -587,20 +602,19 @@ def test_application_mouse_scaled_and_keyboard_unchanged(monkeypatch):
     m = main_screen(app)
     app.push_screen(m)
 
-    cx, cy = center(m._climate_frame.rect)
+    cx, cy = center(m._audio_frame.rect)
     pygame.event.clear()
     pygame.event.post(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=(cx * 2, cy * 2)))
     pygame.event.post(pygame.event.Event(pygame.MOUSEBUTTONUP, button=1, pos=(cx * 2, cy * 2)))
     app._process_events()
-    assert m._editing_target_temp
-    assert m.focus_manager.focused_widget is m._climate_frame
+    assert m._editing_volume
+    assert m.focus_manager.focused_widget is m._audio_frame
 
     # Keyboard path untouched: Enter ends the edit, Right moves focus
     pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_RETURN, mod=0, unicode="\r"))
     pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_RIGHT, mod=0, unicode=""))
     app._process_events()
-    assert not m._editing_target_temp
-    assert m.focus_manager.focused_widget is m._ambient_frame
+    assert not m._editing_volume
 
     # Touch events queued from another thread feed the same pointer model
     import threading
