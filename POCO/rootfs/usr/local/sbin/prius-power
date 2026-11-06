@@ -130,10 +130,10 @@ status() {
     fi
     if systemctl is-active --quiet prius-netwatch.timer 2>/dev/null; then echo "  netwatch: active"
     elif systemctl is-active --quiet "$NETWATCH_ARM_UNIT.timer" 2>/dev/null; then
-        echo "  netwatch: armed, starts in $(systemctl list-timers --no-legend "$NETWATCH_ARM_UNIT.timer" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="left"){print $(i-2), $(i-1); exit}}')"
+        echo "  netwatch: armed, starts in $(systemctl list-timers --no-legend "$NETWATCH_ARM_UNIT.timer" 2>/dev/null | awk '{print $5, "(at", $3 ")"; exit}')"
     else echo "  netwatch: off"; fi
     if systemctl is-active --quiet "$WIFI_SUSPEND_UNIT.timer" 2>/dev/null; then
-        echo "  wifi    : suspend pending, in $(systemctl list-timers --no-legend "$WIFI_SUSPEND_UNIT.timer" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="left"){print $(i-2), $(i-1); exit}}') (grace $(wifi_grace))"
+        echo "  wifi    : suspend pending, in $(systemctl list-timers --no-legend "$WIFI_SUSPEND_UNIT.timer" 2>/dev/null | awk '{print $5, "(at", $3 ")"; exit}') (grace $(wifi_grace))"
     fi
 }
 
