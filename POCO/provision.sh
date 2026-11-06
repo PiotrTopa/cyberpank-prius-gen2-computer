@@ -15,7 +15,7 @@
 #     --usb      : apply USB host + VBUS (prius-usb host && prius-vbus apply --reboot)
 #     --core     : backend + power + udev only. Skips the car network layer
 #                  (NetworkManager connections, resolv.conf, prius-wifi,
-#                  prius-netwatch, prius-clock-fallback) and the display units
+#                  prius-clock-fallback) and the display units
 #                  (prius-blank, backlight-off). For a phone whose networking
 #                  is managed by hand (the bench POCO on home Wi-Fi) or that has
 #                  no panel. Flag files and the backend env are seeded as usual.
@@ -37,8 +37,9 @@ for a in "$@"; do
 done
 
 # Files that belong to the car network layer / the display, skipped by --core.
-# prius-netwatch is deliberately CORE: on a phone with the SIM WAN as its only
-# channel the watchdog is what keeps it reachable (2026-11-04 wedge, timer was off).
+# prius-netwatch is RETIRED (user decision 2026-11-06): its reboot-as-last-resort
+# caused more outages than it fixed (hung reboots, MFD/relay drops). Provisioning
+# never installs or enables it and masks it on every run.
 is_noncore() {
     case "$1" in
         etc/NetworkManager/*|etc/resolv.conf|etc/prius/sim-pin) return 0 ;;
@@ -184,14 +185,17 @@ if command -v udevadm >/dev/null 2>&1; then
     log "reloaded udev rules"
 fi
 if [ "$CORE" = 1 ]; then
-    UNITS="prius-power.service prius-power.path prius-netwatch.service prius-netwatch.timer prius-backend.service"
-    PATHS="prius-power.path prius-netwatch.timer"
+    UNITS="prius-power.service prius-power.path prius-backend.service"
+    PATHS="prius-power.path"
 else
     UNITS="prius-power.service prius-power.path prius-wifi.service prius-wifi.path \
-           prius-netwatch.service prius-netwatch.timer prius-backend.service backlight-off.service \
+           prius-backend.service backlight-off.service \
            prius-clock-fallback.timer prius-sim-unlock.service"
-    PATHS="prius-power.path prius-wifi.path prius-netwatch.timer prius-clock-fallback.timer"
+    PATHS="prius-power.path prius-wifi.path prius-clock-fallback.timer"
 fi
+# netwatch stays off for good: never deploy its units, mask them.
+rm -f /etc/systemd/system/prius-netwatch.timer /etc/systemd/system/prius-netwatch.service 2>/dev/null || true
+systemctl mask prius-netwatch.timer prius-netwatch.service >/dev/null 2>&1 || true
 for u in $UNITS; do
     systemctl enable "$u" >/dev/null 2>&1 || log "  (enable $u skipped)"
 done
