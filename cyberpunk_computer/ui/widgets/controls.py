@@ -309,6 +309,57 @@ class ToggleSwitch(Widget):
         surface.blit(text_surf, (text_x, text_y))
 
 
+class BatteryBarsIcon(Widget):
+    """
+    Compact 8-segment battery gauge for a frame title bar.
+
+    Mirrors the stock MFD hybrid-battery gauge (the bar count the car reports
+    over AVC-LAN). Drawn with plain 1px rects only (no anti-aliasing):
+    a battery outline with a positive nub on the right and 8 vertical
+    segments; ``bars`` of them are lit. ``bars=None`` (unknown, no AVC frame
+    yet) draws a dim outline with no segments.
+    """
+
+    SEGMENTS = 8
+
+    def __init__(self, rect: Rect, bars: Optional[int] = None):
+        super().__init__(rect, focusable=False)
+        self.bars = bars
+
+    def set_bars(self, bars: Optional[int]) -> None:
+        if bars is not None:
+            bars = max(0, min(self.SEGMENTS, int(bars)))
+        if bars != self.bars:
+            self.bars = bars
+            self._dirty = True
+
+    def render(self, surface: pygame.Surface) -> None:
+        if not self.visible:
+            return
+        seg_w, gap = 2, 1           # 8 segs -> 29 px total incl. nub
+        inner_w = self.SEGMENTS * seg_w + (self.SEGMENTS - 1) * gap
+        body_w = inner_w + 4          # 1px border + 1px gap each side
+        body_h = min(12, self.rect.height)
+        nub_w, nub_h = 2, max(2, body_h // 2 - 1)
+        total_w = body_w + nub_w
+        x0 = self.rect.x + (self.rect.width - total_w) // 2
+        y0 = self.rect.y + (self.rect.height - body_h) // 2
+
+        unknown = self.bars is None
+        outline = COLORS["text_dim"] if unknown else COLORS["cyan_mid"]
+        pygame.draw.rect(surface, COLORS["bg_dark"], (x0, y0, total_w, body_h))
+        pygame.draw.rect(surface, outline, (x0, y0, body_w, body_h), 1)
+        pygame.draw.rect(surface, outline,
+                         (x0 + body_w, y0 + (body_h - nub_h) // 2, nub_w, nub_h))
+        if unknown:
+            return
+        seg_h = body_h - 4
+        for i in range(self.SEGMENTS):
+            sx = x0 + 2 + i * (seg_w + gap)
+            color = COLORS["cyan_bright"] if i < self.bars else COLORS["cyan_dark"]
+            pygame.draw.rect(surface, color, (sx, y0 + 2, seg_w, seg_h))
+
+
 class StatusIcon(Widget):
     """
     A read-only status icon display.

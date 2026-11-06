@@ -15,7 +15,7 @@ from .lights_screen import LightsScreen
 from .ambient_screen import AmbientScreen
 from ..widgets.base import Rect
 from ..widgets.frame import Frame
-from ..widgets.controls import VolumeBar, ToggleSwitch, ValueDisplay, ModeIcon, StatusIcon
+from ..widgets.controls import VolumeBar, ToggleSwitch, ValueDisplay, ModeIcon, StatusIcon, BatteryBarsIcon
 from ..widgets.vehicle_status import ConnectionIndicator
 from ..widgets.pagination import PaginationControl
 from ..pointer import TAP_SLOP
@@ -381,13 +381,21 @@ class MainScreen(Screen):
         
         self.add_widget(self._lights_frame)
         
-        # Battery frame (bottom right)
+        # Battery frame (bottom right). Title-bar icon = the 8-bar hybrid
+        # battery gauge the car itself reports over AVC-LAN (E4 5F B8),
+        # not the OBD/CAN battery_soc percentage.
+        self._batt_bars_icon = BatteryBarsIcon(
+            # 32 px wide, right-aligned: "BATTERY" (70 px) must stay unclipped
+            Rect(x + self.SIDE_PANEL_WIDTH - 36, self.FRAME_HEIGHT * 2 + 4, 32, 14),
+            bars=None
+        )
         self._battery_frame = Frame(
             Rect(x, self.FRAME_HEIGHT * 2, self.SIDE_PANEL_WIDTH, self.FRAME_HEIGHT),
             title="BATTERY",
             focusable=True,
             on_action=self._on_battery_action,
-            on_select=self._on_battery_action
+            on_select=self._on_battery_action,
+            title_widget=self._batt_bars_icon
         )
         
         content = self._battery_frame.content_rect
@@ -606,6 +614,7 @@ class MainScreen(Screen):
         self._batt_temp_display.set_value(str(int(batt_t)) if batt_t is not None else "--")
         soc = state.energy.battery_soc
         self._batt_soc_display.set_value(str(int(soc * 100)) if soc > 0 else "--")
+        self._batt_bars_icon.set_bars(state.avc.battery_bars)
 
         # Connection
         self._connection_indicator.set_connected(state.connection.connected)
