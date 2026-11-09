@@ -71,8 +71,8 @@ from .satellites import (
     SatelliteJobQueue,
     SatelliteScheduler,
     SatelliteSupervisor,
-    command_job,
 )
+from .satellite_registry import SatelliteRegistry
 from ..api import ApiServer, StoreBridge
 from .fan_policy import ChassisFanPolicy, FanPolicyConfig
 from .zmq_server import ZmqServer
@@ -294,6 +294,30 @@ class BackendConfig:
     # Payload sent to each polled device to solicit a report.
     satellite_poll_payload: str = '{"a":"status"}'
 
+    # ── Multi-transport satellites (docs/SATELLITES.md) ──────────────────────
+    # Transports the SatelliteRegistry runs. Env BACKEND_SATELLITE_TRANSPORTS
+    # (comma list). "ble" needs io/ble_transport.py + prius-bled; without it
+    # the registry logs once and runs without BLE.
+    satellite_transports: tuple = ("rs485", "ble", "wifi")
+    # Background rediscovery cadence per transport (also right after an
+    # availability edge: RS485 rail confirmed up, bled connected, AP up) and
+    # how long a seen device stays in ``satellites.discovered``.
+    satellite_rediscover_s: float = 300.0
+    satellite_discovery_ttl_s: float = 600.0
+    # Keychain dir (car key + keychain.json). None -> env
+    # BACKEND_SATELLITE_KEYCHAIN_DIR or /etc/prius/satellites, falling back
+    # to ./satellites when not writable.
+    satellite_keychain_dir: Optional[str] = None
+    # Wi-Fi transport: UDP beacons + TCP NDJSON sessions. iface set ("wlan0"
+    # on the phone) = only available while it carries ap_addr (AP mode).
+    satellite_wifi_bind: str = "0.0.0.0"
+    satellite_wifi_iface: str = ""
+    satellite_wifi_ap_addr: str = "10.42.0.1"
+    satellite_wifi_udp_port: int = 8787
+    satellite_wifi_tcp_port: int = 8788
+    # prius-bled control socket (BLE transport).
+    satellite_ble_socket: str = "/run/prius/bled.sock"
+
     # ── Chassis fan control ──────────────────────────────────────────────────
     # 4-wire fan driven by the powerbox (fw >= 2.1: 25 kHz PWM on GP29, tach on
     # GP28); the backend only sends a speed in percent. The policy itself (two
@@ -339,6 +363,7 @@ class BackendService:
         self.satellite_queue: Optional[SatelliteJobQueue] = None
         self.satellite_scheduler: Optional[SatelliteScheduler] = None
         self.satellite_supervisor: Optional[SatelliteSupervisor] = None
+        self.satellite_registry: Optional[SatelliteRegistry] = None
         self._satellite_sup_last: float = 0.0
         self.recorder: Optional[TripRecorder] = None
         self._unsubscribe = None
@@ -1015,20 +1040,20 @@ class BackendService:
         )
 
     def _wire_satellites(self, twin: VirtualTwin) -> None:
-        """Wire the RS485 satellite subsystem: power rules, job queue, twin.
+        """Wire the satellite subsystem: registry (transports, keychain, auth,
+        per-transport queues), RS485 rail power rules, twin.
 
-        Power model: the RS485 rail (relay ch5) is on iff at least one wake-lock holder is
-        held — ``acc`` (ignition on), ``queue`` (jobs pending/running) or
-        ``manual:*``. The queue serializes ALL satellite work (scheduled reads,
-        event commands, config pushes), so overlapping jobs share one rail
-        power-up with no flapping. Dev-safe: without a powerbox link the rail
-        command is log-only and jobs run assuming the rail is up.
+        Power model (RS485, unchanged): the rail (relay ch5) is on iff at least
+        one wake-lock holder is held — ``acc`` (ignition on), ``queue`` (RS485
+        jobs pending/running) or ``manual:*``. The RS485 queue serializes all
+        RS485 work, so overlapping jobs share one rail power-up with no
+        flapping. BLE/Wi-Fi satellites have their own queues that hold no
+        wake-lock (docs/SATELLITES.md §5). Dev-safe: without a powerbox link
+        the rail command is log-only and RS485 jobs run assuming the rail is up.
         """
+        import json as _json
         cfg = self.config
         store = twin.store
-
-        queue = SatelliteJobQueue(store, output_port=twin.output_port)
-        scheduler = SatelliteScheduler(queue, store)
 
         # Persisted per-satellite options -> auto re-push after satellite boot.
         desired_configs = {}
@@ -1037,12 +1062,55 @@ class BackendService:
             desired_configs = SettingsManager().settings.satellites.desired_configs()
         except Exception:
             logger.exception("Failed to load persisted satellite configs")
-        supervisor = SatelliteSupervisor(
-            queue, store,
-            desired_configs=desired_configs,
+
+        poll_payload = None
+        try:
+            poll_payload = _json.loads(cfg.satellite_poll_payload)
+        except ValueError:
+            logger.error("Bad satellite_poll_payload %r — poll disabled",
+                         cfg.satellite_poll_payload)
+        try:
+            poll_devices = tuple(int(d) for d in cfg.satellite_poll_devices)
+        except (TypeError, ValueError):
+            logger.error("Bad satellite_poll_devices %r", cfg.satellite_poll_devices)
+            poll_devices = ()
+
+        # BLE/Wi-Fi satellite payloads reach the same per-device handlers the
+        # gateway ingress uses for RS485 satellites (when one is registered).
+        def _on_message(sat_id: int, payload: dict) -> None:
+            handlers = getattr(twin.ingress, "_satellite_handlers", {}) or {}
+            handler = handlers.get(sat_id)
+            if handler is None:
+                logger.debug("Satellite %d message (no handler): %s", sat_id, payload)
+                return
+            actions = handler(payload) or []
+            for a in actions:
+                store.dispatch(a)
+
+        registry = SatelliteRegistry(
+            store,
+            output_port=twin.output_port,
+            transports_enabled=tuple(cfg.satellite_transports),
+            keychain_dir=cfg.satellite_keychain_dir,
+            rediscover_s=cfg.satellite_rediscover_s,
+            discovery_ttl_s=cfg.satellite_discovery_ttl_s,
             offline_after_s=cfg.satellite_offline_after_s,
+            desired_configs=desired_configs,
+            poll_devices=poll_devices,
+            poll_payload=poll_payload,
+            wifi_options=dict(
+                bind=cfg.satellite_wifi_bind,
+                udp_port=cfg.satellite_wifi_udp_port,
+                tcp_port=cfg.satellite_wifi_tcp_port,
+                iface=cfg.satellite_wifi_iface,
+                ap_addr=cfg.satellite_wifi_ap_addr,
+            ),
+            ble_socket_path=cfg.satellite_ble_socket,
+            on_message=_on_message,
         )
-        supervisor.seed()
+        queue = registry.queue
+        scheduler = registry.scheduler
+        supervisor = registry.supervisor
 
         # Rules: ACC wake-lock + holder-set -> physical rail (relay ch5).
         def _set_rail(on: bool) -> bool:
@@ -1067,54 +1135,69 @@ class BackendService:
             set_gateway=_set_gateway,
         ))
 
-        # Route EnqueueSatelliteCommandAction (API/events) into the queue.
+        # Route EnqueueSatelliteCommandAction (API/events) into the registry
+        # (RS485 ids -> the rail queue exactly as before; BLE/Wi-Fi ids -> their
+        # transport queue) and operator registry commands into the registry.
         def _satellite_middleware(action, _store) -> None:
-            if type(action).__name__ == "EnqueueSatelliteCommandAction":
-                queue.submit(command_job(
-                    action.device_id, action.payload,
-                    name=action.name, priority=action.priority,
-                ))
+            kind = type(action).__name__
+            if kind == "EnqueueSatelliteCommandAction":
+                registry.send(action.device_id, action.payload,
+                              priority=action.priority, name=action.name)
+            elif kind == "SatelliteRegistryCommandAction":
+                registry.handle_command(action.op, action.params)
         store.add_middleware(_satellite_middleware)
 
         # Optional periodic key-off sensor wake ("every 5 min read sensors").
-        if cfg.satellite_poll_interval_s > 0 and cfg.satellite_poll_devices:
-            import json as _json
+        if cfg.satellite_poll_interval_s > 0 and poll_devices and poll_payload is not None:
             from .satellites import PeriodicJobSpec, PRIORITY_SCHEDULED, SatelliteJob
 
-            try:
-                poll_payload = _json.loads(cfg.satellite_poll_payload)
-            except ValueError:
-                logger.error("Bad satellite_poll_payload %r — poll disabled",
-                             cfg.satellite_poll_payload)
-                poll_payload = None
+            rs485_devices = tuple(d for d in poll_devices if 100 <= d <= 199)
 
-            if poll_payload is not None:
-                devices = tuple(int(d) for d in cfg.satellite_poll_devices)
+            def _poll_factory() -> SatelliteJob:
+                def start(ctx) -> None:
+                    for dev in rs485_devices:
+                        ctx.send(dev, dict(poll_payload))
+                return SatelliteJob(
+                    name="sched:poll", start=start,
+                    priority=PRIORITY_SCHEDULED,
+                )
 
-                def _poll_factory() -> SatelliteJob:
-                    def start(ctx) -> None:
-                        for dev in devices:
-                            ctx.send(dev, dict(poll_payload))
-                    return SatelliteJob(
-                        name="sched:poll", start=start,
-                        priority=PRIORITY_SCHEDULED,
-                    )
-
+            if rs485_devices:
                 scheduler.add(PeriodicJobSpec(
                     name="sched:poll",
                     interval_s=cfg.satellite_poll_interval_s,
                     factory=_poll_factory,
                 ))
+            # BLE/Wi-Fi ids in the poll list: one plain command job per cycle
+            # on their own queue (no rail involved).
+            for dev in poll_devices:
+                if 100 <= dev <= 199:
+                    continue
+                transport = registry.transport_of(dev)
+                if transport not in registry.queues:
+                    continue
+                scheduler.add(PeriodicJobSpec(
+                    name=f"sched:poll:{dev}",
+                    interval_s=cfg.satellite_poll_interval_s,
+                    factory=(lambda d=dev: SatelliteJob(
+                        name=f"sched:poll:{d}",
+                        start=lambda ctx, d=d: ctx.send(d, dict(poll_payload)),
+                        priority=PRIORITY_SCHEDULED, requires_online=(d,))),
+                    transport=transport,
+                ))
 
+        registry.start()
+        self.satellite_registry = registry
         self.satellite_queue = queue
         self.satellite_scheduler = scheduler
         self.satellite_supervisor = supervisor
         logger.info(
-            "Satellite subsystem wired (linger=%.0fs, offline_after=%.0fs, "
-            "poll=%.0fs %s, configs=%s)",
+            "Satellite subsystem wired (transports=%s, linger=%.0fs, offline_after=%.0fs, "
+            "poll=%.0fs %s, configs=%s, keychain=%s)",
+            ",".join(sorted(registry.transports)) or "none",
             cfg.satellite_linger_s, cfg.satellite_offline_after_s,
             cfg.satellite_poll_interval_s, cfg.satellite_poll_devices,
-            sorted(desired_configs) or "none",
+            sorted(desired_configs) or "none", registry.keychain.directory,
         )
 
     def _vfd_clock_tick(self) -> None:
@@ -1141,16 +1224,11 @@ class BackendService:
         ))
 
     def _satellite_tick(self) -> None:
-        """Advance the satellite queue/scheduler/supervisor (engine loop)."""
-        if self.satellite_queue is None:
+        """Advance the satellite registry (transports, auth, queues, scheduler,
+        ~1 Hz supervisor) from the engine loop."""
+        if self.satellite_registry is None:
             return
-        self.satellite_queue.tick()
-        self.satellite_scheduler.tick()
-        now = time.monotonic()
-        # Supervisor (presence aging + config sync) needs only ~1 Hz.
-        if (now - self._satellite_sup_last) >= 1.0:
-            self._satellite_sup_last = now
-            self.satellite_supervisor.tick()
+        self.satellite_registry.tick()
 
     def _wire_recording(self, twin: VirtualTwin) -> None:
         """Tap ingress/egress into a rotating per-trip recorder."""
@@ -1963,6 +2041,11 @@ class BackendService:
                 self.recorder.stop()
             except Exception:
                 logger.exception("Error stopping trip recorder")
+        if self.satellite_registry is not None:
+            try:
+                self.satellite_registry.stop()
+            except Exception:
+                logger.exception("Error stopping satellite transports")
         if self.sink is not None:
             self.sink.stop()
         if self._unsubscribe is not None:

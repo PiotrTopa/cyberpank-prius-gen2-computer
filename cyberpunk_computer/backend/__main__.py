@@ -218,11 +218,51 @@ def _build_fan_policy(args: argparse.Namespace):
     return replace(cfg, full=replace(cfg.full, **pick("full")), low=replace(cfg.low, **pick("low")), **top)
 
 
+def _build_satellites() -> dict:
+    """Multi-transport satellite config from env (docs/SATELLITES.md):
+
+        BACKEND_SATELLITE_TRANSPORTS=rs485,ble,wifi   # comma list (default all three)
+        BACKEND_SATELLITE_REDISCOVER_S=300
+        BACKEND_SATELLITE_DISCOVERY_TTL_S=600
+        BACKEND_SATELLITE_KEYCHAIN_DIR=/etc/prius/satellites   # read by the keychain module
+        BACKEND_SATELLITE_WIFI_BIND=0.0.0.0
+        BACKEND_SATELLITE_WIFI_IFACE=wlan0            # empty = always available (dev)
+        BACKEND_SATELLITE_WIFI_AP_ADDR=10.42.0.1
+        BACKEND_SATELLITE_BLE_SOCKET=/run/prius/bled.sock
+    """
+    env = os.environ.get
+    out: dict = {}
+    raw = env("BACKEND_SATELLITE_TRANSPORTS")
+    if raw is not None:
+        out["satellite_transports"] = tuple(
+            t.strip().lower() for t in raw.split(",") if t.strip())
+    for key, var in (("satellite_rediscover_s", "BACKEND_SATELLITE_REDISCOVER_S"),
+                     ("satellite_discovery_ttl_s", "BACKEND_SATELLITE_DISCOVERY_TTL_S")):
+        val = (env(var) or "").strip()
+        if val:
+            try:
+                out[key] = float(val)
+            except ValueError:
+                logging.getLogger(__name__).error("Bad %s=%r ignored", var, val)
+    for key, var in (("satellite_wifi_bind", "BACKEND_SATELLITE_WIFI_BIND"),
+                     ("satellite_wifi_iface", "BACKEND_SATELLITE_WIFI_IFACE"),
+                     ("satellite_wifi_ap_addr", "BACKEND_SATELLITE_WIFI_AP_ADDR"),
+                     ("satellite_ble_socket", "BACKEND_SATELLITE_BLE_SOCKET")):
+        val = env(var)
+        if val is not None:
+            out[key] = val.strip()
+    kc = (env("BACKEND_SATELLITE_KEYCHAIN_DIR") or "").strip()
+    if kc:
+        out["satellite_keychain_dir"] = kc
+    return out
+
+
 def _build_config(args: argparse.Namespace) -> BackendConfig:
     mfd_enabled, mfd_config = _build_mfd()
     roadsense_enabled, roadsense_config = _build_roadsense()
     return BackendConfig(
         **_build_dashcam(),
+        **_build_satellites(),
         gateway_port=args.gateway_port,
         powerbox_port=args.powerbox_port,
         auto_discover=not args.no_auto_discover,

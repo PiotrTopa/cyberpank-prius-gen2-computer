@@ -8,13 +8,14 @@ import { DataRow, Meter, Panel, StatusRow } from '../components/ui';
 import { SatellitesPanel } from '../components/SatellitesPanel';
 import { UsbHubPanel } from '../components/UsbHubPanel';
 
-export function OverviewTab({ state, hist, now, satNodes, satHolders, onOpenDebug }: {
+export function OverviewTab({ state, hist, now, satNodes, satHolders, onOpenDebug, onOpenSatellites }: {
   state: AppState;
   hist: HistoryData;
   now: number;
   satNodes: SatelliteNode[];
   satHolders: string[];
   onOpenDebug: () => void;
+  onOpenSatellites?: () => void;
 }) {
   const pb = state.powerbox;
   const veh = state.vehicle;
@@ -63,14 +64,11 @@ export function OverviewTab({ state, hist, now, satNodes, satHolders, onOpenDebu
       </Panel>
 
       <Panel title="Environment" code="ENV-01" icon={Wind} tone="magenta"
-        right={pb.aht_t == null && pb.aht_h == null && pb.bmp_p == null && pb.bmp2_t == null
+        right={pb.bmp2_t == null && pb.bmp2_p == null
           ? <span className="text-[0.6rem] text-hud-amber tracking-wider">SENSORS OFFLINE</span>
           : undefined}>
         <DataRow label="Cabin Temp" value={pb.bmp2_t?.toFixed(1)} unit="°C" tone="magenta" />
-        <DataRow label="Pressure" value={(pb.bmp2_p ?? pb.bmp_p) != null ? ((pb.bmp2_p ?? pb.bmp_p)! / 100).toFixed(1) : undefined} unit="hPa" />
-        <DataRow label="Box Temp" value={pb.bmp_t?.toFixed(1)} unit="°C" />
-        <DataRow label="Box Temp (AHT)" value={pb.aht_t?.toFixed(1)} unit="°C" />
-        <DataRow label="Box Humidity" value={pb.aht_h?.toFixed(1)} unit="%" />
+        <DataRow label="Pressure" value={pb.bmp2_p != null ? (pb.bmp2_p / 100).toFixed(1) : undefined} unit="hPa" />
         <DataRow label="Outside" value={climate.outside_temp?.toFixed?.(1)} unit="°C" />
       </Panel>
 
@@ -79,14 +77,8 @@ export function OverviewTab({ state, hist, now, satNodes, satHolders, onOpenDebu
           tone={pb.poco_core_temp && pb.poco_core_temp > 60 ? 'amber' : 'cyan'} />
         <DataRow label="POCO GPU" value={pb.poco_gpu_temp?.toFixed(1)} unit="°C"
           tone={pb.poco_gpu_temp && pb.poco_gpu_temp > 60 ? 'amber' : 'cyan'} />
-        <DataRow label="Simulated Temp" value={pb.poco_ema_temp?.toFixed(1)} unit="°C" tone="cyan" />
-        <DataRow label="Box Inside" value={pb.bmp_t?.toFixed(1)} unit="°C"
-          tone={pb.bmp_t && pb.bmp_t > 45 ? 'amber' : 'cyan'} />
-        <DataRow label="Box ΔT (in−out)"
-          value={pb.bmp_t != null && pb.bmp2_t != null ? (pb.bmp_t - pb.bmp2_t).toFixed(1) : undefined}
-          unit="°C"
-          tone={pb.bmp_t != null && pb.bmp2_t != null && pb.bmp_t - pb.bmp2_t > 8 ? 'amber' : 'cyan'} />
         <DataRow label="Chassis Fan" value={pb.fan_duty_pct?.toFixed(0)} unit="%" tone="cyan" />
+        <DataRow label="Fan Speed" value={pb.fan_rpm?.toFixed(0)} unit="rpm" />
       </Panel>
 
       <Panel title="Fuel" code="FUE-01" icon={Fuel} tone="violet">
@@ -130,7 +122,8 @@ export function OverviewTab({ state, hist, now, satNodes, satHolders, onOpenDebu
 
       <UsbHubPanel state={state} now={now} />
 
-      <SatellitesPanel sats={sats} nodes={satNodes} holders={satHolders} rail={pb.rs485_power} now={now} />
+      <SatellitesPanel sats={sats} nodes={satNodes} holders={satHolders} rail={pb.rs485_power} now={now}
+        onOpen={onOpenSatellites} />
     </div>
   );
 }

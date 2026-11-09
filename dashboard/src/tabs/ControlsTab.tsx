@@ -154,8 +154,8 @@ export function ControlsTab({ state, connected, now, satNodes, manualHeld }: {
           </Btn>
         </div>
         <p className="text-xs text-slate-600 text-center">
-          Auto = POCO-delta + box-purge controllers (BMP1 in-box vs BMP2 outside).
-          Off/On pin the fan at 0%/100% until Auto is restored.
+          Auto = thermal management: hysteresis on a filtered GPU-led POCO
+          temperature (heatpipe sink). Off/On pin the fan at 0%/100% until Auto is restored.
         </p>
       </Panel>
 

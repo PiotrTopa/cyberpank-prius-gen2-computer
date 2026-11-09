@@ -690,7 +690,7 @@ class PowerboxState:
 
 @dataclass(frozen=True)
 class SatelliteNode:
-    """Virtual-twin model of one RS485 satellite (device id >= 100).
+    """Virtual-twin model of one satellite (any transport; see docs/SATELLITES.md).
 
     ``desired_config`` holds the persisted per-satellite options (loaded from
     user settings at boot); ``reported_config`` mirrors what the satellite last
@@ -698,6 +698,12 @@ class SatelliteNode:
     (re)discovered after being offline — the config-sync supervisor then
     re-pushes ``desired_config`` so a satellite restart is reconfigured
     automatically.
+
+    ``online`` = recent traffic, usable now. For BLE/Wi-Fi nodes it implies
+    ``authenticated`` (the registry only marks a node online after the
+    handshake on the current link). ``trusted`` = enrolled in the keychain
+    (RS485 nodes are trusted by cabling). ``linked`` = a link/session is up
+    (RS485: same as ``online``).
     """
     device_id: int = 0
     name: str = ""
@@ -708,6 +714,51 @@ class SatelliteNode:
     config_synced: bool = False       # desired_config pushed since last boot
     desired_config: Mapping = field(default_factory=dict)
     reported_config: Mapping = field(default_factory=dict)
+    # Multi-transport fields (docs/SATELLITES.md §5)
+    transport: str = "rs485"          # rs485 | ble | wifi (derived from the id range)
+    address: str = ""                 # RS485 id string, BLE MAC, Wi-Fi ip:port
+    fp: Optional[str] = None          # Ed25519 key fingerprint (None for auth "none")
+    trusted: bool = False             # enrolled in the keychain (RS485: by cabling)
+    authenticated: bool = False       # handshake done on the current link
+    linked: bool = False              # link/session up right now
+    rssi: Optional[int] = None
+    caps: tuple = ()                  # capability strings (serialized as a list)
+
+
+@dataclass(frozen=True)
+class SatelliteTransportInfo:
+    """One entry of ``SatellitesState.transports`` (TransportStatus + its queue)."""
+    available: bool = False
+    state: str = "init"
+    detail: str = ""
+    last_discovery: float = 0.0
+    queue_depth: int = 0
+    active_job: str = ""
+    require_auth: bool = True
+    devices_seen: int = 0
+
+
+@dataclass(frozen=True)
+class SatelliteDiscovered:
+    """A device seen on some transport that is not an enrolled node."""
+    transport: str = ""
+    address: str = ""                 # RS485: the device id as a string
+    name: str = ""
+    fp: Optional[str] = None
+    rssi: Optional[int] = None
+    last_seen: float = 0.0
+    linked: bool = False
+    pubkey: Optional[str] = None      # offered during auth (enrolable when set)
+    sat_id: Optional[int] = None      # presented a valid certificate for this id
+
+
+@dataclass(frozen=True)
+class SatellitePairing:
+    """Operator pairing window (BLE/Wi-Fi enrolment of unknown keys)."""
+    open: bool = False
+    until: float = 0.0                # time.time() when it closes (0 = closed)
+    transport: Optional[str] = None   # None = every transport
+    opened_at: float = 0.0            # time.time() when it opened (0 = closed)
 
 
 @dataclass(frozen=True)
@@ -728,9 +779,18 @@ class SatellitesState:
     nodes: Mapping[int, SatelliteNode] = field(default_factory=dict)
     power_holders: FrozenSet[str] = frozenset()
     power_requested: bool = False
-    # Job queue observability (fed by the SatelliteJobQueue executor)
+    # Job queue observability (fed by the SatelliteJobQueue executors):
+    # sum of every transport queue's depth / first non-empty active job.
     queue_depth: int = 0
     active_job: str = ""
+    # Multi-transport registry (docs/SATELLITES.md §5)
+    transports: Mapping[str, SatelliteTransportInfo] = field(default_factory=dict)
+    discovered: tuple = ()            # tuple of SatelliteDiscovered
+    pairing: SatellitePairing = field(default_factory=SatellitePairing)
+    # Result of the last operator command (satellite_enrol/forget/revoke/...):
+    # {"op", "ok", "error", "ts", "sat_id"?}; commands are fire-and-forget
+    # actions, so refusals are reported here (and in the journal).
+    last_command: Mapping = field(default_factory=dict)
     last_update_time: float = 0.0
 
 

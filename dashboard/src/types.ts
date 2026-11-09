@@ -10,21 +10,15 @@ export interface Powerbox {
   poco_power_w?: number | null;
   poco_core_temp?: number | null;
   poco_gpu_temp?: number | null;
-  poco_ema_temp?: number | null;
   fan_duty_pct?: number | null;
   /** Manual fan override in % (null/undefined = automatic control) */
   fan_override_pct?: number | null;
   /** Chassis fan tach RPM (firmware >= 2.0) */
   fan_rpm?: number | null;
-  /** BMP280 @0x77 — INSIDE the computer box (chassis air) */
-  bmp_t?: number;
-  bmp_p?: number;
-  /** BMP280 @0x76 — OUTSIDE the box (cabin ambient) */
+  /** BMP280 @0x76 — cabin ambient (the only air sensor; the computer has no
+   *  box any more, so the BMP1/AHT20 box sensors are gone, see THERMAL_MODEL.md) */
   bmp2_t?: number | null;
   bmp2_p?: number | null;
-  /** AHT20 on the powerbox board — inside the box */
-  aht_t?: number;
-  aht_h?: number;
   energy_mah?: number;
   undervoltage?: boolean;
   shutdown_requested?: boolean;
@@ -109,6 +103,11 @@ export interface Connection {
   mfd_last_boot_s?: number | null;
 }
 
+export type SatTransport = 'rs485' | 'ble' | 'wifi';
+
+/** Enrolled satellite (keychain). Fields after `reported_config` arrive with
+ *  the multi-transport registry (docs/SATELLITES.md §5); all optional so the
+ *  RS485-only backend still renders. */
 export interface SatelliteNode {
   device_id: number;
   name?: string;
@@ -119,6 +118,49 @@ export interface SatelliteNode {
   config_synced?: boolean;
   desired_config?: Record<string, unknown>;
   reported_config?: Record<string, unknown>;
+  /** rs485 | ble | wifi (absent = rs485, old backend) */
+  transport?: SatTransport | string;
+  address?: string | null;
+  /** Ed25519 fingerprint, 26-char base32 (null for RS485 auth "none") */
+  fp?: string | null;
+  /** in keychain */
+  trusted?: boolean;
+  /** handshake done on the current link */
+  authenticated?: boolean;
+  /** link up */
+  linked?: boolean;
+  rssi?: number | null;
+  caps?: string[] | null;
+}
+
+export interface SatTransportStatus {
+  available?: boolean;
+  state?: string;
+  detail?: string;
+  last_discovery?: number;
+  devices_seen?: number;
+  queue_depth?: number;
+  active_job?: string;
+}
+
+/** Seen but not enrolled ("available"). */
+export interface DiscoveredSatellite {
+  transport: SatTransport | string;
+  address: string;
+  name?: string | null;
+  fp?: string | null;
+  rssi?: number | null;
+  last_seen?: number;
+  linked?: boolean;
+  pubkey?: string | null;
+  trusted?: boolean;
+}
+
+export interface SatPairing {
+  open?: boolean;
+  /** backend epoch seconds */
+  until?: number;
+  transport?: SatTransport | string | null;
 }
 
 export interface Satellites {
@@ -127,6 +169,9 @@ export interface Satellites {
   power_requested?: boolean;
   queue_depth?: number;
   active_job?: string;
+  transports?: Partial<Record<SatTransport, SatTransportStatus>> & Record<string, SatTransportStatus>;
+  discovered?: DiscoveredSatellite[];
+  pairing?: SatPairing;
   last_update_time?: number;
 }
 
@@ -167,5 +212,5 @@ export interface AppState {
 }
 
 export type TimeRange = '1h' | '24h' | '7d';
-export type Tab = 'dashboard' | 'charts' | 'controls';
+export type Tab = 'dashboard' | 'satellites' | 'charts' | 'controls';
 export type Series = { time: string; value: number }[];

@@ -55,3 +55,11 @@ firmware-qcom-adreno-a630-sqe
 
 # --- Clock fallback (mobile APNs that block NTP/UDP-123) ---
 htpdate
+
+# --- satellites: BLE daemon prius-bled (BlueZ over D-Bus) + keychain crypto ---
+bluez
+bluez-btmgmt
+bluez-btmon
+py3-dbus
+py3-gobject3
+py3-cryptography

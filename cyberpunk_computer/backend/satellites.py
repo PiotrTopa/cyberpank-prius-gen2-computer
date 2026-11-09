@@ -20,6 +20,14 @@ the single :class:`SatelliteJobQueue`. The queue:
     * on sustained 12 V under-voltage cancels pending jobs and releases the
       hold, so offline (key-off) satellite work can never drain the battery.
 
+Multi-transport (docs/SATELLITES.md §5): the SatelliteRegistry owns one
+queue per transport. The RS485 queue is exactly the queue described above
+(rail wake-lock, ``powerbox.rs485_power``). BLE/Wi-Fi queues are built with
+``use_rail=False`` and a ``transport_ready`` callback: they hold no wake-lock
+and only wait for the medium plus the job's ``requires_online`` nodes (for
+those transports ``online`` implies an authenticated link); their
+``JobContext.send`` goes through the registry instead of the gateway port.
+
 Executed from the backend engine loop (`tick()` — same thread as store
 dispatches), no asyncio needed. RS485 is half-duplex, so serializing jobs is
 also a bus-correctness win.
@@ -62,16 +70,30 @@ PRIORITY_SCHEDULED = 70 # periodic background sensor reads
 class JobContext:
     """What a job gets to work with while executing."""
 
-    def __init__(self, store: Store, output_port: Optional[OutputPort]):
+    def __init__(
+        self,
+        store: Store,
+        output_port: Optional[OutputPort],
+        sender: Optional[Callable[[int, dict, int], bool]] = None,
+    ):
         self.store = store
         self.output_port = output_port
+        # Non-RS485 queues: sender(sat_id, payload, priority) via the registry.
+        self._sender = sender
 
     @property
     def state(self) -> AppState:
         return self.store.state
 
     def send(self, device_id: int, payload: dict, priority: int = 50) -> bool:
-        """Send one NDJSON command to a satellite via the gateway."""
+        """Send one NDJSON command to a satellite (gateway for RS485, the
+        registry's transport routing for BLE/Wi-Fi)."""
+        if self._sender is not None:
+            try:
+                return bool(self._sender(device_id, payload, priority))
+            except Exception:
+                logger.exception("Satellite send to %d failed", device_id)
+                return False
         if self.output_port is None:
             logger.warning("Satellite send to %d dropped: no output port", device_id)
             return False
@@ -135,10 +157,17 @@ class SatelliteJobQueue:
         store: Store,
         output_port: Optional[OutputPort] = None,
         clock: Callable[[], float] = time.monotonic,
+        transport: str = "rs485",
+        use_rail: bool = True,
+        transport_ready: Optional[Callable[[], bool]] = None,
+        sender: Optional[Callable[[int, dict, int], bool]] = None,
     ):
         self._store = store
-        self._ctx = JobContext(store, output_port)
+        self._ctx = JobContext(store, output_port, sender=sender)
         self._clock = clock
+        self.transport = transport
+        self._use_rail = use_rail
+        self._transport_ready = transport_ready
         self._lock = threading.Lock()
         self._heap: List[Tuple[int, int, SatelliteJob]] = []
         self._seq = itertools.count()  # FIFO tiebreaker within a priority
@@ -173,6 +202,8 @@ class SatelliteJobQueue:
     # ── power hold ───────────────────────────────────────────────────────────
 
     def _acquire_holder(self) -> None:
+        if not self._use_rail:
+            return
         if not self._holder_held:
             self._holder_held = True
             self._store.dispatch(SatellitePowerHoldAction(HOLDER_QUEUE, acquire=True))
@@ -188,11 +219,21 @@ class SatelliteJobQueue:
 
     def _publish(self) -> None:
         active = self._current.name if self._current else ""
-        self._store.dispatch(SetSatelliteQueueAction(self.depth, active))
+        self._store.dispatch(SetSatelliteQueueAction(self.depth, active,
+                                                     transport=self.transport))
 
     # ── executor ─────────────────────────────────────────────────────────────
 
     def _rail_up(self, state: AppState) -> bool:
+        if not self._use_rail:
+            # BLE/Wi-Fi: "rail" = the medium is usable (bled reachable, AP up).
+            if self._transport_ready is None:
+                return True
+            try:
+                return bool(self._transport_ready())
+            except Exception:
+                logger.exception("transport_ready for %s failed", self.transport)
+                return False
         # Trust the powerbox STATUS mirror; when no powerbox is attached
         # (dev/replay) fall back to "requested" so jobs still run.
         rail = state.powerbox.rs485_power
@@ -302,6 +343,7 @@ class PeriodicJobSpec:
     interval_s: float
     factory: Callable[[], SatelliteJob]
     run_when_acc_off: bool = True   # scheduled wakes are the key-off use case
+    transport: str = "rs485"        # which transport queue runs it
     _last_run: float = field(default=0.0, repr=False)
 
 
@@ -317,11 +359,19 @@ class SatelliteScheduler:
         queue: SatelliteJobQueue,
         store: Store,
         clock: Callable[[], float] = time.monotonic,
+        queues: Optional[Dict[str, SatelliteJobQueue]] = None,
     ):
         self._queue = queue
         self._store = store
         self._clock = clock
+        # Per-transport queues (registry); specs pick theirs by ``transport``.
+        self._queues = queues
         self._specs: List[PeriodicJobSpec] = []
+
+    def _queue_for(self, spec: PeriodicJobSpec) -> SatelliteJobQueue:
+        if self._queues is not None and spec.transport in self._queues:
+            return self._queues[spec.transport]
+        return self._queue
 
     def add(self, spec: PeriodicJobSpec) -> None:
         self._specs.append(spec)
@@ -340,12 +390,13 @@ class SatelliteScheduler:
                 continue
             if not spec.run_when_acc_off and not state.powerbox.acc_on:
                 continue
-            if self._queue.has(spec.name):
+            queue = self._queue_for(spec)
+            if queue.has(spec.name):
                 continue  # previous run still in flight
             spec._last_run = now
             job = spec.factory()
             job.name = spec.name
-            self._queue.submit(job)
+            queue.submit(job)
 
 
 class SatelliteSupervisor:
@@ -368,8 +419,11 @@ class SatelliteSupervisor:
         desired_configs: Optional[Dict[int, dict]] = None,
         offline_after_s: float = 15.0,
         clock: Callable[[], float] = time.monotonic,
+        queue_for: Optional[Callable[[int], Optional[SatelliteJobQueue]]] = None,
     ):
         self._queue = queue
+        # Registry: device id -> its transport's queue (None = skip).
+        self._queue_for = queue_for
         self._store = store
         self._offline_after_s = offline_after_s
         self._desired = dict(desired_configs or {})
@@ -400,29 +454,37 @@ class SatelliteSupervisor:
         now = self._clock()
         rail_down = state.powerbox.connected and state.powerbox.rs485_power is False
         for dev, node in state.satellites.nodes.items():
-            seen = self._seen_mono(dev, node.last_seen, now)
-            if node.online and (
-                rail_down or (now - seen) > self._offline_after_s
-            ):
-                self._store.dispatch(UpdateSatelliteNodeAction(
-                    dev, online=False, source=ActionSource.INTERNAL))
-                continue
+            wired = getattr(node, "transport", "rs485") == "rs485"
+            # RS485 presence ages on traffic + rail. BLE/Wi-Fi presence follows
+            # the authenticated link (the registry clears it on link down; the
+            # transports run their own keep-alive), so no traffic ageing here.
+            if wired:
+                seen = self._seen_mono(dev, node.last_seen, now)
+                if node.online and (
+                    rail_down or (now - seen) > self._offline_after_s
+                ):
+                    self._store.dispatch(UpdateSatelliteNodeAction(
+                        dev, online=False, linked=False, source=ActionSource.INTERNAL))
+                    continue
+            queue = self._queue if self._queue_for is None else self._queue_for(dev)
             if (
-                node.online
+                queue is not None
+                and node.online
                 and not node.config_synced
                 and node.desired_config
-                and not self._queue.has(f"cfg:{dev}")
+                and not queue.has(f"cfg:{dev}")
             ):
-                self._submit_config_push(dev, dict(node.desired_config))
+                self._submit_config_push(dev, dict(node.desired_config), queue)
 
-    def _submit_config_push(self, device_id: int, config: dict) -> None:
+    def _submit_config_push(self, device_id: int, config: dict,
+                            queue: Optional[SatelliteJobQueue] = None) -> None:
         def start(ctx: JobContext) -> None:
             ctx.send(device_id, config, priority=80)
             ctx.store.dispatch(UpdateSatelliteNodeAction(
                 device_id, config_synced=True, source=ActionSource.INTERNAL))
 
         logger.info("Satellite %d rebooted/appeared — re-pushing config", device_id)
-        self._queue.submit(SatelliteJob(
+        (queue or self._queue).submit(SatelliteJob(
             name=f"cfg:{device_id}",
             start=start,
             priority=PRIORITY_CONFIG,

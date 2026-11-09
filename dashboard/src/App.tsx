@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import {
-  Activity, Bug, Car, Clock, Cpu, LayoutDashboard, Power, Thermometer,
+  Activity, Bug, Car, Clock, Cpu, LayoutDashboard, Power, SatelliteDish, Thermometer,
   Wifi, WifiOff, Zap,
 } from 'lucide-react';
 import type { Satellites, Tab, TimeRange } from './types';
@@ -12,9 +12,12 @@ import { DebugDrawer } from './components/DebugDrawer';
 import { OverviewTab } from './tabs/OverviewTab';
 import { TelemetryTab } from './tabs/TelemetryTab';
 import { ControlsTab } from './tabs/ControlsTab';
+import { SatellitesTab } from './tabs/SatellitesTab';
+import { transportOf } from './lib/satellites';
 
 const TABS: [Tab, string, typeof LayoutDashboard][] = [
   ['dashboard', 'Overview', LayoutDashboard],
+  ['satellites', 'Satellites', SatelliteDish],
   ['charts', 'Telemetry', Activity],
   ['controls', 'Controls', Power],
 ];
@@ -25,7 +28,15 @@ export default function App() {
   // Backend-clock "now" — the POCO has no reliable RTC/NTP, so ages computed
   // against the raw viewer clock drift by whatever the skew happens to be.
   const serverNow = now - clockOffsetMs;
-  const [activeTab, setActiveTab] = useState<Tab>('dashboard');
+  // Tab mirrors the URL hash (#satellites) so a view can be linked/reloaded.
+  const [activeTab, setActiveTabState] = useState<Tab>(() => {
+    const h = window.location.hash.replace('#', '');
+    return TABS.some(([id]) => id === h) ? (h as Tab) : 'dashboard';
+  });
+  const setActiveTab = (t: Tab) => {
+    setActiveTabState(t);
+    window.history.replaceState(null, '', t === 'dashboard' ? window.location.pathname : `#${t}`);
+  };
   const [timeRange, setTimeRange] = useState<TimeRange>('1h');
   const [debugOpen, setDebugOpen] = useState(false);
   const hist = useHistory(timeRange);
@@ -61,6 +72,7 @@ export default function App() {
   const satNodes = Object.values(sats.nodes ?? {}).sort((a, b) => a.device_id - b.device_id);
   const satHolders = sats.power_holders ?? [];
   const manualHeld = satHolders.includes('manual:dash');
+  const rs485Nodes = satNodes.filter((n) => transportOf(n) === 'rs485');
 
   const v = pb.system_voltage;
   const vState = v == null ? 'idle' : v < 11 ? 'danger' : v < 11.8 ? 'warn' : 'ok';
@@ -125,7 +137,7 @@ export default function App() {
           <StatCard
             icon={Thermometer} label="Cabin Temp" value={cabin?.toFixed(1)} unit="°C" tone="magenta"
             state={cabin == null ? 'idle' : cabin > 30 ? 'warn' : 'ok'}
-            sub={pb.aht_h != null ? `${pb.aht_h.toFixed(0)}% RH` : cabin == null ? 'SENSOR OFFLINE' : 'AHT20'}
+            sub={cabin == null ? 'SENSOR OFFLINE' : pb.bmp2_t != null ? 'BMP280' : 'CLIMATE ECU'}
           />
         </section>
 
@@ -151,14 +163,18 @@ export default function App() {
         <div className="flex-1">
           {activeTab === 'dashboard' && (
             <OverviewTab state={state} hist={hist} now={serverNow}
-              satNodes={satNodes} satHolders={satHolders} onOpenDebug={() => setDebugOpen(true)} />
+              satNodes={satNodes} satHolders={satHolders} onOpenDebug={() => setDebugOpen(true)}
+              onOpenSatellites={() => setActiveTab('satellites')} />
+          )}
+          {activeTab === 'satellites' && (
+            <SatellitesTab sats={sats} nodes={satNodes} holders={satHolders} rail={pb.rs485_power} now={serverNow} />
           )}
           {activeTab === 'charts' && (
             <TelemetryTab hist={hist} timeRange={timeRange} onTimeRange={setTimeRange} />
           )}
           {activeTab === 'controls' && (
             <ControlsTab state={state} connected={connected} now={serverNow}
-              satNodes={satNodes} manualHeld={manualHeld} />
+              satNodes={rs485Nodes} manualHeld={manualHeld} />
           )}
         </div>
 

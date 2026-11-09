@@ -1,5 +1,10 @@
 # RS485 Satellite Power Management & Twin Model
 
+> **See [SATELLITES.md](SATELLITES.md)** for the multi-transport satellite
+> design (RS485 + BLE + Wi-Fi, keychain, auth, `SatelliteRegistry`, REST
+> commands). This document stays the reference for the RS485 rail, its
+> wake-locks and the RS485 job queue, which the registry keeps unchanged.
+
 How the backend manages the **RS485 satellite rail** (powerbox relay channel 5) and models each RS485
 satellite in the virtual twin. Code: `state/rules/satellite_power.py`,
 `backend/satellites.py`, `SatellitesState` in `state/app_state.py`.
@@ -132,6 +137,10 @@ per-node twin.
 | `satellite_poll_interval_s` | `0` (off) | Periodic key-off wake interval. |
 | `satellite_poll_devices` | `()` | Devices poked each poll cycle. |
 | `satellite_poll_payload` | `{"a":"status"}` | Solicit payload. |
+
+Multi-transport knobs (`satellite_transports`, `satellite_rediscover_s`,
+`satellite_keychain_dir`, `satellite_wifi_*`, `satellite_ble_socket`) and
+their `BACKEND_SATELLITE_*` env vars: see SATELLITES.md §8.
 
 ## REST commands
 

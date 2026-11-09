@@ -132,6 +132,9 @@ class ActionType(Enum):
     UPDATE_SATELLITE_NODE = auto()     # presence/config updates for one node
     SET_SATELLITE_QUEUE = auto()       # job-queue depth + active job (observability)
     ENQUEUE_SATELLITE_COMMAND = auto() # submit a command job to the satellite queue
+    REMOVE_SATELLITE_NODE = auto()     # drop a twin node (forget/revoke)
+    SET_SATELLITE_REGISTRY = auto()    # transports/discovered/pairing mirror (registry)
+    SATELLITE_REGISTRY_COMMAND = auto() # operator command for the registry (discover/pair/enrol/...)
 
     # AVC Input actions (buttons and touch)
     AVC_BUTTON_PRESS = auto()
@@ -1599,6 +1602,15 @@ class UpdateSatelliteNodeAction(Action):
         desired_config: Optional[dict] = None,
         reported_config: Optional[dict] = None,
         source: ActionSource = ActionSource.GATEWAY,
+        transport: Optional[str] = None,
+        address: Optional[str] = None,
+        fp: Optional[str] = None,
+        trusted: Optional[bool] = None,
+        authenticated: Optional[bool] = None,
+        linked: Optional[bool] = None,
+        rssi: Optional[int] = None,
+        caps: Optional[List[str]] = None,
+        clear_fp: bool = False,
     ):
         super().__init__(ActionType.UPDATE_SATELLITE_NODE, source)
         self.device_id = device_id
@@ -1609,14 +1621,70 @@ class UpdateSatelliteNodeAction(Action):
         self.config_synced = config_synced
         self.desired_config = desired_config
         self.reported_config = reported_config
+        # Multi-transport fields (None = unchanged; clear_fp sets fp to None)
+        self.transport = transport
+        self.address = address
+        self.fp = fp
+        self.trusted = trusted
+        self.authenticated = authenticated
+        self.linked = linked
+        self.rssi = rssi
+        self.caps = caps
+        self.clear_fp = clear_fp
 
 
 class SetSatelliteQueueAction(Action):
-    """Mirror the satellite job queue state (depth + active job name)."""
-    def __init__(self, depth: int, active_job: str = "", source: ActionSource = ActionSource.INTERNAL):
+    """Mirror one transport queue's state (depth + active job name).
+
+    The reducer stores it under ``transports[transport]`` and recomputes the
+    legacy totals ``queue_depth`` (sum) / ``active_job`` (first non-empty).
+    """
+    def __init__(self, depth: int, active_job: str = "", source: ActionSource = ActionSource.INTERNAL,
+                 transport: str = "rs485"):
         super().__init__(ActionType.SET_SATELLITE_QUEUE, source)
         self.depth = depth
         self.active_job = active_job
+        self.transport = transport
+
+
+class RemoveSatelliteNodeAction(Action):
+    """Drop a satellite twin node (keychain forget/revoke)."""
+    def __init__(self, device_id: int, source: ActionSource = ActionSource.INTERNAL):
+        super().__init__(ActionType.REMOVE_SATELLITE_NODE, source)
+        self.device_id = device_id
+
+
+class SetSatelliteRegistryAction(Action):
+    """Registry mirror: per-transport status, discovered devices, pairing window.
+
+    ``transports`` maps name -> dict of SatelliteTransportInfo fields (queue
+    fields are owned by SetSatelliteQueueAction and preserved); ``discovered``
+    is a list of SatelliteDiscovered field dicts; ``pairing`` a dict of
+    SatellitePairing fields. ``None`` leaves that part unchanged.
+    """
+    def __init__(self, transports: Optional[dict] = None, discovered: Optional[list] = None,
+                 pairing: Optional[dict] = None, source: ActionSource = ActionSource.INTERNAL,
+                 last_command: Optional[dict] = None):
+        super().__init__(ActionType.SET_SATELLITE_REGISTRY, source)
+        self.transports = transports
+        self.discovered = discovered
+        self.pairing = pairing
+        self.last_command = last_command
+
+
+class SatelliteRegistryCommandAction(Action):
+    """Operator command for the SatelliteRegistry (REST ``satellite_discover``,
+    ``satellite_pair_open``, ``satellite_enrol``, ``satellite_forget``,
+    ``satellite_revoke``). Routed by the backend middleware; no state change.
+
+    ``op`` is one of :attr:`OPS`; ``params`` the validated command parameters.
+    """
+    OPS = ("discover", "pair_open", "enrol", "forget", "revoke")
+
+    def __init__(self, op: str, params: Optional[dict] = None, source: ActionSource = ActionSource.UI):
+        super().__init__(ActionType.SATELLITE_REGISTRY_COMMAND, source)
+        self.op = op
+        self.params = dict(params or {})
 
 
 class EnqueueSatelliteCommandAction(Action):

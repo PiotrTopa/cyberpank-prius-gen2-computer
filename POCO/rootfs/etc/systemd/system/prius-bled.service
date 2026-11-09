@@ -1,0 +1,30 @@
+[Unit]
+Description=Prius BLE satellite daemon (advertising, GATT, pairing agent, control socket)
+Documentation=file:///home/user/cyberpunk/docs/SATELLITES.md
+# bled owns hci0 through BlueZ D-Bus; it re-registers by itself when
+# bluetoothd restarts, Requires= only makes a stopped bluetooth stop us too.
+After=bluetooth.service
+Requires=bluetooth.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/prius-bled --adapter hci0 --socket /run/prius/bled.sock
+Restart=always
+RestartSec=5
+
+# /run/prius is shared with the backend (it only connects to bled.sock);
+# preserved so a bled restart does not pull the directory from under others.
+RuntimeDirectory=prius
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+
+# Small helper next to the backend on its dedicated core (see prius.slice).
+Slice=prius.slice
+MemoryHigh=48M
+MemoryMax=64M
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

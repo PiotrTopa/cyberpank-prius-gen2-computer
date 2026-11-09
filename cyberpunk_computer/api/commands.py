@@ -249,7 +249,9 @@ def _build_satellite_power_hold(params: Dict[str, Any]) -> Action:
 
 def _build_satellite_send(params: Dict[str, Any]) -> Action:
     from ..state.actions import EnqueueSatelliteCommandAction
-    device_id = _as_int(_require(params, "device_id"), "device_id", 100, 199)
+    device_id = _as_int(_require(params, "device_id"), "device_id", 100, 499)
+    if 200 <= device_id <= 299:
+        raise CommandError("parameter 'device_id' 200..299 is the powerbox, not a satellite")
     payload = _require(params, "payload")
     if not isinstance(payload, dict):
         raise CommandError("parameter 'payload' must be an object")
@@ -257,6 +259,78 @@ def _build_satellite_send(params: Dict[str, Any]) -> Action:
     return EnqueueSatelliteCommandAction(
         device_id, payload, priority=priority, source=ActionSource.UI,
     )
+
+
+_SAT_TRANSPORTS = ("rs485", "ble", "wifi")
+_SAT_RANGES = {"rs485": (100, 199), "ble": (300, 399), "wifi": (400, 499)}
+
+
+def _opt_transport(params: Dict[str, Any]) -> Any:
+    t = params.get("transport")
+    if t in (None, "", "all"):
+        return None
+    t = str(t).strip().lower()
+    if t not in _SAT_TRANSPORTS:
+        raise CommandError("parameter 'transport' must be one of rs485, ble, wifi")
+    return t
+
+
+def _sat_id(params: Dict[str, Any]) -> int:
+    sid = _as_int(_require(params, "sat_id"), "sat_id", 100, 499)
+    if 200 <= sid <= 299:
+        raise CommandError("parameter 'sat_id' 200..299 is the powerbox, not a satellite")
+    return sid
+
+
+def _registry_cmd(op: str, params: Dict[str, Any]) -> Action:
+    from ..state.actions import SatelliteRegistryCommandAction
+    return SatelliteRegistryCommandAction(op, params, source=ActionSource.UI)
+
+
+def _build_satellite_discover(params: Dict[str, Any]) -> Action:
+    return _registry_cmd("discover", {"transport": _opt_transport(params)})
+
+
+def _build_satellite_pair_open(params: Dict[str, Any]) -> Action:
+    seconds = _as_float(params.get("seconds", 120), "seconds", 0, 3600)
+    return _registry_cmd("pair_open", {"seconds": seconds, "transport": _opt_transport(params)})
+
+
+def _build_satellite_enrol(params: Dict[str, Any]) -> Action:
+    transport = _opt_transport({"transport": _require(params, "transport")})
+    if transport is None:
+        raise CommandError("parameter 'transport' must be one of rs485, ble, wifi")
+    name = str(_require(params, "name")).strip()
+    if not name or len(name) > 32 or any(c.isspace() for c in name):
+        raise CommandError("parameter 'name' must be a short slug without spaces")
+    address = str(params.get("address") or "").strip()
+    sat_id = params.get("sat_id")
+    if sat_id is not None and sat_id != "":
+        lo, hi = _SAT_RANGES[transport]
+        sat_id = _as_int(sat_id, "sat_id", lo, hi)
+    else:
+        sat_id = None
+    if transport == "rs485" and sat_id is None:
+        if not address.isdigit():
+            raise CommandError("RS485 enrolment needs 'sat_id' or a numeric 'address'")
+        sat_id = _as_int(address, "address", 100, 199)
+    if transport != "rs485" and not address:
+        raise CommandError("parameter 'address' is required for ble/wifi")
+    caps = params.get("caps") or []
+    if isinstance(caps, str):
+        caps = [c.strip() for c in caps.split(",") if c.strip()]
+    if not isinstance(caps, list) or not all(isinstance(c, str) for c in caps):
+        raise CommandError("parameter 'caps' must be a list of strings")
+    return _registry_cmd("enrol", {"transport": transport, "address": address or str(sat_id),
+                                   "name": name, "sat_id": sat_id, "caps": caps})
+
+
+def _build_satellite_forget(params: Dict[str, Any]) -> Action:
+    return _registry_cmd("forget", {"sat_id": _sat_id(params)})
+
+
+def _build_satellite_revoke(params: Dict[str, Any]) -> Action:
+    return _registry_cmd("revoke", {"sat_id": _sat_id(params)})
 
 
 # name -> (builder, description, params-doc)
@@ -402,16 +476,59 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
     "satellite_send": {
         "builder": _build_satellite_send,
         "description": (
-            "Enqueue a command to an RS485 satellite. Powers the satellite rail if "
+            "Enqueue a command to a satellite on any transport (RS485 100..199, "
+            "BLE 300..399, Wi-Fi 400..499). RS485: powers the satellite rail if "
             "needed, waits for the rail, sends the payload, and powers back "
-            "down after the linger window (jobs are serialized, FIFO within "
-            "priority — lower runs first)."
+            "down after the linger window. BLE/Wi-Fi: waits for an authenticated "
+            "link. Jobs are serialized per transport, FIFO within priority — "
+            "lower runs first."
         ),
         "params": {
-            "device_id": "int 100..199",
+            "device_id": "int 100..199 | 300..499",
             "payload": "object (raw NDJSON 'd' payload for the satellite)",
             "priority": "int 0..100 (optional, default 50, lower = sooner)",
         },
+    },
+    "satellite_discover": {
+        "builder": _build_satellite_discover,
+        "description": (
+            "Force a satellite rediscovery pass now (RS485: status poll through the "
+            "rail queue, powers the rail; BLE: short scan; Wi-Fi: car announcement)."
+        ),
+        "params": {"transport": "rs485 | ble | wifi (optional, default all)"},
+    },
+    "satellite_pair_open": {
+        "builder": _build_satellite_pair_open,
+        "description": (
+            "Open (or close with seconds=0) the satellite pairing window. While open, "
+            "unknown BLE/Wi-Fi devices that prove their key are held in "
+            "satellites.discovered (with pubkey) for satellite_enrol."
+        ),
+        "params": {"seconds": "float 0..3600 (default 120, 0 closes)",
+                   "transport": "rs485 | ble | wifi (optional, default all)"},
+    },
+    "satellite_enrol": {
+        "builder": _build_satellite_enrol,
+        "description": (
+            "Enrol a satellite into the keychain. BLE/Wi-Fi: a discovered device that "
+            "offered a pubkey, pairing window open. RS485: name + id only, no window "
+            "needed (wired). Result in satellites.last_command."
+        ),
+        "params": {"transport": "rs485 | ble | wifi", "address": "string (as in discovered; RS485: the id)",
+                   "name": "slug", "sat_id": "int (optional; free id in the range otherwise)",
+                   "caps": "list of strings (optional)"},
+    },
+    "satellite_forget": {
+        "builder": _build_satellite_forget,
+        "description": "Remove a satellite from the keychain and drop its link "
+                       "(a valid certificate can bring it back; use revoke to ban).",
+        "params": {"sat_id": "int"},
+    },
+    "satellite_revoke": {
+        "builder": _build_satellite_revoke,
+        "description": "Revoke a satellite's key fingerprint (refused forever, cert or not) "
+                       "and drop its link. Error 'nothing to revoke' for auth-none (RS485) nodes.",
+        "params": {"sat_id": "int"},
     },
 }
 

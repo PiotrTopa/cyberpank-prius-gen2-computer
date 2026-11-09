@@ -1211,6 +1211,27 @@ class Store:
                 kwargs["desired_config"] = dict(action.desired_config)
             if action.reported_config is not None:
                 kwargs["reported_config"] = dict(action.reported_config)
+            if action.device_id not in self._state.satellites.nodes and action.transport is None:
+                # New node: transport follows the id range (ids never move).
+                if 300 <= action.device_id <= 399:
+                    kwargs["transport"] = "ble"
+                elif 400 <= action.device_id <= 499:
+                    kwargs["transport"] = "wifi"
+                else:
+                    # Wired RS485 node: trusted by cabling, address = id.
+                    kwargs["trusted"] = True
+                    kwargs["address"] = str(action.device_id)
+            if action.seen and kwargs.get("transport", node.transport) == "rs485":
+                kwargs["linked"] = True
+            for fname in ("transport", "address", "fp", "trusted", "authenticated",
+                          "linked", "rssi"):
+                val = getattr(action, fname, None)
+                if val is not None:
+                    kwargs[fname] = val
+            if getattr(action, "clear_fp", False):
+                kwargs["fp"] = None
+            if getattr(action, "caps", None) is not None:
+                kwargs["caps"] = tuple(str(c) for c in action.caps)
             nodes[action.device_id] = replace(node, **kwargs)
             self._state = replace(
                 self._state,
@@ -1222,16 +1243,76 @@ class Store:
 
         elif action.type == ActionType.SET_SATELLITE_QUEUE:
             import time as _t
+            from .app_state import SatelliteTransportInfo
+            sats = self._state.satellites
+            name = getattr(action, "transport", "rs485") or "rs485"
+            transports = dict(sats.transports)
+            info = transports.get(name) or SatelliteTransportInfo()
+            transports[name] = replace(info, queue_depth=action.depth,
+                                       active_job=action.active_job)
+            # Legacy totals: transports that never reported a queue count 0.
+            depth = sum(t.queue_depth for t in transports.values())
+            active = next((t.active_job for t in transports.values() if t.active_job), "")
             self._state = replace(
                 self._state,
                 satellites=replace(
-                    self._state.satellites,
-                    queue_depth=action.depth,
-                    active_job=action.active_job,
+                    sats,
+                    transports=transports,
+                    queue_depth=depth,
+                    active_job=active,
                     last_update_time=_t.time(),
                 ),
             )
             affected.add(StateSlice.SATELLITES)
+
+        elif action.type == ActionType.REMOVE_SATELLITE_NODE:
+            import time as _t
+            nodes = dict(self._state.satellites.nodes)
+            if nodes.pop(action.device_id, None) is not None:
+                self._state = replace(
+                    self._state,
+                    satellites=replace(self._state.satellites, nodes=nodes,
+                                       last_update_time=_t.time()),
+                )
+                affected.add(StateSlice.SATELLITES)
+
+        elif action.type == ActionType.SET_SATELLITE_REGISTRY:
+            import time as _t
+            from .app_state import (
+                SatelliteDiscovered, SatellitePairing, SatelliteTransportInfo,
+            )
+            sats = self._state.satellites
+            kwargs = {}
+            if action.transports is not None:
+                transports = dict(sats.transports)
+                for name, fields in action.transports.items():
+                    info = transports.get(name) or SatelliteTransportInfo()
+                    # queue_depth/active_job belong to SET_SATELLITE_QUEUE
+                    upd = {k: v for k, v in fields.items()
+                           if k in SatelliteTransportInfo.__dataclass_fields__
+                           and k not in ("queue_depth", "active_job")}
+                    transports[name] = replace(info, **upd)
+                kwargs["transports"] = transports
+            if action.discovered is not None:
+                kwargs["discovered"] = tuple(
+                    SatelliteDiscovered(**{k: v for k, v in d.items()
+                                           if k in SatelliteDiscovered.__dataclass_fields__})
+                    for d in action.discovered
+                )
+            if action.pairing is not None:
+                kwargs["pairing"] = replace(sats.pairing, **{
+                    k: v for k, v in action.pairing.items()
+                    if k in SatellitePairing.__dataclass_fields__})
+            if getattr(action, "last_command", None) is not None:
+                kwargs["last_command"] = dict(action.last_command)
+            if kwargs:
+                new_sats = replace(sats, **kwargs)
+                if new_sats != sats:
+                    self._state = replace(
+                        self._state,
+                        satellites=replace(new_sats, last_update_time=_t.time()),
+                    )
+                    affected.add(StateSlice.SATELLITES)
 
         return affected
     

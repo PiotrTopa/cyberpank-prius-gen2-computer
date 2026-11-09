@@ -1,0 +1,1350 @@
+#!/usr/bin/env python3
+"""prius-bled - the car's BLE satellite daemon (docs/SATELLITES.md §4 "BLE").
+
+Owns the Bluetooth adapter (hci0) through BlueZ D-Bus so the backend never has
+to: advertises the car as a connectable LE peripheral (local name PRIUS, our
+service UUID, 10 s interval by default), serves the satellite GATT service
+(TX notify / RX write, encrypted link required), runs a NoInputNoOutput pairing
+agent that only accepts pairing while the backend's pairing window is open,
+does short UUID-filtered scans on request, and relays NDJSON lines between
+connected satellites and the backend over the control socket
+/run/prius/bled.sock (one client at a time, NDJSON both ways).
+
+State that matters to the car (advertising interval/flags, pairing window,
+links) lives in this daemon, not in the client connection: the backend can
+restart and reconnect without the radio changing. bluetoothd restarts are
+survived by re-registering everything when org.bluez reappears on the bus.
+
+The file is split in two halves so the tests can importlib-load it without
+D-Bus: pure logic first (framing, chunking, flag bytes, command parsing,
+BledCore, ControlServer), the BlueZ glue (BluezRadio + D-Bus objects) last.
+
+Usage: prius-bled [--adapter hci0] [--socket /run/prius/bled.sock] [--verbose]
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import re
+import signal
+import socket
+import subprocess
+import sys
+import time
+from dataclasses import dataclass, field
+from typing import Callable, Dict, List, Optional, Tuple
+
+try:  # the D-Bus half is optional so the pure logic imports anywhere (tests)
+    import dbus
+    import dbus.exceptions
+    import dbus.mainloop.glib
+    import dbus.service
+    from gi.repository import GLib
+except ImportError:  # pragma: no cover - exercised only on hosts without dbus
+    dbus = None
+    GLib = None
+
+logger = logging.getLogger("prius-bled")
+
+# --- protocol constants (docs/SATELLITES.md §4) ------------------------------
+
+SERVICE_UUID = "580e04f7-d4c0-458b-b2e0-4ebb01a960c8"
+# Characteristics: the service UUID with the last 4 hex digits replaced.
+TX_UUID = "580e04f7-d4c0-458b-b2e0-4ebb01a90001"   # car -> satellite, notify
+RX_UUID = "580e04f7-d4c0-458b-b2e0-4ebb01a90002"   # satellite -> car, write
+LOCAL_NAME = "PRIUS"
+COMPANY_ID = 0xFFFF            # "no company" test id until we have a real one
+
+DEFAULT_SOCKET = "/run/prius/bled.sock"
+LINE_MAX = 4096                # satellite line cap (bytes, without \n); exceeding closes the link
+CONTROL_LINE_MAX = 64 * 1024   # backend -> bled command line cap
+DEFAULT_INTERVAL_MS = 10000
+PAIRING_INTERVAL_MS = 1000     # forced (upper bound) while the pairing window is open
+ADV_SPREAD_MS = 240            # MaxInterval = MinInterval + spread (10 000-10 240 ms default)
+ADV_MIN_MS = 20
+ADV_MAX_MS = 10240             # BLE legacy advertising upper bound
+FLAG_ACC = 0x0001
+FLAG_PAIRING = 0x0002
+STATUS_PERIOD_S = 30
+SCAN_MAX_S = 10
+PAIRABLE_MAX_S = 600
+DEFAULT_ATT_MTU = 23           # until the first write tells us the negotiated MTU
+
+MAC_RE = re.compile(r"^[0-9A-F]{2}(:[0-9A-F]{2}){5}$")
+
+
+# --- pure helpers -------------------------------------------------------------
+
+class LineTooLong(Exception):
+    """A satellite sent more than LINE_MAX bytes without a newline."""
+
+
+class LineAssembler:
+    """Reassembles a byte stream (GATT writes) into NDJSON lines.
+
+    A satellite may split one line over many writes (ATT MTU is small) or pack
+    several lines into one write; we only ever hand complete ``\\n``-terminated
+    lines on. Blank lines are dropped (a bare ``\\n`` is a valid "hello, I am
+    here" write that brings the link up without sending data). ``\\r`` before
+    the newline is tolerated. Raises :class:`LineTooLong` when the pending
+    partial line exceeds ``limit`` — the caller then drops the link, because a
+    satellite that does that is broken or hostile and the buffer must stay
+    bounded.
+    """
+
+    def __init__(self, limit: int = LINE_MAX):
+        self.limit = limit
+        self._buf = bytearray()
+
+    def feed(self, data: bytes) -> List[str]:
+        self._buf.extend(data)
+        lines: List[str] = []
+        while True:
+            nl = self._buf.find(b"\n")
+            if nl < 0:
+                break
+            raw = bytes(self._buf[:nl])
+            del self._buf[: nl + 1]
+            if len(raw) > self.limit:
+                self._buf.clear()
+                raise LineTooLong(len(raw))
+            text = raw.decode("utf-8", errors="replace").rstrip("\r")
+            if text.strip():
+                lines.append(text)
+        if len(self._buf) > self.limit:
+            size = len(self._buf)
+            self._buf.clear()
+            raise LineTooLong(size)
+        return lines
+
+    @property
+    def pending(self) -> int:
+        return len(self._buf)
+
+
+def chunk_line(line: str, mtu: int) -> List[bytes]:
+    """Split one NDJSON line (+ ``\\n``) into notification payloads of MTU-3 bytes.
+
+    ATT notifications carry at most MTU-3 bytes; BlueZ truncates anything
+    longer, so we chunk on bytes (a multi-byte UTF-8 character may straddle
+    two chunks — the satellite reassembles bytes up to ``\\n`` before decoding,
+    exactly like :class:`LineAssembler`).
+    """
+    payload = line.rstrip("\n").encode("utf-8") + b"\n"
+    size = max(DEFAULT_ATT_MTU, int(mtu or DEFAULT_ATT_MTU)) - 3
+    return [payload[i:i + size] for i in range(0, len(payload), size)]
+
+
+def flag_bytes(flags: int) -> bytes:
+    """Manufacturer-data payload: the 16-bit flag word, little-endian (BLE byte order).
+
+    bit0 = ACC on, bit1 = pairing window open; other bits reserved (0).
+    """
+    return int(flags & 0xFFFF).to_bytes(2, "little")
+
+
+def adv_interval_range(interval_ms: int) -> Tuple[int, int]:
+    """(MinInterval, MaxInterval) in ms for a requested interval.
+
+    Min = the request clamped to [20, 10 240]; Max = Min + 240 ms capped at
+    10 240 — a small window lets the controller schedule around connections
+    and scans instead of colliding at a fixed instant.
+    """
+    lo = max(ADV_MIN_MS, min(ADV_MAX_MS, int(interval_ms)))
+    hi = min(ADV_MAX_MS, lo + ADV_SPREAD_MS)
+    return lo, hi
+
+
+def normalise_addr(addr) -> str:
+    """Upper-case colon MAC, or raise ValueError."""
+    a = str(addr or "").strip().upper().replace("-", ":")
+    if not MAC_RE.match(a):
+        raise ValueError("bad address %r" % addr)
+    return a
+
+
+def addr_from_path(path: str) -> str:
+    """``/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF`` -> ``AA:BB:CC:DD:EE:FF``."""
+    leaf = str(path).rsplit("/", 1)[-1]
+    if not leaf.startswith("dev_"):
+        raise ValueError("not a device path: %r" % path)
+    return normalise_addr(leaf[4:].replace("_", ":"))
+
+
+def frame_tx(addr: str, line: str) -> str:
+    """TX addressing (docs/SATELLITES.md §4): ``"<ADDR> <line>"``.
+
+    BlueZ notifies every subscribed link, so each line names its destination:
+    the 17-char upper-case colon address as BlueZ reports it, one space, the
+    NDJSON line. A satellite compares the first 17 bytes with its own address
+    and drops lines that are not for it."""
+    return "%s %s" % (normalise_addr(addr), line.rstrip("\n"))
+
+
+def encode(obj: dict) -> bytes:
+    """One NDJSON line (compact JSON + ``\\n``)."""
+    return (json.dumps(obj, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
+
+
+# --- control protocol ---------------------------------------------------------
+
+class ProtocolError(ValueError):
+    """A backend command we cannot accept; reported in the ack as ``error``."""
+
+
+@dataclass
+class Command:
+    """A parsed, validated backend -> bled command."""
+    name: str
+    addr: str = ""
+    line: str = ""
+    seconds: float = 0.0
+    interval_ms: int = DEFAULT_INTERVAL_MS
+    flags: int = 0
+
+
+COMMANDS = ("send", "disconnect", "scan", "adv", "pairable", "status")
+
+
+def parse_command(raw) -> Command:
+    """Parse one control-socket line (str/bytes) into a :class:`Command`.
+
+    Values are clamped to what the radio can do (scan ≤ 10 s, pairable ≤ 600 s,
+    interval 20-10 240 ms) rather than rejected: the backend's intent is clear
+    and a clamp is safer than an error it may not handle.
+    """
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", errors="replace")
+    try:
+        msg = json.loads(raw)
+    except ValueError as exc:
+        raise ProtocolError("bad json: %s" % exc) from None
+    if not isinstance(msg, dict):
+        raise ProtocolError("not an object")
+    name = msg.get("cmd")
+    if name not in COMMANDS:
+        raise ProtocolError("unknown cmd %r" % (name,))
+    cmd = Command(name=name)
+
+    def num(key, default):
+        v = msg.get(key, default)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ProtocolError("%s must be a number" % key)
+        return v
+
+    if name in ("send", "disconnect"):
+        try:
+            cmd.addr = normalise_addr(msg.get("addr"))
+        except ValueError as exc:
+            raise ProtocolError(str(exc)) from None
+    if name == "send":
+        line = msg.get("line")
+        if not isinstance(line, str):
+            raise ProtocolError("line must be a string")
+        line = line.rstrip("\n")
+        if "\n" in line:
+            raise ProtocolError("line contains a newline")
+        if len(line.encode("utf-8")) > LINE_MAX:
+            raise ProtocolError("line longer than %d bytes" % LINE_MAX)
+        cmd.line = line
+    elif name == "scan":
+        cmd.seconds = max(1.0, min(float(SCAN_MAX_S), float(num("seconds", 5))))
+    elif name == "pairable":
+        cmd.seconds = max(0.0, min(float(PAIRABLE_MAX_S), float(num("seconds", 120))))
+    elif name == "adv":
+        cmd.interval_ms = adv_interval_range(int(num("interval_ms", DEFAULT_INTERVAL_MS)))[0]
+        cmd.flags = int(num("flags", 0)) & 0xFFFF
+    return cmd
+
+
+# --- daemon core (no D-Bus) ----------------------------------------------------
+
+@dataclass
+class Link:
+    """One connected satellite (an LE central talking to our GATT service)."""
+    path: str
+    addr: str
+    name: str = ""
+    bonded: bool = False
+    mtu: int = DEFAULT_ATT_MTU
+    assembler: LineAssembler = field(default_factory=LineAssembler)
+
+    def as_dict(self) -> dict:
+        return {"addr": self.addr, "name": self.name, "bonded": self.bonded, "mtu": self.mtu}
+
+
+class Radio:
+    """What :class:`BledCore` needs from the radio. ``BluezRadio`` implements it;
+    tests pass a fake."""
+
+    address = ""
+    powered = False
+    advertising = False
+
+    def apply_advertisement(self, min_ms: int, max_ms: int, flags: bytes) -> None:
+        """(Re)register the advertisement; report the outcome via core.on_radio_change()."""
+
+    def set_pairable(self, on: bool) -> None:
+        """Adapter1.Pairable."""
+
+    def start_scan(self, seconds: float, done: Callable[[List[dict]], None]) -> bool:
+        """Short UUID-filtered scan; ``done(devices)`` at the end. False if busy/down."""
+        return False
+
+    def notify(self, chunks: List[bytes]) -> bool:
+        """Emit TX notifications (in order)."""
+        return False
+
+    def disconnect(self, path: str) -> None:
+        """Device1.Disconnect()."""
+
+    def device_info(self, path: str) -> dict:
+        """Device1 properties of ``path`` ({} if unknown)."""
+        return {}
+
+
+class Scheduler:
+    """Timer abstraction: GLib in production, a manual fake in tests."""
+
+    def call_later(self, seconds: float, fn: Callable[[], None]):
+        raise NotImplementedError
+
+    def cancel(self, handle) -> None:
+        raise NotImplementedError
+
+
+class BledCore:
+    """Daemon state machine: advertisement, pairing window, links, scans.
+
+    Everything here is D-Bus free and driven by three inputs: backend
+    commands (:meth:`handle_command`), radio callbacks (``on_*``) and timers.
+    Output goes through ``emit(event_dict)`` (to the control client, if any)
+    and the :class:`Radio` interface.
+    """
+
+    def __init__(self, radio: Radio, scheduler: Scheduler, adapter: str = "hci0",
+                 emit: Optional[Callable[[dict], None]] = None,
+                 clock: Callable[[], float] = time.monotonic):
+        self.radio = radio
+        self.scheduler = scheduler
+        self.adapter = adapter
+        self.emit: Callable[[dict], None] = emit or (lambda ev: None)
+        self.clock = clock
+        self.interval_ms = DEFAULT_INTERVAL_MS
+        self.flags = 0                    # backend flags (bit1 is ours to drive)
+        self.pairable_until = 0.0         # clock() deadline, 0 = closed
+        self._pair_timer = None
+        self.links: Dict[str, Link] = {}  # by device path
+        self.pending: Dict[str, dict] = {}  # connected, not (yet) a satellite: path -> info
+        self.scanning = False
+        self._last_status: Optional[dict] = None
+        self._applied_adv: Optional[Tuple[int, int, bytes]] = None
+
+    # -- derived state ------------------------------------------------------
+    @property
+    def pairing(self) -> bool:
+        return self.pairable_until > 0
+
+    def effective_flags(self) -> int:
+        f = self.flags & ~FLAG_PAIRING
+        return f | FLAG_PAIRING if self.pairing else f
+
+    def effective_interval(self) -> int:
+        return min(self.interval_ms, PAIRING_INTERVAL_MS) if self.pairing else self.interval_ms
+
+    def adv_info(self) -> dict:
+        lo, hi = adv_interval_range(self.effective_interval())
+        return {"interval_ms": lo, "max_interval_ms": hi, "flags": self.effective_flags(),
+                "requested_interval_ms": self.interval_ms, "name": LOCAL_NAME,
+                "uuid": SERVICE_UUID, "active": bool(self.radio.advertising)}
+
+    def hello(self) -> dict:
+        return {"ev": "hello", "adapter": self.adapter, "address": self.radio.address,
+                "adv": self.adv_info()}
+
+    def status(self) -> dict:
+        return {"ev": "status", "powered": bool(self.radio.powered),
+                "advertising": bool(self.radio.advertising),
+                "links": [l.as_dict() for l in sorted(self.links.values(), key=lambda l: l.addr)],
+                "pairable": self.pairing,
+                "pairable_left": max(0, int(round(self.pairable_until - self.clock()))) if self.pairing else 0,
+                "scanning": self.scanning, "adv": self.adv_info()}
+
+    # -- status -------------------------------------------------------------
+    def emit_status(self, force: bool = False) -> None:
+        """Emit ``status`` if anything but the countdown changed (or forced)."""
+        st = self.status()
+        key = dict(st, pairable_left=None)
+        if force or key != self._last_status:
+            self._last_status = key
+            self.emit(st)
+
+    # -- advertisement ------------------------------------------------------
+    def refresh_advertisement(self, force: bool = False) -> None:
+        lo, hi = adv_interval_range(self.effective_interval())
+        want = (lo, hi, flag_bytes(self.effective_flags()))
+        if not force and want == self._applied_adv and self.radio.advertising:
+            return
+        self._applied_adv = want
+        logger.info("advertising %s %s ms-%s ms flags=0x%04x", LOCAL_NAME, lo, hi, self.effective_flags())
+        self.radio.apply_advertisement(*want)
+
+    # -- commands -----------------------------------------------------------
+    def handle_line(self, raw) -> dict:
+        """Parse + execute one control line; returns the ack event."""
+        try:
+            cmd = parse_command(raw)
+        except ProtocolError as exc:
+            name = None
+            try:
+                name = json.loads(raw).get("cmd")
+            except Exception:
+                pass
+            return {"ack": name if isinstance(name, str) else "?", "ok": False, "error": str(exc)}
+        return self.handle_command(cmd)
+
+    def handle_command(self, cmd: Command) -> dict:
+        ack = {"ack": cmd.name, "ok": True}
+        if cmd.name == "send":
+            link = self._link_by_addr(cmd.addr)
+            if link is None:
+                return dict(ack, ok=False, error="not linked")
+            mtu = min(l.mtu for l in self.links.values())
+            # BlueZ notifies every link that enabled the TX CCC: the address
+            # prefix tells satellites which lines are theirs.
+            if not self.radio.notify(chunk_line(frame_tx(link.addr, cmd.line), mtu)):
+                return dict(ack, ok=False, error="notify failed")
+        elif cmd.name == "disconnect":
+            link = self._link_by_addr(cmd.addr)
+            path = link.path if link else next(
+                (p for p, info in self.pending.items() if info.get("addr") == cmd.addr), None)
+            if path is None:
+                return dict(ack, ok=False, error="not connected")
+            logger.info("disconnect %s (backend)", cmd.addr)
+            self.radio.disconnect(path)
+        elif cmd.name == "scan":
+            if self.scanning:
+                return dict(ack, ok=False, error="scan in progress")
+            if not self.radio.start_scan(cmd.seconds, self._scan_done):
+                return dict(ack, ok=False, error="radio down")
+            self.scanning = True
+            logger.info("scan %.0f s", cmd.seconds)
+            self.emit_status()
+        elif cmd.name == "adv":
+            self.interval_ms = cmd.interval_ms
+            self.flags = cmd.flags
+            self.refresh_advertisement()
+            self.emit_status()
+        elif cmd.name == "pairable":
+            self.set_pairable(cmd.seconds)
+        elif cmd.name == "status":
+            self.emit_status(force=True)
+        return ack
+
+    def _scan_done(self, devices: List[dict]) -> None:
+        self.scanning = False
+        logger.info("scan done: %d device(s)", len(devices))
+        self.emit({"ev": "scan", "devices": devices})
+        self.emit_status()
+
+    # -- pairing window -----------------------------------------------------
+    def set_pairable(self, seconds: float) -> None:
+        if self._pair_timer is not None:
+            self.scheduler.cancel(self._pair_timer)
+            self._pair_timer = None
+        if seconds > 0:
+            self.pairable_until = self.clock() + seconds
+            self._pair_timer = self.scheduler.call_later(seconds, self._pairable_expired)
+            logger.info("pairing window open for %.0f s", seconds)
+            self.radio.set_pairable(True)
+        else:
+            if self.pairing:
+                logger.info("pairing window closed")
+            self.pairable_until = 0.0
+            self.radio.set_pairable(False)
+        self.refresh_advertisement()
+        self.emit_status()
+
+    def _pairable_expired(self) -> None:
+        self._pair_timer = None
+        self.set_pairable(0)
+
+    # -- radio callbacks ----------------------------------------------------
+    def on_radio_change(self) -> None:
+        """Powered/advertising flipped (or a register call finished)."""
+        self.emit_status()
+
+    def on_radio_reset(self) -> None:
+        """bluetoothd (re)appeared: re-apply our radio state from scratch."""
+        self._applied_adv = None
+        self.radio.set_pairable(self.pairing)
+        self.refresh_advertisement(force=True)
+        self.emit_status()
+
+    def on_radio_lost(self) -> None:
+        """bluetoothd went away or the adapter powered off: every link is gone."""
+        for path in list(self.links):
+            self.on_disconnected(path)
+        self.pending.clear()
+        self.scanning = False
+        self._applied_adv = None
+        self.emit_status()
+
+    def on_connected(self, path: str, info: dict) -> None:
+        """Device1.Connected became true. A device is a satellite link right
+        away only if it is known to advertise our service UUID; any other
+        central becomes one at its first RX write (see §4: a satellite writes
+        a line, or a bare ``\\n``, after subscribing)."""
+        if path in self.links:
+            return
+        if SERVICE_UUID in [str(u).lower() for u in info.get("uuids", ())]:
+            self._link_up(path, info)
+        else:
+            self.pending[path] = info
+
+    def on_disconnected(self, path: str) -> None:
+        self.pending.pop(path, None)
+        link = self.links.pop(path, None)
+        if link is None:
+            return
+        logger.info("link down %s", link.addr)
+        self.emit({"ev": "link", "state": "down", "addr": link.addr, "name": link.name,
+                   "bonded": link.bonded, "mtu": link.mtu})
+        self.emit_status()
+
+    def on_rx(self, path: str, data: bytes, mtu: Optional[int] = None) -> None:
+        """A write to RX from ``path``: reassemble and forward complete lines."""
+        link = self.links.get(path)
+        if link is None:
+            info = self.pending.pop(path, None) or self.radio.device_info(path) or {}
+            link = self._link_up(path, info, mtu)
+            if link is None:
+                return
+        if mtu and int(mtu) != link.mtu:
+            link.mtu = int(mtu)
+        try:
+            lines = link.assembler.feed(bytes(data))
+        except LineTooLong as exc:
+            logger.warning("link %s: line > %d bytes (%s), disconnecting", link.addr, LINE_MAX, exc)
+            self.radio.disconnect(path)
+            return
+        for line in lines:
+            self.emit({"ev": "data", "addr": link.addr, "line": line})
+
+    def _link_up(self, path: str, info: dict, mtu: Optional[int] = None) -> Optional[Link]:
+        try:
+            addr = normalise_addr(info.get("addr") or addr_from_path(path))
+        except ValueError:
+            logger.warning("ignoring write from unknown object %s", path)
+            return None
+        link = Link(path=path, addr=addr, name=str(info.get("name") or ""),
+                    bonded=bool(info.get("bonded")), mtu=int(mtu or DEFAULT_ATT_MTU))
+        self.links[path] = link
+        logger.info("link up %s %s bonded=%s", addr, link.name or "-", link.bonded)
+        self.emit(dict({"ev": "link", "state": "up"}, **link.as_dict()))
+        self.emit_status()
+        return link
+
+    def _link_by_addr(self, addr: str) -> Optional[Link]:
+        return next((l for l in self.links.values() if l.addr == addr), None)
+
+
+class ControlServer:
+    """The Unix control socket: one client (the backend), NDJSON both ways.
+
+    A new client replaces the old one (a restarted backend may connect before
+    the kernel tells us the old socket is dead). On connect the client gets
+    ``hello`` + ``status``. Writes are blocking with a short timeout: a client
+    that stops reading for a second is dropped rather than stalling the radio.
+    ``watch`` registers fd callbacks (GLib in production); tests pass None and
+    call :meth:`accept_client` / :meth:`on_client_readable` themselves.
+    """
+
+    def __init__(self, path: str, core: BledCore, watch: Optional[Callable] = None,
+                 unwatch: Optional[Callable] = None):
+        self.path = path
+        self.core = core
+        self.watch = watch
+        self.unwatch = unwatch
+        self.client: Optional[socket.socket] = None
+        self._client_watch = None
+        self._listen_watch = None
+        self._asm = LineAssembler(limit=CONTROL_LINE_MAX)
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.bind(path)
+        os.chmod(path, 0o660)
+        self.sock.listen(2)
+        self.sock.setblocking(False)
+        if self.watch:
+            self._listen_watch = self.watch(self.sock, lambda: self.accept_client() or True)
+        core.emit = self.send_event
+
+    def accept_client(self) -> None:
+        try:
+            conn, _ = self.sock.accept()
+        except (BlockingIOError, InterruptedError):
+            return
+        if self.client is not None:
+            logger.info("control: new client replaces the old one")
+            self._drop_client()
+        conn.settimeout(1.0)
+        self.client = conn
+        self._asm = LineAssembler(limit=CONTROL_LINE_MAX)
+        logger.info("control: client connected")
+        if self.watch:
+            self._client_watch = self.watch(conn, self.on_client_readable)
+        self.send_event(self.core.hello())
+        self.core.emit_status(force=True)
+
+    def on_client_readable(self) -> bool:
+        """Returns False when the client is gone (GLib: remove the watch)."""
+        conn = self.client
+        if conn is None:
+            return False
+        try:
+            data = conn.recv(65536)
+        except (BlockingIOError, InterruptedError, socket.timeout):
+            return True
+        except OSError:
+            data = b""
+        if not data:
+            logger.info("control: client disconnected")
+            self._drop_client(from_watch=True)
+            return False
+        try:
+            lines = self._asm.feed(data)
+        except LineTooLong:
+            logger.warning("control: command line too long, dropping client")
+            self._drop_client(from_watch=True)
+            return False
+        for line in lines:
+            ack = self.core.handle_line(line)
+            if not ack.get("ok"):
+                logger.warning("control: %s -> %s", line[:120], ack.get("error"))
+            self.send_event(ack)
+            if self.client is not conn:
+                return False
+        return True
+
+    def send_event(self, ev: dict) -> None:
+        if self.client is None:
+            return
+        try:
+            self.client.sendall(encode(ev))
+        except OSError as exc:
+            logger.warning("control: write failed (%s), dropping client", exc)
+            self._drop_client()
+
+    def _drop_client(self, from_watch: bool = False) -> None:
+        if self._client_watch is not None and self.unwatch and not from_watch:
+            self.unwatch(self._client_watch)
+        self._client_watch = None
+        if self.client is not None:
+            try:
+                self.client.close()
+            except OSError:
+                pass
+        self.client = None
+
+    def close(self) -> None:
+        self._drop_client()
+        if self._listen_watch is not None and self.unwatch:
+            self.unwatch(self._listen_watch)
+        self.sock.close()
+        try:
+            os.unlink(self.path)
+        except OSError:
+            pass
+
+
+# --- BlueZ glue (D-Bus) --------------------------------------------------------
+
+BLUEZ = "org.bluez"
+ADAPTER_IFACE = "org.bluez.Adapter1"
+DEVICE_IFACE = "org.bluez.Device1"
+ADV_MGR_IFACE = "org.bluez.LEAdvertisingManager1"
+ADV_IFACE = "org.bluez.LEAdvertisement1"
+GATT_MGR_IFACE = "org.bluez.GattManager1"
+GATT_SERVICE_IFACE = "org.bluez.GattService1"
+GATT_CHRC_IFACE = "org.bluez.GattCharacteristic1"
+AGENT_MGR_IFACE = "org.bluez.AgentManager1"
+AGENT_IFACE = "org.bluez.Agent1"
+PROPS_IFACE = "org.freedesktop.DBus.Properties"
+OM_IFACE = "org.freedesktop.DBus.ObjectManager"
+
+APP_PATH = "/org/prius/bled"
+ADV_PATH_BASE = "/org/prius/bled/adv"
+AGENT_PATH = "/org/prius/bled/agent"
+
+
+class GlibScheduler(Scheduler):
+    def call_later(self, seconds, fn):
+        def run():
+            fn()
+            return False
+        return GLib.timeout_add(int(seconds * 1000), run)
+
+    def cancel(self, handle):
+        GLib.source_remove(handle)
+
+
+def device_props_to_info(props) -> dict:
+    return {"addr": str(props.get("Address", "")),
+            "name": str(props.get("Alias") or props.get("Name") or ""),
+            "bonded": bool(props.get("Bonded", props.get("Paired", False))),
+            "uuids": [str(u).lower() for u in props.get("UUIDs", [])],
+            "rssi": int(props["RSSI"]) if "RSSI" in props else None}
+
+
+if dbus is not None:
+
+    class InvalidArgs(dbus.exceptions.DBusException):
+        _dbus_error_name = "org.freedesktop.DBus.Error.InvalidArgs"
+
+    class Rejected(dbus.exceptions.DBusException):
+        _dbus_error_name = "org.bluez.Error.Rejected"
+
+    class NotPermitted(dbus.exceptions.DBusException):
+        _dbus_error_name = "org.bluez.Error.NotPermitted"
+
+    class Advertisement(dbus.service.Object):
+        """org.bluez.LEAdvertisement1: connectable, PRIUS, service UUID, mfr flags.
+
+        Kept ≤ 31 bytes of AD (flags 3 + UUID128 18 + mfr 6 = 27) so legacy
+        PDUs are used and every scanner sees it; BlueZ puts LocalName in the
+        scan response when it does not fit."""
+
+        def __init__(self, bus, path, min_ms, max_ms, flags: bytes, on_release):
+            self.path = path
+            self.props = {
+                "Type": "peripheral",
+                "ServiceUUIDs": dbus.Array([SERVICE_UUID], signature="s"),
+                "ManufacturerData": dbus.Dictionary(
+                    {dbus.UInt16(COMPANY_ID): dbus.Array(list(flags), signature="y")},
+                    signature="qv"),
+                "LocalName": dbus.String(LOCAL_NAME),
+                "Discoverable": dbus.Boolean(True),
+                "MinInterval": dbus.UInt32(min_ms),
+                "MaxInterval": dbus.UInt32(max_ms),
+            }
+            self._on_release = on_release
+            super().__init__(bus, path)
+
+        @dbus.service.method(PROPS_IFACE, in_signature="s", out_signature="a{sv}")
+        def GetAll(self, interface):
+            if interface != ADV_IFACE:
+                raise InvalidArgs("no interface %s" % interface)
+            return self.props
+
+        @dbus.service.method(ADV_IFACE, in_signature="", out_signature="")
+        def Release(self):
+            logger.info("advertisement released by bluez")
+            self._on_release(self)
+
+    class Characteristic(dbus.service.Object):
+        def __init__(self, bus, path, uuid, flags, service_path):
+            self.path = path
+            self.uuid = uuid
+            self.flags = flags
+            self.service_path = service_path
+            self.value = b""
+            super().__init__(bus, path)
+
+        def properties(self):
+            return {GATT_CHRC_IFACE: {
+                "Service": dbus.ObjectPath(self.service_path),
+                "UUID": self.uuid,
+                "Flags": dbus.Array(self.flags, signature="s"),
+            }}
+
+        @dbus.service.method(PROPS_IFACE, in_signature="s", out_signature="a{sv}")
+        def GetAll(self, interface):
+            if interface != GATT_CHRC_IFACE:
+                raise InvalidArgs("no interface %s" % interface)
+            return self.properties()[GATT_CHRC_IFACE]
+
+        @dbus.service.signal(PROPS_IFACE, signature="sa{sv}as")
+        def PropertiesChanged(self, interface, changed, invalidated):
+            pass
+
+    class TxCharacteristic(Characteristic):
+        """Car -> satellite. Notifications are PropertiesChanged(Value), which
+        BlueZ fans out to every device that enabled the CCC (and only to
+        those). StartNotify/StopNotify carry no device, so per-link
+        subscription cannot be tracked here; lines are addressed instead
+        (frame_tx)."""
+
+        def __init__(self, bus, path, service_path):
+            super().__init__(bus, path, TX_UUID, ["encrypt-read", "encrypt-notify"], service_path)
+            self.notifying = 0
+
+        @dbus.service.method(GATT_CHRC_IFACE, in_signature="a{sv}", out_signature="ay")
+        def ReadValue(self, options):
+            return dbus.Array(self.value, signature="y")
+
+        @dbus.service.method(GATT_CHRC_IFACE, in_signature="", out_signature="")
+        def StartNotify(self):
+            self.notifying += 1
+            logger.debug("TX notify on (%d)", self.notifying)
+
+        @dbus.service.method(GATT_CHRC_IFACE, in_signature="", out_signature="")
+        def StopNotify(self):
+            self.notifying = max(0, self.notifying - 1)
+            logger.debug("TX notify off (%d)", self.notifying)
+
+        def push(self, chunk: bytes):
+            self.value = bytes(chunk)
+            self.PropertiesChanged(GATT_CHRC_IFACE,
+                                   {"Value": dbus.Array(self.value, signature="y")}, [])
+
+    class RxCharacteristic(Characteristic):
+        """Satellite -> car. ``encrypt-write`` sets the attribute's write
+        permission, which BlueZ checks for write-without-response too (an
+        unencrypted write command is dropped)."""
+
+        def __init__(self, bus, path, service_path, on_write):
+            super().__init__(bus, path, RX_UUID, ["encrypt-write", "write-without-response"],
+                             service_path)
+            self.on_write = on_write
+
+        @dbus.service.method(GATT_CHRC_IFACE, in_signature="aya{sv}", out_signature="")
+        def WriteValue(self, value, options):
+            dev = options.get("device")
+            if dev is None:
+                raise NotPermitted("no device")
+            mtu = options.get("mtu")
+            self.on_write(str(dev), bytes(bytearray(value)), int(mtu) if mtu is not None else None)
+
+    class Service(dbus.service.Object):
+        def __init__(self, bus, path):
+            self.path = path
+            super().__init__(bus, path)
+
+        def properties(self):
+            return {GATT_SERVICE_IFACE: {"UUID": SERVICE_UUID, "Primary": dbus.Boolean(True)}}
+
+        @dbus.service.method(PROPS_IFACE, in_signature="s", out_signature="a{sv}")
+        def GetAll(self, interface):
+            return self.properties()[GATT_SERVICE_IFACE]
+
+    class Application(dbus.service.Object):
+        """GATT application root (ObjectManager) holding our one service."""
+
+        def __init__(self, bus, on_write):
+            super().__init__(bus, APP_PATH)
+            self.service = Service(bus, APP_PATH + "/service0")
+            self.tx = TxCharacteristic(bus, APP_PATH + "/service0/tx", self.service.path)
+            self.rx = RxCharacteristic(bus, APP_PATH + "/service0/rx", self.service.path, on_write)
+
+        @dbus.service.method(OM_IFACE, out_signature="a{oa{sa{sv}}}")
+        def GetManagedObjects(self):
+            return {dbus.ObjectPath(o.path): o.properties()
+                    for o in (self.service, self.tx, self.rx)}
+
+    class Agent(dbus.service.Object):
+        """NoInputNoOutput agent: Just Works, accepted only while the pairing
+        window is open; already-bonded devices may always use our service."""
+
+        def __init__(self, bus, is_open: Callable[[], bool], is_bonded: Callable[[str], bool]):
+            super().__init__(bus, AGENT_PATH)
+            self.is_open = is_open
+            self.is_bonded = is_bonded
+
+        def _gate(self, what, device):
+            if self.is_open():
+                logger.info("agent: %s %s accepted (pairing window open)", what, device)
+                return
+            logger.info("agent: %s %s rejected (pairing window closed)", what, device)
+            raise Rejected("pairing window closed")
+
+        @dbus.service.method(AGENT_IFACE, in_signature="", out_signature="")
+        def Release(self):
+            logger.info("agent released")
+
+        @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="")
+        def RequestAuthorization(self, device):
+            self._gate("pairing", device)
+
+        @dbus.service.method(AGENT_IFACE, in_signature="ou", out_signature="")
+        def RequestConfirmation(self, device, passkey):
+            self._gate("confirmation", device)
+
+        @dbus.service.method(AGENT_IFACE, in_signature="os", out_signature="")
+        def AuthorizeService(self, device, uuid):
+            if self.is_bonded(str(device)):
+                return
+            self._gate("service %s" % uuid, device)
+
+        @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="s")
+        def RequestPinCode(self, device):
+            raise Rejected("no input")
+
+        @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="u")
+        def RequestPasskey(self, device):
+            raise Rejected("no input")
+
+        @dbus.service.method(AGENT_IFACE, in_signature="ouq", out_signature="")
+        def DisplayPasskey(self, device, passkey, entered):
+            pass
+
+        @dbus.service.method(AGENT_IFACE, in_signature="os", out_signature="")
+        def DisplayPinCode(self, device, pincode):
+            raise Rejected("no display")
+
+        @dbus.service.method(AGENT_IFACE, in_signature="", out_signature="")
+        def Cancel(self):
+            logger.info("agent: request cancelled")
+
+
+class BluezRadio(Radio):
+    """BlueZ implementation of :class:`Radio` (adapter, advertisement, GATT,
+    agent, scans), plus bluetoothd lifecycle tracking via NameOwnerChanged.
+
+    Registration calls that make bluetoothd call back into us
+    (RegisterApplication, RegisterAdvertisement) are async: a sync call would
+    block our main loop while bluez waits for our GetManagedObjects/GetAll.
+    """
+
+    def __init__(self, bus, adapter: str):
+        self.bus = bus
+        self.adapter_name = adapter
+        self.adapter_path = "/org/bluez/" + adapter
+        self.core: Optional[BledCore] = None
+        self.present = False
+        self.address = ""
+        self.powered = False
+        self.advertising = False
+        self.app = Application(bus, self._on_write)
+        self.agent: Optional[Agent] = None
+        self.adv: Optional[Advertisement] = None
+        self._adv_seq = 0
+        self._adv_pending: Optional[Tuple[int, int, bytes]] = None
+        self._adv_busy = False
+        self._btmgmt_adv = False
+        self._orig_pairable: Optional[bool] = None
+        self._scan_timer = None
+        self._scan_seen: Dict[str, dict] = {}
+        self._scan_done: Optional[Callable] = None
+        self._app_registered = False
+        self._agent_registered = False
+
+    # -- lifecycle ------------------------------------------------------------
+    def start(self, core: BledCore) -> None:
+        self.core = core
+        self.agent = Agent(self.bus, lambda: core.pairing, self._is_bonded)
+        self.bus.add_signal_receiver(self._on_props_changed, dbus_interface=PROPS_IFACE,
+                                     signal_name="PropertiesChanged", bus_name=BLUEZ,
+                                     path_keyword="path")
+        self.bus.add_signal_receiver(self._on_ifaces_added, dbus_interface=OM_IFACE,
+                                     signal_name="InterfacesAdded", bus_name=BLUEZ)
+        self.bus.watch_name_owner(BLUEZ, self._on_bluez_owner)
+
+    def _on_bluez_owner(self, owner: str) -> None:
+        if owner:
+            logger.info("bluetoothd is up (%s)", owner)
+            GLib.idle_add(self._attach_or_retry)
+        elif self.present:
+            logger.warning("bluetoothd went away; waiting for it to return")
+            self._detach()
+
+    def _attach_or_retry(self) -> bool:
+        """Attach; if the adapter is not there yet (bluetoothd just started,
+        firmware still loading), try again every 5 s while bluez is up."""
+        if not self._attach():
+            GLib.timeout_add_seconds(5, self._attach_or_retry)
+        return False
+
+    def _obj(self, path):
+        return self.bus.get_object(BLUEZ, path)
+
+    def _adapter_props(self) -> dict:
+        return dict(self._obj(self.adapter_path).GetAll(ADAPTER_IFACE, dbus_interface=PROPS_IFACE))
+
+    def _attach(self) -> bool:
+        if self.present:
+            return True
+        if self.bus.name_has_owner(BLUEZ) is False:
+            return True  # bluez gone again; the owner watch will re-attach
+        try:
+            props = self._adapter_props()
+        except dbus.exceptions.DBusException as exc:
+            logger.error("adapter %s not available: %s", self.adapter_name, exc.get_dbus_message())
+            return False
+        self.present = True
+        self.address = str(props.get("Address", ""))
+        if self._orig_pairable is None:
+            self._orig_pairable = bool(props.get("Pairable", False))
+        if not props.get("Powered"):
+            logger.info("powering %s on", self.adapter_name)
+            try:
+                self._set_adapter("Powered", True)
+            except dbus.exceptions.DBusException as exc:
+                logger.error("cannot power %s: %s", self.adapter_name, exc.get_dbus_message())
+        self.powered = bool(self._adapter_props().get("Powered"))
+        logger.info("adapter %s %s powered=%s", self.adapter_name, self.address, self.powered)
+        self._register_agent()
+        self._register_app()
+        self.core.on_radio_reset()
+        self._resync_connected()
+        return True
+
+    def _detach(self) -> None:
+        self.present = False
+        self.powered = False
+        self.advertising = False
+        self.adv = self._drop_adv_object()
+        self._adv_busy = False
+        self._app_registered = False
+        self._agent_registered = False
+        if self._scan_timer is not None:
+            GLib.source_remove(self._scan_timer)
+            self._scan_timer = None
+            self._finish_scan(stop=False)
+        self.core.on_radio_lost()
+
+    def shutdown(self) -> None:
+        """Leave the adapter as we found it: no advertisement, no discovery,
+        Pairable restored, agent and GATT app unregistered."""
+        if not self.present:
+            return
+        if self._scan_timer is not None:
+            GLib.source_remove(self._scan_timer)
+            self._scan_timer = None
+            self._finish_scan(stop=True, report=False)
+        self._unregister_adv()
+        self._btmgmt_remove()
+        for call, what in ((self._unregister_app, "app"), (self._unregister_agent, "agent")):
+            try:
+                call()
+            except dbus.exceptions.DBusException as exc:
+                logger.debug("unregister %s: %s", what, exc.get_dbus_message())
+        if self._orig_pairable is not None:
+            try:
+                self._set_adapter("Pairable", self._orig_pairable)
+            except dbus.exceptions.DBusException:
+                pass
+        logger.info("adapter left clean (pairable=%s)", self._orig_pairable)
+
+    # -- adapter properties ---------------------------------------------------
+    def _set_adapter(self, prop, value) -> None:
+        self._obj(self.adapter_path).Set(ADAPTER_IFACE, prop, dbus.Boolean(value),
+                                         dbus_interface=PROPS_IFACE)
+
+    def set_pairable(self, on: bool) -> None:
+        if not self.present:
+            return
+        try:
+            self._set_adapter("Pairable", on)
+        except dbus.exceptions.DBusException as exc:
+            logger.error("Pairable=%s failed: %s", on, exc.get_dbus_message())
+
+    # -- agent / GATT app ------------------------------------------------------
+    def _register_agent(self) -> None:
+        mgr = dbus.Interface(self._obj("/org/bluez"), AGENT_MGR_IFACE)
+        try:
+            mgr.RegisterAgent(AGENT_PATH, "NoInputNoOutput")
+            mgr.RequestDefaultAgent(AGENT_PATH)
+            self._agent_registered = True
+            logger.info("agent registered (NoInputNoOutput, default)")
+        except dbus.exceptions.DBusException as exc:
+            logger.error("agent registration failed: %s", exc.get_dbus_message())
+
+    def _unregister_agent(self) -> None:
+        if self._agent_registered:
+            dbus.Interface(self._obj("/org/bluez"), AGENT_MGR_IFACE).UnregisterAgent(AGENT_PATH)
+            self._agent_registered = False
+
+    def _register_app(self) -> None:
+        mgr = dbus.Interface(self._obj(self.adapter_path), GATT_MGR_IFACE)
+
+        def ok():
+            self._app_registered = True
+            logger.info("GATT application registered (service %s)", SERVICE_UUID)
+
+        def err(exc):
+            logger.error("GATT registration failed: %s", exc.get_dbus_message())
+
+        mgr.RegisterApplication(APP_PATH, {}, reply_handler=ok, error_handler=err)
+
+    def _unregister_app(self) -> None:
+        if self._app_registered:
+            dbus.Interface(self._obj(self.adapter_path), GATT_MGR_IFACE).UnregisterApplication(APP_PATH)
+            self._app_registered = False
+
+    # -- advertisement -----------------------------------------------------------
+    def _drop_adv_object(self) -> None:
+        if self.adv is not None:
+            try:
+                self.adv.remove_from_connection()
+            except Exception:
+                pass
+        return None
+
+    def _unregister_adv(self, replacing: bool = False) -> None:
+        """Remove our advertisement. ``replacing``: a new one follows at once,
+        so keep reporting advertising=True (no status flap on interval/flag
+        changes); a failed re-register clears it."""
+        if self.adv is not None and self.present:
+            try:
+                dbus.Interface(self._obj(self.adapter_path), ADV_MGR_IFACE) \
+                    .UnregisterAdvertisement(self.adv.path)
+            except dbus.exceptions.DBusException as exc:
+                logger.debug("unregister advertisement: %s", exc.get_dbus_message())
+        self.adv = self._drop_adv_object()
+        if not replacing:
+            self.advertising = False
+
+    def apply_advertisement(self, min_ms: int, max_ms: int, flags: bytes) -> None:
+        """Replace the advertisement (BlueZ does not re-read a registered one).
+        Serialised: a request arriving during a pending register is applied
+        when that one finishes."""
+        if not self.present:
+            return
+        self._adv_pending = (min_ms, max_ms, flags)
+        if not self._adv_busy:
+            self._apply_next_adv()
+
+    def _apply_next_adv(self) -> None:
+        want, self._adv_pending = self._adv_pending, None
+        if want is None or not self.present:
+            return
+        self._unregister_adv(replacing=True)
+        self._btmgmt_remove()
+        self._adv_seq += 1
+        self.adv = Advertisement(self.bus, "%s%d" % (ADV_PATH_BASE, self._adv_seq), *want,
+                                 on_release=self._on_adv_release)
+        adv = self.adv
+        self._adv_busy = True
+        mgr = dbus.Interface(self._obj(self.adapter_path), ADV_MGR_IFACE)
+
+        def ok():
+            self._adv_busy = False
+            self.advertising = True
+            logger.info("advertisement registered (%d-%d ms)", want[0], want[1])
+            self.core.on_radio_change()
+            self._apply_next_adv()
+
+        def err(exc):
+            self._adv_busy = False
+            logger.error("RegisterAdvertisement failed: %s", exc.get_dbus_message())
+            if self.adv is adv:
+                self.adv = self._drop_adv_object()
+            self.advertising = self._btmgmt_add(*want)
+            self.core.on_radio_change()
+            self._apply_next_adv()
+
+        mgr.RegisterAdvertisement(adv.path, {}, reply_handler=ok, error_handler=err)
+
+    def _on_adv_release(self, adv) -> None:
+        if adv is self.adv:
+            self.adv = self._drop_adv_object()
+            self.advertising = False
+            self.core.on_radio_change()
+
+    # btmgmt fallback: only if bluez rejects the D-Bus advertisement (e.g. an
+    # adapter/kernel that refuses MinInterval/MaxInterval). Instance 1; removed
+    # on every re-apply and at shutdown.
+    def _btmgmt(self, *args) -> bool:
+        try:
+            # stdin must be a pipe: btmgmt hangs with stdin=/dev/null.
+            p = subprocess.run(["btmgmt", "-i", self.adapter_name] + list(args),
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, timeout=5, text=True)
+            return p.returncode == 0
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.error("btmgmt %s: %s", args[0], exc)
+            return False
+
+    def _btmgmt_add(self, min_ms: int, max_ms: int, flags: bytes) -> bool:
+        mfr = bytes([5, 0xFF]) + COMPANY_ID.to_bytes(2, "little") + flags
+        name = LOCAL_NAME.encode()
+        scan_rsp = bytes([len(name) + 1, 0x09]) + name
+        ok = (self._btmgmt("add-ext-adv-params", "-r", str(min_ms), "-x", str(max_ms),
+                           "-c", "-g", "1")
+              and self._btmgmt("add-ext-adv-data", "-u", SERVICE_UUID, "-d", mfr.hex(),
+                               "-s", scan_rsp.hex(), "1"))
+        self._btmgmt_adv = ok
+        logger.warning("btmgmt fallback advertisement %s", "active" if ok else "FAILED")
+        return ok
+
+    def _btmgmt_remove(self) -> None:
+        if self._btmgmt_adv:
+            self._btmgmt("rm-adv", "1")
+            self._btmgmt_adv = False
+
+    # -- devices / links -------------------------------------------------------
+    def device_info(self, path: str) -> dict:
+        try:
+            props = self._obj(path).GetAll(DEVICE_IFACE, dbus_interface=PROPS_IFACE)
+        except dbus.exceptions.DBusException:
+            return {}
+        return device_props_to_info(props)
+
+    def _is_bonded(self, path: str) -> bool:
+        return bool(self.device_info(path).get("bonded"))
+
+    def _resync_connected(self) -> None:
+        """After (re)attach: pick up devices that are already connected."""
+        try:
+            objs = self._obj("/").GetManagedObjects(dbus_interface=OM_IFACE)
+        except dbus.exceptions.DBusException:
+            return
+        for path, ifaces in objs.items():
+            dev = ifaces.get(DEVICE_IFACE)
+            if dev and str(path).startswith(self.adapter_path + "/") and dev.get("Connected"):
+                self.core.on_connected(str(path), device_props_to_info(dev))
+
+    def _on_write(self, device_path: str, data: bytes, mtu: Optional[int]) -> None:
+        self.core.on_rx(device_path, data, mtu)
+
+    def notify(self, chunks: List[bytes]) -> bool:
+        if not self._app_registered:
+            return False
+        for c in chunks:
+            self.app.tx.push(c)
+        return True
+
+    def disconnect(self, path: str) -> None:
+        def done(*_):
+            pass
+        try:
+            self._obj(path).Disconnect(dbus_interface=DEVICE_IFACE,
+                                       reply_handler=done, error_handler=done)
+        except dbus.exceptions.DBusException as exc:
+            logger.warning("disconnect %s: %s", path, exc.get_dbus_message())
+
+    def _on_props_changed(self, interface, changed, invalidated, path=None) -> None:
+        if interface == ADAPTER_IFACE and path == self.adapter_path:
+            if "Powered" in changed:
+                self.powered = bool(changed["Powered"])
+                logger.info("adapter powered=%s", self.powered)
+                if self.powered:
+                    self.core.on_radio_reset()
+                else:
+                    self.advertising = False
+                    self.core.on_radio_lost()
+            elif "Discovering" in changed or "Pairable" in changed:
+                logger.debug("adapter %s", dict(changed))
+        elif interface == DEVICE_IFACE and path and path.startswith(self.adapter_path + "/"):
+            if "Connected" in changed:
+                if changed["Connected"]:
+                    self.core.on_connected(path, self.device_info(path))
+                else:
+                    self.core.on_disconnected(path)
+            if self._scan_timer is not None and "RSSI" in changed:
+                self._scan_seen[path] = {"rssi": int(changed["RSSI"])}
+
+    def _on_ifaces_added(self, path, ifaces) -> None:
+        dev = ifaces.get(DEVICE_IFACE)
+        if dev is not None and self._scan_timer is not None and "RSSI" in dev:
+            self._scan_seen[str(path)] = {"rssi": int(dev["RSSI"])}
+
+    # -- scan ----------------------------------------------------------------
+    def start_scan(self, seconds: float, done) -> bool:
+        if not (self.present and self.powered) or self._scan_timer is not None:
+            return False
+        adapter = dbus.Interface(self._obj(self.adapter_path), ADAPTER_IFACE)
+        try:
+            adapter.SetDiscoveryFilter({"UUIDs": dbus.Array([SERVICE_UUID], signature="s"),
+                                        "Transport": "le", "DuplicateData": dbus.Boolean(True)})
+            adapter.StartDiscovery()
+        except dbus.exceptions.DBusException as exc:
+            logger.error("StartDiscovery failed: %s", exc.get_dbus_message())
+            return False
+        self._scan_seen = {}
+        self._scan_done = done
+        self._scan_timer = GLib.timeout_add(int(seconds * 1000), self._scan_timeout)
+        return True
+
+    def _scan_timeout(self) -> bool:
+        self._scan_timer = None
+        self._finish_scan(stop=True)
+        return False
+
+    def _finish_scan(self, stop: bool, report: bool = True) -> None:
+        devices = []
+        if stop:
+            adapter = dbus.Interface(self._obj(self.adapter_path), ADAPTER_IFACE)
+            for call in (adapter.StopDiscovery, lambda: adapter.SetDiscoveryFilter({})):
+                try:
+                    call()
+                except dbus.exceptions.DBusException as exc:
+                    logger.debug("scan stop: %s", exc.get_dbus_message())
+            for path, seen in self._scan_seen.items():
+                info = self.device_info(path)
+                if SERVICE_UUID not in info.get("uuids", ()):
+                    continue
+                devices.append({"addr": info["addr"], "name": info["name"],
+                                "rssi": seen.get("rssi"), "uuids": info["uuids"]})
+        done, self._scan_done = self._scan_done, None
+        if report and done is not None:
+            done(devices)
+
+
+# --- main ---------------------------------------------------------------------
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="Prius BLE satellite daemon")
+    ap.add_argument("--adapter", default="hci0")
+    ap.add_argument("--socket", default=DEFAULT_SOCKET)
+    ap.add_argument("--verbose", action="store_true")
+    args = ap.parse_args(argv)
+    logging.basicConfig(stream=sys.stdout, level=logging.DEBUG if args.verbose else logging.INFO,
+                        format="%(levelname)s %(message)s")
+    if dbus is None:
+        logger.error("dbus-python / python3-gobject missing")
+        return 1
+
+    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    bus = dbus.SystemBus()
+    loop = GLib.MainLoop()
+    sched = GlibScheduler()
+    radio = BluezRadio(bus, args.adapter)
+    core = BledCore(radio, sched, adapter=args.adapter)
+
+    def watch(sock, cb):
+        return GLib.io_add_watch(sock.fileno(), GLib.PRIORITY_DEFAULT,
+                                 GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR,
+                                 lambda *_: bool(cb()))
+
+    server = ControlServer(args.socket, core, watch=watch, unwatch=GLib.source_remove)
+    radio.start(core)
+
+    def periodic():
+        core.emit_status(force=True)
+        return True
+    GLib.timeout_add_seconds(STATUS_PERIOD_S, periodic)
+
+    def quit_():
+        logger.info("stopping")
+        loop.quit()
+        return False
+    try:  # PyGObject >= 3.52 moved unix signals to GLibUnix
+        from gi.repository import GLibUnix
+        add_signal = GLibUnix.signal_add
+    except (ImportError, AttributeError):
+        add_signal = GLib.unix_signal_add
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        add_signal(GLib.PRIORITY_HIGH, sig, quit_)
+
+    logger.info("prius-bled on %s, socket %s", args.adapter, args.socket)
+    try:
+        loop.run()
+    finally:
+        try:
+            radio.shutdown()
+        finally:
+            server.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

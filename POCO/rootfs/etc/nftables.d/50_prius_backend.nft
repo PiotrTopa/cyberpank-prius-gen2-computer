@@ -4,8 +4,13 @@
 # (Traffic from the MFD Pi arrives on usb*, which the base ruleset accepts
 # anyway; this rule covers Wi-Fi/WireGuard clients. The roadsense API has its
 # own file, 50_roadsense.nft, installed by the roadsense repo.)
+# Wi-Fi satellites (docs/SATELLITES.md §4) on the prius AP: UDP 8787 beacons /
+# car probes and TCP 8788 NDJSON sessions, accepted on wlan* only (they carry
+# their own Ed25519 authentication on top).
 table inet filter {
 	chain input {
 		tcp dport { 8080, 8081, 8082 } accept comment "accept prius backend API + ZMQ"
+		iifname "wlan*" udp dport 8787 accept comment "accept prius Wi-Fi satellite beacons"
+		iifname "wlan*" tcp dport 8788 accept comment "accept prius Wi-Fi satellite sessions"
 	}
 }

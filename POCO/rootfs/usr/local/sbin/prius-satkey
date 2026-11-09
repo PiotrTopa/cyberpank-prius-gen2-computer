@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""prius-satkey - manage the car's satellite keychain (docs/SATELLITES.md §2).
+
+Runs on the phone (as root: /etc/prius/satellites is root 0600) and on the
+P52 (BACKEND_SATELLITE_KEYCHAIN_DIR or --dir, else ./satellites). Plain
+python3 + the 'cryptography' package; it imports only the keychain module of
+the backend (installed app /home/user/cyberpunk, else this repo), never the
+backend itself, so the backend venv is not needed.
+
+  prius-satkey init                         create car.key/car.pub, print car_fp
+  prius-satkey list                         enrolled satellites + revocations
+  prius-satkey new NAME --transport ble|wifi [--id N] [--caps a,b] [-o FILE]
+                                            new key pair + cert, print provisioning blob
+  prius-satkey sign --pubkey B64 NAME --transport ble|wifi [--id N] [--caps a,b]
+                                            enrol a satellite that made its own key
+  prius-satkey add-rs485 ID NAME            enrol a wired RS485 satellite (auth none)
+  prius-satkey show REF                     provisioning blob without private key
+  prius-satkey revoke REF                   REF = id | fp | name
+  prius-satkey forget ID
+  prius-satkey export-pub                   car public key (PEM) to stdout
+
+The running backend notices keychain changes within ~2 s.
+"""
+
+import argparse
+import json
+import os
+import sys
+import types
+
+APP_DIRS = ("/home/user/cyberpunk",
+            os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                                         "..", "..", "..", "..", "..")))
+
+
+def _load_keychain_module():
+    """Import cyberpunk_computer.backend.satellite_keychain without running the
+    package __init__ files (they pull in the whole backend)."""
+    for root in APP_DIRS:
+        pkg = os.path.join(root, "cyberpunk_computer")
+        if os.path.isfile(os.path.join(pkg, "backend", "satellite_keychain.py")):
+            break
+    else:
+        sys.exit("prius-satkey: cannot find cyberpunk_computer (looked in %s)" % ", ".join(APP_DIRS))
+    for name, path in (("cyberpunk_computer", pkg),
+                       ("cyberpunk_computer.io", os.path.join(pkg, "io")),
+                       ("cyberpunk_computer.backend", os.path.join(pkg, "backend"))):
+        if name not in sys.modules:
+            mod = types.ModuleType(name)
+            mod.__path__ = [path]
+            sys.modules[name] = mod
+    import importlib
+    return importlib.import_module("cyberpunk_computer.backend.satellite_keychain")
+
+
+kc_mod = _load_keychain_module()
+
+
+def _caps(text):
+    return [c.strip() for c in (text or "").split(",") if c.strip()]
+
+
+def _emit_blob(blob, out):
+    data = json.dumps(blob, indent=2, sort_keys=True) + "\n"
+    if out:
+        kc_mod.atomic_write(out, data.encode("utf-8"), 0o600)
+        print("provisioning blob written to %s (0600; contains the private key)" % out,
+              file=sys.stderr)
+    else:
+        sys.stdout.write(data)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="prius-satkey", description=__doc__.split("\n")[0])
+    ap.add_argument("--dir", default=None,
+                    help="keychain directory (default $BACKEND_SATELLITE_KEYCHAIN_DIR "
+                         "or /etc/prius/satellites, fallback ./satellites)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("init")
+    sub.add_parser("list")
+    p = sub.add_parser("new")
+    p.add_argument("name")
+    p.add_argument("--transport", required=True, choices=("ble", "wifi"))
+    p.add_argument("--id", type=int, default=None)
+    p.add_argument("--caps", default="")
+    p.add_argument("-o", "--out", default=None, help="write the blob to FILE (0600)")
+    p = sub.add_parser("sign")
+    p.add_argument("name")
+    p.add_argument("--pubkey", required=True, help="base64 raw 32-byte Ed25519 public key")
+    p.add_argument("--transport", required=True, choices=("ble", "wifi"))
+    p.add_argument("--id", type=int, default=None)
+    p.add_argument("--caps", default="")
+    p.add_argument("-o", "--out", default=None)
+    p = sub.add_parser("add-rs485")
+    p.add_argument("id", type=int)
+    p.add_argument("name")
+    p.add_argument("--caps", default="")
+    p = sub.add_parser("show")
+    p.add_argument("ref")
+    p = sub.add_parser("revoke")
+    p.add_argument("ref")
+    p = sub.add_parser("forget")
+    p.add_argument("id", type=int)
+    sub.add_parser("export-pub")
+    args = ap.parse_args(argv)
+
+    try:
+        kc = kc_mod.Keychain(args.dir)
+        if args.cmd == "init":
+            fp, created = kc.init_car_key()
+            print("car_fp %s (%s, %s)" % (fp, "created" if created else "already present",
+                                          kc.directory))
+        elif args.cmd == "list":
+            print("keychain: %s" % kc.path)
+            print("car_fp:   %s" % (kc.car_fp or "(no car key: prius-satkey init)"))
+            entries = kc.entries()
+            if entries:
+                print("%-5s %-16s %-6s %-8s %-26s %s" % ("id", "name", "trans", "auth", "fp", "caps"))
+            for sid in sorted(entries):
+                e = entries[sid]
+                print("%-5d %-16s %-6s %-8s %-26s %s" % (
+                    sid, e.get("name", ""), e.get("transport", ""), e.get("auth", ""),
+                    e.get("fp") or "-", ",".join(e.get("caps") or [])))
+            if not entries:
+                print("(no satellites enrolled)")
+            for fp in kc.revoked:
+                print("revoked  %s" % fp)
+        elif args.cmd == "new":
+            with kc.transaction():
+                blob = kc.new_satellite(args.name, args.transport, sat_id=args.id,
+                                        caps=_caps(args.caps))
+            print("enrolled %s as id %d (fp %s)" % (args.name, blob["sat_id"], blob["fp"]),
+                  file=sys.stderr)
+            _emit_blob(blob, args.out)
+        elif args.cmd == "sign":
+            with kc.transaction():
+                sid, _ = kc.enrol_pubkey(args.name, args.transport, args.pubkey,
+                                         sat_id=args.id, caps=_caps(args.caps))
+            blob = kc.provisioning_blob(sid)
+            print("enrolled %s as id %d (fp %s)" % (args.name, sid, blob["fp"]), file=sys.stderr)
+            _emit_blob(blob, args.out)
+        elif args.cmd == "add-rs485":
+            with kc.transaction():
+                kc.add_rs485(args.id, args.name, _caps(args.caps))
+            print("enrolled RS485 %s as id %d (auth none)" % (args.name, args.id))
+        elif args.cmd == "show":
+            found = kc.resolve(args.ref)
+            if found is None:
+                sys.exit("prius-satkey: nothing matches %r" % args.ref)
+            _emit_blob(kc.provisioning_blob(found[0]), None)
+        elif args.cmd == "revoke":
+            with kc.transaction():
+                sid, fp = kc.revoke(args.ref)
+            print("revoked fp %s%s" % (fp, " (id %d removed)" % sid if sid is not None else ""))
+        elif args.cmd == "forget":
+            with kc.transaction():
+                e = kc.forget(args.id)
+            print("forgot id %d (%s)" % (args.id, e.get("name")))
+        elif args.cmd == "export-pub":
+            if not os.path.exists(kc.car_pub_path):
+                sys.exit("prius-satkey: no car key (run: prius-satkey init)")
+            with open(kc.car_pub_path) as fh:
+                sys.stdout.write(fh.read())
+    except kc_mod.KeychainError as exc:
+        sys.exit("prius-satkey: %s" % exc)
+    except PermissionError as exc:
+        sys.exit("prius-satkey: %s (run as root on the phone)" % exc)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
