@@ -138,3 +138,8 @@ class SatelliteTransport(ABC):
 
     def set_advertisement(self, interval_ms: int, flags: int) -> None:  # optional
         """Advertisement hint (BLE only: interval + 2-byte flags)."""
+
+    def set_central(self, enabled: bool, addresses: Sequence[str] = ()) -> None:  # optional
+        """Central-role hint (BLE only): scan for and connect to the enrolled
+        "beacon" satellites at ``addresses`` while ``enabled`` (docs/SATELLITES.md
+        §4 "BLE roles"); others: no-op."""

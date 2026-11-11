@@ -37,6 +37,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import tempfile
 import time
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -49,6 +50,7 @@ except ImportError:  # pragma: no cover
 from ..io.satellite_transport import (
     ID_RANGES,
     REQUIRE_AUTH,
+    TRANSPORT_BLE,
     TRANSPORT_RS485,
     TRANSPORTS,
 )
@@ -70,6 +72,15 @@ BLOB_VERSION = 1
 
 AUTH_NONE = "none"
 AUTH_ED25519 = "ed25519"
+
+# BLE satellite roles (docs/SATELLITES.md §4 "BLE roles"): a "scanner" scans
+# for the advertising car and connects (default); a "beacon" advertises itself
+# and the car connects to it while the power profile is full — so the car
+# needs its address.
+BLE_ROLE_SCANNER = "scanner"
+BLE_ROLE_BEACON = "beacon"
+BLE_ROLES = (BLE_ROLE_SCANNER, BLE_ROLE_BEACON)
+_MAC_RE = re.compile(r"^[0-9A-F]{2}(:[0-9A-F]{2}){5}$")
 
 
 class KeychainError(Exception):
@@ -118,6 +129,14 @@ def transport_for_id(sat_id: int) -> Optional[str]:
         if lo <= sat_id <= hi:
             return name
     return None
+
+
+def normalise_ble_address(addr: str) -> str:
+    """``aa-bb-cc-dd-ee-ff`` -> ``AA:BB:CC:DD:EE:FF`` (BlueZ spelling); ValueError if not a MAC."""
+    a = str(addr or "").strip().upper().replace("-", ":")
+    if not _MAC_RE.match(a):
+        raise ValueError(f"bad BLE address {addr!r}")
+    return a
 
 
 def id_in_range(sat_id: int, transport: str) -> bool:
@@ -570,13 +589,36 @@ class Keychain:
         self._doc["satellites"][str(sat_id)] = entry
         return copy.deepcopy(entry)
 
+    @staticmethod
+    def _ble_role_fields(transport: str, ble_role: Optional[str], address: str) -> Dict[str, Any]:
+        """Validate ``ble_role`` (+ the address a beacon needs); returns the
+        extra entry fields (``{}`` for the default: no role stored = scanner)."""
+        if ble_role is None:
+            return {}
+        if transport != TRANSPORT_BLE:
+            raise KeychainError("ble_role applies to BLE satellites only")
+        if ble_role not in BLE_ROLES:
+            raise KeychainError(f"ble_role must be one of {', '.join(BLE_ROLES)}")
+        if ble_role == BLE_ROLE_BEACON and not address:
+            raise KeychainError("a beacon satellite needs its BLE address (the car connects to it)")
+        return {"ble_role": ble_role}
+
     def enrol_pubkey(self, name: str, transport: str, pubkey_b64: str,
                      sat_id: Optional[int] = None, caps: Optional[List[str]] = None,
-                     address: str = "", expires: Optional[int] = None) -> Tuple[int, Dict[str, Any]]:
+                     address: str = "", expires: Optional[int] = None,
+                     ble_role: Optional[str] = None) -> Tuple[int, Dict[str, Any]]:
         """Enrol a satellite by its public key and issue a cert (when the car
-        private key is present). Returns ``(sat_id, entry)``."""
+        private key is present). Returns ``(sat_id, entry)``. ``ble_role``
+        (BLE only): ``"scanner"`` (default when omitted) or ``"beacon"``
+        (needs ``address``)."""
         if transport == TRANSPORT_RS485:
             raise KeychainError("RS485 satellites are enrolled without a key (add_rs485)")
+        if address and transport == TRANSPORT_BLE and ble_role == BLE_ROLE_BEACON:
+            try:   # the car dials this address: BlueZ spelling, validated
+                address = normalise_ble_address(address)
+            except ValueError as exc:
+                raise KeychainError(str(exc))
+        role_fields = self._ble_role_fields(transport, ble_role, address)
         pub = b64d(pubkey_b64)
         if len(pub) != 32:
             raise KeychainError("pubkey must be 32 raw bytes (base64)")
@@ -590,6 +632,7 @@ class Keychain:
             "address": address, "caps": list(caps or []), "enrolled": now,
             "cert": None, "auth": AUTH_ED25519,
         }
+        entry.update(role_fields)
         if self.car_priv is not None:
             entry["cert"] = sign_cert(self.car_priv, cert_body(
                 int(sat_id), name, transport, pubkey_b64, caps, now, expires))
@@ -672,14 +715,19 @@ class Keychain:
                             "beacon_port": 8787}
         if entry["transport"] == "ble":
             blob["ble"] = {"service": "580e04f7-d4c0-458b-b2e0-4ebb01a960c8",
-                           "car_addr": "02:00:E8:51:02:58"}
+                           "car_addr": "02:00:E8:51:02:58",
+                           "role": entry.get("ble_role") or BLE_ROLE_SCANNER}
+            if entry.get("address"):
+                blob["ble"]["address"] = entry["address"]
         return blob
 
     def new_satellite(self, name: str, transport: str, sat_id: Optional[int] = None,
-                      caps: Optional[List[str]] = None) -> Dict[str, Any]:
+                      caps: Optional[List[str]] = None, address: str = "",
+                      ble_role: Optional[str] = None) -> Dict[str, Any]:
         """Generate a key pair, enrol it, return the provisioning blob."""
         if self.car_priv is None:
             raise KeychainError("no car key (run: prius-satkey init)")
         priv, pub = generate_keypair()
-        sat_id, _ = self.enrol_pubkey(name, transport, b64e(pub), sat_id=sat_id, caps=caps)
+        sat_id, _ = self.enrol_pubkey(name, transport, b64e(pub), sat_id=sat_id, caps=caps,
+                                      address=address, ble_role=ble_role)
         return self.provisioning_blob(sat_id, priv_raw=priv)

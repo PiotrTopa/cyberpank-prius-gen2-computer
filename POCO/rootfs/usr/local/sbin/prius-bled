@@ -10,6 +10,15 @@ does short UUID-filtered scans on request, and relays NDJSON lines between
 connected satellites and the backend over the control socket
 /run/prius/bled.sock (one client at a time, NDJSON both ways).
 
+Central role (``central`` command, docs/SATELLITES.md §4 "BLE roles"): while
+the backend enables it (power profile ``full`` or a pairing window open) the
+same adapter also runs duty-cycled UUID-filtered discovery, reports sightings
+as ``scan`` events, and connects as a GATT client to enrolled "beacon"
+satellites that advertise our service themselves (mirrored roles: their TX
+notifies us, we write their RX, no address prefix). Beacon links surface to
+the backend exactly like scanner links (``link`` with ``role: central``,
+``data``, ``send``, ``disconnect``).
+
 State that matters to the car (advertising interval/flags, pairing window,
 links) lives in this daemon, not in the client connection: the backend can
 restart and reconnect without the radio changing. bluetoothd restarts are
@@ -72,6 +81,21 @@ STATUS_PERIOD_S = 30
 SCAN_MAX_S = 10
 PAIRABLE_MAX_S = 600
 DEFAULT_ATT_MTU = 23           # until the first write tells us the negotiated MTU
+
+# Central role (beacon satellites). Duty cycle: 8 s of discovery every 20 s.
+# The radio is shared with our advertising and the GATT server links, and the
+# kernel's LE discovery scans at a 100 % window while on; 40 % keeps the
+# controller free for connection events most of the time while a beacon
+# advertising at <= 2 s is still caught in every scan phase (worst-case
+# first-connect latency ~12 s + connect). scan_s >= period_s = continuous.
+CENTRAL_SCAN_S = 8
+CENTRAL_PERIOD_S = 20
+CENTRAL_SCAN_MIN_S, CENTRAL_SCAN_MAX_S = 1, 60
+CENTRAL_PERIOD_MAX_S = 300
+CENTRAL_TARGETS_MAX = 32
+CENTRAL_SIGHTING_EVENT_S = 10  # at most one central "scan" event per 10 s
+CENTRAL_RETRY_S = 5            # ignore sightings of an address this long after a failure/link down
+CENTRAL_SETUP_TIMEOUT_S = 30   # connect + resolve + pair + subscribe
 
 MAC_RE = re.compile(r"^[0-9A-F]{2}(:[0-9A-F]{2}){5}$")
 
@@ -204,9 +228,13 @@ class Command:
     seconds: float = 0.0
     interval_ms: int = DEFAULT_INTERVAL_MS
     flags: int = 0
+    enabled: bool = False
+    addresses: Tuple[str, ...] = ()
+    scan_s: float = CENTRAL_SCAN_S
+    period_s: float = CENTRAL_PERIOD_S
 
 
-COMMANDS = ("send", "disconnect", "scan", "adv", "pairable", "status")
+COMMANDS = ("send", "disconnect", "scan", "adv", "pairable", "status", "central")
 
 
 def parse_command(raw) -> Command:
@@ -257,23 +285,48 @@ def parse_command(raw) -> Command:
     elif name == "adv":
         cmd.interval_ms = adv_interval_range(int(num("interval_ms", DEFAULT_INTERVAL_MS)))[0]
         cmd.flags = int(num("flags", 0)) & 0xFFFF
+    elif name == "central":
+        enabled = msg.get("enabled", False)
+        if not isinstance(enabled, bool):
+            raise ProtocolError("enabled must be a boolean")
+        addrs = msg.get("addresses", [])
+        if not isinstance(addrs, list):
+            raise ProtocolError("addresses must be a list")
+        if len(addrs) > CENTRAL_TARGETS_MAX:
+            raise ProtocolError("more than %d addresses" % CENTRAL_TARGETS_MAX)
+        try:
+            cmd.addresses = tuple(sorted({normalise_addr(a) for a in addrs}))
+        except ValueError as exc:
+            raise ProtocolError(str(exc)) from None
+        cmd.enabled = enabled
+        cmd.scan_s = max(float(CENTRAL_SCAN_MIN_S),
+                         min(float(CENTRAL_SCAN_MAX_S), float(num("scan_s", CENTRAL_SCAN_S))))
+        cmd.period_s = max(cmd.scan_s, min(float(CENTRAL_PERIOD_MAX_S),
+                                           float(num("period_s", CENTRAL_PERIOD_S))))
     return cmd
 
 
 # --- daemon core (no D-Bus) ----------------------------------------------------
 
+ROLE_PERIPHERAL = "peripheral"   # scanner satellite: it connected to our GATT server
+ROLE_CENTRAL = "central"         # beacon satellite: we connected to its GATT server
+
+
 @dataclass
 class Link:
-    """One connected satellite (an LE central talking to our GATT service)."""
+    """One connected satellite: an LE central talking to our GATT service
+    (role ``peripheral``), or a beacon we connected to (role ``central``)."""
     path: str
     addr: str
     name: str = ""
     bonded: bool = False
     mtu: int = DEFAULT_ATT_MTU
+    role: str = ROLE_PERIPHERAL
     assembler: LineAssembler = field(default_factory=LineAssembler)
 
     def as_dict(self) -> dict:
-        return {"addr": self.addr, "name": self.name, "bonded": self.bonded, "mtu": self.mtu}
+        return {"addr": self.addr, "name": self.name, "bonded": self.bonded, "mtu": self.mtu,
+                "role": self.role}
 
 
 class Radio:
@@ -304,6 +357,24 @@ class Radio:
     def device_info(self, path: str) -> dict:
         """Device1 properties of ``path`` ({} if unknown)."""
         return {}
+
+    # central role (beacon satellites)
+    def set_central_discovery(self, on: bool) -> bool:
+        """Want UUID-filtered LE discovery on/off for the central role (shared
+        with :meth:`start_scan`); sightings go to ``core.on_sighting``.
+        Returns False if discovery could not be started."""
+        return False
+
+    def central_connect(self, path: str, done: Callable[[str, bool, dict], None]) -> bool:
+        """Connect to ``path`` as GATT client: Connect, ServicesResolved, find
+        our service, bond if needed, StartNotify on the remote TX; then
+        ``done(path, ok, info)`` (info: addr/name/bonded/mtu, or error).
+        Remote TX notifications go to ``core.on_central_data``."""
+        return False
+
+    def central_write(self, path: str, chunks: List[bytes]) -> bool:
+        """Write chunks (in order) to the remote RX of a set-up central link."""
+        return False
 
 
 class Scheduler:
@@ -342,6 +413,18 @@ class BledCore:
         self.scanning = False
         self._last_status: Optional[dict] = None
         self._applied_adv: Optional[Tuple[int, int, bytes]] = None
+        # central role (beacon satellites)
+        self.central_enabled = False
+        self.central_targets: Tuple[str, ...] = ()
+        self.central_scan_s = float(CENTRAL_SCAN_S)
+        self.central_period_s = float(CENTRAL_PERIOD_S)
+        self.central_scanning = False          # duty-cycle phase: discovery on
+        self._central_timer = None
+        self.connecting: Dict[str, str] = {}   # path -> addr, central setup in progress
+        self._retry_after: Dict[str, float] = {}  # addr -> clock() before which sightings are ignored
+        self._sightings: Dict[str, dict] = {}  # addr -> device, since the last central scan event
+        self._sighting_timer = None
+        self._last_sighting_emit = float("-inf")
 
     # -- derived state ------------------------------------------------------
     @property
@@ -371,13 +454,29 @@ class BledCore:
                 "links": [l.as_dict() for l in sorted(self.links.values(), key=lambda l: l.addr)],
                 "pairable": self.pairing,
                 "pairable_left": max(0, int(round(self.pairable_until - self.clock()))) if self.pairing else 0,
-                "scanning": self.scanning, "adv": self.adv_info()}
+                "scanning": self.scanning, "adv": self.adv_info(),
+                "central": {"enabled": self.central_enabled, "scanning": self.central_scanning,
+                            "targets": len(self.central_targets),
+                            "links": sum(1 for l in self.links.values() if l.role == ROLE_CENTRAL)}}
+
+    def pairing_allowed(self, path: str) -> bool:
+        """Agent policy: Just Works pairing/authorization is accepted while the
+        pairing window is open, or (central role) for an enrolled beacon
+        address the backend asked us to connect to."""
+        if self.pairing:
+            return True
+        try:
+            addr = addr_from_path(path)
+        except ValueError:
+            return False
+        return self.central_enabled and addr in self.central_targets
 
     # -- status -------------------------------------------------------------
     def emit_status(self, force: bool = False) -> None:
-        """Emit ``status`` if anything but the countdown changed (or forced)."""
+        """Emit ``status`` if anything but the countdown / the central scan
+        phase changed (or forced; the 30 s periodic status carries both)."""
         st = self.status()
-        key = dict(st, pairable_left=None)
+        key = dict(st, pairable_left=None, central=dict(st["central"], scanning=None))
         if force or key != self._last_status:
             self._last_status = key
             self.emit(st)
@@ -412,7 +511,12 @@ class BledCore:
             link = self._link_by_addr(cmd.addr)
             if link is None:
                 return dict(ack, ok=False, error="not linked")
-            mtu = min(l.mtu for l in self.links.values())
+            if link.role == ROLE_CENTRAL:
+                # Our own GATT client link: one peer, no address prefix.
+                if not self.radio.central_write(link.path, chunk_line(cmd.line, link.mtu)):
+                    return dict(ack, ok=False, error="write failed")
+                return ack
+            mtu = min(l.mtu for l in self.links.values() if l.role != ROLE_CENTRAL)
             # BlueZ notifies every link that enabled the TX CCC: the address
             # prefix tells satellites which lines are theirs.
             if not self.radio.notify(chunk_line(frame_tx(link.addr, cmd.line), mtu)):
@@ -421,6 +525,8 @@ class BledCore:
             link = self._link_by_addr(cmd.addr)
             path = link.path if link else next(
                 (p for p, info in self.pending.items() if info.get("addr") == cmd.addr), None)
+            if path is None:
+                path = next((p for p, a in self.connecting.items() if a == cmd.addr), None)
             if path is None:
                 return dict(ack, ok=False, error="not connected")
             logger.info("disconnect %s (backend)", cmd.addr)
@@ -442,6 +548,8 @@ class BledCore:
             self.set_pairable(cmd.seconds)
         elif cmd.name == "status":
             self.emit_status(force=True)
+        elif cmd.name == "central":
+            self.set_central(cmd.enabled, cmd.addresses, cmd.scan_s, cmd.period_s)
         return ack
 
     def _scan_done(self, devices: List[dict]) -> None:
@@ -472,6 +580,166 @@ class BledCore:
         self._pair_timer = None
         self.set_pairable(0)
 
+    # -- central role (beacon satellites) -----------------------------------
+    def set_central(self, enabled: bool, addresses=(), scan_s: float = CENTRAL_SCAN_S,
+                    period_s: float = CENTRAL_PERIOD_S) -> None:
+        """Enable/disable the central role and set the enrolled beacon
+        addresses to connect to. Idempotent: the backend re-sends it after
+        every reconnect; only real changes touch the radio."""
+        targets = tuple(sorted(set(addresses)))
+        params = (float(scan_s), float(period_s))
+        if targets != self.central_targets:
+            logger.info("central: targets %s", ", ".join(targets) or "(none)")
+        self.central_targets = targets
+        if enabled:
+            restart = not self.central_enabled or params != (self.central_scan_s, self.central_period_s)
+            self.central_scan_s, self.central_period_s = params
+            if restart:
+                if not self.central_enabled:
+                    logger.info("central: enabled (scan %.0f s every %.0f s)", *params)
+                self.central_enabled = True
+                self._central_cycle_start()
+        elif self.central_enabled:
+            logger.info("central: disabled")
+            self.central_enabled = False
+            self._central_stop()      # drops every central link and attempt
+        # links/attempts to addresses no longer enrolled are dropped
+        for path, link in list(self.links.items()) if enabled else ():
+            if link.role == ROLE_CENTRAL and link.addr not in targets:
+                logger.info("central: %s no longer a target, disconnecting", link.addr)
+                self.radio.disconnect(path)
+        for path, addr in list(self.connecting.items()):
+            if addr not in targets:
+                self.connecting.pop(path, None)
+                self.radio.disconnect(path)
+        self.emit_status()
+
+    def _cancel_central_timer(self) -> None:
+        if self._central_timer is not None:
+            self.scheduler.cancel(self._central_timer)
+            self._central_timer = None
+
+    def _central_cycle_start(self) -> None:
+        self._cancel_central_timer()
+        self._central_scan_on()
+
+    def _central_scan_on(self) -> None:
+        self._central_timer = None
+        if not self.central_enabled:
+            return
+        ok = bool(self.radio.set_central_discovery(True))
+        self.central_scanning = ok
+        if not ok:
+            logger.warning("central: discovery did not start; retrying in %.0f s", self.central_period_s)
+            self._central_timer = self.scheduler.call_later(self.central_period_s, self._central_scan_on)
+        elif self.central_scan_s < self.central_period_s:
+            self._central_timer = self.scheduler.call_later(self.central_scan_s, self._central_scan_off)
+        logger.debug("central: scan phase on")
+
+    def _central_scan_off(self) -> None:
+        self._central_timer = None
+        if self.central_scanning:
+            self.radio.set_central_discovery(False)
+            self.central_scanning = False
+        if self.central_enabled:
+            self._central_timer = self.scheduler.call_later(
+                max(0.0, self.central_period_s - self.central_scan_s), self._central_scan_on)
+        logger.debug("central: scan phase off")
+
+    def _central_stop(self) -> None:
+        """Disable: stop discovery, drop central links and attempts."""
+        self._cancel_central_timer()
+        if self.central_scanning:
+            self.radio.set_central_discovery(False)
+        self.central_scanning = False
+        if self._sighting_timer is not None:
+            self.scheduler.cancel(self._sighting_timer)
+            self._sighting_timer = None
+        self._sightings.clear()
+        for path in list(self.connecting):
+            self.connecting.pop(path, None)
+            self.radio.disconnect(path)
+        for path, link in list(self.links.items()):
+            if link.role == ROLE_CENTRAL:
+                self.radio.disconnect(path)
+
+    def on_sighting(self, path: str, info: dict) -> None:
+        """Discovery saw ``path`` advertising (radio callback, central role):
+        remember it for the next ``scan`` event, connect if it is a target."""
+        if not self.central_enabled:
+            return
+        if SERVICE_UUID not in [str(u).lower() for u in info.get("uuids", ())]:
+            return
+        try:
+            addr = normalise_addr(info.get("addr") or addr_from_path(path))
+        except ValueError:
+            return
+        now = self.clock()
+        self._sightings[addr] = {"addr": addr, "name": str(info.get("name") or ""),
+                                 "rssi": info.get("rssi"), "uuids": [SERVICE_UUID]}
+        self._schedule_sighting_event(now)
+        if (addr in self.central_targets and path not in self.connecting
+                and path not in self.links and path not in self.pending
+                and self._link_by_addr(addr) is None
+                and now >= self._retry_after.get(addr, 0.0)):
+            self.connecting[path] = addr
+            logger.info("central: connecting to %s (rssi %s)", addr, info.get("rssi"))
+            if not self.radio.central_connect(path, self._central_done):
+                self.connecting.pop(path, None)
+                self._retry_after[addr] = now + CENTRAL_RETRY_S
+
+    def _schedule_sighting_event(self, now: float) -> None:
+        if self._sighting_timer is not None:
+            return
+        wait = self._last_sighting_emit + CENTRAL_SIGHTING_EVENT_S - now
+        if wait <= 0:
+            self._emit_sightings()
+        else:
+            self._sighting_timer = self.scheduler.call_later(wait, self._emit_sightings)
+
+    def _emit_sightings(self) -> None:
+        self._sighting_timer = None
+        if not self._sightings:
+            return
+        devices = [self._sightings[a] for a in sorted(self._sightings)]
+        self._sightings = {}
+        self._last_sighting_emit = self.clock()
+        self.emit({"ev": "scan", "devices": devices, "central": True})
+
+    def _central_done(self, path: str, ok: bool, info: dict) -> None:
+        """Radio finished (or failed) setting up a central link."""
+        addr = self.connecting.pop(path, None)
+        if addr is None:
+            if ok:      # cancelled meanwhile (disabled / no longer a target)
+                self.radio.disconnect(path)
+            return
+        if not ok:
+            logger.warning("central: %s setup failed: %s", addr, info.get("error", "?"))
+            self._retry_after[addr] = self.clock() + CENTRAL_RETRY_S
+            return
+        link = Link(path=path, addr=addr, name=str(info.get("name") or ""),
+                    bonded=bool(info.get("bonded")), mtu=int(info.get("mtu") or DEFAULT_ATT_MTU),
+                    role=ROLE_CENTRAL)
+        self.links[path] = link
+        logger.info("link up %s %s bonded=%s mtu=%d (central)", addr, link.name or "-",
+                    link.bonded, link.mtu)
+        self.emit(dict({"ev": "link", "state": "up"}, **link.as_dict()))
+        self.emit_status()
+
+    def on_central_data(self, path: str, data: bytes) -> None:
+        """A notification on a beacon's TX: reassemble and forward lines."""
+        link = self.links.get(path)
+        if link is None or link.role != ROLE_CENTRAL:
+            return
+        try:
+            lines = link.assembler.feed(bytes(data))
+        except LineTooLong as exc:
+            logger.warning("link %s: line > %d bytes (%s), disconnecting", link.addr, LINE_MAX, exc)
+            self.radio.disconnect(path)
+            return
+        for line in lines:
+            self.emit({"ev": "data", "addr": link.addr, "line": line})
+
     # -- radio callbacks ----------------------------------------------------
     def on_radio_change(self) -> None:
         """Powered/advertising flipped (or a register call finished)."""
@@ -482,6 +750,8 @@ class BledCore:
         self._applied_adv = None
         self.radio.set_pairable(self.pairing)
         self.refresh_advertisement(force=True)
+        if self.central_enabled:
+            self._central_cycle_start()
         self.emit_status()
 
     def on_radio_lost(self) -> None:
@@ -489,7 +759,10 @@ class BledCore:
         for path in list(self.links):
             self.on_disconnected(path)
         self.pending.clear()
+        self.connecting.clear()
         self.scanning = False
+        self._cancel_central_timer()
+        self.central_scanning = False    # enabled stays: on_radio_reset restarts the cycle
         self._applied_adv = None
         self.emit_status()
 
@@ -497,8 +770,9 @@ class BledCore:
         """Device1.Connected became true. A device is a satellite link right
         away only if it is known to advertise our service UUID; any other
         central becomes one at its first RX write (see §4: a satellite writes
-        a line, or a bare ``\\n``, after subscribing)."""
-        if path in self.links:
+        a line, or a bare ``\\n``, after subscribing). A device we are
+        connecting to ourselves (central role) is not a peripheral link."""
+        if path in self.links or path in self.connecting:
             return
         if SERVICE_UUID in [str(u).lower() for u in info.get("uuids", ())]:
             self._link_up(path, info)
@@ -507,17 +781,28 @@ class BledCore:
 
     def on_disconnected(self, path: str) -> None:
         self.pending.pop(path, None)
+        addr = self.connecting.pop(path, None)
+        if addr is not None:
+            logger.info("central: %s disconnected during setup", addr)
+            self._retry_after[addr] = self.clock() + CENTRAL_RETRY_S
         link = self.links.pop(path, None)
         if link is None:
             return
-        logger.info("link down %s", link.addr)
+        if link.role == ROLE_CENTRAL:   # reconnect on a later sighting
+            self._retry_after[link.addr] = self.clock() + CENTRAL_RETRY_S
+        logger.info("link down %s%s", link.addr, " (central)" if link.role == ROLE_CENTRAL else "")
         self.emit({"ev": "link", "state": "down", "addr": link.addr, "name": link.name,
-                   "bonded": link.bonded, "mtu": link.mtu})
+                   "bonded": link.bonded, "mtu": link.mtu, "role": link.role})
         self.emit_status()
 
     def on_rx(self, path: str, data: bytes, mtu: Optional[int] = None) -> None:
         """A write to RX from ``path``: reassemble and forward complete lines."""
         link = self.links.get(path)
+        if link is not None and link.role == ROLE_CENTRAL:
+            logger.debug("ignoring RX write from %s: it is our central link", link.addr)
+            return
+        if link is None and path in self.connecting:
+            return
         if link is None:
             info = self.pending.pop(path, None) or self.radio.device_info(path) or {}
             link = self._link_up(path, info, mtu)
@@ -851,18 +1136,22 @@ if dbus is not None:
 
     class Agent(dbus.service.Object):
         """NoInputNoOutput agent: Just Works, accepted only while the pairing
-        window is open; already-bonded devices may always use our service."""
+        window is open or for an enrolled beacon the central role is
+        connecting to (``allowed(device_path)`` = BledCore.pairing_allowed);
+        already-bonded devices may always use our service."""
 
-        def __init__(self, bus, is_open: Callable[[], bool], is_bonded: Callable[[str], bool]):
+        def __init__(self, bus, allowed: Callable[[str], bool], is_bonded: Callable[[str], bool]):
             super().__init__(bus, AGENT_PATH)
-            self.is_open = is_open
+            self.allowed = allowed
             self.is_bonded = is_bonded
 
         def _gate(self, what, device):
-            if self.is_open():
-                logger.info("agent: %s %s accepted (pairing window open)", what, device)
+            if self.allowed(str(device)):
+                logger.info("agent: %s %s accepted (pairing window open or enrolled beacon)",
+                            what, device)
                 return
-            logger.info("agent: %s %s rejected (pairing window closed)", what, device)
+            logger.info("agent: %s %s rejected (pairing window closed, not an enrolled beacon)",
+                        what, device)
             raise Rejected("pairing window closed")
 
         @dbus.service.method(AGENT_IFACE, in_signature="", out_signature="")
@@ -935,11 +1224,20 @@ class BluezRadio(Radio):
         self._scan_done: Optional[Callable] = None
         self._app_registered = False
         self._agent_registered = False
+        # discovery is shared by the one-shot scan and the central role
+        self._discovering = False
+        self._disc_central = False
+        self._dev_cache: Dict[str, dict] = {}      # sighting info per device path
+        # central role: device path -> setup/link state; remote TX path -> device path
+        self._central: Dict[str, dict] = {}
+        self._tx_paths: Dict[str, str] = {}
+        self._want_pairable = False
+        self._bond_holds = 0
 
     # -- lifecycle ------------------------------------------------------------
     def start(self, core: BledCore) -> None:
         self.core = core
-        self.agent = Agent(self.bus, lambda: core.pairing, self._is_bonded)
+        self.agent = Agent(self.bus, core.pairing_allowed, self._is_bonded)
         self.bus.add_signal_receiver(self._on_props_changed, dbus_interface=PROPS_IFACE,
                                      signal_name="PropertiesChanged", bus_name=BLUEZ,
                                      path_keyword="path")
@@ -1004,6 +1302,8 @@ class BluezRadio(Radio):
         self._adv_busy = False
         self._app_registered = False
         self._agent_registered = False
+        self._discovering = False
+        self._drop_central_state()
         if self._scan_timer is not None:
             GLib.source_remove(self._scan_timer)
             self._scan_timer = None
@@ -1015,10 +1315,18 @@ class BluezRadio(Radio):
         Pairable restored, agent and GATT app unregistered."""
         if not self.present:
             return
+        self._disc_central = False
         if self._scan_timer is not None:
             GLib.source_remove(self._scan_timer)
             self._scan_timer = None
             self._finish_scan(stop=True, report=False)
+        self._update_discovery()
+        for path in list(self._central):     # links we initiated go with us
+            try:
+                self._obj(path).Disconnect(dbus_interface=DEVICE_IFACE, timeout=3)
+            except dbus.exceptions.DBusException as exc:
+                logger.debug("central disconnect %s: %s", path, exc.get_dbus_message())
+        self._drop_central_state()
         self._unregister_adv()
         self._btmgmt_remove()
         for call, what in ((self._unregister_app, "app"), (self._unregister_agent, "agent")):
@@ -1039,8 +1347,17 @@ class BluezRadio(Radio):
                                          dbus_interface=PROPS_IFACE)
 
     def set_pairable(self, on: bool) -> None:
+        self._want_pairable = bool(on)
+        self._apply_pairable()
+
+    def _apply_pairable(self) -> None:
+        """Adapter1.Pairable (= mgmt Bondable) = pairing window open, or a
+        central-role bond in progress (the kernel only asks for a bond in our
+        own Pair() when the adapter is bondable). Incoming pairing during such
+        a hold is still gated by the agent (enrolled beacons only)."""
         if not self.present:
             return
+        on = self._want_pairable or self._bond_holds > 0
         try:
             self._set_adapter("Pairable", on)
         except dbus.exceptions.DBusException as exc:
@@ -1238,30 +1555,267 @@ class BluezRadio(Radio):
                 if changed["Connected"]:
                     self.core.on_connected(path, self.device_info(path))
                 else:
+                    self._central_gone(path)
                     self.core.on_disconnected(path)
-            if self._scan_timer is not None and "RSSI" in changed:
-                self._scan_seen[path] = {"rssi": int(changed["RSSI"])}
+            if changed.get("ServicesResolved"):
+                st = self._central.get(path)
+                if st is not None and st["stage"] == "resolve":
+                    self._central_resolve(path)
+            if any(k in changed for k in ("Name", "Alias", "UUIDs")):
+                self._dev_cache.pop(path, None)
+            if "RSSI" in changed:
+                self._seen(path, int(changed["RSSI"]))
+        elif interface == GATT_CHRC_IFACE and path in self._tx_paths and "Value" in changed:
+            self.core.on_central_data(self._tx_paths[path], bytes(bytearray(changed["Value"])))
 
     def _on_ifaces_added(self, path, ifaces) -> None:
         dev = ifaces.get(DEVICE_IFACE)
-        if dev is not None and self._scan_timer is not None and "RSSI" in dev:
-            self._scan_seen[str(path)] = {"rssi": int(dev["RSSI"])}
+        if dev is not None and "RSSI" in dev and str(path).startswith(self.adapter_path + "/"):
+            self._seen(str(path), int(dev["RSSI"]), dev)
+
+    def _seen(self, path: str, rssi: int, props=None) -> None:
+        """An advertisement report (new device or RSSI update) while discovering."""
+        if not self._discovering:
+            return
+        if self._scan_timer is not None:
+            self._scan_seen[path] = {"rssi": rssi}
+        if self._disc_central:
+            info = self._dev_cache.get(path)
+            if info is None:
+                info = device_props_to_info(props) if props is not None else self.device_info(path)
+                if not info:
+                    return
+                self._dev_cache[path] = info
+            info["rssi"] = rssi
+            self.core.on_sighting(path, dict(info))
+
+    # -- discovery (one-shot scan + central role) --------------------------------
+    def set_central_discovery(self, on: bool) -> bool:
+        self._disc_central = bool(on)
+        return self._update_discovery() or not on
+
+    def _update_discovery(self) -> bool:
+        """Start/stop StartDiscovery so it runs while the one-shot scan or the
+        central role wants it (one D-Bus client = one BlueZ discovery session,
+        so the two must share it). Returns False if a start failed."""
+        want = self._disc_central or self._scan_timer is not None
+        if want == self._discovering:
+            return True
+        if not (self.present and self.powered):
+            self._discovering = False
+            return not want
+        adapter = dbus.Interface(self._obj(self.adapter_path), ADAPTER_IFACE)
+        if want:
+            try:
+                adapter.SetDiscoveryFilter({"UUIDs": dbus.Array([SERVICE_UUID], signature="s"),
+                                            "Transport": "le", "DuplicateData": dbus.Boolean(True)})
+                adapter.StartDiscovery()
+            except dbus.exceptions.DBusException as exc:
+                logger.error("StartDiscovery failed: %s", exc.get_dbus_message())
+                return False
+            self._discovering = True
+            self._dev_cache = {}
+            logger.info("discovery on (LE, UUID %s)", SERVICE_UUID)
+        else:
+            for call in (adapter.StopDiscovery, lambda: adapter.SetDiscoveryFilter({})):
+                try:
+                    call()
+                except dbus.exceptions.DBusException as exc:
+                    logger.debug("discovery stop: %s", exc.get_dbus_message())
+            self._discovering = False
+            logger.info("discovery off")
+        return True
+
+    # -- central role (GATT client to beacon satellites) -------------------------
+    def central_connect(self, path: str, done) -> bool:
+        if not (self.present and self.powered) or path in self._central:
+            return False
+        st = {"done": done, "stage": "connect", "tx": None, "rx": None,
+              "write_type": "request", "mtu": DEFAULT_ATT_MTU, "hold": False, "info": {}}
+        self._central[path] = st
+
+        def timeout():
+            st["timer"] = None
+            self._central_fail(path, "setup timeout")
+            return False
+        st["timer"] = GLib.timeout_add_seconds(CENTRAL_SETUP_TIMEOUT_S, timeout)
+        self._obj(path).Connect(dbus_interface=DEVICE_IFACE, timeout=CENTRAL_SETUP_TIMEOUT_S,
+                                reply_handler=lambda: self._central_connected(path),
+                                error_handler=lambda e: self._central_fail(
+                                    path, "Connect: %s" % e.get_dbus_message()))
+        return True
+
+    def _central_connected(self, path: str) -> None:
+        st = self._central.get(path)
+        if st is None or st["stage"] != "connect":
+            return
+        st["stage"] = "resolve"
+        try:
+            resolved = bool(self._obj(path).Get(DEVICE_IFACE, "ServicesResolved",
+                                                dbus_interface=PROPS_IFACE))
+        except dbus.exceptions.DBusException:
+            resolved = False
+        logger.debug("central %s connected (services resolved=%s)", path, resolved)
+        if resolved:
+            self._central_resolve(path)
+        # else: PropertiesChanged(ServicesResolved=True) continues
+
+    def _central_resolve(self, path: str) -> None:
+        st = self._central.get(path)
+        if st is None:
+            return
+        st["stage"] = "gatt"
+        try:
+            objs = self._obj("/").GetManagedObjects(dbus_interface=OM_IFACE)
+        except dbus.exceptions.DBusException as exc:
+            self._central_fail(path, "GetManagedObjects: %s" % exc.get_dbus_message())
+            return
+        svc = next((str(p) for p, ifs in objs.items()
+                    if str(p).startswith(path + "/") and GATT_SERVICE_IFACE in ifs
+                    and str(ifs[GATT_SERVICE_IFACE].get("UUID", "")).lower() == SERVICE_UUID), None)
+        if svc is None:
+            self._central_fail(path, "service %s not found" % SERVICE_UUID)
+            return
+        chrcs = {}
+        for p, ifs in objs.items():
+            c = ifs.get(GATT_CHRC_IFACE)
+            if c is not None and str(c.get("Service", "")) == svc:
+                chrcs[str(c.get("UUID", "")).lower()] = (str(p), c)
+        if TX_UUID not in chrcs or RX_UUID not in chrcs:
+            self._central_fail(path, "TX/RX characteristic missing")
+            return
+        (st["tx"], tx), (st["rx"], rx) = chrcs[TX_UUID], chrcs[RX_UUID]
+        flags = [str(f) for f in rx.get("Flags", [])]
+        st["write_type"] = "command" if "write-without-response" in flags else "request"
+        st["mtu"] = int(rx.get("MTU") or tx.get("MTU") or DEFAULT_ATT_MTU)
+        dev = objs.get(dbus.ObjectPath(path), {}).get(DEVICE_IFACE, {})
+        st["info"] = device_props_to_info(dev)
+        if dev.get("Paired"):
+            self._central_subscribe(path)
+            return
+        # Bond first (Just Works, we initiate: the kernel confirms it itself;
+        # the agent sees it only for re-pairing). The remote TX/RX are
+        # encrypt-only, so without a bond every connection would re-pair.
+        st["stage"] = "pair"
+        st["hold"] = True
+        self._bond_holds += 1
+        self._apply_pairable()
+        logger.info("central %s: pairing", path)
+        self._obj(path).Pair(dbus_interface=DEVICE_IFACE, timeout=CENTRAL_SETUP_TIMEOUT_S,
+                             reply_handler=lambda: self._central_paired(path, None),
+                             error_handler=lambda e: self._central_paired(path, e))
+
+    def _release_hold(self, st: dict) -> None:
+        if st.get("hold"):
+            st["hold"] = False
+            self._bond_holds = max(0, self._bond_holds - 1)
+            self._apply_pairable()
+
+    def _central_paired(self, path: str, err) -> None:
+        st = self._central.get(path)
+        if st is None or st["stage"] != "pair":
+            return
+        self._release_hold(st)
+        if err is not None and err.get_dbus_name() != "org.bluez.Error.AlreadyExists":
+            logger.warning("central %s: Pair failed (%s); subscribing anyway (BlueZ "
+                           "raises security on demand)", path, err.get_dbus_message())
+        self._central_subscribe(path)
+
+    def _central_subscribe(self, path: str) -> None:
+        st = self._central.get(path)
+        if st is None:
+            return
+        st["stage"] = "notify"
+        self._tx_paths[st["tx"]] = path
+        self._obj(st["tx"]).StartNotify(dbus_interface=GATT_CHRC_IFACE,
+                                        timeout=CENTRAL_SETUP_TIMEOUT_S,
+                                        reply_handler=lambda: self._central_ready(path),
+                                        error_handler=lambda e: self._central_fail(
+                                            path, "StartNotify: %s" % e.get_dbus_message()))
+
+    def _central_ready(self, path: str) -> None:
+        st = self._central.get(path)
+        if st is None or st["stage"] != "notify":
+            return
+        st["stage"] = "up"
+        if st.get("timer") is not None:
+            GLib.source_remove(st["timer"])
+            st["timer"] = None
+        info = self.device_info(path) or st["info"]
+        try:   # MTU exchange may have finished after resolve
+            mtu = self._obj(st["rx"]).Get(GATT_CHRC_IFACE, "MTU", dbus_interface=PROPS_IFACE)
+            st["mtu"] = int(mtu) or st["mtu"]
+        except dbus.exceptions.DBusException:
+            pass   # BlueZ < 5.62 has no MTU property: stay at what we have (23 by default)
+        info["mtu"] = st["mtu"]
+        logger.info("central %s: subscribed to TX, RX write type %s, mtu %d",
+                    path, st["write_type"], st["mtu"])
+        st["done"](path, True, info)
+
+    def _central_fail(self, path: str, why: str) -> None:
+        st = self._central.pop(path, None)
+        if st is None:
+            return
+        self._cleanup_central(st)
+        logger.warning("central %s: %s", path, why)
+        self.disconnect(path)
+        st["done"](path, False, {"error": why})
+
+    def _cleanup_central(self, st: dict) -> None:
+        if st.get("timer") is not None:
+            GLib.source_remove(st["timer"])
+            st["timer"] = None
+        self._release_hold(st)
+        if st.get("tx"):
+            self._tx_paths.pop(st["tx"], None)
+
+    def _central_gone(self, path: str) -> None:
+        """Device1.Connected=false: forget the GATT client state (the core
+        gets on_disconnected right after, for setups and links alike)."""
+        st = self._central.pop(path, None)
+        if st is not None:
+            self._cleanup_central(st)
+
+    def _drop_central_state(self) -> None:
+        for st in self._central.values():
+            if st.get("timer") is not None:
+                GLib.source_remove(st["timer"])
+                st["timer"] = None
+        self._central.clear()
+        self._tx_paths.clear()
+        self._bond_holds = 0
+
+    def central_write(self, path: str, chunks: List[bytes]) -> bool:
+        st = self._central.get(path)
+        if st is None or st["stage"] != "up":
+            return False
+        chrc = self._obj(st["rx"])
+        opts = dbus.Dictionary({"type": dbus.String(st["write_type"])}, signature="sv")
+
+        def ok(*_):
+            pass
+
+        def err(e):
+            logger.warning("central %s: WriteValue failed: %s", path, e.get_dbus_message())
+
+        # Sent in order on one connection; bluetoothd queues them in order.
+        for c in chunks:
+            chrc.WriteValue(dbus.Array(c, signature="y"), opts, dbus_interface=GATT_CHRC_IFACE,
+                            reply_handler=ok, error_handler=err)
+        return True
 
     # -- scan ----------------------------------------------------------------
     def start_scan(self, seconds: float, done) -> bool:
         if not (self.present and self.powered) or self._scan_timer is not None:
             return False
-        adapter = dbus.Interface(self._obj(self.adapter_path), ADAPTER_IFACE)
-        try:
-            adapter.SetDiscoveryFilter({"UUIDs": dbus.Array([SERVICE_UUID], signature="s"),
-                                        "Transport": "le", "DuplicateData": dbus.Boolean(True)})
-            adapter.StartDiscovery()
-        except dbus.exceptions.DBusException as exc:
-            logger.error("StartDiscovery failed: %s", exc.get_dbus_message())
-            return False
         self._scan_seen = {}
         self._scan_done = done
         self._scan_timer = GLib.timeout_add(int(seconds * 1000), self._scan_timeout)
+        if not self._update_discovery():
+            GLib.source_remove(self._scan_timer)
+            self._scan_timer = None
+            self._scan_done = None
+            return False
         return True
 
     def _scan_timeout(self) -> bool:
@@ -1272,12 +1826,7 @@ class BluezRadio(Radio):
     def _finish_scan(self, stop: bool, report: bool = True) -> None:
         devices = []
         if stop:
-            adapter = dbus.Interface(self._obj(self.adapter_path), ADAPTER_IFACE)
-            for call in (adapter.StopDiscovery, lambda: adapter.SetDiscoveryFilter({})):
-                try:
-                    call()
-                except dbus.exceptions.DBusException as exc:
-                    logger.debug("scan stop: %s", exc.get_dbus_message())
+            self._update_discovery()   # stops unless the central role still wants it
             for path, seen in self._scan_seen.items():
                 info = self.device_info(path)
                 if SERVICE_UUID not in info.get("uuids", ()):

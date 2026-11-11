@@ -88,6 +88,8 @@ PUBLISH_PERIOD_S = 1.0
 KEYCHAIN_CHECK_S = 2.0
 ADV_INTERVAL_IDLE_MS = 10_000
 ADV_INTERVAL_ACTIVE_MS = 1_000
+CENTRAL_CHECK_S = 1.0          # how often the beacon address list is recomputed from the keychain
+BLE_ROLE_BEACON = "beacon"     # keychain ``ble_role``: the satellite advertises, the car connects
 
 
 class RegistryError(Exception):
@@ -202,6 +204,8 @@ class SatelliteRegistry:
         self._published: Optional[tuple] = None
         self._publish_last = 0.0
         self._adv: Optional[Tuple[int, int]] = None
+        self._central: Optional[Tuple[bool, Tuple[str, ...]]] = None
+        self._central_check = float("-inf")
         self._seeded_ids: set = set()
         self._started = False
 
@@ -358,6 +362,7 @@ class SatelliteRegistry:
                 except Exception:
                     logger.exception("set_pairable on %s failed", name)
         self._update_adv()
+        self._update_central(force=True)
         self._publish(force=True)
 
     def _close_pairing(self, why: str) -> None:
@@ -372,6 +377,7 @@ class SatelliteRegistry:
                     except Exception:
                         logger.exception("set_pairable(0) on %s failed", name)
         self._update_adv()
+        self._update_central(force=True)
         self._publish(force=True)
 
     def discover(self, transport: Optional[str] = None) -> None:
@@ -598,6 +604,7 @@ class SatelliteRegistry:
         self._keepalives(now)
         self._auto_connect(now)
         self._update_adv()
+        self._update_central(now)
 
         for q in self.queues.values():
             q.tick()
@@ -863,6 +870,45 @@ class SatelliteRegistry:
                 t.set_advertisement(interval, flags)
             except Exception:
                 logger.exception("set_advertisement failed")
+
+    def central_wanted(self) -> bool:
+        """BLE central role (beacon satellites, docs/SATELLITES.md §4 "BLE
+        roles"): on while the POCO power profile is ``full`` (ACC on, or held
+        full by roadsense) or a BLE pairing window is open; never in ``low``.
+        ``acc_on`` counts too, so the role still follows the key when the
+        powerbox computer-side rules (which set ``power_mode``) are disabled."""
+        pb = self._store.state.powerbox
+        return (getattr(pb, "power_mode", "low") == "full" or bool(pb.acc_on)
+                or self.pairing_open_for(TRANSPORT_BLE))
+
+    def _beacon_addresses(self) -> Tuple[str, ...]:
+        """Enrolled BLE satellites with ``ble_role: beacon`` and an address."""
+        out = set()
+        for entry in self.keychain.entries().values():
+            if (entry.get("transport") == TRANSPORT_BLE
+                    and entry.get("ble_role") == BLE_ROLE_BEACON and entry.get("address")):
+                out.add(str(entry["address"]).upper())
+        return tuple(sorted(out))
+
+    def _update_central(self, now: Optional[float] = None, force: bool = False) -> None:
+        """Tell the BLE transport to scan for / connect to beacon satellites;
+        only on change (the transport re-sends after a bled reconnect)."""
+        t = self.transports.get(TRANSPORT_BLE)
+        if t is None:
+            return
+        now = self._clock() if now is None else now
+        if not force and now - self._central_check < CENTRAL_CHECK_S:
+            return
+        self._central_check = now
+        want = (self.central_wanted(), self._beacon_addresses())
+        if want != self._central:
+            self._central = want
+            logger.info("BLE central role %s (%d beacon address(es))",
+                        "on" if want[0] else "off", len(want[1]))
+            try:
+                t.set_central(want[0], list(want[1]))
+            except Exception:
+                logger.exception("set_central failed")
 
     # ── state mirror ────────────────────────────────────────────────────────
 

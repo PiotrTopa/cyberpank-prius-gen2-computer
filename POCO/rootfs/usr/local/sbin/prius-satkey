@@ -10,9 +10,15 @@ backend itself, so the backend venv is not needed.
   prius-satkey init                         create car.key/car.pub, print car_fp
   prius-satkey list                         enrolled satellites + revocations
   prius-satkey new NAME --transport ble|wifi [--id N] [--caps a,b] [-o FILE]
+                    [--ble-role scanner|beacon --address AA:BB:CC:DD:EE:FF]
                                             new key pair + cert, print provisioning blob
   prius-satkey sign --pubkey B64 NAME --transport ble|wifi [--id N] [--caps a,b]
+                    [--ble-role scanner|beacon --address AA:BB:CC:DD:EE:FF]
                                             enrol a satellite that made its own key
+
+  --ble-role beacon: the satellite advertises and the car connects to it while
+  the power profile is full (ACC on / pairing window); needs --address (the
+  satellite's BLE address as BlueZ shows it). Default role: scanner.
   prius-satkey add-rs485 ID NAME            enrol a wired RS485 satellite (auth none)
   prius-satkey show REF                     provisioning blob without private key
   prius-satkey revoke REF                   REF = id | fp | name
@@ -60,6 +66,13 @@ def _caps(text):
     return [c.strip() for c in (text or "").split(",") if c.strip()]
 
 
+def _role_args(p):
+    p.add_argument("--ble-role", default=None, choices=("scanner", "beacon"),
+                   help="BLE only: scanner (default; the satellite connects to the car) or "
+                        "beacon (the satellite advertises, the car connects; needs --address)")
+    p.add_argument("--address", default="", help="the satellite's BLE address (beacons)")
+
+
 def _emit_blob(blob, out):
     data = json.dumps(blob, indent=2, sort_keys=True) + "\n"
     if out:
@@ -84,6 +97,7 @@ def main(argv=None):
     p.add_argument("--id", type=int, default=None)
     p.add_argument("--caps", default="")
     p.add_argument("-o", "--out", default=None, help="write the blob to FILE (0600)")
+    _role_args(p)
     p = sub.add_parser("sign")
     p.add_argument("name")
     p.add_argument("--pubkey", required=True, help="base64 raw 32-byte Ed25519 public key")
@@ -91,6 +105,7 @@ def main(argv=None):
     p.add_argument("--id", type=int, default=None)
     p.add_argument("--caps", default="")
     p.add_argument("-o", "--out", default=None)
+    _role_args(p)
     p = sub.add_parser("add-rs485")
     p.add_argument("id", type=int)
     p.add_argument("name")
@@ -118,9 +133,12 @@ def main(argv=None):
                 print("%-5s %-16s %-6s %-8s %-26s %s" % ("id", "name", "trans", "auth", "fp", "caps"))
             for sid in sorted(entries):
                 e = entries[sid]
-                print("%-5d %-16s %-6s %-8s %-26s %s" % (
+                role = ""
+                if e.get("ble_role") == "beacon":
+                    role = "  [beacon %s]" % (e.get("address") or "?")
+                print("%-5d %-16s %-6s %-8s %-26s %s%s" % (
                     sid, e.get("name", ""), e.get("transport", ""), e.get("auth", ""),
-                    e.get("fp") or "-", ",".join(e.get("caps") or [])))
+                    e.get("fp") or "-", ",".join(e.get("caps") or []), role))
             if not entries:
                 print("(no satellites enrolled)")
             for fp in kc.revoked:
@@ -128,14 +146,16 @@ def main(argv=None):
         elif args.cmd == "new":
             with kc.transaction():
                 blob = kc.new_satellite(args.name, args.transport, sat_id=args.id,
-                                        caps=_caps(args.caps))
+                                        caps=_caps(args.caps), address=args.address,
+                                        ble_role=args.ble_role)
             print("enrolled %s as id %d (fp %s)" % (args.name, blob["sat_id"], blob["fp"]),
                   file=sys.stderr)
             _emit_blob(blob, args.out)
         elif args.cmd == "sign":
             with kc.transaction():
                 sid, _ = kc.enrol_pubkey(args.name, args.transport, args.pubkey,
-                                         sat_id=args.id, caps=_caps(args.caps))
+                                         sat_id=args.id, caps=_caps(args.caps),
+                                         address=args.address, ble_role=args.ble_role)
             blob = kc.provisioning_blob(sid)
             print("enrolled %s as id %d (fp %s)" % (args.name, sid, blob["fp"]), file=sys.stderr)
             _emit_blob(blob, args.out)

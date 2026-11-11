@@ -1,0 +1,5 @@
+# Real provisioning material: never commit.
+esp32s3_ble/provision.h
+*.blob.json
+blob*.json
+build*/

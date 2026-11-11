@@ -153,3 +153,45 @@ def test_accept_cert_renames_on_name_clash(kc):
     cert = kc_mod.sign_cert(kc.car_priv, kc_mod.cert_body(410, "garage", "wifi", b64e(pub)))
     sid, entry = kc.accept_cert(cert)
     assert sid == 410 and entry["name"] == "garage-410"
+
+
+def test_ble_role_beacon_needs_address_and_lands_in_blob(kc):
+    with kc.transaction():
+        with pytest.raises(KeychainError, match="needs its BLE address"):
+            kc.new_satellite("door", "ble", ble_role="beacon")
+        with pytest.raises(KeychainError, match="BLE satellites only"):
+            kc.new_satellite("door", "wifi", ble_role="beacon", address="AA:BB:CC:DD:EE:B1")
+        with pytest.raises(KeychainError, match="ble_role must be"):
+            kc.new_satellite("door", "ble", ble_role="mesh", address="AA:BB:CC:DD:EE:B1")
+        with pytest.raises(KeychainError, match="bad BLE address"):
+            kc.new_satellite("door", "ble", ble_role="beacon", address="nope")
+        blob = kc.new_satellite("door", "ble", ble_role="beacon", address="aa-bb-cc-dd-ee-b1")
+        plain = kc.new_satellite("garage", "ble")
+    entry = Keychain(kc.directory).get(blob["sat_id"])
+    assert entry["ble_role"] == "beacon" and entry["address"] == "AA:BB:CC:DD:EE:B1"
+    assert blob["ble"]["role"] == "beacon" and blob["ble"]["address"] == "AA:BB:CC:DD:EE:B1"
+    assert "ble_role" not in kc.get(plain["sat_id"]) and plain["ble"]["role"] == "scanner"
+    assert kc_mod.verify_cert(kc.car_pub, blob["cert"]) is None   # cert fields unchanged
+
+
+def test_satkey_cli_ble_role(kc, capsys):
+    import importlib.machinery
+    import importlib.util
+    from pathlib import Path
+    script = Path(__file__).resolve().parents[1] / "POCO/rootfs/usr/local/sbin/prius-satkey"
+    loader = importlib.machinery.SourceFileLoader("prius_satkey", str(script))
+    spec = importlib.util.spec_from_loader("prius_satkey", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    pub = b64e(b"\x07" * 32)
+    assert mod.main(["--dir", kc.directory, "sign", "door", "--pubkey", pub, "--transport", "ble",
+                     "--ble-role", "beacon", "--address", "AA:BB:CC:DD:EE:B1"]) == 0
+    blob = json.loads(capsys.readouterr().out)
+    assert blob["ble"] == {"service": "580e04f7-d4c0-458b-b2e0-4ebb01a960c8",
+                           "car_addr": "02:00:E8:51:02:58", "role": "beacon",
+                           "address": "AA:BB:CC:DD:EE:B1"}
+    with pytest.raises(SystemExit, match="needs its BLE address"):
+        mod.main(["--dir", kc.directory, "sign", "door2", "--pubkey", b64e(b"\x08" * 32),
+                  "--transport", "ble", "--ble-role", "beacon"])
+    mod.main(["--dir", kc.directory, "list"])
+    assert "[beacon AA:BB:CC:DD:EE:B1]" in capsys.readouterr().out

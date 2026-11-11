@@ -57,6 +57,8 @@ warning when that is not writable, e.g. on the P52).
     "300": {"name": "garage", "transport": "ble", "fp": "…", "pubkey": "<base64 raw 32 B>",
             "address": "AA:BB:CC:DD:EE:FF", "caps": ["relay", "temp"],
             "enrolled": 1762700000, "cert": {…}, "auth": "ed25519"},
+    "301": {"name": "door", "transport": "ble", "ble_role": "beacon",
+            "address": "AA:BB:CC:DD:EE:B1", "…": "…"},
     "106": {"name": "drl", "transport": "rs485", "auth": "none"}
   },
   "revoked": ["<fp>", "…"]
@@ -83,6 +85,9 @@ warning when that is not writable, e.g. on the P52).
     the entry to the keychain. `--id` picks a free id in the range otherwise;
   * `sign --pubkey <b64> <name> --transport …` — same without generating the
     key (the satellite made its own);
+  * `new`/`sign` take `--ble-role scanner|beacon` (BLE only, default
+    scanner) and `--address` (required for a beacon: the car connects to it;
+    see §4 "BLE roles");
   * `revoke <id|fp|name>`, `forget <id>`, `export-pub`.
 
 ## 3. Authentication handshake (transport-agnostic, NDJSON)
@@ -178,6 +183,7 @@ Python 3, `dbus-python` + GLib, root, `prius-bled.service`) owns `hci0`:
   | backend → bled | `{"cmd":"adv","interval_ms":10000,"flags":1}` |
   | backend → bled | `{"cmd":"pairable","seconds":120}` (0 = close) |
   | backend → bled | `{"cmd":"status"}` |
+  | backend → bled | `{"cmd":"central","enabled":true,"addresses":["AA:…"],"scan_s":8,"period_s":20}` (central role, see "BLE roles") |
 
   `BleTransport` reconnects to the socket with backoff; `available=false`
   while bled is unreachable.
@@ -258,6 +264,112 @@ Fixed by the first implementation where the contract above was silent:
   links reported by a fresh `status` are reconciled into `up`/`down` events
   (after a bled restart). Optional `rediscover_s` makes `tick()` scan on its
   own; by default the registry drives rediscovery.
+
+### BLE roles: car-advertises and satellite-advertises (decision 2026-11-11)
+
+Two satellite kinds, chosen per satellite at enrolment (`keychain.json`
+`ble_role`: `"scanner"` default, or `"beacon"`):
+
+| | **scanner satellite** (mains/12 V powered) | **beacon satellite** (coin cell, passive) |
+|---|---|---|
+| who advertises | the **car** (always, 10 s; 1 s with ACC on or pairing open) | the **satellite** (its own interval, our service UUID + its name) |
+| who scans + connects | the satellite (GAP central) | the **car**, only while the power profile is `full` (ACC on, or a pairing window open) — never in `low` |
+| GATT server | the car (`prius-bled`, service `580e04f7-…`, TX notify car→sat with the 17-char address prefix, RX write sat→car) | the satellite: the **same service and characteristic UUIDs**, mirrored: TX (`…0001`, notify) = sat→car, RX (`…0002`, write) = car→sat; no address prefix (one client) |
+| auth | car sends the challenge first on every link, both cases (docs §3) | same |
+| discovery listing | connected-but-unknown devices while pairing is open | car's scan results (RSSI, name) while in `full`; enrolled beacons are connected as soon as seen |
+
+`prius-bled` therefore runs both roles on hci0: peripheral always; central
+(scan + connect + GATT client) only when the backend sends
+`{"cmd":"central","enabled":true,"addresses":[...]}` (enrolled beacon
+addresses to connect to; empty list = scan-and-report only). The backend
+sends `enabled=true` when the power profile is `full` or a pairing window is
+open, `false` otherwise; `BleTransport.set_central(enabled, addresses)` is the
+hook. A beacon link surfaces to the backend exactly like a scanner link
+(`link up/down`, `data`), so the registry/auth/queue code is identical.
+
+Power: continuous scanning ≈ 10 mA at the phone, only with ACC on, so free;
+in `low` the car just advertises (< 0.1 mA) and beacon satellites wait.
+
+#### Central role implementation (prius-bled, 2026-11-11)
+
+* **Command** `{"cmd":"central","enabled":bool,"addresses":[…],"scan_s":8,"period_s":20}`
+  → ack `{"ack":"central","ok":true}`. `enabled` must be a JSON boolean
+  (default false); `addresses` = up to 32 MACs (normalised to upper-case
+  colon form, de-duplicated; empty = scan and report only); `scan_s`
+  clamped to 1–60, `period_s` to `scan_s`–300 (`scan_s == period_s` =
+  continuous). The command is idempotent: re-sending the same values (the
+  backend does after every reconnect) does not restart the duty cycle;
+  changing `addresses` drops central links/attempts to addresses no longer
+  listed; `enabled:false` stops discovery and disconnects every central link
+  and attempt.
+* **Discovery duty cycle**: 8 s of discovery every 20 s by default (40 %).
+  BlueZ/kernel LE discovery scans at a ~100 % window while on and the single
+  controller also serves our advertising and GATT-server links; 40 % leaves
+  it free for connection events most of the time while a beacon advertising
+  every ≤ 2 s is still caught in every scan phase (first connect ≤ ~12 s +
+  connect time). Discovery = `Adapter1.SetDiscoveryFilter({UUIDs:[service],
+  Transport:"le", DuplicateData:true})` + `StartDiscovery`, shared with the
+  one-shot `scan` command (one D-Bus client = one BlueZ discovery session,
+  so bled starts it while either wants it and stops it, with the filter
+  cleared, when neither does). The advertisement stays registered throughout.
+* **Sightings** (any device advertising our service while discovery is on)
+  go to the backend as the usual `{"ev":"scan","devices":[{addr,name,rssi,uuids}],"central":true}`,
+  at most one event per 10 s (devices seen since the previous event,
+  newest RSSI) — `BleTransport` turns them into its normal discovery list.
+* **Connect** (sighted address ∈ `addresses`, not linked, not within 5 s of a
+  failure / link down): `Device1.Connect()` → wait for
+  `ServicesResolved=true` → find our service + `…0001`/`…0002` on the remote
+  (`ObjectManager.GetManagedObjects`) → if not `Paired`: `Device1.Pair()`
+  (Just Works) → `GattCharacteristic1.StartNotify()` on the remote TX →
+  link up. Setup timeout 30 s (then `Disconnect`, retry on a later
+  sighting). BlueZ reports `Connected=true` during setup; bled does not treat
+  that device as a peripheral link.
+* **Data**: remote TX notifications arrive as `PropertiesChanged(Value)` on
+  the remote characteristic and are reassembled into lines exactly like RX
+  writes (4 kB cap, blank lines dropped) → `{"ev":"data",…}`. `send` to a
+  central link = `GattCharacteristic1.WriteValue(chunk, {"type":"command"})`
+  on the remote RX when it has `write-without-response`, `"request"`
+  otherwise; chunks of MTU − 3 bytes, **no address prefix**; MTU from the
+  remote characteristic's `MTU` property (BlueZ ≥ 5.62; 23 otherwise).
+  The peripheral side's notify chunking uses the smallest MTU of
+  **peripheral** links only.
+* **Events**: `link` (up/down) and every `status.links[]` entry now carry
+  `"role":"peripheral"|"central"`; `status` gains
+  `"central":{"enabled","scanning","targets","links"}` (a scan-phase flip
+  alone does not emit a status; the 30 s periodic one carries it).
+* **Pairing policy**: the agent accepts Just Works pairing/authorization when
+  the pairing window is open **or** the device is in the current central
+  `addresses` while central is enabled; anything else is rejected. For our
+  own `Pair()` the kernel confirms Just Works itself (we are the initiator),
+  so the agent is mostly consulted only on re-pairing. Because the kernel
+  asks for a *bond* only while the adapter is bondable, bled holds
+  `Adapter1.Pairable=true` for the duration of a central `Pair()` and
+  restores it afterwards (incoming pairing during that hold still goes
+  through the agent above). The bond is what lets the encrypt-only remote
+  characteristics work on later connections without re-pairing.
+* **Lifecycle**: radio loss drops central links (link down) and pauses the
+  cycle; bluetoothd/adapter return restarts it if enabled. Shutdown
+  disconnects central links, stops discovery and restores `Pairable`.
+* **Beacon satellite contract** (for firmware): advertise connectable with
+  the service UUID `580e04f7-…60c8` (+ a name); serve the same service with
+  TX `…0001` notify (sat → car; the car subscribes) and RX `…0002` write and/or
+  write-without-response (car → sat), both encrypted; allow Just Works
+  bonding initiated by the car; NDJSON lines, `\n`-terminated, may span
+  notifications/writes; the car sends the auth challenge first (§3). Use a
+  static/public address: the keychain stores it and the car connects by it.
+* **Backend**: `SatelliteTransport.set_central(enabled, addresses)` (no-op
+  default); `BleTransport` sends it and re-sends it after every bled
+  `hello`; its status `detail` gets `, central` while bled reports central
+  enabled. The registry computes `enabled = power_mode == "full" or acc_on
+  or a BLE pairing window open` and `addresses` = keychain BLE entries with
+  `ble_role: "beacon"` and an `address` (rechecked every 1 s, immediately on
+  pairing open/close), and calls `set_central` on change only.
+* **Keychain**: optional per-entry `"ble_role": "scanner"|"beacon"` (absent =
+  scanner); a beacon needs `"address"` (validated, normalised). The
+  provisioning blob's `ble` section carries `role` (+ `address`).
+  `prius-satkey new|sign … --transport ble --ble-role beacon --address AA:BB:CC:DD:EE:FF`;
+  `list` marks beacons. The cert format is unchanged (role/address are not
+  signed; the car's own keychain is authoritative for them).
 
 ### Wi-Fi (`WifiTransport`)
 Satellites are clients of the `prius` AP (`10.42.0.1/24`, NM shared).
@@ -485,6 +597,8 @@ python3 scripts/sat_wifi_sim.py --blob $K/garage.json --port 8790 --beacon-addr 
 # or let it dial the car instead of beaconing:
 python3 scripts/sat_wifi_sim.py --blob $K/garage.json --dial 127.0.0.1:8788 --no-beacon
 ```
+
+**Reference BLE satellite firmware** (ESP32-C6/S3, Arduino + NimBLE, scanner mode A and beacon mode B, bench-verified against prius-bled): `satellites/esp32s3-ble/README.md`.
 
 ## 9. Not in this round
 

@@ -502,3 +502,69 @@ def test_service_wiring_preserves_rs485_path(kc):
         assert store.state.satellites.nodes[121].name == "horn"
     finally:
         svc.satellite_registry.stop()
+
+
+def test_ble_central_follows_profile_pairing_and_keychain(kc):
+    from cyberpunk_computer.state.actions import (
+        SetPowerboxIgnitionAction,
+        SetPowerboxPowerModeAction,
+    )
+
+    class CentralTransport(FakeTransport):
+        def __init__(self):
+            super().__init__("ble")
+            self.central = []
+
+        def set_central(self, enabled, addresses=()):
+            self.central.append((enabled, list(addresses)))
+
+    with kc.transaction():
+        kc.new_satellite("door", "ble", ble_role="beacon", address="aa:bb:cc:dd:ee:b1")
+        kc.new_satellite("garage", "ble", address="AA:BB:CC:DD:EE:01")   # scanner: not a target
+        kc.new_satellite("cam", "wifi")
+    t = CentralTransport()
+    store, reg, clock = make(kc, {"ble": t})
+    reg.tick()
+    assert t.central == [(False, ["AA:BB:CC:DD:EE:B1"])]      # low profile: off
+    reg.tick()
+    clock.advance(5)
+    reg.tick()
+    assert len(t.central) == 1                                # on change only
+
+    store.dispatch(SetPowerboxPowerModeAction("full"))
+    clock.advance(1)
+    reg.tick()
+    assert t.central[-1] == (True, ["AA:BB:CC:DD:EE:B1"])
+    store.dispatch(SetPowerboxPowerModeAction("low"))
+    clock.advance(1)
+    reg.tick()
+    assert t.central[-1][0] is False
+
+    # a pairing window turns it on at once (no 1 s wait), closing turns it off
+    reg.pair_open(60)
+    assert t.central[-1][0] is True
+    reg.pair_open(0)
+    assert t.central[-1][0] is False
+
+    # ACC on counts as well (power-mode rules disabled)
+    store.dispatch(SetPowerboxIgnitionAction(acc_on=True))
+    clock.advance(1)
+    reg.tick()
+    assert t.central[-1][0] is True
+
+    # a beacon enrolled by prius-satkey shows up in the address list
+    other = Keychain(kc.directory)
+    with other.transaction():
+        other.enrol_pubkey("window", "ble", b64e(b"\x05" * 32), ble_role="beacon",
+                           address="AA:BB:CC:DD:EE:B2")
+    clock.advance(3)
+    reg.tick()
+    assert t.central[-1] == (True, ["AA:BB:CC:DD:EE:B1", "AA:BB:CC:DD:EE:B2"])
+
+
+def test_central_noop_for_transports_without_it(kc):
+    t = FakeTransport("ble")            # no set_central override: ABC default no-op
+    store, reg, clock = make(kc, {"ble": t})
+    reg.tick()
+    reg.pair_open(30)
+    reg.tick()

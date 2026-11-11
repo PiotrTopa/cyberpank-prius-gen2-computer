@@ -291,3 +291,50 @@ def test_stop_is_idempotent(sock_path):
     t.start()
     t.stop()
     t.stop()
+
+
+def test_set_central_sent_and_resent_after_reconnect(transport, sock_path):
+    transport.set_central(True, ["aa:bb:cc:dd:ee:b1"])    # before bled exists: remembered
+    bled = FakeBled(sock_path)
+    transport.start()
+    try:
+        assert bled.wait_cmd("central") == {"cmd": "central", "enabled": True,
+                                            "addresses": ["AA:BB:CC:DD:EE:B1"]}
+        wait_for(lambda: transport.status().available)
+        assert transport.status().detail == "10 s, central"      # no central in status yet
+        bled.emit(bled.status(central={"enabled": False, "scanning": False, "targets": 0,
+                                       "links": 0}))
+        wait_for(lambda: transport.status().detail == "10 s")    # bled's report wins
+        transport.set_central(False, [])
+        wait_for(lambda: [c for c in bled.commands if c["cmd"] == "central"][-1]["enabled"] is False)
+        transport.set_central(True, ["AA:BB:CC:DD:EE:B2", "AA:BB:CC:DD:EE:B1"])
+        wait_for(lambda: len([c for c in bled.commands if c["cmd"] == "central"]) == 3)
+    finally:
+        bled.close()
+    wait_for(lambda: not transport.status().available)
+    bled2 = FakeBled(sock_path)                           # restarted bled gets the last state
+    try:
+        assert bled2.wait_cmd("central", timeout=5) == {
+            "cmd": "central", "enabled": True,
+            "addresses": ["AA:BB:CC:DD:EE:B1", "AA:BB:CC:DD:EE:B2"]}
+    finally:
+        bled2.close()
+
+
+def test_central_scan_events_feed_discovered(transport, sock_path):
+    bled = FakeBled(sock_path)
+    try:
+        transport.start()
+        wait_for(lambda: transport.status().available)
+        bled.emit({"ev": "scan", "central": True, "devices": [
+            {"addr": "AA:BB:CC:DD:EE:B1", "name": "door", "rssi": -58,
+             "uuids": ["580e04f7-d4c0-458b-b2e0-4ebb01a960c8"]}]})
+        (ev,) = wait_events(transport, 1)
+        assert ev.kind == "discovery" and ev.devices[0].name == "door"
+        bled.emit({"ev": "link", "state": "up", "addr": "AA:BB:CC:DD:EE:B1", "name": "door",
+                   "bonded": True, "mtu": 185, "role": "central"})
+        (up,) = wait_events(transport, 1)
+        assert up.kind == "up" and up.extra == {"bonded": True, "mtu": 185}
+        assert transport.send("AA:BB:CC:DD:EE:B1", "{}") is True
+    finally:
+        bled.close()

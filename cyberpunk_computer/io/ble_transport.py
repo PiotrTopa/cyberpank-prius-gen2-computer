@@ -24,7 +24,7 @@ import select
 import socket
 import threading
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .satellite_transport import (
     TRANSPORT_BLE,
@@ -101,6 +101,8 @@ class BleTransport(SatelliteTransport):
         self._scan_pending = False
         self._was_available = False
         self._last_auto_scan = 0.0
+        # desired central role (None = never set); re-sent after every bled hello
+        self._central: Optional[Tuple[bool, Tuple[str, ...]]] = None
 
     # ------------------------------------------------------------------ lifecycle
     def start(self) -> bool:
@@ -163,6 +165,18 @@ class BleTransport(SatelliteTransport):
     def set_advertisement(self, interval_ms: int, flags: int) -> None:
         self._command({"cmd": "adv", "interval_ms": int(interval_ms), "flags": int(flags) & 0xFFFF})
 
+    def set_central(self, enabled: bool, addresses: Sequence[str] = ()) -> None:
+        """Central role on/off + the enrolled beacon addresses to connect to.
+        Remembered and re-sent after every (re)connect to bled, so a bled or
+        backend restart converges without the registry noticing."""
+        want = (bool(enabled), tuple(sorted({str(a).upper() for a in addresses})))
+        with self._lock:
+            self._central = want
+        self._send_central(want)
+
+    def _send_central(self, want: Tuple[bool, Tuple[str, ...]]) -> None:
+        self._command({"cmd": "central", "enabled": want[0], "addresses": list(want[1])})
+
     def request_status(self) -> None:
         self._command({"cmd": "status"})
 
@@ -193,6 +207,9 @@ class BleTransport(SatelliteTransport):
             st = dict(self._bled_status)
             adv = st.get("adv") or self._hello.get("adv") or {}
             last = self._last_discovery
+            central = st.get("central")
+            if not isinstance(central, dict):   # older bled / no status yet: what we asked for
+                central = {"enabled": bool(self._central and self._central[0])}
         seen = len(self.discovered())
         if not connected:
             return TransportStatus(self.name, available=False, state="down",
@@ -207,6 +224,8 @@ class BleTransport(SatelliteTransport):
             state, detail = "advertising", _fmt_interval(adv.get("interval_ms"))
         else:
             state, detail = "down", "not advertising"
+        if powered and central.get("enabled"):
+            detail = "%s, central" % detail if detail else "central"
         return TransportStatus(self.name, available=bool(powered), state=state, detail=detail,
                                last_discovery=last, devices_seen=seen)
 
@@ -337,7 +356,10 @@ class BleTransport(SatelliteTransport):
         if ev == "hello":
             with self._lock:
                 self._hello = msg
+                central = self._central
             logger.info("BLE: bled hello adapter=%s address=%s", msg.get("adapter"), msg.get("address"))
+            if central is not None:
+                self._send_central(central)
         elif ev == "status":
             self._on_status(msg)
         elif ev == "link":
