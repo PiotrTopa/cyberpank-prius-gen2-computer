@@ -120,7 +120,7 @@ actually drop. It runs inside `wdt_sleep_ms()` — the main loop's
 inter-telemetry wait and every button hold — deadline-paced (the sleep length
 is unchanged). Before 2.2.3 the check ran only once per main-loop pass, i.e.
 ~1 s, despite the old 100 ms constant. Cost: one 1-byte I2C read per check
-(~25 µs on the wire at 400 kHz, ~0.1 ms with interpreter overhead, ~2 %).
+(~100 µs on the wire at 100 kHz, ~0.2 ms with interpreter overhead, ~4 %). The bus runs at 100 kHz since fw 2.2.4: the PCF8574 is a standard-mode-only part.
 The 5 ms bound does not hold while the loop body itself runs (sensor reads,
 STATUS, inbound commands, a running `bean` `loop`/`square`/`pulse` op); those
 gaps are a few ms each, up to ~1 s for a bench `square`. `RELAY_IO` errors are

@@ -135,7 +135,7 @@ import pcf8574                      # PCF8574 driver + RelayBoard (pin map, NC, 
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-VERSION = "2.2.3"
+VERSION = "2.2.4"
 
 # Device role — reported in the unified identify ("whoami") response and the
 # ready banner so the computer can discover which USB-CDC port is the powerbox
@@ -173,8 +173,13 @@ ACC_HEARTBEAT_MS = 5000
 # main loop's inter-telemetry sleep and every button hold), deadline-paced;
 # before 2.2.3 it only ran once per main-loop pass, i.e. every ~1 s despite
 # the old 100 ms constant. Cost: one 1-byte I2C read per check (~25 us on the
-# wire at 400 kHz, ~0.1 ms with MicroPython overhead, ~2 % of the time).
+# wire at 100 kHz, ~0.2 ms with MicroPython overhead, ~4 % of the time).
 RELAY_VERIFY_MS = 5
+# I2C bus clock. 100 kHz, not 400: the PCF8574 relay expander is a
+# standard-mode-only part (100 kHz max in every PCF8574/PCF8574A datasheet);
+# the INA219/BMP280 are fine at either. Ran out of spec at 400 kHz until fw
+# 2.2.4 (2026-11-11) while the expander kept turning up reset to 0xFF.
+I2C_FREQ = 100000
 
 # Re-announce identity (IDENT on the system channel) at least this often. This
 # makes the device discoverable by the computer at ANY time — not just at boot —
@@ -540,7 +545,7 @@ def setup_i2c():
     """Try standard pin assignment first, then swapped (SoftI2C fallback)."""
     # Standard: SDA=GP0, SCL=GP1
     try:
-        i2c = I2C(0, sda=Pin(0), scl=Pin(1), freq=400000)
+        i2c = I2C(0, sda=Pin(0), scl=Pin(1), freq=I2C_FREQ)
         devices = i2c.scan()
         if devices:
             tx(ID_SYSTEM, {
@@ -554,7 +559,7 @@ def setup_i2c():
 
     # Swapped: SDA=GP1, SCL=GP0 (software I2C)
     try:
-        i2c = SoftI2C(sda=Pin(1), scl=Pin(0), freq=400000)
+        i2c = SoftI2C(sda=Pin(1), scl=Pin(0), freq=I2C_FREQ)
         devices = i2c.scan()
         if devices:
             tx(ID_SYSTEM, {
