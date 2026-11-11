@@ -283,6 +283,9 @@ def parse_powerbox_system(data: dict) -> List[Action]:
             uptime_s=_i("up"),
             relay_fix_count=_i("rly_fix"),
             relay_err_count=_i("rly_err"),
+            # fw >= 2.2.5 sends "acc_sim":1 only while the bench override is
+            # active; its absence means no override.
+            acc_sim=bool(_coerce_bool(data.get("acc_sim"))),
         )]
 
     if msg == "PMLOG":
@@ -351,6 +354,12 @@ def parse_powerbox_system(data: dict) -> List[Action]:
         return []
 
     ack = data.get("ack")
+    if ack == "acc_sim":
+        v = data.get("v")
+        logger.warning("Powerbox ACC override %s (real ACC pin %s) — BENCH ONLY",
+                       "cleared" if v is None else ("ON" if v else "OFF"),
+                       data.get("pin"))
+        return [SetPowerboxPowerStatusAction(acc_sim=v is not None)]
     if ack == "bean":
         # BEAN transceiver bench result (fw >= 2.2.3). The firmware also
         # echoes it as a PMEVENT (ev "bean"), which is what gets journalled.
@@ -670,6 +679,18 @@ def build_bean_command(op: str, **kw) -> OutgoingCommand:
     )
 
 
+def build_acc_sim_command(on: Optional[bool]) -> OutgoingCommand:
+    """BENCH ONLY: override the powerbox ACC input (fw >= 2.2.5): True / False
+    simulate key-on / key-off everywhere the firmware reports ACC, None clears.
+    RAM only on the board; it auto-expires after 30 min."""
+    return OutgoingCommand(
+        device_id=POWERBOX_LOCAL_SYSTEM,
+        command_type="power",
+        payload={"a": "acc_sim", "v": None if on is None else (1 if on else 0)},
+        priority=50,
+    )
+
+
 class PowerboxCommander:
     """Send commands to the powerbox over an OutputPort (None = log only)."""
 
@@ -735,6 +756,10 @@ class PowerboxCommander:
 
     def set_fan(self, pct: float) -> bool:
         return self._send(build_fan_command(pct), "fan %.0f%%" % float(pct))
+
+    def set_acc_sim(self, on: Optional[bool]) -> bool:
+        """BENCH ONLY ACC override (None clears)."""
+        return self._send(build_acc_sim_command(on), "acc_sim %s" % on, warn=True)
 
     def send_bean(self, op: str, **kw) -> bool:
         """BEAN transceiver bench op (see :func:`build_bean_command`)."""

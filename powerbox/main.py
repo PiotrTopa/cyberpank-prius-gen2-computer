@@ -36,6 +36,12 @@ Inbound commands from the computer (device 0):
     {"id": 0, "d": {"a": "ping"}}    → {"msg":"PONG"}
     {"id": 0, "d": {"a": "getlog"}}  → PMLOG (power-event ring buffer)
     {"id": 0, "d": {"a": "i2c_scan"}}
+    {"id": 0, "d": {"a": "acc_sim", "v": 0|1|null}}  BENCH ONLY (fw 2.2.5):
+            override the ACC input everywhere (STATUS acc, ID_EVENTS edges,
+            wake/sleep logic); null/absent clears. RAM only (cleared on boot),
+            auto-expires ACC_SIM_MAX_MS (30 min) after the last set. Ack
+            {"ack":"acc_sim","v":0|1|null,"pin":<real ACC 0|1>}; STATUS
+            carries "acc_sim":1 while active.
     {"id": 0, "d": {"a": "bean", "op": "status"|"tx"|"pulse"|"loop"|"square", ...}}
             BEAN transceiver bench diagnostics (GP7 TX, GP6 RX, fw 2.2.3):
             status                 -> {"tx":0|1,"rx":gp6,"bus":1 if rx low}
@@ -135,7 +141,7 @@ import pcf8574                      # PCF8574 driver + RelayBoard (pin map, NC, 
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-VERSION = "2.2.4"
+VERSION = "2.2.5"
 
 # Device role — reported in the unified identify ("whoami") response and the
 # ready banner so the computer can discover which USB-CDC port is the powerbox
@@ -583,12 +589,67 @@ def setup_acc_pin():
     The accessory feed drives GP11 LOW when ACC is ON (inverted logic); the
     pull-up keeps it HIGH (= ACC OFF) when the line is released.
     """
-    return Pin(ACC_PIN, Pin.IN, Pin.PULL_UP)
+    global _acc_pin
+    _acc_pin = Pin(ACC_PIN, Pin.IN, Pin.PULL_UP)
+    return _acc_pin
+
+
+# Bench-only ACC override ({"a":"acc_sim"}): lets the backend's whole
+# key-off/key-on sequence run without touching the ACC wire. read_acc() is
+# the single point where the pin enters the logic, so the override reaches
+# STATUS, the ID_EVENTS edges and the PowerManager alike. RAM only (a boot
+# clears it) and it expires ACC_SIM_MAX_MS after the last set, so the car can
+# never stay on a stale simulated ACC.
+ACC_SIM_MAX_MS = 30 * 60 * 1000
+_acc_sim = None                   # None = off, else the simulated ACC (bool)
+_acc_sim_t0 = 0
+_acc_pin = None                   # the GP11 Pin, for the real level in acks
+
+
+def acc_sim_active():
+    """True while an override is set; clears it once ACC_SIM_MAX_MS passed."""
+    global _acc_sim
+    if _acc_sim is not None and \
+            time.ticks_diff(time.ticks_ms(), _acc_sim_t0) >= ACC_SIM_MAX_MS:
+        _acc_sim = None
+        log_event("acc_sim", v=None, why="expired")
+    return _acc_sim is not None
+
+
+def set_acc_sim(v):
+    """Set (True/False) or clear (None) the ACC override; restarts the timer."""
+    global _acc_sim, _acc_sim_t0
+    _acc_sim = None if v is None else bool(v)
+    _acc_sim_t0 = time.ticks_ms()
+    log_event("acc_sim", v=None if v is None else (1 if v else 0))
+
+
+def read_acc_pin(acc_pin) -> bool:
+    """The REAL ACC input: True when ON. GP11 is active-low (inverted)."""
+    return acc_pin.value() == 0
 
 
 def read_acc(acc_pin) -> bool:
-    """Return True when ACC/ignition is ON. GP11 is active-low (inverted)."""
-    return acc_pin.value() == 0
+    """Effective ACC: the bench override while one is active, else the pin."""
+    real = read_acc_pin(acc_pin)
+    if acc_sim_active():
+        return _acc_sim
+    return real
+
+
+def acc_step(acc_pin, acc_state, last_tx):
+    """One main-loop ACC pass: read (override applied), feed the
+    PowerManager, send the ID_EVENTS {"acc":..} on a change or as the
+    heartbeat. Returns (acc_state, last_tx)."""
+    acc_now = read_acc(acc_pin)
+    if _pm is not None:
+        _pm.on_acc(acc_now)
+    now_ms = time.ticks_ms()
+    if acc_now != acc_state or \
+            time.ticks_diff(now_ms, last_tx) >= ACC_HEARTBEAT_MS:
+        tx(ID_EVENTS, {"acc": acc_now})
+        return acc_now, now_ms
+    return acc_state, last_tx
 
 
 # ─── Chassis fan ──────────────────────────────────────────────────────────────
@@ -1201,6 +1262,8 @@ class PowerManager:
             "rc": _reset_cause,
             "up": uptime_s(),
         }
+        if acc_sim_active():
+            payload["acc_sim"] = 1        # never let a simulated ACC hide
         if _fan is not None:
             payload["fan"] = _fan.pct
             payload["rpm"] = _fan.rpm
@@ -1561,6 +1624,18 @@ def process_command(line: str, config: Config):
     elif action == "bean":
         bean_command(data)
 
+    elif action == "acc_sim":
+        # BENCH ONLY: override the ACC input (null/absent clears).
+        v = data.get("v")
+        if v is not None and v not in (0, 1, True, False):
+            tx_error("ACC_SIM", "v=%s (0|1|null)" % v)
+        else:
+            set_acc_sim(None if v is None else bool(v))
+            tx(ID_SYSTEM, {"ack": "acc_sim",
+                           "v": None if v is None else (1 if v else 0),
+                           "pin": None if _acc_pin is None
+                           else (1 if read_acc_pin(_acc_pin) else 0)})
+
     elif action == "i2c_scan":
         if config.i2c is None:
             tx_error("I2C_SCAN", "no bus")
@@ -1685,14 +1760,8 @@ def main():
             feed_wdt()
             bean_release()
             poll_stdin(idle_config)
-            acc_now = read_acc(acc_pin)
-            _pm.on_acc(acc_now)
+            acc_state, last_acc_tx = acc_step(acc_pin, acc_state, last_acc_tx)
             now_ms = time.ticks_ms()
-            if acc_now != acc_state or \
-                    time.ticks_diff(now_ms, last_acc_tx) >= ACC_HEARTBEAT_MS:
-                acc_state = acc_now
-                last_acc_tx = now_ms
-                tx(ID_EVENTS, {"acc": acc_state})
             if time.ticks_diff(now_ms, last_ident_tx) >= IDENT_HEARTBEAT_MS:
                 last_ident_tx = now_ms
                 tx_ident()
@@ -1796,15 +1865,10 @@ def main():
                 total_mah = 0.0
                 config._reset_mah = False
 
-            # Read ignition (ACC) on GP11 — emit on change or as a heartbeat
-            acc_now = read_acc(acc_pin)
-            _pm.on_acc(acc_now)
+            # Read ignition (ACC) on GP11 (or the bench override) — emit on
+            # change or as a heartbeat
+            acc_state, last_acc_tx = acc_step(acc_pin, acc_state, last_acc_tx)
             now_ms = time.ticks_ms()
-            if acc_now != acc_state or \
-                    time.ticks_diff(now_ms, last_acc_tx) >= ACC_HEARTBEAT_MS:
-                acc_state = acc_now
-                last_acc_tx = now_ms
-                tx(ID_EVENTS, {"acc": acc_state})
 
             # Periodic identity so the computer can (re)discover us at any time
             if time.ticks_diff(now_ms, last_ident_tx) >= IDENT_HEARTBEAT_MS:

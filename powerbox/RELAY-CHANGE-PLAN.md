@@ -102,6 +102,16 @@ converge the rest. The MFD manager recovers through its ON-state watchdog.
 - **BEAN transceiver bench (2026-11-11).** Pins: GP7 TX (output, LOW in `boot.py` and first thing in `main()`), GP6 RX (input, no pull, inverted). Command `{"a":"bean","op":"status|tx|pulse|loop|square"}` → `{"ack":"bean",...}` + PMEVENT echo, `ERROR BEAN_ARGS` on bad args; TX is released on every path. Backend: REST `powerbox_bean`, state `powerbox.bean`. Docs: README "BEAN transceiver bench". Tests: `TestBean` in `tests/test_powerbox_firmware.py` and `tests/test_powerbox_io.py`.
 - Flash both `main.py` **and** `boot.py`, plus `pcf8574.py` (the default `prius-flash-powerbox` only sends main.py + boot.py).
 
+**2.2.4 (2026-11-11).** I2C bus at 100 kHz (`I2C_FREQ`): the PCF8574 is a standard-mode-only part.
+
+**2.2.5 (2026-11-11), bench ACC override.**
+- Command `{"a":"acc_sim","v":0|1|null}` → `{"ack":"acc_sim","v":..,"pin":<real ACC>}`. It runs the backend's full key-off/key-on sequence without the ACC wire.
+- The override sits in `read_acc()`, which feeds the ID_EVENTS edges, STATUS `acc` and the PowerManager. STATUS carries `"acc_sim":1` while it is active.
+- RAM only (cleared on boot), and it auto-expires 30 min after the last set (`ACC_SIM_MAX_MS`).
+- Backend: REST `powerbox_acc_sim`, state `powerbox.acc_sim`.
+- Tests: `TestAccSim` in `tests/test_powerbox_firmware.py` and `tests/test_powerbox_io.py`.
+- Only `main.py` changed.
+
 ## Bench verification checklist (after flashing `pcf8574.py` + `main.py`)
 
 1. Banner: `POWERBOX_READY` with `ver 2.1.0` and `rc` arrives once the heartbeat daemon runs; STATUS shows `rc`, `up`, `rly: [null,0,0,0,0,0,0,0]`, `rly_fix 0`, `rly_err 0`.

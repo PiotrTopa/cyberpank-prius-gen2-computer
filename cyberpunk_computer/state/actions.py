@@ -122,6 +122,7 @@ class ActionType(Enum):
     POWERBOX_HARD_RESTART = auto()    # powerbox self-power-cut (restart relay)
     POWERBOX_BEAN = auto()            # BEAN transceiver bench op (fw >= 2.2.3)
     SET_POWERBOX_BEAN = auto()        # mirror of the last BEAN bench result
+    POWERBOX_ACC_SIM = auto()         # bench ACC override (fw >= 2.2.5)
     SET_RELAY = auto()                # relay board load channel (PCF8574 ch 2-8)
     ROADSENSE_MODE = auto()           # roadsense stack operator mode (auto|on|off)
     ROADSENSE_RESTART = auto()        # restart roadsense.target
@@ -1352,6 +1353,7 @@ class SetPowerboxPowerStatusAction(Action):
     uptime_s: Optional[int] = None    # firmware uptime (s)
     relay_fix_count: Optional[int] = None  # relay drift repairs since boot
     relay_err_count: Optional[int] = None  # relay expander I2C errors since boot
+    acc_sim: Optional[bool] = None    # bench ACC override active (fw >= 2.2.5)
 
     def __init__(
         self,
@@ -1366,9 +1368,11 @@ class SetPowerboxPowerStatusAction(Action):
         uptime_s: Optional[int] = None,
         relay_fix_count: Optional[int] = None,
         relay_err_count: Optional[int] = None,
+        acc_sim: Optional[bool] = None,
         source: ActionSource = ActionSource.GATEWAY,
     ):
         super().__init__(ActionType.SET_POWERBOX_POWER_STATUS, source)
+        self.acc_sim = acc_sim
         self.poco_alive = poco_alive
         self.poco2_alive = poco2_alive
         self.pm_state = pm_state
@@ -1481,6 +1485,15 @@ class PowerboxBeanAction(Action):
         super().__init__(ActionType.POWERBOX_BEAN, source)
         self.op = op
         self.params = dict(params or {})
+
+
+class PowerboxAccSimAction(Action):
+    """BENCH ONLY: override the powerbox ACC input (fw >= 2.2.5). ``on`` True /
+    False simulates key-on / key-off; None clears the override. The firmware
+    clears it on boot and after 30 min."""
+    def __init__(self, on: Optional[bool], source: ActionSource = ActionSource.UI):
+        super().__init__(ActionType.POWERBOX_ACC_SIM, source)
+        self.on = None if on is None else bool(on)
 
 
 class SetPowerboxBeanAction(Action):

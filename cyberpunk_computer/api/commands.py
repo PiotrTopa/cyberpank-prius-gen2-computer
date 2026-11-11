@@ -216,6 +216,16 @@ def _build_powerbox_bean(params: Dict[str, Any]) -> Action:
     return PowerboxBeanAction(op, fields, source=ActionSource.UI)
 
 
+def _build_powerbox_acc_sim(params: Dict[str, Any]) -> Action:
+    from ..state.actions import PowerboxAccSimAction
+    on = params.get("on")
+    if on is not None and not (isinstance(on, str) and on.strip().lower() in ("null", "none", "")):
+        on = _as_bool(on, "on")
+    else:
+        on = None
+    return PowerboxAccSimAction(on, source=ActionSource.UI)
+
+
 def _build_input_event(params: Dict[str, Any]) -> Action:
     from ..state.actions import InputEventAction
     device = str(_require(params, "device")).strip()
@@ -449,6 +459,18 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
             "n": "loop: int 1..200 (default 20)",
             "hz": "square: int 100..20000 (default 5000)",
         },
+    },
+    "powerbox_acc_sim": {
+        "builder": _build_powerbox_acc_sim,
+        "description": (
+            "BENCH ONLY: override the powerbox ACC input (fw >= 2.2.5) to run the "
+            "full key-off/key-on sequence without touching the ACC wire. on=true "
+            "simulates key-on, false key-off, null (or omitted) clears. The firmware "
+            "reports the simulated ACC everywhere (events, STATUS, wake/sleep "
+            "logic), flags it in STATUS (powerbox.acc_sim), clears it on boot and "
+            "auto-expires it 30 min after the last set. Never leave it on in the car."
+        ),
+        "params": {"on": "bool | null (null/omitted = clear)"},
     },
     "roadsense_mode": {
         "builder": _build_roadsense_mode,

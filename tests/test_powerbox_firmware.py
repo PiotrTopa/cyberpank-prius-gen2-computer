@@ -328,7 +328,7 @@ def _cmd(fw, payload, cfg):
 
 class TestCommandSurface:
     def test_version_bumped(self, fw):
-        assert fw.main.VERSION == "2.2.4"
+        assert fw.main.VERSION == "2.2.5"
         assert fw.main.I2C_FREQ == 100000  # PCF8574 is a 100 kHz part
 
     def test_relay_command_sets_load_channels(self, fw, pm):
@@ -864,3 +864,113 @@ class TestBean:
         bean.bean.tx.value(1)
         fw.main.bean_release()
         assert FakePin.levels[7] == 0
+
+
+# ─── fw 2.2.5: bench ACC override ({"a":"acc_sim"}) ─────────────────────────
+
+class TestAccSim:
+    @pytest.fixture
+    def acc(self, fw, pm, monkeypatch):
+        m = fw.main
+        t = [5_000_000]
+        monkeypatch.setattr(m.time, "ticks_ms", lambda: t[0])
+        FakePin.readers.clear()
+        real = {"on": False}
+        FakePin.readers[m.ACC_PIN] = lambda: 0 if real["on"] else 1   # active-low
+        pin = m.setup_acc_pin()
+        m._acc_sim = None
+        yield types.SimpleNamespace(m=m, pin=pin, t=t, real=real, pm=pm)
+        m._acc_sim = None
+        FakePin.readers.clear()
+
+    def test_off_by_default_and_pin_passes_through(self, fw, acc):
+        m = acc.m
+        assert m.read_acc(acc.pin) is False
+        acc.real["on"] = True
+        assert m.read_acc(acc.pin) is True
+        assert m.acc_sim_active() is False
+
+    def test_override_on_off_clear_with_ack(self, fw, acc):
+        m = acc.m
+        with Recorder(fw) as rec:
+            _cmd(fw, {"a": "acc_sim", "v": 1}, acc.pm.cfg)
+        assert {"ack": "acc_sim", "v": 1, "pin": 0} in rec.lines
+        assert m.read_acc(acc.pin) is True                 # real pin is OFF
+        acc.real["on"] = True
+        with Recorder(fw) as rec:
+            _cmd(fw, {"a": "acc_sim", "v": 0}, acc.pm.cfg)
+        assert m.read_acc(acc.pin) is False                # real pin is ON
+        assert {"ack": "acc_sim", "v": 0, "pin": 1} in rec.lines
+        with Recorder(fw) as rec:
+            _cmd(fw, {"a": "acc_sim"}, acc.pm.cfg)         # absent = clear
+            _cmd(fw, {"a": "acc_sim", "v": 1}, acc.pm.cfg)
+            _cmd(fw, {"a": "acc_sim", "v": None}, acc.pm.cfg)
+        assert m.read_acc(acc.pin) is True                 # pin again
+        assert rec.lines[-1]["ack"] == "acc_sim" and rec.lines[-1]["v"] is None
+
+    def test_bad_value_refused(self, fw, acc):
+        with Recorder(fw) as rec:
+            _cmd(fw, {"a": "acc_sim", "v": 7}, acc.pm.cfg)
+            _cmd(fw, {"a": "acc_sim", "v": "on"}, acc.pm.cfg)
+        assert [l["code"] for l in rec.lines if l.get("msg") == "ERROR"] == \
+            ["ACC_SIM", "ACC_SIM"]
+        assert acc.m.acc_sim_active() is False
+
+    def test_status_flag_only_while_active(self, fw, acc):
+        with Recorder(fw) as rec:
+            acc.pm.pm._tx_status(0)
+            acc.m.set_acc_sim(False)
+            acc.pm.pm._tx_status(0)
+        st = [l for l in rec.lines if l.get("msg") == "STATUS"]
+        assert "acc_sim" not in st[0] and st[1]["acc_sim"] == 1
+
+    def test_expires_after_30_min(self, fw, acc):
+        m = acc.m
+        assert m.ACC_SIM_MAX_MS == 30 * 60 * 1000
+        with Recorder(fw) as rec:
+            m.set_acc_sim(True)
+            acc.t[0] += m.ACC_SIM_MAX_MS - 1
+            assert m.read_acc(acc.pin) is True
+            acc.t[0] += 1
+            assert m.read_acc(acc.pin) is False             # back to the pin
+        assert m.acc_sim_active() is False
+        assert any(l.get("ev") == "acc_sim" and l.get("why") == "expired"
+                   for l in rec.lines)
+
+    def test_resend_restarts_the_timer(self, fw, acc):
+        m = acc.m
+        m.set_acc_sim(True)
+        acc.t[0] += m.ACC_SIM_MAX_MS - 10
+        m.set_acc_sim(True)
+        acc.t[0] += 100
+        assert m.read_acc(acc.pin) is True
+
+    def test_override_drives_edge_events_and_power_manager(self, fw, acc):
+        m = acc.m
+        p = acc.pm.pm
+        with Recorder(fw) as rec:
+            state, last = m.acc_step(acc.pin, False, acc.t[0])   # real OFF
+            p.on_acc(False)
+            m.set_acc_sim(True)
+            state, last = m.acc_step(acc.pin, state, last)
+            state, last = m.acc_step(acc.pin, state, last)       # no repeat
+            m.set_acc_sim(None)
+            state, last = m.acc_step(acc.pin, state, last)
+        events = [l for l in rec.lines if set(l) == {"acc"}]
+        assert events == [{"acc": True}, {"acc": False}]
+        assert state is False and p.acc_on is False
+        pm_ev = [l["ev"] for l in rec.lines if l.get("ev") in ("acc_on", "acc_off")]
+        assert pm_ev == ["acc_on", "acc_off"]
+
+    def test_sleep_wakes_on_simulated_key_on(self, fw, acc):
+        p = acc.pm.pm
+        p.on_acc(False)
+        p.state = "sleep"
+        with Recorder(fw):
+            acc.m.set_acc_sim(True)
+            acc.m.acc_step(acc.pin, False, acc.t[0])
+        assert p.state == "normal"
+
+    def test_cleared_on_boot(self, fw):
+        src = open(os.path.join(POWERBOX_DIR, "main.py")).read()
+        assert "\n_acc_sim = None " in src                 # RAM only, module init

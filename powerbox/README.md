@@ -31,8 +31,9 @@ To check the current pin level over the REPL on `prius`:
 # prints 0 when ACC is ON (inverted logic), 1 when ACC is OFF
 ```
 
-Current firmware: **2.2.3** (2026-11-11: BEAN transceiver bench on GP6/GP7,
-5 ms relay read-back).
+Current firmware: **2.2.5** (2.2.3: BEAN transceiver bench on GP6/GP7 and
+5 ms relay read-back; 2.2.4: I2C at 100 kHz; 2.2.5: bench ACC override
+`acc_sim`).
 
 ## Power Management (POCO button + relay board + heartbeat + sleep) — firmware 2.1
 
@@ -208,6 +209,7 @@ A rolling "automotive" counter lets each side detect if the other died:
 | Get event log | `{"a":"getlog"}` | Dump the power-event ring buffer as `PMLOG` (cold-boot timeline). |
 | Reset mAh | `{"a":"reset_mah"}` | Zero the coulomb counter. |
 | BEAN bench | `{"a":"bean","op":...}` | fw ≥ 2.2.3, see *BEAN transceiver bench* below. |
+| ACC override (**bench only**) | `{"a":"acc_sim","v":0\|1\|null}` | fw ≥ 2.2.5. Simulates key-on (1) or key-off (0) without touching the ACC wire; `null` or no `v` clears it. The override is applied in `read_acc()`, the single place the pin enters the logic, so it reaches the Events `{"acc":..}` messages (sent on the next main-loop pass when the effective state changes), STATUS `acc` and the wake/sleep logic. STATUS carries `"acc_sim":1` while it is active. Ack: `{"ack":"acc_sim","v":0\|1\|null,"pin":<real ACC, 1 = on>}`; any other `v` → `ERROR ACC_SIM`. **RAM only:** a firmware boot clears it. It also **auto-expires 30 min** (`ACC_SIM_MAX_MS`) after the last set, then the real pin takes over again (`acc_sim` PMEVENT with `why: expired`). Re-sending restarts the 30 min. Set and clear are logged as `acc_sim` PMEVENTs. Backend: REST `powerbox_acc_sim {"on": true\|false\|null}`, mirrored in `powerbox.acc_sim`. |
 
 ### BEAN transceiver bench (fw 2.2.3, 2026-11-11)
 

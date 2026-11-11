@@ -1136,6 +1136,8 @@ class Store:
                 kwargs["fan_duty_pct"] = float(action.fan_pct)
             if getattr(action, "fan_rpm", None) is not None:
                 kwargs["fan_rpm"] = int(action.fan_rpm)
+            if getattr(action, "acc_sim", None) is not None:
+                kwargs["acc_sim"] = bool(action.acc_sim)
             for name in ("reset_cause", "uptime_s", "relay_fix_count", "relay_err_count"):
                 val = getattr(action, name, None)
                 if val is not None:

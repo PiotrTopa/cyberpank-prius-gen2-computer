@@ -353,3 +353,45 @@ class TestBean:
         from cyberpunk_computer.backend import service
         src = inspect.getsource(service)
         assert '"PowerboxBeanAction"' in src and "send_bean(action.op, **action.params)" in src
+
+
+class TestAccSim:
+    def test_command_payload(self):
+        from cyberpunk_computer.io.powerbox import build_acc_sim_command
+        assert build_acc_sim_command(True).payload == {"a": "acc_sim", "v": 1}
+        assert build_acc_sim_command(False).payload == {"a": "acc_sim", "v": 0}
+        assert build_acc_sim_command(None).payload == {"a": "acc_sim", "v": None}
+
+    def test_commander(self):
+        sent = []
+
+        class Port:
+            def send(self, cmd):
+                sent.append(cmd.payload)
+                return True
+
+        assert PowerboxCommander(output_port=Port()).set_acc_sim(None)
+        assert sent == [{"a": "acc_sim", "v": None}]
+
+    def test_status_flag_and_ack_mirrored(self):
+        store = Store()
+        store.dispatch(parse_powerbox_system(_status(acc_sim=1))[0])
+        assert store.state.powerbox.acc_sim is True
+        store.dispatch(parse_powerbox_system(_status())[0])   # flag absent = off
+        assert store.state.powerbox.acc_sim is False
+        (a,) = parse_powerbox_system({"ack": "acc_sim", "v": 0, "pin": 1})
+        store.dispatch(a)
+        assert store.state.powerbox.acc_sim is True
+        (a,) = parse_powerbox_system({"ack": "acc_sim", "v": None, "pin": 1})
+        store.dispatch(a)
+        assert store.state.powerbox.acc_sim is False
+
+    def test_rest_command(self):
+        from cyberpunk_computer.api.commands import COMMANDS, CommandError, build_command
+        assert build_command("powerbox_acc_sim", {"on": True}).on is True
+        assert build_command("powerbox_acc_sim", {"on": "false"}).on is False
+        assert build_command("powerbox_acc_sim", {"on": None}).on is None
+        assert build_command("powerbox_acc_sim", {}).on is None
+        with pytest.raises(CommandError):
+            build_command("powerbox_acc_sim", {"on": "maybe"})
+        assert "BENCH ONLY" in COMMANDS["powerbox_acc_sim"]["description"]

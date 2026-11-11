@@ -688,6 +688,10 @@ class PowerboxState:
     # the firmware ack fields ({"op":..., ...results}) plus "ts" (time.time()
     # of receipt), or {"error": "BEAN_ARGS"|"BEAN", "detail": ..., "ts": ...}.
     bean: Optional[Mapping] = None
+    # Bench ACC override (fw >= 2.2.5, REST powerbox_acc_sim): True while the
+    # firmware reports a simulated ACC (STATUS "acc_sim":1); the simulated
+    # value itself is what acc_on shows. None until the first STATUS/ack.
+    acc_sim: Optional[bool] = None
 
     last_update_time: float = 0.0
 
