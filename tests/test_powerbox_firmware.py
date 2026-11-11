@@ -23,13 +23,23 @@ POWERBOX_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "powerbo
 class FakePin:
     IN, OUT, PULL_UP, IRQ_FALLING = 0, 1, 2, 4
     log = []                      # (pin, mode, value|pull) for every construction
+    levels = {}                   # pin -> last driven output level
+    readers = {}                  # pin -> callable giving the input level
+    writes = []                   # (pin, level) for every value(v) call
 
     def __init__(self, pin_no, mode=None, pull=None, value=None):
         self.pin_no = pin_no
         FakePin.log.append((pin_no, mode, pull if value is None else value))
+        if value is not None:
+            FakePin.levels[pin_no] = value
 
-    def value(self):
-        return 1
+    def value(self, v=None):
+        if v is not None:
+            FakePin.levels[self.pin_no] = v
+            FakePin.writes.append((self.pin_no, v))
+            return None
+        reader = FakePin.readers.get(self.pin_no)
+        return reader() if reader is not None else 1
 
     def irq(self, **kw):
         pass
@@ -76,6 +86,14 @@ def _install_stubs():
         time.ticks_diff = lambda a, b: a - b
         time.ticks_add = lambda a, b: a + b
         time.sleep_ms = lambda ms: None
+    if not hasattr(time, "ticks_us"):
+        time.ticks_us = lambda: int(time.perf_counter() * 1000000)
+
+        def _sleep_us(us):
+            end = time.perf_counter() + us / 1e6
+            while time.perf_counter() < end:
+                pass
+        time.sleep_us = _sleep_us
 
 
 def _load(name, filename):
@@ -310,7 +328,7 @@ def _cmd(fw, payload, cfg):
 
 class TestCommandSurface:
     def test_version_bumped(self, fw):
-        assert fw.main.VERSION == "2.2.2"
+        assert fw.main.VERSION == "2.2.3"
 
     def test_relay_command_sets_load_channels(self, fw, pm):
         with Recorder(fw) as rec:
@@ -482,8 +500,14 @@ class TestButtonSafety:
         exec(compile(src, "boot.py", "exec"), {"__name__": "boot"}, ns)
         assert ns["ACTIVE_HIGH"] == fw.main.POCO_BTN_ACTIVE_HIGH
         assert ns["BTN_PIN"] == fw.main.POCO1_BTN_PIN
-        # boot.py leaves the button released
-        assert FakePin.log[-1][0] == 27 and FakePin.log[-1][1:] == (FakePin.IN, None)
+        # boot.py leaves the button released ...
+        btn = [e for e in FakePin.log if e[0] == 27]
+        assert btn[-1][1:] == (FakePin.IN, None)
+        # ... and the BEAN TX (GP7) driven LOW, RX (GP6) a plain input.
+        assert (7, FakePin.OUT, 0) in FakePin.log
+        assert (6, FakePin.IN, None) in FakePin.log
+        assert ns["BEAN_TX_PIN"] == fw.main.BEAN_TX_PIN == 7
+        assert ns["BEAN_RX_PIN"] == fw.main.BEAN_RX_PIN == 6
 
 
 class TestFirmwareUpload:
@@ -594,3 +618,248 @@ class TestWakeLadderRebootGrace:
         with Recorder(fw):
             pm.pm.tick(12.0)                     # never saw a heartbeat
         assert presses == [(fw.main.POCO_BTN_PRESS_MS, "wake")]
+
+
+# ─── fw 2.2.3: relay read-back cadence (5 ms) ────────────────────────────────
+
+class FakeClockMs:
+    """Deterministic ms clock: sleep_ms advances it."""
+
+    def __init__(self, t=50_000):
+        self.t = t
+
+    def ticks(self):
+        return self.t
+
+    def sleep(self, ms):
+        self.t += ms
+
+
+class TestRelayVerifyCadence:
+    """2026-11-11: the PCF8574 keeps resetting to 0xFF in the field; the
+    read-back must re-assert within the relays' ~5 ms release time. Before
+    2.2.3 it only ran once per main-loop pass (~1 s)."""
+
+    def _clock(self, fw, pm, monkeypatch):
+        c = FakeClockMs()
+        monkeypatch.setattr(fw.main.time, "ticks_ms", c.ticks)
+        monkeypatch.setattr(fw.main.time, "sleep_ms", c.sleep)
+        pm.pm.relay_verify_ms = c.t
+        return c
+
+    def test_constant(self, fw):
+        assert fw.main.RELAY_VERIFY_MS == 5
+
+    def test_main_loop_sleep_reads_back_every_5_ms(self, fw, pm, monkeypatch):
+        c = self._clock(fw, pm, monkeypatch)
+        reads = []
+        orig = pm.bus.read
+        pm.bus.read = lambda: (reads.append(c.t), orig())[1]
+        with Recorder(fw):
+            fw.main.wdt_sleep_ms(1000)            # the inter-telemetry sleep
+        assert c.t - 50_000 == 1000               # deadline kept exactly
+        assert len(reads) == 200
+        gaps = {b - a for a, b in zip(reads, reads[1:])}
+        assert gaps == {5}
+
+    def test_pcf_reset_repaired_within_5_ms_and_logged_once(self, fw, pm, monkeypatch):
+        c = self._clock(fw, pm, monkeypatch)
+        pm.pm.relays.set(2, True)
+        want = pm.pm.relays.wanted
+        reset_at = []
+
+        def sleep(ms):                            # chip resets 3 ms into the wait
+            c.t += ms
+            if not reset_at and c.t - 50_000 >= 3:
+                pm.bus.port = 0xFF
+                reset_at.append(c.t)
+        monkeypatch.setattr(fw.main.time, "sleep_ms", sleep)
+        writes_before = len(pm.bus.writes)
+        with Recorder(fw) as rec:
+            fw.main.wdt_sleep_ms(50)
+        assert pm.bus.port == want
+        assert pm.bus.writes[writes_before:] == [want]   # one repair write
+        assert pm.pm.relays.pcf_resets == 1
+        ev = [l for l in rec.lines if l.get("ev") == "rly_fix"]
+        assert len(ev) == 1 and ev[0]["pcf_reset"] == 1
+
+    def test_streak_logs_first_mismatch_only(self, fw, pm, monkeypatch):
+        c = self._clock(fw, pm, monkeypatch)
+        pm.pm.relays.set(3, True)
+
+        def sleep(ms):                            # the write never sticks
+            c.t += ms
+            pm.bus.port = 0xFF
+        monkeypatch.setattr(fw.main.time, "sleep_ms", sleep)
+        with Recorder(fw) as rec:
+            fw.main.wdt_sleep_ms(100)
+        assert pm.pm.relays.fix_count >= 19
+        assert len([l for l in rec.lines if l.get("ev") == "rly_fix"]) == 1
+
+    def test_io_errors_counted_but_reported_at_most_once_a_second(self, fw, pm, monkeypatch):
+        c = self._clock(fw, pm, monkeypatch)
+        pm.pm.relays._ticks = c.ticks
+        pm.bus.fail_reads = 10_000
+        with Recorder(fw) as rec:
+            fw.main.wdt_sleep_ms(2000)
+        errs = [l for l in rec.lines if l.get("code") == "RELAY_IO"]
+        assert pm.pm.relays.err_count == 400
+        assert len(errs) == 2
+
+    def test_button_hold_keeps_relays_serviced(self, fw, pm, monkeypatch):
+        c = self._clock(fw, pm, monkeypatch)
+        pm.pm.relays.set(2, True)
+        want = pm.pm.relays.wanted
+
+        def sleep(ms):
+            c.t += ms
+            if c.t - 50_000 == 150:
+                pm.bus.port = 0xFF
+        monkeypatch.setattr(fw.main.time, "sleep_ms", sleep)
+        with Recorder(fw):
+            pm.pm.btn1.press(300, "test")
+        assert pm.bus.port == want and pm.pm.relays.pcf_resets == 1
+
+    def test_tick_still_paced(self, fw, pm, monkeypatch):
+        c = self._clock(fw, pm, monkeypatch)
+        reads = []
+        orig = pm.bus.read
+        pm.bus.read = lambda: (reads.append(c.t), orig())[1]
+        pm.pm.last_hb_tx_ms = c.t                 # keep STATUS out of the way
+        with Recorder(fw):
+            pm.pm.tick(12.0)                      # < 5 ms since last check
+            c.t += 5
+            pm.pm.tick(12.0)                      # due: one read
+            c.t += 3
+            pm.pm.tick(12.0)                      # 3 ms later: not yet
+        assert reads == [50_005]
+
+
+# ─── fw 2.2.3: BEAN transceiver bench (GP7 TX, GP6 RX inverted) ─────────────
+
+@pytest.fixture
+def bean(fw, pm):
+    """A Bean on stub pins; RX mirrors TX inverted (a working transceiver)."""
+    FakePin.levels.clear()
+    FakePin.writes.clear()
+    FakePin.readers.clear()
+    FakePin.readers[6] = lambda: 1 - FakePin.levels.get(7, 0)
+    b = fw.main.Bean()
+    fw.main._bean = b
+    yield types.SimpleNamespace(bean=b, cfg=pm.cfg)
+    fw.main._bean = None
+    FakePin.readers.clear()
+
+
+def _bean_cmd(fw, cfg, **kw):
+    with Recorder(fw) as rec:
+        _cmd(fw, dict({"a": "bean"}, **kw), cfg)
+    acks = [l for l in rec.lines if l.get("ack") == "bean"]
+    errs = [l for l in rec.lines if l.get("msg") == "ERROR"]
+    return rec.lines, acks, errs
+
+
+class TestBean:
+    def test_pins_free_and_initialised_safe(self, fw, bean):
+        assert fw.main.BEAN_TX_PIN == 7 and fw.main.BEAN_RX_PIN == 6
+        used = (fw.main.POCO1_BTN_PIN, fw.main.FAN_PWM_PIN, fw.main.FAN_TACH_PIN,
+                fw.main.ACC_PIN, fw.main.LED_PIN, 0, 1, 14, 15)
+        assert 6 not in used and 7 not in used
+        assert (7, FakePin.OUT, 0) in FakePin.log         # TX output LOW
+        assert (6, FakePin.IN, None) in FakePin.log       # RX no pull
+
+    def test_status(self, fw, bean):
+        lines, (ack,), errs = _bean_cmd(fw, bean.cfg, op="status")
+        assert ack == {"ack": "bean", "op": "status", "tx": 0, "rx": 1, "bus": 0}
+        assert not errs
+        # PMEVENT echo for the journal, not stored in the PMLOG ring.
+        assert any(l.get("msg") == "PMEVENT" and l.get("ev") == "bean" for l in lines)
+        assert not any(e.get("ev") == "bean" for e in fw.main._evlog)
+
+    def test_status_bus_dominant(self, fw, bean):
+        FakePin.readers[6] = lambda: 0                     # bus held at +B
+        _, (ack,), _ = _bean_cmd(fw, bean.cfg, op="status")
+        assert ack["rx"] == 0 and ack["bus"] == 1
+
+    def test_tx_samples_driven_and_released_then_forces_low(self, fw, bean):
+        _, (ack,), errs = _bean_cmd(fw, bean.cfg, op="tx", v=1, ms=2)
+        assert not errs
+        assert ack["v"] == 1 and ack["ms"] == 2
+        assert ack["rx_on"] == 0 and ack["rx_off"] == 1
+        assert FakePin.levels[7] == 0
+        assert FakePin.writes[0] == (7, 1) and FakePin.writes[-1] == (7, 0)
+        assert bean.bean.level == 0
+
+    def test_tx_default_ms_and_cap(self, fw, bean):
+        _, (ack,), _ = _bean_cmd(fw, bean.cfg, op="tx")
+        assert ack["ms"] == 1 and ack["v"] == 1
+        FakePin.writes.clear()
+        _, acks, errs = _bean_cmd(fw, bean.cfg, op="tx", v=1, ms=501)
+        assert not acks and errs[0]["code"] == "BEAN_ARGS"
+        assert (7, 1) not in FakePin.writes                # never driven
+        _, acks, errs = _bean_cmd(fw, bean.cfg, op="tx", v=2, ms=5)
+        assert not acks and errs[0]["code"] == "BEAN_ARGS"
+
+    def test_tx_released_when_the_hold_is_interrupted(self, fw, bean, monkeypatch):
+        def boom(ms):
+            raise RuntimeError("bus fault")
+        monkeypatch.setattr(fw.main, "wdt_sleep_ms", boom)
+        _, acks, errs = _bean_cmd(fw, bean.cfg, op="tx", v=1, ms=100)
+        assert not acks and errs[0]["code"] == "BEAN"
+        assert FakePin.levels[7] == 0 and bean.bean.level == 0
+
+    def test_pulse(self, fw, bean):
+        _, (ack,), errs = _bean_cmd(fw, bean.cfg, op="pulse", us=200)
+        assert not errs
+        assert ack["rx_mid"] == 0 and ack["rx_after"] == 1
+        assert ack["us"] == 200 and ack["us_real"] >= 200
+        assert FakePin.levels[7] == 0
+        _, acks, errs = _bean_cmd(fw, bean.cfg, op="pulse", us=2001)
+        assert not acks and errs[0]["code"] == "BEAN_ARGS"
+
+    def test_loop_measures_both_edges(self, fw, bean):
+        _, (ack,), errs = _bean_cmd(fw, bean.cfg, op="loop", n=5)
+        assert not errs
+        assert ack["n"] == 5 and ack["timeouts"] == 0 and ack["rx_idle"] == 1
+        for edge in ("dom", "rec"):
+            assert 0 <= ack[edge + "_min"] <= ack[edge + "_avg"] <= ack[edge + "_max"]
+            assert ack[edge + "_max"] < fw.main.BEAN_EDGE_TIMEOUT_US
+        assert FakePin.levels[7] == 0
+
+    def test_loop_counts_timeouts_on_a_dead_receiver(self, fw, bean):
+        FakePin.readers[6] = lambda: 1                     # RX never follows
+        _, (ack,), _ = _bean_cmd(fw, bean.cfg, op="loop", n=2)
+        assert ack["to_dom"] == 2 and ack["timeouts"] == 2
+        assert ack["dom_min"] is None and ack["dom_avg"] is None
+        assert FakePin.levels[7] == 0
+        _, acks, errs = _bean_cmd(fw, bean.cfg, op="loop", n=201)
+        assert not acks and errs[0]["code"] == "BEAN_ARGS"
+
+    def test_square_counts_every_edge(self, fw, bean):
+        _, (ack,), errs = _bean_cmd(fw, bean.cfg, op="square", hz=1000, ms=20)
+        assert not errs
+        assert ack["cycles"] >= 1
+        assert ack["edges"] == ack["expected"] == 2 * ack["cycles"]
+        assert ack["hz_real"] is not None and ack["hz_real"] <= 1000
+        assert FakePin.levels[7] == 0                      # ends released
+
+    def test_square_dead_receiver_counts_nothing(self, fw, bean):
+        FakePin.readers[6] = lambda: 1
+        _, (ack,), _ = _bean_cmd(fw, bean.cfg, op="square", hz=2000, ms=5)
+        assert ack["edges"] == 0 and ack["expected"] > 0
+
+    def test_square_caps(self, fw, bean):
+        for kw in ({"hz": 99}, {"hz": 20001}, {"ms": 1001}, {"ms": 0}, {"hz": "x"}):
+            _, acks, errs = _bean_cmd(fw, bean.cfg, op="square", **kw)
+            assert not acks and errs[0]["code"] == "BEAN_ARGS", kw
+
+    def test_unknown_op_and_bad_types(self, fw, bean):
+        for kw in ({"op": "blast"}, {"op": "tx", "ms": None}, {"op": "tx", "v": True}):
+            _, acks, errs = _bean_cmd(fw, bean.cfg, **kw)
+            assert not acks and errs[0]["code"] == "BEAN_ARGS", kw
+        assert FakePin.levels.get(7, 0) == 0
+
+    def test_main_loop_guard_releases_tx(self, fw, bean):
+        bean.bean.tx.value(1)
+        fw.main.bean_release()
+        assert FakePin.levels[7] == 0

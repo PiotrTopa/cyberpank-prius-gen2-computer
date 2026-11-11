@@ -204,6 +204,18 @@ def _build_powerbox_hard_restart(params: Dict[str, Any]) -> Action:
     return PowerboxHardRestartAction(source=ActionSource.UI)
 
 
+def _build_powerbox_bean(params: Dict[str, Any]) -> Action:
+    from ..io.powerbox import validate_bean_params
+    from ..state.actions import PowerboxBeanAction
+    op = str(_require(params, "op")).strip().lower()
+    fields = {k: v for k, v in params.items() if k != "op"}
+    try:
+        fields = validate_bean_params(op, fields)
+    except ValueError as exc:
+        raise CommandError(str(exc))
+    return PowerboxBeanAction(op, fields, source=ActionSource.UI)
+
+
 def _build_input_event(params: Dict[str, Any]) -> Action:
     from ..state.actions import InputEventAction
     device = str(_require(params, "device")).strip()
@@ -418,6 +430,25 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
             "OFF until the backend re-asserts the wanted states on the boot banner."
         ),
         "params": {},
+    },
+    "powerbox_bean": {
+        "builder": _build_powerbox_bean,
+        "description": (
+            "BENCH ONLY: BEAN transceiver diagnostics on the powerbox (fw >= 2.2.3; "
+            "GP7 TX high = bus driven to +B, GP6 RX inverted). status = levels; "
+            "tx = drive TX to v for ms, RX sampled driven/released; pulse = one "
+            "dominant pulse, RX mid/after; loop = n round trips, TX->RX edge "
+            "delays min/max/avg + timeouts; square = square wave, RX edges vs "
+            "expected. TX is always released afterwards. Result in powerbox.bean."
+        ),
+        "params": {
+            "op": "status | tx | pulse | loop | square",
+            "v": "tx: int 0..1 (default 1)",
+            "ms": "tx: int 1..500 (default 1); square: int 1..1000 (default 200)",
+            "us": "pulse: int 1..2000 (default 100)",
+            "n": "loop: int 1..200 (default 20)",
+            "hz": "square: int 100..20000 (default 5000)",
+        },
     },
     "roadsense_mode": {
         "builder": _build_roadsense_mode,

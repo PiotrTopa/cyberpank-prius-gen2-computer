@@ -5,7 +5,11 @@
 #    main.py is not running (REPL, flash, crash) and the phone boot-loops
 #    (seen 2026-11-04). Keep ACTIVE_HIGH in sync with POCO_BTN_ACTIVE_HIGH in
 #    main.py (True once the button is driven through an N-MOSFET).
-# 2. Finish an interrupted firmware swap (main.py -> main.py.bak, then
+# 2. Hold the BEAN transceiver TX (GP7) LOW = bus released (HIGH would drive
+#    the body bus to +B through a 220R short-circuit limit only) and leave the
+#    RX (GP6) a plain input (R8 10k pull-up on the board). main.py re-owns
+#    both pins first thing.
+# 3. Finish an interrupted firmware swap (main.py -> main.py.bak, then
 #    main.py.new -> main.py): if main.py is missing, put the old one back.
 from machine import Pin
 
@@ -16,6 +20,11 @@ if ACTIVE_HIGH:
     Pin(BTN_PIN, Pin.OUT, value=0)
 else:
     Pin(BTN_PIN, Pin.IN, pull=None)
+
+BEAN_TX_PIN = 7
+BEAN_RX_PIN = 6
+Pin(BEAN_TX_PIN, Pin.OUT, value=0)
+Pin(BEAN_RX_PIN, Pin.IN, pull=None)
 
 try:
     import os

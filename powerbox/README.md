@@ -31,6 +31,9 @@ To check the current pin level over the REPL on `prius`:
 # prints 0 when ACC is ON (inverted logic), 1 when ACC is OFF
 ```
 
+Current firmware: **2.2.3** (2026-11-11: BEAN transceiver bench on GP6/GP7,
+5 ms relay read-back).
+
 ## Power Management (POCO button + relay board + heartbeat + sleep) — firmware 2.1
 
 There are **no power rails** since 2.0. The powerbox, its hub and both POCO
@@ -104,10 +107,24 @@ PCF powers up at 0xFF (all coils released).
 (coil energised), for the NC channel HIGH (coil released) — the NC flag is
 generic (`RELAY_NC` in `pcf8574.py`). The firmware updates its wanted byte
 **only after a successful I2C write**, reports `rly` from a **chip read-back**
-every STATUS, re-writes the wanted byte whenever the read-back disagrees
+every STATUS and **every 5 ms in between** (fw 2.2.3, `RELAY_VERIFY_MS`; see
+below), re-writes the wanted byte whenever the read-back disagrees
 (lost write, PCF reset to 0xFF) and counts those repairs in `rly_fix`
 (`rly_err` = I2C errors; `rly` is omitted when the read-back itself failed).
 The first mismatch of a streak is logged as a `rly_fix` PMEVENT.
+
+**5 ms read-back (fw 2.2.3, 2026-11-11).** The PCF8574 keeps power-up
+resetting to 0xFF in the field. The read-back now runs every 5 ms so the
+re-assert lands inside the relays' ~5 ms release time and the loads should not
+actually drop. It runs inside `wdt_sleep_ms()` — the main loop's
+inter-telemetry wait and every button hold — deadline-paced (the sleep length
+is unchanged). Before 2.2.3 the check ran only once per main-loop pass, i.e.
+~1 s, despite the old 100 ms constant. Cost: one 1-byte I2C read per check
+(~25 µs on the wire at 400 kHz, ~0.1 ms with interpreter overhead, ~2 %).
+The 5 ms bound does not hold while the loop body itself runs (sensor reads,
+STATUS, inbound commands, a running `bean` `loop`/`square`/`pulse` op); those
+gaps are a few ms each, up to ~1 s for a bench `square`. `RELAY_IO` errors are
+still counted one by one in `rly_err` but reported at most once a second.
 
 **Restart scope.** After `hard_restart` (or any other reset) the MFD Pi, CAN
 hub and camera hub drop and come back **OFF**; the backend re-asserts its
@@ -190,6 +207,40 @@ A rolling "automotive" counter lets each side detect if the other died:
 | Ping | `{"a":"ping"}` | PONG. |
 | Get event log | `{"a":"getlog"}` | Dump the power-event ring buffer as `PMLOG` (cold-boot timeline). |
 | Reset mAh | `{"a":"reset_mah"}` | Zero the coulomb counter. |
+| BEAN bench | `{"a":"bean","op":...}` | fw ≥ 2.2.3, see *BEAN transceiver bench* below. |
+
+### BEAN transceiver bench (fw 2.2.3, 2026-11-11)
+
+Logic verification of the discrete BEAN transceiver on GP7 (TX) / GP6 (RX,
+inverted); BEAN itself is 10 kbit/s (100 µs bits), dominant = +B, recessive =
+0 V. Not a protocol stack. Every op is synchronous, capped, and leaves TX LOW
+(also on errors). Reply: `{"ack":"bean","op":<op>,...}` on id 0, plus a live
+`{"msg":"PMEVENT","ev":"bean","t_ms":..,...}` echo for the journal (not kept in
+the `getlog` ring). Bad op / out-of-range or non-integer field →
+`ERROR BEAN_ARGS` (nothing driven); an exception during an op → `ERROR BEAN`.
+
+| op | fields (default, range) | reply fields |
+|---|---|---|
+| `status` | — | `tx` (0/1), `rx` (GP6 level), `bus` (1 = dominant, i.e. `rx` low) |
+| `tx` | `v` (1, 0–1), `ms` (1, 1–500) | `v`, `ms`, `rx_on` (sampled at the end of the hold), `rx_off` (50 µs after release) |
+| `pulse` | `us` (100, 1–2000) | `us`, `rx_mid`, `rx_after` (50 µs after release), `us_real` (measured width) |
+| `loop` | `n` (20, 1–200) | n × {TX high → µs to RX low (timeout 2000), hold 300 µs, TX low → µs to RX high, 300 µs gap}: `dom_min/max/avg`, `rec_min/max/avg` (µs; `null` if no edge seen), `to_dom`, `to_rec`, `timeouts`, `rx_idle` (RX before the first round) |
+| `square` | `hz` (5000, 100–20000), `ms` (200, 1–1000) | `edges` (RX level changes counted), `expected` (= 2 × `cycles`), `cycles`, `hz_real` |
+
+`square` toggles TX and polls RX in one Python loop; each half period is at
+least 500000/`hz` µs counted from the actual toggle, so a loop that cannot keep
+up lowers `hz_real` instead of starving the transceiver — `edges == expected`
+means RX followed every TX edge at `hz_real`. Interrupts stay enabled (USB,
+tach); the longest op (~1 s) is far inside the 8 s WDT, which is fed per round.
+Timing caveat: all µs figures come from `time.ticks_us()` in interpreted loops
+(resolution = one loop pass, a few µs at 96 MHz, plus jitter from USB/IRQ
+service); good for "does RX follow TX and roughly how fast", not for bit
+timing. A real BEAN implementation needs PIO for TX/RX.
+
+Backend: REST `powerbox_bean` (`op` + the same optional fields, same caps,
+HTTP 400 outside them); the reply is mirrored into `/api/v1/state` →
+`powerbox.bean` (the ack fields + `ts`; a BEAN error appears there as
+`{"error": "BEAN_ARGS", "detail": ...}`).
 
 ## Reliability — USB-CDC write model
 
@@ -255,6 +306,8 @@ power model + the host-side staleness watchdog that detects a silent USB-CDC lin
 | GP28 | Chassis fan tach | IN (PULL_UP), falling-edge IRQ | Fan's open-collector tach, 2 pulses/rev → `fan_rpm` in telemetry. |
 | GP29 | Chassis fan PWM | PWM 25 kHz, **not inverted** | Straight to the fan's PWM wire, no transistor: GPIO duty = fan duty. Undriven (bootloader, safe-boot) = fan at full speed; the firmware takes it over first thing in `main()`. |
 | — | "poco 2" slot | not connected | `POCO2_BTN_PIN = None`; no second POCO exists. Must never share a fan pin (a fan PWM on a button line presses the phone). |
+| GP6 | BEAN transceiver RX (fw 2.2.3) | IN, **no internal pull** | Q3 collector with R8 10k pull-up to 3V3 on the board. **Inverted**: bus idle (0 V, recessive) → 1, bus at +B (dominant) → 0. |
+| GP7 | BEAN transceiver TX (fw 2.2.3) | OUT, **LOW at boot** | R2 5.1k → Q1 BC547 → Q2 BC327 high side → D1 → R5 220R → bus. HIGH = bus driven to ~+B (dominant), LOW = released. Set LOW in `boot.py` and again first thing in `main()` (the reset-default pad pull-down keeps Q1 off before that); every `bean` op releases it in a `finally` and the main loop forces it low each pass. R5 is a short-circuit limit only: never hold TX high for long (op cap 500 ms). |
 | GP14, GP15 | unused, **dead** | — | Both pads are blown inside the RP2040 (2026-10-27: diode mode to GND 0.045 V instead of ~0.5 V, 11 Ω between the two pins, carrier wiring verified clean). Never assign them. |
 
 **Button wiring, verified on the bench** (2026-10-26 with the phone's

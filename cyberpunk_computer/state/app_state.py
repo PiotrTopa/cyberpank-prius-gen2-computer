@@ -684,6 +684,10 @@ class PowerboxState:
     # RS485 satellite rail = relay RELAY_CH_RS485, derived from ``relays`` by
     # the reducer so the satellite rules read one semantic field.
     rs485_power: Optional[bool] = None
+    # Last BEAN transceiver bench result (fw >= 2.2.3, REST powerbox_bean):
+    # the firmware ack fields ({"op":..., ...results}) plus "ts" (time.time()
+    # of receipt), or {"error": "BEAN_ARGS"|"BEAN", "detail": ..., "ts": ...}.
+    bean: Optional[Mapping] = None
 
     last_update_time: float = 0.0
 

@@ -120,6 +120,8 @@ class ActionType(Enum):
     SET_POCO_TELEMETRY = auto() # OUT1/2/3 + POCO heartbeat (powerbox STATUS)
     POWERBOX_BUTTON = auto()          # press a POCO power button via the powerbox
     POWERBOX_HARD_RESTART = auto()    # powerbox self-power-cut (restart relay)
+    POWERBOX_BEAN = auto()            # BEAN transceiver bench op (fw >= 2.2.3)
+    SET_POWERBOX_BEAN = auto()        # mirror of the last BEAN bench result
     SET_RELAY = auto()                # relay board load channel (PCF8574 ch 2-8)
     ROADSENSE_MODE = auto()           # roadsense stack operator mode (auto|on|off)
     ROADSENSE_RESTART = auto()        # restart roadsense.target
@@ -1467,6 +1469,27 @@ class PowerboxHardRestartAction(Action):
     """
     def __init__(self, source: ActionSource = ActionSource.UI):
         super().__init__(ActionType.POWERBOX_HARD_RESTART, source)
+
+
+class PowerboxBeanAction(Action):
+    """Run one BEAN transceiver bench op on the powerbox (fw >= 2.2.3):
+    ``op`` in status|tx|pulse|loop|square, ``params`` the validated optional
+    fields (v, ms, us, n, hz; see io.powerbox.BEAN_OPS). The result lands in
+    PowerboxState.bean via SetPowerboxBeanAction."""
+    def __init__(self, op: str, params: Optional[dict] = None,
+                 source: ActionSource = ActionSource.UI):
+        super().__init__(ActionType.POWERBOX_BEAN, source)
+        self.op = op
+        self.params = dict(params or {})
+
+
+class SetPowerboxBeanAction(Action):
+    """Mirror the firmware's last ``{"ack":"bean",...}`` reply (or a BEAN /
+    BEAN_ARGS error as ``{"error": code, "detail": ...}``) into
+    PowerboxState.bean."""
+    def __init__(self, result: dict, source: ActionSource = ActionSource.GATEWAY):
+        super().__init__(ActionType.SET_POWERBOX_BEAN, source)
+        self.result = dict(result)
 
 
 class InputEventAction(Action):

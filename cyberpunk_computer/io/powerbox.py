@@ -24,7 +24,8 @@ This module provides:
 The wire formats match powerbox firmware 2.1 (2026-11-03: board relay N =
 channel N, ch1 = the box's own NC restart relay exposed only as
 ``hard_restart``, ``rly`` read back from the PCF8574 with ``null`` for ch1,
-``rc``/``up`` boot diagnostics) and stay tolerant of key/unit variants. No
+``rc``/``up`` boot diagnostics; fw 2.2.3 adds the ``bean`` transceiver bench
+command) and stay tolerant of key/unit variants. No
 transport is required for the parsers/rules to be unit-tested.
 """
 
@@ -43,6 +44,7 @@ from .ports import (
 )
 from ..state.actions import (
     Action,
+    SetPowerboxBeanAction,
     SetPowerboxConnectionAction,
     SetPowerboxIgnitionAction,
     SetPowerboxPowerStatusAction,
@@ -339,10 +341,22 @@ def parse_powerbox_system(data: dict) -> List[Action]:
         return [SetPowerboxPowerStatusAction(pm_state=msg.lower())]
 
     if msg == "ERROR":
-        logger.warning("Powerbox ERROR %s: %s", data.get("code"), data.get("detail", ""))
+        code = str(data.get("code", ""))
+        logger.warning("Powerbox ERROR %s: %s", code, data.get("detail", ""))
+        if code in ("BEAN", "BEAN_ARGS"):
+            # BEAN bench op refused / failed: surface it in powerbox.bean so a
+            # REST caller polling the state sees why nothing came back.
+            return [SetPowerboxBeanAction({"error": code,
+                                           "detail": data.get("detail", "")})]
         return []
 
     ack = data.get("ack")
+    if ack == "bean":
+        # BEAN transceiver bench result (fw >= 2.2.3). The firmware also
+        # echoes it as a PMEVENT (ev "bean"), which is what gets journalled.
+        result = {k: v for k, v in data.items() if k != "ack"}
+        logger.debug("Powerbox bean ack: %s", result)
+        return [SetPowerboxBeanAction(result)]
     if ack:
         logger.info("Powerbox ack: %s", ack)
     return []
@@ -597,6 +611,65 @@ def build_fan_command(pct: float) -> OutgoingCommand:
     )
 
 
+# BEAN transceiver bench ops (fw >= 2.2.3; GP7 TX, GP6 RX inverted). Same caps
+# as the firmware (BEAN_* in powerbox/main.py), which also refuses anything
+# outside them with ERROR BEAN_ARGS. op -> {field: (default, lo, hi)}.
+BEAN_OPS = {
+    "status": {},
+    "tx": {"v": (1, 0, 1), "ms": (1, 1, 500)},
+    "pulse": {"us": (100, 1, 2000)},
+    "loop": {"n": (20, 1, 200)},
+    "square": {"hz": (5000, 100, 20000), "ms": (200, 1, 1000)},
+}
+
+
+def validate_bean_params(op: str, params: Optional[dict] = None) -> dict:
+    """Check a BEAN bench op and its optional fields against the firmware
+    caps. Returns the explicit fields (ints; omitted ones are left to the
+    firmware defaults). Raises ValueError on an unknown op, an unknown field
+    or a value out of range."""
+    op = str(op).strip().lower()
+    if op not in BEAN_OPS:
+        raise ValueError("bean op must be one of %s" % ", ".join(BEAN_OPS))
+    spec = BEAN_OPS[op]
+    out = {}
+    for key, value in (params or {}).items():
+        if value is None:
+            continue
+        if key not in spec:
+            raise ValueError("bean op %s takes no '%s' (fields: %s)"
+                             % (op, key, ", ".join(spec) or "none"))
+        if isinstance(value, bool):
+            raise ValueError("bean '%s' must be an integer" % key)
+        try:
+            ivalue = int(value)
+        except (TypeError, ValueError):
+            raise ValueError("bean '%s' must be an integer" % key)
+        if isinstance(value, float) and value != ivalue:
+            raise ValueError("bean '%s' must be an integer" % key)
+        _, lo, hi = spec[key]
+        if not lo <= ivalue <= hi:
+            raise ValueError("bean '%s' must be between %d and %d" % (key, lo, hi))
+        out[key] = ivalue
+    return out
+
+
+def build_bean_command(op: str, **kw) -> OutgoingCommand:
+    """BEAN transceiver bench op: ``{"a":"bean","op":op,...}`` (validated by
+    :func:`validate_bean_params`; ValueError on bad input). The firmware
+    answers ``{"ack":"bean","op":op,...results}`` (mirrored into
+    ``powerbox.bean``) or ``ERROR BEAN_ARGS``."""
+    fields = validate_bean_params(op, kw)
+    payload = {"a": "bean", "op": str(op).strip().lower()}
+    payload.update(fields)
+    return OutgoingCommand(
+        device_id=POWERBOX_LOCAL_SYSTEM,
+        command_type="power",
+        payload=payload,
+        priority=50,
+    )
+
+
 class PowerboxCommander:
     """Send commands to the powerbox over an OutputPort (None = log only)."""
 
@@ -662,6 +735,15 @@ class PowerboxCommander:
 
     def set_fan(self, pct: float) -> bool:
         return self._send(build_fan_command(pct), "fan %.0f%%" % float(pct))
+
+    def send_bean(self, op: str, **kw) -> bool:
+        """BEAN transceiver bench op (see :func:`build_bean_command`)."""
+        try:
+            cmd = build_bean_command(op, **kw)
+        except ValueError as exc:
+            logger.error("Powerbox bean command refused: %s", exc)
+            return False
+        return self._send(cmd, "bean %s %s" % (cmd.payload["op"], kw), warn=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

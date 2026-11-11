@@ -36,6 +36,16 @@ Inbound commands from the computer (device 0):
     {"id": 0, "d": {"a": "ping"}}    → {"msg":"PONG"}
     {"id": 0, "d": {"a": "getlog"}}  → PMLOG (power-event ring buffer)
     {"id": 0, "d": {"a": "i2c_scan"}}
+    {"id": 0, "d": {"a": "bean", "op": "status"|"tx"|"pulse"|"loop"|"square", ...}}
+            BEAN transceiver bench diagnostics (GP7 TX, GP6 RX, fw 2.2.3):
+            status                 -> {"tx":0|1,"rx":gp6,"bus":1 if rx low}
+            tx    "v":0|1 "ms":1-500     drive TX, sample RX, release
+            pulse "us":1-2000            one dominant pulse, RX mid + after
+            loop  "n":1-200              TX->RX edge delays (min/max/avg)
+            square "hz":100-20000 "ms":1-1000  RX edge count vs expected
+            Reply {"ack":"bean","op":..,<results>} plus a live PMEVENT echo
+            ({"msg":"PMEVENT","ev":"bean",...}, not kept in the PMLOG ring);
+            bad op/args -> ERROR BEAN_ARGS, TX released on every path.
     Firmware update (no REPL needed; the firmware keeps running, the WDT fed
     and the buttons released throughout; host tool powerbox/pb_flash.py):
     {"id": 0, "d": {"a": "put_begin", "name": "main.py", "size": n, "sha": hex64}}
@@ -83,6 +93,12 @@ Hardware (Waveshare RP2040-Zero), bench state of 2026-11-03:
     GP16     Onboard WS2812 status LED.
     GP14/15  DEAD: pads blown inside the chip (shorted to GND, 11 ohm to each
              other, measured 2026-10-27). Never assign them.
+    GP7      BEAN transceiver TX (bench, 2026-11-11): output, HIGH = bus driven
+             to ~+B (dominant), LOW = released. Set LOW in boot.py and first
+             thing in main(); never held high for long (R5 220R is only a
+             short-circuit limit).
+    GP6      BEAN transceiver RX: plain input (no pull; R8 10k to 3V3 on the
+             board), INVERTED: bus idle 0 V -> 1, bus at +B -> 0.
 
 Relay board (HW-281 type, 12 V coils, active-low inputs; IN1..IN8 on PCF
 P0..P7, so board relay N = firmware channel N). Opto/input VCC comes from the
@@ -119,7 +135,7 @@ import pcf8574                      # PCF8574 driver + RelayBoard (pin map, NC, 
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-VERSION = "2.2.2"
+VERSION = "2.2.3"
 
 # Device role — reported in the unified identify ("whoami") response and the
 # ready banner so the computer can discover which USB-CDC port is the powerbox
@@ -151,8 +167,14 @@ ACC_HEARTBEAT_MS = 5000
 # power-up-resetting (0xFF = every coil released) on the ACC-off transient
 # while the MCU kept running (2026-11-04): the STATUS-paced check (~1 s)
 # repaired it 1.03 s later, long enough for the MFD Pi to brown out and every
-# hub to re-enumerate. 100 ms bounds that window; one I2C byte per check.
-RELAY_VERIFY_MS = 100
+# hub to re-enumerate. fw 2.2.3 (2026-11-11, the reset keeps recurring in the
+# field): 5 ms, so the re-assert lands inside the relays' ~5 ms release time
+# and the loads never actually drop. The check runs from wdt_sleep_ms() (the
+# main loop's inter-telemetry sleep and every button hold), deadline-paced;
+# before 2.2.3 it only ran once per main-loop pass, i.e. every ~1 s despite
+# the old 100 ms constant. Cost: one 1-byte I2C read per check (~25 us on the
+# wire at 400 kHz, ~0.1 ms with MicroPython overhead, ~2 % of the time).
+RELAY_VERIFY_MS = 5
 
 # Re-announce identity (IDENT on the system channel) at least this often. This
 # makes the device discoverable by the computer at ANY time — not just at boot —
@@ -446,14 +468,18 @@ def feed_wdt():
 
 
 def wdt_sleep_ms(total_ms):
-    """Sleep while keeping the watchdog fed (chunked so long waits don't trip it)."""
-    remaining = total_ms
-    while remaining > 0:
+    """Sleep ``total_ms`` while feeding the watchdog and running the relay
+    read-back every RELAY_VERIFY_MS (PowerManager.relay_poll). Deadline-based,
+    so the I2C time does not stretch the sleep."""
+    t_end = time.ticks_add(time.ticks_ms(), total_ms)
+    while True:
         feed_wdt()
-        step = 2000 if remaining > 2000 else remaining
-        time.sleep_ms(step)
-        remaining -= step
-    feed_wdt()
+        if _pm is not None:
+            _pm.relay_poll()
+        left = time.ticks_diff(t_end, time.ticks_ms())
+        if left <= 0:
+            break
+        time.sleep_ms(RELAY_VERIFY_MS if left > RELAY_VERIFY_MS else left)
 
 
 # ─── Status LED (RP2040-Zero onboard WS2812 on GP16) ──────────────────────────
@@ -622,6 +648,272 @@ class Fan:
 
 
 _fan = None
+
+
+# ─── BEAN transceiver bench (GP7 TX, GP6 RX) ─────────────────────────────────
+#
+# Discrete Toyota BEAN (single-wire body bus, 10 kbit/s, 100 us bits,
+# dominant = +B, recessive = 0 V) transceiver, bench-verified logic only (no
+# protocol stack). TX on GP7: R2 5.1k -> Q1 BC547 -> Q2 BC327 high side -> D1
+# -> R5 220R -> bus, so GPIO HIGH = bus driven to ~+B, LOW = released. R5 is a
+# short-circuit limit only: TX must never stay high for long, so every op is
+# synchronous, capped and releases TX in a ``finally``; the main loop also
+# forces TX low every iteration. RX on GP6: Q3 collector, R8 10k pull-up to
+# 3V3, INVERTED (bus idle 0 V -> 1, bus at +B -> 0).
+#
+# Timing is measured with time.ticks_us() in Python loops: resolution is one
+# loop pass (several us at 96 MHz), fine for logic/delay checks, not for bit
+# timing (a real BEAN stack needs PIO).
+BEAN_TX_PIN = 7
+BEAN_RX_PIN = 6
+BEAN_TX_MAX_MS = 500          # "tx" hold cap
+BEAN_PULSE_MAX_US = 2000      # "pulse" width cap
+BEAN_EDGE_TIMEOUT_US = 2000   # "loop": max wait for an RX edge
+BEAN_LOOP_HOLD_US = 300       # "loop": dominant hold after the RX edge
+BEAN_LOOP_MAX_N = 200
+BEAN_SQ_MIN_HZ = 100
+BEAN_SQ_MAX_HZ = 20000
+BEAN_SQ_MAX_MS = 1000
+BEAN_SETTLE_US = 50           # sample delay after a release
+
+
+def _bean_stat(st, dt):
+    if st[0] is None or dt < st[0]:
+        st[0] = dt
+    if st[1] is None or dt > st[1]:
+        st[1] = dt
+    st[2] += dt
+    st[3] += 1
+
+
+class Bean:
+    """GP7 TX / GP6 RX bench primitives. Every method leaves TX low."""
+
+    def __init__(self):
+        self.tx = Pin(BEAN_TX_PIN, Pin.OUT, value=0)   # released first
+        self.rx = Pin(BEAN_RX_PIN, Pin.IN, pull=None)  # R8 is the pull-up
+        self.level = 0
+
+    def release(self):
+        try:
+            self.tx.value(0)
+        except Exception:
+            pass
+        self.level = 0
+
+    def status(self):
+        rx = self.rx.value()
+        return {"tx": self.level, "rx": rx, "bus": 0 if rx else 1}
+
+    def hold(self, v, ms):
+        """Drive TX to ``v`` for ``ms`` ms; RX sampled at the end of the hold
+        and BEAN_SETTLE_US after the release."""
+        try:
+            self.tx.value(v)
+            self.level = v
+            wdt_sleep_ms(ms)              # relay read-back keeps running
+            rx_on = self.rx.value()
+        finally:
+            self.release()
+        time.sleep_us(BEAN_SETTLE_US)
+        return {"v": v, "ms": ms, "rx_on": rx_on, "rx_off": self.rx.value()}
+
+    def pulse(self, us):
+        """One dominant pulse of ``us`` us, RX sampled mid-pulse and
+        BEAN_SETTLE_US after the release; ``us_real`` = measured width."""
+        rx = self.rx
+        ticks_us = time.ticks_us
+        diff = time.ticks_diff
+        half = us // 2
+        try:
+            t0 = ticks_us()
+            self.tx.value(1)
+            self.level = 1
+            while diff(ticks_us(), t0) < half:
+                pass
+            mid = rx.value()
+            while diff(ticks_us(), t0) < us:
+                pass
+        finally:
+            self.release()
+        width = diff(ticks_us(), t0)
+        time.sleep_us(BEAN_SETTLE_US)
+        return {"us": us, "rx_mid": mid, "rx_after": rx.value(), "us_real": width}
+
+    def loop(self, n):
+        """``n`` round trips: TX high -> us until RX low (dominant seen),
+        hold, TX low -> us until RX high. Timed-out edges are counted, not
+        averaged."""
+        rx = self.rx
+        tx = self.tx
+        ticks_us = time.ticks_us
+        diff = time.ticks_diff
+        to = BEAN_EDGE_TIMEOUT_US
+        dom = [None, None, 0, 0]
+        rec = [None, None, 0, 0]
+        to_dom = 0
+        to_rec = 0
+        rx_idle = rx.value()
+        try:
+            for _ in range(n):
+                feed_wdt()
+                t0 = ticks_us()
+                tx.value(1)
+                self.level = 1
+                while True:
+                    dt = diff(ticks_us(), t0)
+                    if not rx.value():
+                        break
+                    if dt > to:
+                        dt = -1
+                        break
+                if dt < 0:
+                    to_dom += 1
+                else:
+                    _bean_stat(dom, dt)
+                time.sleep_us(BEAN_LOOP_HOLD_US)
+                t0 = ticks_us()
+                tx.value(0)
+                self.level = 0
+                while True:
+                    dt = diff(ticks_us(), t0)
+                    if rx.value():
+                        break
+                    if dt > to:
+                        dt = -1
+                        break
+                if dt < 0:
+                    to_rec += 1
+                else:
+                    _bean_stat(rec, dt)
+                time.sleep_us(BEAN_LOOP_HOLD_US)   # recessive gap
+        finally:
+            self.release()
+        res = {"n": n, "rx_idle": rx_idle, "to_dom": to_dom, "to_rec": to_rec,
+               "timeouts": to_dom + to_rec}
+        for name, st in (("dom", dom), ("rec", rec)):
+            res[name + "_min"] = st[0]
+            res[name + "_max"] = st[1]
+            res[name + "_avg"] = (st[2] // st[3]) if st[3] else None
+        return res
+
+    def square(self, hz, ms):
+        """50 % square wave on TX for ~``ms`` ms, counting RX level changes
+        in the same tight loop. Each half period lasts at least 500000/hz us
+        (rescheduled from the actual toggle, so a slow loop lowers the rate
+        instead of starving the transceiver); ``hz_real`` reports the rate
+        reached. Ends on a whole cycle with TX low; expected = 2 * cycles.
+        Interrupts stay on (USB, tach); runtime <= ~1 s << WDT."""
+        rx = self.rx
+        tx = self.tx
+        ticks_us = time.ticks_us
+        diff = time.ticks_diff
+        half = 500000 // hz
+        limit = ms * 1000
+        edges = 0
+        k = 0
+        level = 0
+        feed_wdt()
+        last = rx.value()
+        try:
+            t0 = ticks_us()
+            due = 0
+            while True:
+                now = diff(ticks_us(), t0)
+                if now >= due:
+                    if level == 0 and now >= limit:
+                        break
+                    level ^= 1
+                    tx.value(level)
+                    k += 1
+                    due = now + half
+                v = rx.value()
+                if v != last:
+                    edges += 1
+                    last = v
+        finally:
+            self.release()
+        elapsed = diff(ticks_us(), t0)
+        # Catch the last recessive edge.
+        tail = half if half > 100 else 100
+        t1 = ticks_us()
+        while diff(ticks_us(), t1) < tail:
+            v = rx.value()
+            if v != last:
+                edges += 1
+                last = v
+        feed_wdt()
+        cycles = k // 2
+        return {"hz": hz, "ms": ms, "edges": edges, "expected": 2 * cycles,
+                "cycles": cycles,
+                "hz_real": (cycles * 1000000 // elapsed) if elapsed > 0 else None}
+
+
+_bean = None
+
+
+def _bean_arg(data, key, default, lo, hi):
+    """Integer argument within lo..hi (inclusive); ValueError otherwise."""
+    v = data.get(key, default)
+    if v is None or isinstance(v, bool):
+        raise ValueError("%s=%s" % (key, v))
+    v = int(v)
+    if v < lo or v > hi:
+        raise ValueError("%s=%d not in %d..%d" % (key, v, lo, hi))
+    return v
+
+
+def bean_release():
+    """Belt and braces: force BEAN TX low (main loop, exception paths)."""
+    if _bean is not None:
+        _bean.release()
+
+
+def bean_command(data):
+    """Run one {"a":"bean","op":...} bench op; reply ack + PMEVENT echo."""
+    if _bean is None:
+        tx_error("BEAN", "not initialised")
+        return
+    op = str(data.get("op", "status")).lower()
+    try:
+        if op == "status":
+            args = ()
+        elif op == "tx":
+            args = (_bean_arg(data, "v", 1, 0, 1),
+                    _bean_arg(data, "ms", 1, 1, BEAN_TX_MAX_MS))
+        elif op == "pulse":
+            args = (_bean_arg(data, "us", 100, 1, BEAN_PULSE_MAX_US),)
+        elif op == "loop":
+            args = (_bean_arg(data, "n", 20, 1, BEAN_LOOP_MAX_N),)
+        elif op == "square":
+            args = (_bean_arg(data, "hz", 5000, BEAN_SQ_MIN_HZ, BEAN_SQ_MAX_HZ),
+                    _bean_arg(data, "ms", 200, 1, BEAN_SQ_MAX_MS))
+        else:
+            raise ValueError("op=%s" % op)
+    except (TypeError, ValueError) as e:
+        _bean.release()
+        tx_error("BEAN_ARGS", str(e))
+        return
+    try:
+        if op == "status":
+            res = _bean.status()
+        elif op == "tx":
+            res = _bean.hold(*args)
+        elif op == "pulse":
+            res = _bean.pulse(*args)
+        elif op == "loop":
+            res = _bean.loop(*args)
+        else:
+            res = _bean.square(*args)
+    except Exception as e:
+        _bean.release()
+        tx_error("BEAN", "%s: %s" % (op, e))
+        return
+    res["op"] = op
+    tx(ID_SYSTEM, dict(res, ack="bean"))
+    # Live echo for the journal; deliberately NOT appended to the PMLOG ring
+    # (bench spam would push the power events out).
+    tx(ID_SYSTEM, dict(res, msg="PMEVENT", ev="bean", t_ms=time.ticks_ms()))
 
 
 # ─── POCO power buttons ───────────────────────────────────────────────────────
@@ -861,6 +1153,21 @@ class PowerManager:
             return None
         return self.relays.states()
 
+    def relay_poll(self, now=None):
+        """Relay read-back + re-assert at most every RELAY_VERIFY_MS (called
+        from tick() and from every wdt_sleep_ms() slice). While a hard
+        restart is in flight it only watches for a failed cut."""
+        if self.relays is None:
+            return
+        if self.relays.restart_at is not None:
+            self.relays.tick()               # notices a failed cut, releases
+            return
+        if now is None:
+            now = time.ticks_ms()
+        if time.ticks_diff(now, self.relay_verify_ms) >= RELAY_VERIFY_MS:
+            self.relay_verify_ms = now
+            self.relays.tick()               # catches a PCF power-up reset fast
+
     # -- shutdown / sleep -------------------------------------------------------
     def begin_shutdown(self, grace_s, reason):
         if self.state != "normal":
@@ -961,12 +1268,8 @@ class PowerManager:
         if self.restart_due is not None and \
                 time.ticks_diff(now, self.restart_due) >= 0:
             self._do_hard_restart()
-        elif self.relays is not None and self.relays.restart_at is not None:
-            self.relays.tick()               # notices a failed cut, releases
-        elif self.relays is not None and \
-                time.ticks_diff(now, self.relay_verify_ms) >= RELAY_VERIFY_MS:
-            self.relay_verify_ms = now
-            self.relays.tick()               # catches a PCF power-up reset fast
+        else:
+            self.relay_poll(now)
 
         # 3) Under-voltage backstop (only with a real reading, only while normal).
         if self.state == "normal" and voltage is not None:
@@ -1246,8 +1549,12 @@ def process_command(line: str, config: Config):
     elif action == "reboot":
         tx_ack("reboot")
         release_all_buttons()
+        bean_release()
         wdt_sleep_ms(300)                 # let the ack drain over USB
         machine.reset()
+
+    elif action == "bean":
+        bean_command(data)
 
     elif action == "i2c_scan":
         if config.i2c is None:
@@ -1286,7 +1593,14 @@ def poll_stdin(config: Config):
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    global _pm, _fan, _reset_cause, _boot_ticks, _pending_banner
+    global _pm, _fan, _reset_cause, _boot_ticks, _pending_banner, _bean
+
+    # BEAN TX (GP7) LOW = bus released, before anything else (boot.py did it
+    # already; this owns the pins from here on). GP6 RX = plain input.
+    try:
+        _bean = Bean()
+    except Exception:
+        _bean = None
 
     _boot_ticks = time.ticks_ms()
 
@@ -1330,6 +1644,7 @@ def main():
     except KeyboardInterrupt:
         print("Interrupt received during safe boot. Dropping to REPL.")
         release_all_buttons()
+        bean_release()
         sys.exit(0)
 
     # From here on Ctrl-C (0x03) is ordinary data: a stray or deliberate
@@ -1363,6 +1678,7 @@ def main():
         last_ident_tx = time.ticks_ms()
         while True:
             feed_wdt()
+            bean_release()
             poll_stdin(idle_config)
             acc_now = read_acc(acc_pin)
             _pm.on_acc(acc_now)
@@ -1465,6 +1781,7 @@ def main():
     while True:
         try:
             feed_wdt()
+            bean_release()                # BEAN TX never left high
 
             # Process any inbound commands (non-blocking)
             poll_stdin(config)
@@ -1550,14 +1867,17 @@ def main():
             _pm.tick(volt)
 
             error_streak = 0
-            time.sleep_ms(config.interval_ms)
+            # Inter-telemetry wait; runs the 5 ms relay read-back.
+            wdt_sleep_ms(config.interval_ms)
 
         except KeyboardInterrupt:
             release_all_buttons()
+            bean_release()
             tx(ID_SYSTEM, {"msg": "INTERRUPTED"})
             sys.exit(0)
 
         except Exception as e:
+            bean_release()
             error_streak += 1
             tx_error("READ", str(e))
             last_time = time.ticks_ms()

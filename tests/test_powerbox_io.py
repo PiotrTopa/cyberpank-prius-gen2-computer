@@ -279,3 +279,77 @@ class TestAccOffDebouncer:
         handlers[DEVICE_POWERBOX_EVENTS]({"event": "acc_on"})
         out = handlers[DEVICE_POWERBOX_EVENTS]({"event": "acc_off"})
         assert [a.acc_on for a in out] == [True] and d.pending
+
+
+class TestBean:
+    """fw 2.2.3 BEAN transceiver bench: command, ack mirror, REST validation."""
+
+    def test_build_and_caps(self):
+        from cyberpunk_computer.io.powerbox import build_bean_command
+        assert build_bean_command("status").payload == {"a": "bean", "op": "status"}
+        assert build_bean_command("tx", v=1, ms=500).payload == \
+            {"a": "bean", "op": "tx", "v": 1, "ms": 500}
+        assert build_bean_command("square", hz=20000, ms=1000).payload["hz"] == 20000
+        assert build_bean_command("loop").payload == {"a": "bean", "op": "loop"}
+        for op, kw in (("tx", {"ms": 501}), ("tx", {"v": 2}), ("pulse", {"us": 2001}),
+                       ("loop", {"n": 0}), ("loop", {"n": 201}), ("square", {"hz": 99}),
+                       ("square", {"hz": 20001}), ("square", {"ms": 1001}),
+                       ("tx", {"us": 10}), ("blast", {}), ("tx", {"v": True}),
+                       ("tx", {"ms": 1.5})):
+            with pytest.raises(ValueError):
+                build_bean_command(op, **kw)
+
+    def test_commander_send_bean(self):
+        sent = []
+
+        class Port:
+            def send(self, cmd):
+                sent.append(cmd.payload)
+                return True
+
+        c = PowerboxCommander(output_port=Port())
+        assert c.send_bean("pulse", us=100)
+        assert c.send_bean("tx", ms=9999) is False      # refused, not sent
+        assert sent == [{"a": "bean", "op": "pulse", "us": 100}]
+
+    def test_ack_mirrored_into_state(self):
+        from cyberpunk_computer.api.serialization import serialize_state
+        store = Store()
+        (a,) = parse_powerbox_system({"ack": "bean", "op": "loop", "n": 20,
+                                      "dom_avg": 12, "timeouts": 0})
+        store.dispatch(a)
+        bean = store.state.powerbox.bean
+        assert bean["op"] == "loop" and bean["dom_avg"] == 12 and "ack" not in bean
+        assert isinstance(bean["ts"], float)
+        js = serialize_state(store.state)
+        assert js["powerbox"]["bean"]["op"] == "loop"
+
+    def test_pmevent_echo_is_not_reduced(self):
+        assert parse_powerbox_system({"msg": "PMEVENT", "ev": "bean", "op": "status"}) == []
+
+    def test_bean_error_mirrored(self):
+        store = Store()
+        (a,) = parse_powerbox_system({"msg": "ERROR", "code": "BEAN_ARGS",
+                                      "detail": "ms=900 not in 1..500"})
+        store.dispatch(a)
+        assert store.state.powerbox.bean["error"] == "BEAN_ARGS"
+        assert parse_powerbox_system({"msg": "ERROR", "code": "RELAY"}) == []
+
+    def test_rest_command_validation(self):
+        from cyberpunk_computer.api.commands import COMMANDS, CommandError, build_command
+        a = build_command("powerbox_bean", {"op": "square", "hz": "5000", "ms": 200})
+        assert type(a).__name__ == "PowerboxBeanAction"
+        assert a.op == "square" and a.params == {"hz": 5000, "ms": 200}
+        assert build_command("powerbox_bean", {"op": "status"}).params == {}
+        for params in ({}, {"op": "nope"}, {"op": "tx", "ms": 501},
+                       {"op": "pulse", "us": 0}, {"op": "loop", "hz": 5}):
+            with pytest.raises(CommandError):
+                build_command("powerbox_bean", params)
+        assert "op" in COMMANDS["powerbox_bean"]["params"]
+
+    def test_service_routes_ui_action_to_commander(self):
+        """The backend middleware turns PowerboxBeanAction into send_bean."""
+        import inspect
+        from cyberpunk_computer.backend import service
+        src = inspect.getsource(service)
+        assert '"PowerboxBeanAction"' in src and "send_bean(action.op, **action.params)" in src

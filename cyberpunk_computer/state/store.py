@@ -1155,6 +1155,16 @@ class Store:
             )
             affected.add(StateSlice.POWERBOX)
 
+        elif action.type == ActionType.SET_POWERBOX_BEAN:
+            import time as _t
+            bean = dict(action.result)
+            bean["ts"] = _t.time()
+            self._state = replace(
+                self._state,
+                powerbox=replace(self._state.powerbox, bean=bean),
+            )
+            affected.add(StateSlice.POWERBOX)
+
         elif action.type == ActionType.SATELLITE_POWER_HOLD:
             import time as _t
             holders = set(self._state.satellites.power_holders)

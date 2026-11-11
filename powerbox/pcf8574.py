@@ -49,6 +49,8 @@ RELAY_RESTRICTED = (RELAY_CH_RESTART,)
 # If we are still alive this long after energising the restart relay, the cut
 # did not happen (relay not wired?): release the coil and report it.
 RESTART_RELEASE_MS = 3000
+# Minimum spacing of reported RELAY_IO errors (all are counted in err_count).
+IO_REPORT_MS = 1000
 
 
 def relay_level(ch, on):
@@ -100,6 +102,7 @@ class RelayBoard:
         self.err_count = 0        # I2C errors
         self.restart_at = None    # ticks when the restart coil was energised
         self._drift_streak = 0
+        self._last_io_report = None   # ticks of the last reported RELAY_IO
 
     # -- reporting ------------------------------------------------------------
     def _event(self, kind, **fields):
@@ -107,7 +110,17 @@ class RelayBoard:
             self._on_event(kind, **fields)
 
     def _error(self, code, detail):
+        """Count every error; report RELAY_IO at most once per
+        IO_REPORT_MS (the read-back runs every 5 ms since fw 2.2.3, so a dead
+        expander would otherwise send ~200 ERROR lines/s). err_count in
+        STATUS still counts each one."""
         self.err_count += 1
+        if code == "RELAY_IO":
+            now = self._ticks()
+            if self._last_io_report is not None and \
+                    self._ticks_diff(now, self._last_io_report) < IO_REPORT_MS:
+                return
+            self._last_io_report = now
         if self._on_error is not None:
             self._on_error(code, detail)
 

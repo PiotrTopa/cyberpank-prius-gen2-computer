@@ -951,6 +951,8 @@ class BackendService:
                         self.powerbox_commander.set_relay(ch, action.on)
                 elif type(action).__name__ == "PowerboxI2cScanAction":
                     self.powerbox_commander.request_i2c_scan()
+                elif type(action).__name__ == "PowerboxBeanAction":
+                    self.powerbox_commander.send_bean(action.op, **action.params)
 
         twin.store.add_middleware(_powerbox_middleware)
 

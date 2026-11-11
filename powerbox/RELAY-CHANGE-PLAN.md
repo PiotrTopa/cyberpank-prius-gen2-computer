@@ -1,7 +1,8 @@
 # Relay board + I2C — current state
 
 Status: **IMPLEMENTED and flashed (firmware 2.2.2 on the board since
-2026-11-04, bench-verified on the P52).** Decisions of 2026-11-03 are final; this file is the
+2026-11-04, bench-verified on the P52).** Firmware 2.2.3 (5 ms relay read-back,
+BEAN bench) is written and tested on the host, see "Firmware change log" below. Decisions of 2026-11-03 are final; this file is the
 current-state reference for the hardware and the code that drives it.
 
 **Open, unexplained (2026-11-04, seen once): the PCF8574 relay expander reset at a key-off.**
@@ -11,9 +12,11 @@ pcf_reset=1`); the STATUS-paced check repaired it, but by then the MFD Pi had br
 (55 s reboot) and every hub re-enumerated. It did NOT recur on the next two key-offs (17:19,
 18:01) with the same stack. It is not an ACC-line transient: the ACC signal only gates a
 2N7000 into GP11, carries no load and shares nothing with the expander. Firmware 2.2.2
-reads the expander back every 100 ms (`RELAY_VERIFY_MS`), which bounds any repeat to
-~100 ms and time-stamps it in the PMLOG. No hardware action is planned unless it recurs;
-if it does, scope the expander VCC and the I2C lines around the event.
+was meant to read the expander back every 100 ms (`RELAY_VERIFY_MS`). In practice the check
+ran once per main-loop pass, about every 1 s (see the 2.2.3 change log). Update 2026-11-11:
+the reset keeps recurring in the field. Firmware 2.2.3 reads the expander back every 5 ms,
+inside the relays' release time, and time-stamps each streak in the PMLOG. If loads still
+drop, scope the expander VCC and the I2C lines around the event.
 
 ## Hardware as it is
 
@@ -88,6 +91,16 @@ converge the rest. The MFD manager recovers through its ON-state watchdog.
 - `POWERBOX_READY` carries `rc` and is delivered once the host heartbeats.
 - New errors: `RELAY` (refused channel), `RELAY_IO`, `RESTART_FAILED`, `POCO1_NC`/`POCO2_NC`, `BMP280_READ`/`AHT20_READ` (sensor dropped).
 - `SENSOR_OK` for the PCF8574 includes the adopted `port` byte.
+
+## Firmware change log after 2.2.2
+
+**2.2.3 (2026-11-11), not yet flashed at the time of writing.**
+- **5 ms relay read-back.** The PCF8574 keeps resetting to 0xFF in the field, so `RELAY_VERIFY_MS` is now 5 ms (was 100). The goal is to re-assert inside the relays' ~5 ms release time, so the loads never actually drop. The check now runs from `wdt_sleep_ms()`, deadline-paced, in the main loop's inter-telemetry sleep and during every button hold. Before this change it only ran once per main-loop pass (~1 s), whatever the constant said, because the loop slept `interval_ms` in one piece.
+  - The `rly_fix` event still fires only on the first mismatch of a streak.
+  - `RELAY_IO` errors are rate-limited to one report per second (`pcf8574.IO_REPORT_MS`); `rly_err` still counts every one.
+  - Tests: `TestRelayVerifyCadence`.
+- **BEAN transceiver bench (2026-11-11).** Pins: GP7 TX (output, LOW in `boot.py` and first thing in `main()`), GP6 RX (input, no pull, inverted). Command `{"a":"bean","op":"status|tx|pulse|loop|square"}` → `{"ack":"bean",...}` + PMEVENT echo, `ERROR BEAN_ARGS` on bad args; TX is released on every path. Backend: REST `powerbox_bean`, state `powerbox.bean`. Docs: README "BEAN transceiver bench". Tests: `TestBean` in `tests/test_powerbox_firmware.py` and `tests/test_powerbox_io.py`.
+- Flash both `main.py` **and** `boot.py`, plus `pcf8574.py` (the default `prius-flash-powerbox` only sends main.py + boot.py).
 
 ## Bench verification checklist (after flashing `pcf8574.py` + `main.py`)
 
