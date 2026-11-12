@@ -399,3 +399,32 @@ AVC-LAN Event Listener: Configure the IEBus controller to trigger an interrupt o
 The Toyota Prius Gen 2 operates on a sophisticated, compartmentalized network architecture that separates human comfort (AVC-LAN) from powertrain physics (CAN). While the CAN bus offers a high-speed, unsolicited stream of critical data like "Real" SOC (0x3CB) and Energy Flow (0x3B6), it notably obscures Inverter Temperatures behind a diagnostic firewall, requiring active solicitation (0x7E2). Conversely, the AVC-LAN offers high-fidelity climate data (0x130) but requires specialized physical hardware to access.
 
 By synthesizing these two data streams, an analyst can move beyond simple diagnostics and engage in comprehensive vehicle system analysis. This approach reveals the hidden causal links between cabin climate requests, battery thermal limits, and engine operating strategies, providing a complete picture of the Hybrid Synergy Drive's operational logic. The hexadecimal identifiers and bitmasks detailed in this report constitute the master key for unlocking this data.
+## BEAN (MPX) tap points — from the Prius repair manual RM1076E (2004, EU), section 05 "Multiplex communication system" (checked 2026-11-12)
+
+The BEAN is a single-wire daisy-chain ring (10 kbit/s, dominant ≈ +B, recessive 0 V) between the
+gateway ECU, power source control ECU, combination meter, smart (certification) ECU, transmission
+control ECU, transponder key ECU, A/C ECU and body ECU. **All nodes are in the instrument panel.**
+There is **no BEAN terminal on the DLC3** (OBD): the DLC3 carries only SIL 7, CG 4, SG 5, CANH 6,
+CANL 14, BAT 16; Techstream reaches the body side through the K-line/gateway. Nothing BEAN runs under
+the seats (the nav ECU is AVC-LAN only). The key slot K3 carries only VC5/CODE/TXCT/GND to the
+transponder key ECU.
+
+Connector terminals (manual drawings are "wire harness side" views, lock on top, numbered row by row
+left→right; wire colours GR = grey, B = black, P = pink, W = white; *LHD):
+
+| Node | Connector / pin | Signal | Wire | Ring neighbour |
+|---|---|---|---|---|
+| Combination meter C10 | IG1-2 (= C10-24) | MPX+ | B (W via centre connector) | S11-32 (w/ smart entry) or T5-19 (w/o) |
+| Combination meter C10 | IG2-3* (= C10-25) | MPX− | GR (P via centre connector) | P8-7 |
+| Power source control ECU P8 (40-pin) | 7 | MPX1 | GR | C10-25 |
+| Power source control ECU P8 | 24 | MPX2 | B | G1-3 |
+| Gateway ECU G1 (24-pin) | 3 | MPD1 | GR* | P8-24 |
+| Smart ECU S11 (40-pin) | 32 / 31 | MPX2 / MPX1 | B / GR | C10-24 / T5-19 |
+| Transmission control ECU T5 (26-pin, console) | 19 / 18 | MPX1 / MPX2 | GR / B | S11-31 (or C10-24) / T6-16 |
+| Transponder key ECU T6 (24-pin) | 16 | MPX2 | GR | T5-18 |
+
+Easiest taps: transmission control ECU T5 pins 18/19 (centre console, by the shift lever) or the
+combination meter IG1-2 / IG2-3 (top centre of the dash). Identification: unpowered, a candidate
+wire reads < 1 Ω to the neighbouring node's MPX terminal (the manual's own "check resistance of
+communication line" test); powered, the wire idles at 0 V with a flickering few-hundred-mV average
+and shows ≈12 V, 100 µs pulses on a scope. Never drive TX onto a wire before it is identified.
