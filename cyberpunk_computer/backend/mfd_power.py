@@ -114,6 +114,10 @@ class MfdPowerConfig:
     dark_cmd: str = DARK_CMD
     restore_cmd: str = RESTORE_CMD
     standby_sends: int = 3           # each command is repeated on this many ticks
+    # While the board is ON the restore is re-sent this often (0 = never): the
+    # SSH call is fire-and-forget, so a lost restore must not leave the UI
+    # frozen with the key on.
+    restore_resend_s: float = 30.0
 
 
 class BeanWakeTrigger:
@@ -221,6 +225,7 @@ class MfdPowerManager:
         # Dark standby: what the Pi was last told, and how many repeats are left.
         self._dark: bool = False
         self._standby_left: int = 0
+        self._last_restore: float = 0.0   # monotonic, last restore sent in ON
 
     # ── external effects (injectable) ────────────────────────────────────
 
@@ -407,6 +412,8 @@ class MfdPowerManager:
             return
         self._standby_left -= 1
         cfg = self.config
+        if not self._dark:
+            self._last_restore = self._clock()
         cmd = ["sudo", "ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
                "-o", "ConnectTimeout=5", f"{cfg.ssh_user}@{cfg.board_ip}",
                cfg.dark_cmd if self._dark else cfg.restore_cmd]
@@ -572,6 +579,12 @@ class MfdPowerManager:
                 self._standby(True)
             else:
                 self._standby_tick()
+                if (cfg.dark_grace and cfg.restore_cmd and cfg.restore_resend_s > 0
+                        and self._standby_left <= 0 and reachable
+                        and now - self._last_restore >= cfg.restore_resend_s):
+                    self._dark = False
+                    self._standby_left = 1
+                    self._standby_tick()
 
         elif self._state == STATE_GRACE:
             if acc_on:

@@ -206,7 +206,18 @@ def test_bean_early_start():
     f.now += 6; m.tick(True)
     f.now += 6; m.tick(True)
     f.now += 6; m.tick(True)
-    check("restore repeated 3 times, no more", len(ssh("SIGCONT")) == 3)
+    check("restore repeated 3 times", len(ssh("SIGCONT")) == 3)
+    f.now += 6; m.tick(True)
+    check("no resend inside 30 s", len(ssh("SIGCONT")) == 3)
+    for _ in range(5):
+        f.now += 6; m.tick(True)
+    check("restore re-sent once after 30 s in ON", len(ssh("SIGCONT")) == 4)
+    f.ping_ok = False
+    for _ in range(6):
+        f.now += 6; m.tick(True)
+    check("no resend while unreachable", len(ssh("SIGCONT")) == 4)
+    f.ping_ok = True
+    f.now += 6; m.tick(True)
     f.now += 6; m.tick(False)
     f.now += 1201; m.tick(False)
     check("grace expired: shutting down", m.status()["state"] == STATE_SHUTTING_DOWN)
