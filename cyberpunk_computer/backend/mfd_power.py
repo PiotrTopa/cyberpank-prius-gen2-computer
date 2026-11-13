@@ -25,6 +25,11 @@ Power policy (state machine, driven from the backend loop at a slow cadence):
 
 * ACC on: hub-port power on, wait for the gadget iface, configure the host
   IP, ping until reachable.
+* Early start (``tick(acc_on, early=True)``): the same demand as ACC, raised
+  by :class:`BeanWakeTrigger` when the BEAN body bus wakes and shows somebody
+  getting in (doors unlocked or a door open), typically 10-30 s before the
+  key reaches ACC. When the bus goes quiet again without ACC the board goes
+  through the normal grace, then the clean shutdown.
 * ACC off: keep running for a grace period (default 10 min) in case the key
   comes back; then ask the Pi to shut down cleanly over SSH, wait for the
   halt to complete, and finally cut the port power.
@@ -82,6 +87,63 @@ class MfdPowerConfig:
     # host-side USBDEVFS_RESET does NOT fix it; only a VBUS cycle does. If the
     # board stays unreachable in ON for this long, power-cycle it. 0 disables.
     unreachable_recover_s: float = 45.0
+    # Early start from the BEAN body bus: "entry" = bus active and the doors
+    # are unlocked or a door is open; "any" = any bus activity; "off".
+    bean_wake: str = "entry"
+    bean_active_s: float = 15.0      # the bus counts as active this long after a frame
+    bean_own_tx_mute_s: float = 30.0 # ignore the bus this long after our own transmit
+
+
+class BeanWakeTrigger:
+    """Early-start demand from the BEAN body bus (see MfdPowerConfig.bean_wake).
+
+    ``update(bean, own_tx_ts, now, wall)`` -> bool. ``bean`` is BeanState (or
+    None); activity is a change of ``frames_total`` judged on the backend's
+    own clock (frame timestamps from the firmware are not wall-clock exact).
+    The bus waking because WE transmitted (``bean_wake``, last reply time
+    ``own_tx_ts``, wall clock) is not somebody getting in: muted for
+    ``bean_own_tx_mute_s``. In "entry" mode locking the car and walking away
+    (bus active, doors locked, nothing open) does not start the board.
+    """
+
+    def __init__(self, mode: str = "entry", active_s: float = 15.0,
+                 own_tx_mute_s: float = 30.0) -> None:
+        self.mode = mode if mode in ("entry", "any") else "off"
+        self.active_s = active_s
+        self.own_tx_mute_s = own_tx_mute_s
+        self._frames: Optional[int] = None
+        self._last_activity: Optional[float] = None
+        self.reason = ""
+
+    @staticmethod
+    def _val(decoded, name):
+        entry = (decoded or {}).get(name)
+        return entry.get("value") if hasattr(entry, "get") else None
+
+    def update(self, bean, own_tx_ts: Optional[float], now: float, wall: float) -> bool:
+        if self.mode == "off" or bean is None:
+            return False
+        frames = int(getattr(bean, "frames_total", 0) or 0)
+        if self._frames is None:
+            self._frames = frames          # first look: no activity inferred
+        elif frames != self._frames:
+            self._frames = frames
+            muted = own_tx_ts is not None and 0 <= wall - own_tx_ts < self.own_tx_mute_s
+            if not muted:
+                self._last_activity = now
+        if self._last_activity is None or now - self._last_activity > self.active_s:
+            return False
+        if self.mode == "any":
+            self.reason = "BEAN bus active"
+            return True
+        decoded = getattr(bean, "decoded", None)
+        if self._val(decoded, "doors_locked") is False:
+            self.reason = "BEAN: doors unlocked"
+            return True
+        if self._val(decoded, "any_door_open") or self._val(decoded, "door_open"):
+            self.reason = "BEAN: door open"
+            return True
+        return False
 
 
 class MfdPowerManager:
@@ -356,9 +418,15 @@ class MfdPowerManager:
 
     # ── state machine ─────────────────────────────────────────────────────
 
-    def tick(self, acc_on: bool) -> None:
+    def tick(self, acc_on: bool, early: bool = False, why: str = "") -> None:
+        """``early``: start demand that is not ACC (BEAN entry); it is treated
+        like ACC, and a start from OFF does not wait for the next slow tick."""
         now = self._clock()
-        if (now - self._last_tick) < self.config.tick_s:
+        if early and not acc_on and self._state == STATE_OFF and self._reconciled:
+            logger.info("MFD power: early start (%s)", why or "early demand")
+            self._last_tick = 0.0
+        acc_on = bool(acc_on or early)
+        if self._last_tick and (now - self._last_tick) < self.config.tick_s:
             return
         self._last_tick = now
         cfg = self.config
@@ -448,7 +516,7 @@ class MfdPowerManager:
 
         elif self._state == STATE_GRACE:
             if acc_on:
-                logger.info("MFD power: ACC back during grace, staying up")
+                logger.info("MFD power: %s during grace, staying up", why if early and why else "ACC back")
                 self._enter(STATE_ON)
             elif now >= (self._deadline or 0):
                 self._request_shutdown()

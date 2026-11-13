@@ -45,6 +45,8 @@ def _build_mfd():
         BACKEND_MFD_GRACE_S=600           # key-off grace before shutdown
         BACKEND_MFD_BOOT_TIMEOUT_S=180
         BACKEND_MFD_SHUTDOWN_WAIT_S=45
+        BACKEND_MFD_BEAN_WAKE=entry       # early start from the BEAN bus:
+                                          # entry (unlocked / door open) | any | off
     """
     enabled = os.environ.get("BACKEND_MFD_ENABLED", "0").strip().lower() in (
         "1", "true", "yes", "on",
@@ -63,6 +65,7 @@ def _build_mfd():
         grace_s=float(env("BACKEND_MFD_GRACE_S", "600")),
         boot_timeout_s=float(env("BACKEND_MFD_BOOT_TIMEOUT_S", "180")),
         shutdown_wait_s=float(env("BACKEND_MFD_SHUTDOWN_WAIT_S", "45")),
+        bean_wake=env("BACKEND_MFD_BEAN_WAKE", "entry").strip().lower(),
     )
 
 

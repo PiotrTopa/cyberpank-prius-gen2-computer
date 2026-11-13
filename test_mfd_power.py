@@ -76,8 +76,9 @@ class Fake:
 
 
 def make(fake: Fake, **cfg_kw) -> MfdPowerManager:
-    cfg = MfdPowerConfig(tick_s=1.0, grace_s=600.0, boot_timeout_s=120.0,
-                         shutdown_wait_s=45.0, **cfg_kw)
+    kw = dict(tick_s=1.0, grace_s=600.0, boot_timeout_s=120.0, shutdown_wait_s=45.0)
+    kw.update(cfg_kw)
+    cfg = MfdPowerConfig(**kw)
     return MfdPowerManager(
         cfg, publish=fake.publish, runner=fake.runner, spawner=fake.spawner,
         iface_exists=fake.iface_exists, clock=fake.clock,
@@ -138,6 +139,65 @@ def test_full_cycle():
     check("power-cut-after-halt",
           fake.power_cmds()[-1] == ["sudo", "prius-usb-power", "off", "1-1 5"])
     check("back-to-off", mgr.status()["state"] == STATE_OFF)
+
+
+class Bean:
+    def __init__(self):
+        self.frames_total = 0
+        self.decoded = {}
+
+    def rx(self, **vals):
+        self.frames_total += 5
+        for k, v in vals.items():
+            self.decoded[k] = {"value": v, "ts": 0, "src": "FE:B6"}
+
+
+def test_bean_early_start():
+    print("test_bean_early_start")
+    T = _mod.BeanWakeTrigger
+    # entry mode: locked wake (our own or a fob lock) does not trigger
+    b, t = Bean(), T("entry", 15.0, 30.0)
+    check("idle bus: no demand", t.update(b, None, 0.0, 5000.0) is False)
+    b.rx(doors_locked=True, any_door_open=False)
+    check("bus active but locked: no demand", t.update(b, None, 1.0, 5001.0) is False)
+    b.rx(doors_locked=False)
+    check("unlocked: demand", t.update(b, None, 2.0, 5002.0) is True)
+    check("still inside the active window", t.update(b, None, 16.0, 5016.0) is True)
+    check("bus quiet > 15 s: demand gone", t.update(b, None, 18.0, 5018.0) is False)
+    b.rx(doors_locked=True, any_door_open=True)
+    check("door open: demand", t.update(b, None, 30.0, 5030.0) is True)
+    # our own transmit woke the bus: muted
+    b, t = Bean(), T("entry", 15.0, 30.0)
+    t.update(b, None, 0.0, 5000.0)
+    b.rx(doors_locked=False)
+    check("own TX 3 s ago: muted", t.update(b, 4998.0, 1.0, 5001.0) is False)
+    # any / off modes
+    b, t = Bean(), T("any")
+    t.update(b, None, 0.0, 5000.0)
+    b.rx(doors_locked=True)
+    check("any: activity is enough", t.update(b, None, 1.0, 5001.0) is True)
+    b, t = Bean(), T("off")
+    b.rx(doors_locked=False)
+    check("off: never", t.update(b, None, 1.0, 5001.0) is False)
+
+    # manager: early demand starts from OFF at once and then follows the grace
+    f = Fake()
+    m = make(f, tick_s=5.0)
+    step(m, f, False)                      # reconcile, OFF
+    check("off before", m.status()["state"] == STATE_OFF)
+    f.now += 0.5                           # well inside the 5 s tick limit
+    m.tick(False, early=True, why="BEAN: doors unlocked")
+    check("early start not delayed by the slow tick", m.status()["state"] == STATE_BOOTING)
+    f.iface_present = f.ping_ok = True
+    f.now += 6; m.tick(False, early=True)
+    check("on", m.status()["state"] == STATE_ON)
+    f.now += 6; m.tick(False, early=False)
+    check("bus quiet, no ACC: grace", m.status()["state"] == STATE_GRACE)
+    f.now += 6; m.tick(True)
+    check("ACC during grace: on", m.status()["state"] == STATE_ON)
+    f.now += 6; m.tick(False)
+    f.now += 601; m.tick(False)
+    check("grace expired: shutting down", m.status()["state"] == STATE_SHUTTING_DOWN)
 
 
 def test_boot_timeout_recycles():
@@ -231,6 +291,7 @@ def test_startup_reconciliation():
 
 def main() -> None:
     test_full_cycle()
+    test_bean_early_start()
     test_boot_timeout_recycles()
     test_shutdown_wait_timeout()
     test_reconfigures_ip_while_on()

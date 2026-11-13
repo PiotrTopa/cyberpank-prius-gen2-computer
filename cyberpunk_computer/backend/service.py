@@ -430,6 +430,7 @@ class BackendService:
 
         # MFD video board power manager (backend.mfd_power).
         self.mfd_power = None
+        self._mfd_bean_trigger = None
         # roadsense stack manager (backend.roadsense_power).
         self.roadsense_power = None
         # On-demand dashboard camera preview (backend.camera_preview).
@@ -1480,9 +1481,19 @@ class BackendService:
         """Advance the MFD video-board power manager (ACC follower)."""
         if self.mfd_power is None or self.twin is None:
             return
-        acc = bool(self.twin.store.state.powerbox.acc_on)
+        state = self.twin.store.state
+        acc = bool(state.powerbox.acc_on)
         try:
-            self.mfd_power.tick(acc)
+            trig = self._mfd_bean_trigger
+            if trig is None:
+                from .mfd_power import BeanWakeTrigger
+                c = self.mfd_power.config
+                trig = self._mfd_bean_trigger = BeanWakeTrigger(
+                    c.bean_wake, c.bean_active_s, c.bean_own_tx_mute_s)
+            own_tx = (state.powerbox.bean_tx or {}).get("ts")
+            early = trig.update(getattr(state, "bean", None), own_tx,
+                                time.monotonic(), time.time())
+            self.mfd_power.tick(acc, early=early, why=trig.reason)
         except Exception:
             logger.exception("MFD power tick failed")
 
