@@ -57,3 +57,32 @@ BEAN. **Conclusion: door lock/unlock cannot be achieved by BEAN injection on thi
 state and door-open state from the bus works perfectly; actuation would need either body-ECU message
 fuzzing (`40:xx`, risky on a safety ECU) or a physical relay tap on the lock-actuator / lock-switch
 wiring (the standard aftermarket approach).
+
+### Corroborated by the factory manual (research lane, 2026-11-13)
+
+The official 2004 NHW20 repair manual (RM1075U) states the architecture explicitly and settles it:
+
+- Smart-entry "Function of Main Components", Multiplex Network Body ECU: it *transmits* body signals
+  (courtesy switch, door key lock/unlock switch, door lock position switch, …) to the smart ECU **via
+  BEAN**, but *receives* the **door lock/unlock request signal from the smart ECU via a DEDICATED SERIAL
+  COMMUNICATION LINE with a local protocol** (body ECU ↔ smart ECU ↔ wireless door-lock receiver). So
+  BEAN carries body-ECU→smart-ECU **status only**; the lock/unlock **command** rides a separate
+  proprietary serial line, not BEAN.
+- The body ECU then **drives the lock motors over hardwired outputs** ("outputs a door lock/unlock
+  control signal to each door lock assy"); the 30 s auto re-lock and repeat-lock are body-ECU-internal
+  logic — matching our `FE:E1 0x20` auto re-lock being a report, not a command.
+- Body-ECU terminals page: the dedicated link is pin **RDA (B7-23) "Door control receiver input"**
+  (~6–7 V idle); the lock-motor drive outputs live in the separate "Power Door Lock Control System"
+  section, not the multiplex section.
+
+Independent hobbyist corroboration: the only public Toyota BEAN code table (`specadmin/toyota-mpx`,
+`MPX-codes.md`) documents door frames `FE:DB/DC/DD/DE/96` etc. — **all status/event reports, no command
+packet**. Toyota diagnostic lock control *does* exist but over the **diagnostic channel** (K-line/CAN,
+Techstream actuator test), reachable at CAN id 0x750 on *later* (2010+, CAN-body) Prii — not on the
+NHW20's BEAN body bus.
+
+**Routes to actual lock control, ranked:** (1) relay/driver on the body ECU's **hardwired lock-motor
+outputs** — "Power Door Lock Control System" section of the EWD — bypasses the bus and crypto, highest
+confidence; (2) reverse-engineer and inject on the **dedicated serial line** at body-ECU pin RDA (B7-23)
+— carries the real request but is an undocumented proprietary protocol, high effort; (3) body-ECU
+**diagnostic actuator test** over K-line (NHW20 is pre-CAN-body), not over BEAN.
