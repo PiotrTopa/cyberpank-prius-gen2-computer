@@ -16,9 +16,12 @@ MES that arrived (it may include the CRC byte). An 8th element 1 (fw >=
 powerbox's own transmitter (``"own": True`` in the frame dict); such frames
 stay in the frame ring and the capture log but not in the message table.
 
-Known IDs (docs/BEAN_PROTOCOL.md §4): ALL of these are UNVERIFIED on the
-NHW20 Prius. They come from other Toyota/Lexus models (RX300, IS300) or from
-the bean_tools NHW20 dashboard and must be confirmed with captures.
+Known IDs (:func:`decode_known`): the door / lock / lamp / key-window group
+is CONFIRMED on this NHW20 with the car OFF (docs/BEAN_FINDINGS.md,
+docs/BEAN_ANALYSIS.md). The IG-ON group (coolant, ambient, speed, rpm, shift,
+P-lock, power-source state) is carried over from JP dumps and other
+Toyota/Lexus models (RX300, IS300, bean_tools) and stays UNVERIFIED on this
+car until captured with the key on.
 """
 
 from __future__ import annotations
@@ -70,43 +73,99 @@ def _b(data: bytes, i: int) -> Optional[int]:
     return data[i] if len(data) > i else None
 
 
-def decode_known(mes: str, data_hex: str) -> Dict[str, Any]:
-    """Named values for the few known MES-IDs. UNVERIFIED on the Prius.
+def decode_known(mes: str, data_hex: str, dst: Optional[str] = None) -> Dict[str, Any]:
+    """Named values decoded from a BEAN frame's MES id + data (and, where it
+    matters to avoid a collision, its DST).
 
-    0x2C coolant = D0/2 C (RX300/IS300/BeanMPX car; NHW20 values plausible)
-    0x40 shift   = D0 bit7 P, bit6 R, bit5 N, bit4 D (RX300; NHW20 P/R/N/D seen)
-    0x24 speed   = D0 km/h (RX300/IS300; only 0 seen on the NHW20)
-    0xCD ambient = D0 - 48 C (IS300/RX300 scaling)
-    0x7F lamps   = b0.4 clearance/tail, b0.3 high beam, b2.7 door (bean_tools)
-    0x3F odometer= D0..D2 24-bit km (bean_tools "mileage")
+    CONFIRMED on the owner's NHW20 with the car OFF (docs/BEAN_FINDINGS.md,
+    docs/BEAN_ANALYSIS.md):
+      FE:B6  door lock state (b0) + door-open courtesy switches (b1)
+      FE:E1  lock/unlock EVENT (b2), by source: 04/08 remote fob, 10/20 smart
+      FE:7F  any-door-open indicator (b2 bit7); lamps (b0, car ON)
+      FE:83  interior dome / luggage lamp (b3); key/ACC/IG flags (b0, car ON)
+      FE:D8  driver-door smart-key check window (b1 bit0, ~30 s)
+      ..:3F  odometer, 24-bit km (52:3F on this car, owner-confirmed exact)
+
+    Carried over from JP dumps / other Toyota-Lexus models (RX300, IS300,
+    bean_tools) and UNVERIFIED on this car until captured with the key on:
+      FE:2C coolant (x/2), FE:CD ambient (x-48), FE:24 speed, FE:26 rpm,
+      FE:40 shift, FE:50 P-lock, FE:62 power-source state.
+
+    NB: FE:E1 is a STATUS REPORT the body ECU broadcasts after it acts, not a
+    command — see docs/BEAN_FINDINGS.md (there is no door-lock command on this
+    bus; the request reaches the body ECU on a dedicated serial line).
     """
     try:
         data = bytes.fromhex(data_hex or "")
     except ValueError:
         return {}
     mes = (mes or "").upper()
+    dst = (dst or "").upper()
     out: Dict[str, Any] = {}
-    d0 = _b(data, 0)
-    if d0 is None:
+    d0, d1, d2, d3 = _b(data, 0), _b(data, 1), _b(data, 2), _b(data, 3)
+
+    # Odometer rides a directed frame on this car (52:3F); accept any DST.
+    if mes == "3F":
+        if len(data) >= 3:
+            out["odometer_km"] = (data[0] << 16) | (data[1] << 8) | data[2]
         return out
-    if mes == "2C":
+
+    # The rest are body-bus broadcasts (DST 0xFE). Guard on DST so a directed
+    # frame that happens to reuse a MES byte is not mis-decoded.
+    if dst not in ("", "FE") or d0 is None:
+        return out
+
+    if mes == "B6":                         # [C] door lock + door-open state
+        out["doors_locked"] = (d0 == 0x00)
+        out["driver_door_unlocked"] = bool(d0 & 0x01)
+        out["other_doors_unlocked"] = bool(d0 & 0xC0)
+        out["lock_state_raw"] = d0
+        if d1 is not None:
+            out["driver_door_open"] = bool(d1 & 0x80)
+            out["passenger_door_open"] = bool(d1 & 0x40)
+            out["rear_door_open"] = bool(d1 & 0x04)
+            out["any_door_open"] = bool(d1 & 0xC4)
+    elif mes == "E1":                       # [C] lock/unlock event (b2)
+        if d2:
+            out["lock_event"] = {0x04: "remote_unlock", 0x08: "remote_lock",
+                                 0x10: "smart_unlock", 0x20: "smart_lock"}.get(
+                                     d2, "0x%02X" % d2)
+            out["lock_event_raw"] = d2
+    elif mes == "7F":                       # [C] any-door-open (b2); lamps (b0)
+        out["lamp_tail"] = bool(d0 & 0x10)
+        out["lamp_head"] = bool(d0 & 0x20)
+        out["lamp_high_beam"] = bool(d0 & 0x08)
+        if d2 is not None:
+            out["door_open"] = bool(d2 & 0x80)
+    elif mes == "83":                       # [C] dome/luggage lamp (b3); flags (b0)
+        if d3 is not None:
+            out["dome_lamp"] = bool(d3 & 0x08)
+            out["luggage_lamp"] = bool(d3 & 0x04)
+        out["key_inserted"] = bool(d0 & 0x02)
+        out["acc_on"] = bool(d0 & 0x20)
+        out["ig_on"] = bool(d0 & 0x40)
+    elif mes == "D8":                       # [C] driver-door key window (b1)
+        if d1 is not None:
+            out["driver_key_window"] = bool(d1 & 0x01)
+    elif mes == "62":                       # [I] power-source state (JP-derived)
+        out["in_park"] = bool(d0 & 0x20)
+        out["key_present"] = bool(d0 & 0x40)
+        out["power_on"] = bool(d0 & 0x10)
+        out["power_switch_pressed"] = bool(d0 & 0x08)
+    elif mes == "2C":                       # [X] coolant
         out["coolant_c"] = d0 / 2.0
-    elif mes == "40":
+    elif mes == "CD":                       # [X] ambient (car ON)
+        out["ambient_c"] = d0 - 48
+    elif mes == "24":                       # [X] vehicle speed
+        out["speed_kmh"] = d0
+    elif mes == "26" and len(data) >= 2:    # [X] engine rpm (RX300 scaling)
+        out["engine_rpm"] = round((data[0] * 256 + data[1]) / 5.12)
+    elif mes == "40":                       # [X]/[C-JP] shift position
         names = [n for bit, n in ((0x80, "P"), (0x40, "R"), (0x20, "N"), (0x10, "D")) if d0 & bit]
         out["shift"] = names[0] if len(names) == 1 else ("" if not names else "/".join(names))
         out["shift_raw"] = d0
-    elif mes == "24":
-        out["speed_kmh"] = d0
-    elif mes == "CD":
-        out["ambient_c"] = d0 - 48
-    elif mes == "7F":
-        out["lamp_tail"] = bool(d0 & 0x10)
-        out["lamp_high_beam"] = bool(d0 & 0x08)
-        b2 = _b(data, 2)
-        if b2 is not None:
-            out["door_open"] = bool(b2 & 0x80)
-    elif mes == "3F" and len(data) >= 3:
-        out["odometer_km"] = (data[0] << 16) | (data[1] << 8) | data[2]
+    elif mes == "50":                       # [I] P-lock state
+        out["park_engaged"] = bool(d0 & 0x80)
     return out
 
 
@@ -147,6 +206,6 @@ def update_decoded(decoded: Mapping[str, Mapping], frames: List[Mapping]) -> Dic
     for f in frames:
         if not f.get("ok"):
             continue
-        for name, value in decode_known(f["mes"], f["data"]).items():
+        for name, value in decode_known(f["mes"], f["data"], f.get("dst")).items():
             out[name] = {"value": value, "ts": f["ts"], "src": "%s:%s" % (f["dst"], f["mes"])}
     return out

@@ -85,7 +85,7 @@ class TestParser:
 
 
 class TestKnownIds:
-    """All UNVERIFIED on the Prius (other models / bean_tools dashboard)."""
+    """IG-ON group UNVERIFIED (other models); car-OFF door/lock group CONFIRMED."""
 
     def test_values(self):
         assert decode_known("2C", "64") == {"coolant_c": 50.0}
@@ -93,11 +93,41 @@ class TestKnownIds:
         assert decode_known("40", "100000")["shift"] == "D"
         assert decode_known("24", "23") == {"speed_kmh": 35}
         assert decode_known("CD", "47") == {"ambient_c": 23}
-        assert decode_known("7F", "001080000000") == {"lamp_tail": False, "lamp_high_beam": False,
-                                                      "door_open": True}
-        assert decode_known("7F", "18") == {"lamp_tail": True, "lamp_high_beam": True}
+        assert decode_known("7F", "001080000000") == {"lamp_tail": False, "lamp_head": False,
+                                                      "lamp_high_beam": False, "door_open": True}
+        assert decode_known("7F", "18") == {"lamp_tail": True, "lamp_head": False,
+                                            "lamp_high_beam": True}
         assert decode_known("3F", "0287E980") == {"odometer_km": 165865}
         assert decode_known("AB", "4080") == {} and decode_known("2C", "") == {}
+
+    def test_confirmed_door_lock_group(self):
+        # FE:B6 lock state + door-open courtesy switches (confirmed on the car)
+        assert decode_known("B6", "0000", "FE") == {
+            "doors_locked": True, "driver_door_unlocked": False,
+            "other_doors_unlocked": False, "lock_state_raw": 0x00,
+            "driver_door_open": False, "passenger_door_open": False,
+            "rear_door_open": False, "any_door_open": False}
+        v = decode_known("B6", "C100", "FE")           # all unlocked
+        assert v["doors_locked"] is False and v["driver_door_unlocked"] is True \
+            and v["other_doors_unlocked"] is True
+        v = decode_known("B6", "0080", "FE")           # driver door open
+        assert v["driver_door_open"] is True and v["any_door_open"] is True
+        # FE:E1 lock/unlock event, coded by source
+        assert decode_known("E1", "000004", "FE") == {"lock_event": "remote_unlock",
+                                                       "lock_event_raw": 0x04}
+        assert decode_known("E1", "000020", "FE")["lock_event"] == "smart_lock"
+        assert decode_known("E1", "000000", "FE") == {}      # idle: no event
+        # FE:83 dome lamp, FE:D8 key window
+        assert decode_known("83", "00000008", "FE")["dome_lamp"] is True
+        assert decode_known("D8", "0001", "FE")["driver_key_window"] is True
+        assert decode_known("62", "2000", "FE")["in_park"] is True
+
+    def test_dst_guard(self):
+        # 52:3F is the odometer on this car (directed); decodes regardless of DST
+        assert decode_known("3F", "0493DF80", "52") == {"odometer_km": 299999}
+        # a broadcast decode must not fire for a directed frame reusing the MES
+        assert decode_known("B6", "C100", "40") == {}
+        assert decode_known("E1", "000004", "52") == {}
 
 
 def _frames(*recs, t=10_000, ts=T0):
@@ -254,6 +284,24 @@ class TestCommands:
         assert not c.bean_rx(raw=1000)
         assert sent == [{"a": "bean_rx", "on": 1}, {"a": "bean_rx", "raw": 10},
                         {"a": "bean_tx_enable", "v": 0}]
+
+    def test_bean_wake_sequence(self):
+        sent = []
+
+        class Port:
+            def send(self, cmd):
+                sent.append(cmd.payload)
+                return True
+        c = PowerboxCommander(Port())
+        assert c.bean_wake(retries=1) is True
+        # arm -> edge -> allow -> send FE:48, in order; only the safe test frame
+        assert sent == [
+            {"a": "bean_tx_enable", "v": 1},
+            {"a": "bean_tx", "op": "edge", "wake": 1},
+            {"a": "bean_tx", "op": "allow", "v": 1},
+            {"a": "bean_tx", "op": "send", "pri": 2, "dst": "FE", "mes": "48",
+             "data": "00", "retries": 1, "wake": 1},
+        ]
 
 
 class TestApi:

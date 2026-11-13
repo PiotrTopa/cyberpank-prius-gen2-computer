@@ -127,6 +127,7 @@ class ActionType(Enum):
     POWERBOX_BEAN_TX_ENABLE = auto()  # arm/disarm the BEAN TX guard (60 s, bench)
     POWERBOX_BEAN_TX = auto()         # BEAN transmitter op (fw >= 2.4.0)
     SET_POWERBOX_BEAN_TX = auto()     # mirror of the last BEAN transmitter reply
+    POWERBOX_BEAN_WAKE = auto()       # wake the sleeping body bus (safe FE:48)
     SET_BEAN_RX = auto()              # decoded BEAN frames/stats/ack from the powerbox
     BEAN_CAPTURE = auto()             # start/stop the BEAN capture log
     BEAN_MARK = auto()                # event mark in the BEAN capture log
@@ -1554,6 +1555,19 @@ class SetPowerboxBeanTxAction(Action):
     def __init__(self, result: dict, source: ActionSource = ActionSource.GATEWAY):
         super().__init__(ActionType.SET_POWERBOX_BEAN_TX, source)
         self.result = dict(result)
+
+
+class PowerboxBeanWakeAction(Action):
+    """Wake the sleeping Toyota BEAN body bus (fw >= 2.4.0). Fires the guarded
+    transmitter sequence (arm -> edge -> allow -> send the safe allow-listed
+    test frame FE:48 with wake=1); the single valid frame triggers the network
+    management wake cascade. Only ever sends FE:48 (never a bench frame); the
+    60 s arm window is left to auto-expire. ``retries`` 0..3 resends if the
+    first (bus-waking) frame is not ACKed. Replies land in PowerboxState.bean_tx
+    as for any send; freshly woken frames then arrive on GET /api/v1/bean/frames."""
+    def __init__(self, retries: int = 2, source: ActionSource = ActionSource.UI):
+        super().__init__(ActionType.POWERBOX_BEAN_WAKE, source)
+        self.retries = max(0, min(3, int(retries)))
 
 
 class SetBeanRxAction(Action):

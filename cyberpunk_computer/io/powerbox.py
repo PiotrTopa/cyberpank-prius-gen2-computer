@@ -1015,6 +1015,26 @@ class PowerboxCommander:
             return False
         return self._send(cmd, "bean %s %s" % (cmd.payload["op"], kw), warn=True)
 
+    def bean_wake(self, retries: int = 2) -> bool:
+        """Wake the sleeping BEAN body bus by transmitting the safe, allow-listed
+        test frame FE:48 (a single valid frame triggers the NM wake cascade).
+
+        Fires the guarded TX sequence the firmware requires — arm (60 s), edge
+        test, per-boot frames flag, then the send with wake=1 — as four ordered
+        serial commands; the firmware processes them in order (the edge op
+        blocks its command loop until done, so allow/send see a passed edge).
+        Only ever sends FE:48; it never uses the bench override, so the block
+        list and budgets still apply. The arm window is left to auto-expire.
+        Returns True if all four commands were written to the link (the actual
+        wake result arrives async in PowerboxState.bean_tx)."""
+        retries = max(0, min(3, int(retries)))
+        ok = self.bean_tx_enable(True)
+        ok = self.send_bean_tx("edge", wake=True) and ok
+        ok = self.send_bean_tx("allow", v=True) and ok
+        ok = self.send_bean_tx("send", pri=2, dst="FE", mes="48", data="00",
+                               wake=True, retries=retries) and ok
+        return ok
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # POCO power profile control (writes the prius-power flag file)

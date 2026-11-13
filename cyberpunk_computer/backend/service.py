@@ -1053,6 +1053,10 @@ class BackendService:
                     logger.warning("Powerbox BEAN TX guard %s requested",
                                    "ARM (60 s)" if action.on else "disarm")
                     self.powerbox_commander.bean_tx_enable(action.on)
+                elif type(action).__name__ == "PowerboxBeanWakeAction":
+                    logger.warning("Powerbox BEAN bus wake requested (FE:48, retries=%d)",
+                                   action.retries)
+                    self.powerbox_commander.bean_wake(retries=action.retries)
 
         twin.store.add_middleware(_powerbox_middleware)
 

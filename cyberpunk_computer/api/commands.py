@@ -259,6 +259,18 @@ def _build_powerbox_bean_tx(params: Dict[str, Any]) -> Action:
     return PowerboxBeanTxAction(op, fields, source=ActionSource.UI)
 
 
+def _build_bean_wake(params: Dict[str, Any]) -> Action:
+    from ..state.actions import PowerboxBeanWakeAction
+    retries = params.get("retries", 2)
+    try:
+        retries = int(retries)
+    except (TypeError, ValueError):
+        raise CommandError("'retries' must be an int 0..3")
+    if not 0 <= retries <= 3:
+        raise CommandError("'retries' must be 0..3")
+    return PowerboxBeanWakeAction(retries, source=ActionSource.UI)
+
+
 def _build_bean_capture(params: Dict[str, Any]) -> Action:
     import re
     from ..state.actions import BeanCaptureAction
@@ -561,6 +573,21 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
             "retries": "send: int 0..3 (default 2)",
             "wake": "edge, send: bool, needed when the bus is asleep",
         },
+    },
+    "bean_wake": {
+        "builder": _build_bean_wake,
+        "description": (
+            "Wake the sleeping Toyota BEAN body bus by transmitting the safe, "
+            "allow-listed test frame FE:48 (one valid frame triggers the network "
+            "wake cascade so every ECU reports fresh state). Fires the guarded TX "
+            "sequence the firmware requires (arm 60 s, edge test, per-boot frames "
+            "flag, then send with wake=1); never uses the bench override, so the "
+            "block list and 5/s + 50/10 min budgets still apply, and the arm "
+            "window is left to auto-expire. The result lands in powerbox.bean_tx; "
+            "freshly woken frames then appear on GET /api/v1/bean/frames. Use it "
+            "to read current lock/door state on demand while the car is parked."
+        ),
+        "params": {"retries": "int 0..3 (default 2): resends if the bus-waking frame is not ACKed"},
     },
     "bean_capture": {
         "builder": _build_bean_capture,

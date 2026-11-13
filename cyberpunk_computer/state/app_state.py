@@ -724,9 +724,12 @@ class BeanState:
     """Toyota BEAN body bus as seen by the powerbox receiver (fw >= 2.3.0).
 
     ``messages``: "DST:MES" -> {dst, mes, pri, count, last_ts, data (hex),
-    changes, period_ms}, CRC-good frames only. ``decoded``: named values of
-    the few known IDs (comm.bean.decode_known, all UNVERIFIED on the Prius)
-    -> {value, ts, src}. The last frames themselves are NOT in the state
+    changes, period_ms}, CRC-good frames only. ``decoded``: named values from
+    comm.bean.decode_known -> {value, ts, src}. The door/lock/lamp/key-window
+    group (FE:B6 lock + door-open, FE:E1 lock/unlock event, FE:7F door, FE:83
+    dome lamp, FE:D8 key window, odometer) is CONFIRMED on this car; the IG-ON
+    group (coolant, ambient, speed, rpm, shift, P-lock, power mode) is still
+    UNVERIFIED. The last frames themselves are NOT in the state
     (kept small for the 1 Hz publish): GET /api/v1/bean/frames.
     ``capture``: capture-log status {on, file, frames, bytes, name, dir}.
     """
