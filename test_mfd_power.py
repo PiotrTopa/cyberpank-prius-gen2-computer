@@ -76,7 +76,7 @@ class Fake:
 
 
 def make(fake: Fake, **cfg_kw) -> MfdPowerManager:
-    kw = dict(tick_s=1.0, grace_s=600.0, boot_timeout_s=120.0, shutdown_wait_s=45.0)
+    kw = dict(tick_s=1.0, grace_s=600.0, dark_grace=False, boot_timeout_s=120.0, shutdown_wait_s=45.0)
     kw.update(cfg_kw)
     cfg = MfdPowerConfig(**kw)
     return MfdPowerManager(
@@ -182,7 +182,7 @@ def test_bean_early_start():
 
     # manager: early demand starts from OFF at once and then follows the grace
     f = Fake()
-    m = make(f, tick_s=5.0)
+    m = make(f, tick_s=5.0, grace_s=1200.0, dark_grace=True)
     step(m, f, False)                      # reconcile, OFF
     check("off before", m.status()["state"] == STATE_OFF)
     f.now += 0.5                           # well inside the 5 s tick limit
@@ -193,10 +193,22 @@ def test_bean_early_start():
     check("on", m.status()["state"] == STATE_ON)
     f.now += 6; m.tick(False, early=False)
     check("bus quiet, no ACC: grace", m.status()["state"] == STATE_GRACE)
+    ssh = lambda needle: [c for c in f.cmds if c[:2] == ["sudo", "ssh"] and needle in c[-1]]
+    check("grace: dark standby sent", len(ssh("SIGSTOP")) == 1 and m.status()["dark"])
+    f.now += 6; m.tick(False)
+    f.now += 6; m.tick(False)
+    f.now += 6; m.tick(False)
+    check("dark standby repeated 3 times, no more", len(ssh("SIGSTOP")) == 3)
+    check("no restore yet", len(ssh("SIGCONT")) == 0)
     f.now += 6; m.tick(True)
     check("ACC during grace: on", m.status()["state"] == STATE_ON)
+    check("restore sent at once", len(ssh("SIGCONT")) == 1 and not m.status()["dark"])
+    f.now += 6; m.tick(True)
+    f.now += 6; m.tick(True)
+    f.now += 6; m.tick(True)
+    check("restore repeated 3 times, no more", len(ssh("SIGCONT")) == 3)
     f.now += 6; m.tick(False)
-    f.now += 601; m.tick(False)
+    f.now += 1201; m.tick(False)
     check("grace expired: shutting down", m.status()["state"] == STATE_SHUTTING_DOWN)
 
 

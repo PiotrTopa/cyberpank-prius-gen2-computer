@@ -30,9 +30,15 @@ Power policy (state machine, driven from the backend loop at a slow cadence):
   getting in (doors unlocked or a door open), typically 10-30 s before the
   key reaches ACC. When the bus goes quiet again without ACC the board goes
   through the normal grace, then the clean shutdown.
-* ACC off: keep running for a grace period (default 10 min) in case the key
+* ACC off: keep running for a grace period (default 20 min) in case the key
   comes back; then ask the Pi to shut down cleanly over SSH, wait for the
   halt to complete, and finally cut the port power.
+* Dark grace: on entering the grace the Pi is put into a dark standby over
+  SSH (``dark_cmd``: the UI process frozen with SIGSTOP, framebuffer blanked,
+  activity LED off) so it idles instead of rendering to a screen nobody
+  sees; when the demand returns ``restore_cmd`` undoes it at once (SIGCONT:
+  no boot, no UI start). Both commands are idempotent and are sent a few
+  times, because the SSH call is fire-and-forget.
 * While ON the manager keeps enforcing host-side IP config (gadget
   re-enumerations wipe it) and tracks reachability via ping.
 
@@ -61,6 +67,17 @@ STATE_SHUTTING_DOWN = "shutting_down"
 STATE_POWERING_OFF = "powering_off"
 
 
+# Dark standby on the Pi (run as the ssh user, which has passwordless sudo).
+# Every step tolerates failure; the restore order ends with SIGCONT so the UI
+# redraws onto an unblanked framebuffer.
+DARK_CMD = ("sudo systemctl kill -s SIGSTOP mfd.service; "
+            "echo 1 | sudo tee /sys/class/graphics/fb0/blank >/dev/null 2>&1; "
+            "echo 0 | sudo tee /sys/class/leds/ACT/brightness >/dev/null 2>&1; true")
+RESTORE_CMD = ("echo 0 | sudo tee /sys/class/graphics/fb0/blank >/dev/null 2>&1; "
+               "echo 1 | sudo tee /sys/class/leds/ACT/brightness >/dev/null 2>&1; "
+               "sudo systemctl kill -s SIGCONT mfd.service; true")
+
+
 @dataclass
 class MfdPowerConfig:
     """Configuration for the MFD video-board power manager.
@@ -76,7 +93,7 @@ class MfdPowerConfig:
     host_cidr: str = "192.168.100.1/24"   # host-side address on the gadget link
     board_ip: str = "192.168.100.2"  # Pi's static IP
     ssh_user: str = "piotr"          # account on the Pi for the shutdown call
-    grace_s: float = 600.0           # ACC-off grace before shutdown (10 min)
+    grace_s: float = 1200.0          # ACC-off grace before shutdown (20 min)
     boot_timeout_s: float = 180.0    # max wait for iface+ping before re-cycle
     shutdown_wait_s: float = 45.0    # wait after `poweroff` before cutting VBUS
     tick_s: float = 5.0              # manager cadence within the backend loop
@@ -92,6 +109,11 @@ class MfdPowerConfig:
     bean_wake: str = "entry"
     bean_active_s: float = 15.0      # the bus counts as active this long after a frame
     bean_own_tx_mute_s: float = 30.0 # ignore the bus this long after our own transmit
+    # Dark standby during the grace (shell run on the Pi over SSH; "" = off).
+    dark_grace: bool = True
+    dark_cmd: str = DARK_CMD
+    restore_cmd: str = RESTORE_CMD
+    standby_sends: int = 3           # each command is repeated on this many ticks
 
 
 class BeanWakeTrigger:
@@ -196,6 +218,9 @@ class MfdPowerManager:
         self._power_cycles: int = 0                 # boot-timeout + watchdog cycles
         self._boot_started: Optional[float] = None  # monotonic, boot duration measure
         self._last_boot_s: Optional[float] = None   # last power-on -> reachable time
+        # Dark standby: what the Pi was last told, and how many repeats are left.
+        self._dark: bool = False
+        self._standby_left: int = 0
 
     # ── external effects (injectable) ────────────────────────────────────
 
@@ -364,6 +389,32 @@ class MfdPowerManager:
         except Exception:
             logger.exception("MFD board shutdown request failed")
 
+    def _standby(self, dark: bool) -> None:
+        """Ask for the dark standby (grace) or its restore; repeats follow
+        from :meth:`_standby_tick`."""
+        cfg = self.config
+        if not cfg.dark_grace or not (cfg.dark_cmd and cfg.restore_cmd):
+            return
+        if dark != self._dark:
+            logger.info("MFD board: %s", "dark standby for the grace (UI frozen, screen blanked)"
+                        if dark else "restore from the dark standby")
+        self._dark = dark
+        self._standby_left = max(1, cfg.standby_sends)
+        self._standby_tick()
+
+    def _standby_tick(self) -> None:
+        if self._standby_left <= 0:
+            return
+        self._standby_left -= 1
+        cfg = self.config
+        cmd = ["sudo", "ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+               "-o", "ConnectTimeout=5", f"{cfg.ssh_user}@{cfg.board_ip}",
+               cfg.dark_cmd if self._dark else cfg.restore_cmd]
+        try:
+            self._spawn(cmd)
+        except Exception:
+            logger.exception("MFD board standby command failed")
+
     # ── observability ─────────────────────────────────────────────────────
 
     def status(self) -> dict:
@@ -380,6 +431,7 @@ class MfdPowerManager:
             "last_ok_ping": self._last_ok_ping,
             "power_cycles": self._power_cycles,
             "last_boot_s": self._last_boot_s,
+            "dark": self._dark,
         }
 
     def _emit(self) -> None:
@@ -414,6 +466,8 @@ class MfdPowerManager:
         self._set_port_power(True)
         self._boot_started = self._clock()
         self._unreachable_since = None
+        self._dark = False            # a fresh boot is never dark
+        self._standby_left = 0
         self._enter(into_state, self.config.boot_timeout_s)
 
     # ── state machine ─────────────────────────────────────────────────────
@@ -448,6 +502,8 @@ class MfdPowerManager:
                 self._set_port_power(True)
                 self._enter(STATE_ON if acc_on else STATE_GRACE,
                             None if acc_on else cfg.grace_s)
+                # The backend may have restarted mid-grace: make the Pi match.
+                self._standby(not acc_on)
             elif not acc_on:
                 self._set_port_power(False)
 
@@ -513,15 +569,20 @@ class MfdPowerManager:
                         % (now - self._unreachable_since))
             if not acc_on and self._state == STATE_ON:
                 self._enter(STATE_GRACE, cfg.grace_s)
+                self._standby(True)
+            else:
+                self._standby_tick()
 
         elif self._state == STATE_GRACE:
             if acc_on:
                 logger.info("MFD power: %s during grace, staying up", why if early and why else "ACC back")
                 self._enter(STATE_ON)
+                self._standby(False)
             elif now >= (self._deadline or 0):
                 self._request_shutdown()
                 self._enter(STATE_SHUTTING_DOWN, cfg.shutdown_wait_s)
             else:
+                self._standby_tick()
                 # Keep the link maintained during grace.
                 if self._iface_exists(cfg.iface):
                     self._configure_host_iface()
@@ -535,6 +596,8 @@ class MfdPowerManager:
                 self._enter(STATE_POWERING_OFF)
 
         if self._state == STATE_POWERING_OFF:
+            self._dark = False
+            self._standby_left = 0
             self._set_port_power(False)
             self._reachable = None
             self._enter(STATE_OFF)

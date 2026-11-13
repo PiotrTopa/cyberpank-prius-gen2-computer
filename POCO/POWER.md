@@ -340,7 +340,7 @@ ACC-on is immediate).
 | +10 s | satellite rail (relay ch5) off (linger); gateway relay ch3 off | `SatellitePowerRule`, gateway ACC follower |
 | +30 s | roadsense grace over → `roadsense.target` stopped (~0.3 s) | `RoadsenseManager` |
 | +35 s | camera relay ch4 off → `low` profile applied (cpu4-7 offline, Wi-Fi suspended) | `RoadsenseManager` → deferred switch |
-| +600 s | MFD Pi: clean `poweroff` over SSH, 45 s later relay ch2 off | `MfdPowerManager` |
+| +1200 s | MFD Pi (in dark standby since key-off: UI frozen, screen blanked): clean `poweroff` over SSH, 45 s later relay ch2 off | `MfdPowerManager` |
 
 | t (key-on) | what |
 |---|---|

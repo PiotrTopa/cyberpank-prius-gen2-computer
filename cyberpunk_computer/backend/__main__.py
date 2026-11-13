@@ -42,11 +42,12 @@ def _build_mfd():
         BACKEND_MFD_HOST_CIDR=192.168.100.1/24
         BACKEND_MFD_IP=192.168.100.2      # the Pi's static IP
         BACKEND_MFD_SSH_USER=piotr
-        BACKEND_MFD_GRACE_S=600           # key-off grace before shutdown
+        BACKEND_MFD_GRACE_S=1200          # key-off grace before shutdown
         BACKEND_MFD_BOOT_TIMEOUT_S=180
         BACKEND_MFD_SHUTDOWN_WAIT_S=45
         BACKEND_MFD_BEAN_WAKE=entry       # early start from the BEAN bus:
                                           # entry (unlocked / door open) | any | off
+        BACKEND_MFD_DARK_GRACE=1          # dark standby on the Pi during the grace
     """
     enabled = os.environ.get("BACKEND_MFD_ENABLED", "0").strip().lower() in (
         "1", "true", "yes", "on",
@@ -62,7 +63,8 @@ def _build_mfd():
         host_cidr=env("BACKEND_MFD_HOST_CIDR", "192.168.100.1/24"),
         board_ip=env("BACKEND_MFD_IP", "192.168.100.2"),
         ssh_user=env("BACKEND_MFD_SSH_USER", "piotr"),
-        grace_s=float(env("BACKEND_MFD_GRACE_S", "600")),
+        grace_s=float(env("BACKEND_MFD_GRACE_S", "1200")),
+        dark_grace=env("BACKEND_MFD_DARK_GRACE", "1").strip().lower() in ("1", "true", "yes", "on"),
         boot_timeout_s=float(env("BACKEND_MFD_BOOT_TIMEOUT_S", "180")),
         shutdown_wait_s=float(env("BACKEND_MFD_SHUTDOWN_WAIT_S", "45")),
         bean_wake=env("BACKEND_MFD_BEAN_WAKE", "entry").strip().lower(),
