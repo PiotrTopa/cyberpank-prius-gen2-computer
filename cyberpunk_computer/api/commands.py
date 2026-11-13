@@ -194,6 +194,11 @@ def _build_roadsense_mode(params: Dict[str, Any]) -> Action:
     return RoadsenseModeAction(mode, source=ActionSource.UI)
 
 
+def _build_mfd_hold(params: Dict[str, Any]) -> Action:
+    from ..state.actions import MfdHoldAction
+    return MfdHoldAction(_as_bool(_require(params, "on"), "on"), source=ActionSource.UI)
+
+
 def _build_roadsense_restart(params: Dict[str, Any]) -> Action:
     from ..state.actions import RoadsenseRestartAction
     return RoadsenseRestartAction(source=ActionSource.UI)
@@ -618,6 +623,16 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
             "auto-expires it 30 min after the last set. Never leave it on in the car."
         ),
         "params": {"on": "bool | null (null/omitted = clear)"},
+    },
+    "mfd_hold": {
+        "builder": _build_mfd_hold,
+        "description": (
+            "Operator hold for the MFD video board (Raspberry Pi): on=true keeps it "
+            "powered with the key off, as ACC would (tests, measurements); on=false "
+            "returns it to the normal policy (dark grace, then clean shutdown). The "
+            "hold is dropped automatically after 30 min. State in connection.mfd_state."
+        ),
+        "params": {"on": "bool"},
     },
     "roadsense_mode": {
         "builder": _build_roadsense_mode,

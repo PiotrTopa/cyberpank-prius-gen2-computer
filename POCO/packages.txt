@@ -9,6 +9,9 @@ usbutils
 uhubctl
 zstd
 rsync
+# ssh client: the backend reaches the MFD Pi with it (dark standby, restore,
+# clean poweroff). Without it the Pi gets a hard power cut at every key-off.
+openssh-client-default
 
 # --- CAN / gateway ---
 can-utils

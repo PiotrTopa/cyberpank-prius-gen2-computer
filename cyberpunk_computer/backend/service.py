@@ -431,6 +431,7 @@ class BackendService:
         # MFD video board power manager (backend.mfd_power).
         self.mfd_power = None
         self._mfd_bean_trigger = None
+        self._mfd_hold_until = 0.0     # monotonic; operator hold (mfd_hold command)
         # roadsense stack manager (backend.roadsense_power).
         self.roadsense_power = None
         # On-demand dashboard camera preview (backend.camera_preview).
@@ -1080,6 +1081,14 @@ class BackendService:
 
         twin.store.add_middleware(_system_middleware)
 
+        def _mfd_hold_middleware(action, store) -> None:
+            if type(action).__name__ != "MfdHoldAction":
+                return
+            self._mfd_hold_until = (time.monotonic() + 1800.0) if action.on else 0.0
+            logger.warning("MFD operator hold %s", "ON (30 min max)" if action.on else "off")
+
+        twin.store.add_middleware(_mfd_hold_middleware)
+
         def request_shutdown(reason: str) -> None:
             # Tell the box first so it stops its wake ladder (it goes to
             # "sleep" until ACC rises), then halt ourselves: since firmware
@@ -1493,7 +1502,14 @@ class BackendService:
             own_tx = (state.powerbox.bean_tx or {}).get("ts")
             early = trig.update(getattr(state, "bean", None), own_tx,
                                 time.monotonic(), time.time())
-            self.mfd_power.tick(acc, early=early, why=trig.reason)
+            why = trig.reason
+            if self._mfd_hold_until:
+                if time.monotonic() < self._mfd_hold_until:
+                    early, why = True, "operator hold"
+                else:
+                    self._mfd_hold_until = 0.0
+                    logger.info("MFD operator hold expired")
+            self.mfd_power.tick(acc, early=early, why=why)
         except Exception:
             logger.exception("MFD power tick failed")
 

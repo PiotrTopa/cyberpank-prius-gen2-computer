@@ -133,6 +133,7 @@ class ActionType(Enum):
     BEAN_MARK = auto()                # event mark in the BEAN capture log
     SET_BEAN_CAPTURE = auto()         # capture log status mirror
     SET_RELAY = auto()                # relay board load channel (PCF8574 ch 2-8)
+    MFD_HOLD = auto()                 # operator hold: keep the MFD board on (bench/test)
     ROADSENSE_MODE = auto()           # roadsense stack operator mode (auto|on|off)
     ROADSENSE_RESTART = auto()        # restart roadsense.target
     INPUT_EVENT = auto()              # human-interface event (frontend/satellite HID)
@@ -1675,6 +1676,16 @@ class SetFanOverrideAction(Action):
     def __init__(self, pct: Optional[float], source: ActionSource = ActionSource.UI):
         super().__init__(ActionType.SET_FAN_OVERRIDE, source)
         self.pct = pct
+
+
+class MfdHoldAction(Action):
+    """Operator hold for the MFD video board: ``on`` keeps the board powered
+    with the key off (tests, measurements), exactly as ACC would; off returns
+    it to the normal policy (grace, then clean shutdown). The backend drops
+    the hold by itself after 30 min. Not reduced into state."""
+    def __init__(self, on: bool, source: ActionSource = ActionSource.UI):
+        super().__init__(ActionType.MFD_HOLD, source)
+        self.on = bool(on)
 
 
 class RoadsenseModeAction(Action):
