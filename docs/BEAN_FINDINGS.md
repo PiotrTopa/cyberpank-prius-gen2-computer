@@ -86,3 +86,76 @@ outputs** — "Power Door Lock Control System" section of the EWD — bypasses t
 confidence; (2) reverse-engineer and inject on the **dedicated serial line** at body-ECU pin RDA (B7-23)
 — carries the real request but is an undocumented proprietary protocol, high effort; (3) body-ECU
 **diagnostic actuator test** over K-line (NHW20 is pre-CAN-body), not over BEAN.
+
+## First IG-ON drive capture (2026-11-13, 21:47–22:07 CET)
+
+Capture: `docs/data/bean/2026-11-13_drive_ig_on.ndjson.gz` (59 648 frames, 45
+IDs, marks for the scripted climate run). The owner logged events by clock;
+frames are matched to them within a few seconds. "Confirmed" below means seen
+in this capture at the logged moment; nothing here was transmitted by us.
+
+### Climate (scripted through the AVC-LAN remote, 21:58:00–21:59:20)
+
+Every AVC climate command makes the gateway put a momentary button frame on
+BEAN (`FE:FB`, one bit, back to zero within ~0.3 s); the status frame `FE:FC`
+follows.
+
+`FE:FB` (6 bytes), button bits:
+
+| Action | Byte | Bit |
+|---|---|---|
+| temperature up | 0 | 80 |
+| AUTO | 0 | 08 |
+| recirculation toggle | 0 | 02 |
+| A/C toggle | 1 | 20 |
+| direction face / face+foot / foot / windscreen+foot | 1 | 08 / 04 / 02 / 01 |
+| fan 1 / 2 / 3 / 4 / 7 | 2 | 80 / 40 / 20 / 10 / 08 |
+| fan 6 (single observation, odd position) | 4 | 04 |
+
+Not seen: temperature down (the 20 -> 18 step produced no `FE:FB`), fan 5, and
+"auto off" (no frame at all).
+
+`FE:FC` status: byte 0 `80` AUTO, `40` fresh air (clear = recirculation), `02`
+A/C on, `01` face; byte 1 `80` face+foot, `40` foot, `20` windscreen+foot;
+byte 2 `04` pulses on each change; byte 5 top three bits = fan level 1..7.
+`52:FD` byte 0 = target temperature, +1 per 0.5 °C (`05` = 18.0).
+
+`FE:FB` is the candidate for direct climate control over BEAN (untested).
+
+### Lamps (`FE:7F`), 22:00:10–22:01:01 and 22:07:00
+
+Byte 0: `10` tail/parking lamps, `20` low beam (both confirmed by the switch
+sequence off -> parking -> low beam), `01` fog lamp (on 22:00:41, off
+22:01:01; only one fog bit seen for the two fog steps logged). Byte 1 `08`
+follows the tail lamps (illumination). Byte 2 `80` = a door open (as before).
+
+### Shift, parking, power
+
+* `FE:40` byte 0: `80` P, `10` D, `40` R, `00` in between. Confirmed P -> D
+  (22:02:24), D <-> R repeatedly while reversing (22:05–22:06), -> P (22:06:04).
+* `FE:50` `80` = parking lock engaged; `FE:62` byte 0 `20` = in P, `10` =
+  power on, `08` = power switch pressed (22:06:41). All three confirmed.
+* `FE:29` byte 2 bit `08` toggles just before every shift change: brake pedal
+  (inferred). Bit `80` clears at power-off; bit `01` unknown.
+* `FE:83` byte 0 went `60` -> `40` -> `00` at power-off: the two bits are
+  IG and ACC, which is which is not settled by this capture.
+
+### Key-out warning (`62:6E`), 22:01:30–22:02:02
+
+Driver left the READY car with the key: door open 22:01:30.9, closed
+22:01:34.0, then `62:6E` `0000` -> `8080` (22:01:34.5) -> `8000` (22:01:35.7)
+-> `0000` (22:02:01.8, key back inside). Byte 0 `80` = "key not in vehicle"
+warning active, byte 1 `80` = the ~1.2 s beep. This confirms `62:6E` as a
+warning/buzzer demand to the meter (see BEAN_ACTUATION_RESEARCH.md).
+
+### Not found on BEAN
+
+* Wipers (single wipe, low, high, off at 21:59:30–53): no frame changed.
+* Seat belt (unbuckled 22:01:10, buckled 22:02:15): no frame tied to it.
+* Light-reminder chime (door opened with the lamps on, 22:06:50): no separate
+  frame; only door-open and the lamp bits themselves.
+
+### Lock on leaving
+
+22:07:18 `FE:E1 000020` (smart lock), `FE:B6` `C1` -> `C0` -> `00`. The doors
+stayed unlocked (`C1`) for the whole drive.
