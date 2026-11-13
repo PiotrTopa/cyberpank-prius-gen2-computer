@@ -347,6 +347,7 @@ class SvcHarness:
         self.reader = FakeReader(self.clock)
         self.stack_body = stack_body
         self.stack_fetches = 0
+        cfg.setdefault("grace_s", 0.0)     # immediate release; TestGrace sets it
         conf = CameraPreviewConfig(**cfg)
 
         async def fetch():
@@ -913,7 +914,7 @@ class TestRest:
         h, base = api
         lid = json.loads(_req("POST", base + "/lease", {})[2])["lease_id"]
         st, _, body = _req("DELETE", base + "/lease/" + lid)
-        assert st == 200 and json.loads(body) == {"released": True, "leases": 0}
+        assert st == 200 and json.loads(body) == {"released": True, "stop": False, "leases": 0}
 
     def test_validation(self, api):
         h, base = api
@@ -946,3 +947,309 @@ class TestRest:
             h.clock.t += 10
             st, _, body = _req("POST", base + "/lease", {"lease_id": lid})
         assert st == 410 and json.loads(body)["detail"]["reason"] == "max_session"
+
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Grace (camera kept on after a soft end) + resume
+# ═════════════════════════════════════════════════════════════════════════════
+
+class TestGrace:
+    def live(self, **kw):
+        kw.setdefault("grace_s", 180.0)
+        h = SvcHarness(**kw)
+        lid = h.svc.lease()["lease_id"]
+        h.step(False)
+        h.reader.deliver()
+        assert h.mh.state == STATE_PREVIEW and h.svc.phase()[0] == PHASE_LIVE
+        return h, lid
+
+    def test_soft_release_keeps_camera_and_resume_is_instant(self):
+        h, lid = self.live()
+        relay_calls = list(h.mh.camera.calls)
+        h.svc.release(lid)                       # page hidden / pagehide beacon
+        h.step(False)
+        st = h.svc.status()
+        assert st["phase"] == cp.PHASE_GRACE and st["grace"] is True
+        assert st["grace_left_s"] == 180 and st["active"] is False
+        assert st["camera_phase"] == PHASE_LIVE
+        assert h.mh.state == STATE_PREVIEW and h.reader.running()
+        assert h.published[-1]["phase"] == cp.PHASE_GRACE
+        with pytest.raises(cp.FrameUnavailable):  # still no frames without a lease
+            h.frame()
+        h.step(False, dt=100)
+        h.reader.deliver(seq=2)
+        r = h.svc.lease(resume=True)             # tab visible again
+        assert r["resumed"] is True and r["phase"] == PHASE_LIVE
+        h.step(False)
+        assert h.svc.status()["grace"] is False
+        assert h.reader.starts == 1              # never restarted
+        assert h.mh.camera.calls == relay_calls  # no relay toggling at all
+        data, _ = h.frame(width=1280)
+        assert data == JPEG
+
+    def test_grace_reported_before_the_next_tick(self):
+        # A reload's beacon release and the new page's status GET can land
+        # within one engine tick: the status must already say grace.
+        h, lid = self.live()
+        h.svc.release(lid)
+        st = h.svc.status()
+        assert st["phase"] == cp.PHASE_GRACE and st["grace"] is True
+        assert h.svc.lease(resume=True)["resumed"] is True
+
+    def test_ttl_expiry_grace_then_off(self):
+        h, lid = self.live()
+        h.step(False, dt=16)                     # lease lapsed (tab closed, no beacon)
+        h.reader.deliver(seq=2)                  # the fake camera keeps delivering
+        assert h.svc.status()["phase"] == cp.PHASE_GRACE
+        assert h.svc.status()["camera_phase"] == PHASE_LIVE
+        h.step(False, dt=170)
+        assert h.mh.state == STATE_PREVIEW
+        h.step(False, dt=11)                     # 181 s of grace
+        assert h.mh.state == STATE_OFF and h.mh.camera.on is False
+        assert not h.reader.running()
+        assert h.svc.status()["phase"] == PHASE_OFF
+        with pytest.raises(PreviewRefused) as e:  # no cold auto-start
+            h.svc.lease(resume=True)
+        assert e.value.status == 409 and e.value.reason == "not_resumable"
+
+    def test_explicit_stop_is_immediate(self):
+        h, lid = self.live()
+        h.svc.release(lid, stop=True)
+        h.step(False)
+        assert h.mh.state == STATE_OFF and h.mh.camera.on is False
+        assert h.svc.status()["grace"] is False
+
+    def test_stop_during_grace_ends_it(self):
+        h, lid = self.live()
+        h.svc.release(lid)
+        h.step(False)
+        assert h.svc.status()["grace"]
+        assert h.svc.release(lid, stop=True) is False    # lease already gone
+        h.step(False)
+        assert h.mh.state == STATE_OFF and h.mh.camera.on is False
+
+    def test_stop_by_one_viewer_leaves_the_other(self):
+        h, a = self.live()
+        b = h.svc.lease()["lease_id"]
+        h.svc.release(a, stop=True)
+        h.step(False)
+        assert h.mh.state == STATE_PREVIEW and h.svc.leases.count() == 1
+        h.svc.release(b)                         # soft: grace
+        h.step(False)
+        assert h.svc.status()["grace"] is True
+
+    def test_cap_bounds_lease_time_and_grace_adds_one_period(self):
+        h, lid = self.live(max_session_s=60.0)
+        t0 = h.clock.t
+        h.step(False, dt=5)
+        h.svc.release(lid)                       # reload at +6 s
+        h.step(False, dt=2)
+        lid = h.svc.lease(resume=True)["lease_id"]
+        assert lid
+        r = h.svc.lease(lid)
+        assert r["session_left_s"] <= 60 - 8    # resumed lease shares the viewing cap
+        while True:
+            h.step(False, dt=10)
+            try:
+                h.svc.lease(lid)
+            except PreviewRefused as e:
+                assert e.reason == "max_session"
+                break
+        cap_end = h.clock.t
+        assert cap_end - t0 <= 60 + 10
+        h.step(False)
+        assert h.svc.status()["phase"] == cp.PHASE_GRACE    # one grace after the cap
+        with pytest.raises(PreviewRefused) as e:             # auto-resume refused
+            h.svc.lease(resume=True)
+        assert e.value.reason == "max_session"
+        h.step(False, dt=181)
+        assert h.mh.state == STATE_OFF and h.mh.camera.on is False
+        assert h.clock.t - t0 <= 60 + 180 + 15
+
+    def test_explicit_start_during_grace_after_cap_is_instant_and_fresh(self):
+        h, lid = self.live(max_session_s=60.0)
+        for _ in range(7):
+            h.step(False, dt=10)
+            try:
+                h.svc.lease(lid)
+            except PreviewRefused:
+                break
+        h.step(False)
+        assert h.svc.status()["grace"]
+        h.reader.deliver(seq=9)
+        r = h.svc.lease()                        # user presses START again
+        assert r["session_left_s"] == 60.0 and r["phase"] == PHASE_LIVE
+        assert h.reader.starts == 1
+
+    def test_undervoltage_during_grace_cuts_now(self):
+        h, lid = self.live()
+        h.svc.release(lid)
+        h.step(False)
+        assert h.svc.status()["grace"]
+        h.uv = True
+        h.step(False)
+        assert h.mh.state == STATE_OFF and h.mh.camera.on is False
+        assert h.svc.status()["phase"] == PHASE_ERROR
+        h.uv = False
+        with pytest.raises(PreviewRefused):
+            h.svc.lease(resume=True)
+
+    def test_shutdown_during_grace_cuts_now(self):
+        h, lid = self.live()
+        h.svc.release(lid)
+        h.step(False)
+        h.svc.shutdown()
+        assert h.mh.state == STATE_OFF and h.mh.camera.on is False
+        assert not h.reader.running()
+
+    def test_no_grace_when_stack_has_the_camera(self):
+        h = SvcHarness(target_active=True, api={}, grace_s=180.0)
+        h.step(True, dt=5)
+        lid = h.svc.lease()["lease_id"]
+        h.step(True)
+        h.svc.release(lid)
+        h.step(True)
+        assert h.svc.status()["grace"] is False and h.svc.status()["phase"] == PHASE_OFF
+        assert h.mh.m.preview_hold is False
+        assert h.mh.state == STATE_RUNNING and h.mh.verbs() == []
+
+    def test_acc_on_during_grace_hands_over_and_ends_grace(self):
+        h, lid = self.live()
+        h.svc.release(lid)
+        h.step(False)
+        h.step(True, dt=5)
+        assert h.mh.state == STATE_STARTING and not h.reader.running()
+        h.step(True)
+        assert h.svc.status()["grace"] is False
+        assert h.mh.m.preview_hold is False
+        h.mh.api = {}
+        h.step(True, dt=5)
+        assert h.mh.state == STATE_RUNNING
+
+
+class TestReenumeration:
+    """Car log 2026-11-13: live at +7 s, info read EIO at ~+29 s (dashcam
+    re-enumerates), node changes name; the reader must find the new one."""
+
+    def test_disappear_new_node_recover(self):
+        dvr = FakeDvr()
+        dvr.seq = 1
+        nodes = {"list": ["/dev/sdg"]}
+        stale = {"/dev/sdg"}
+        opened = []
+        r = DvrReader(capture_interval_s=0.5, find_device=lambda: list(nodes["list"]),
+                      io_=dvr, clock=Clock(), wall=lambda: 1.7e9)
+        real_open = dvr.open
+
+        def open_(path):
+            opened.append(path)
+            if path in stale and dvr.fail_reads:
+                raise OSError(errno.ENODEV, "No such device")
+            return real_open(path)
+        dvr.open = open_
+        r.step(); r.step()
+        assert r.status()[0] == PHASE_LIVE
+        dvr.fail_reads = True                    # disconnect under the open fd
+        r.step()
+        assert r.status()[0] == PHASE_ENUMERATING
+        nodes["list"] = []                       # gone from sysfs
+        r.step(); r.step()
+        assert r.status()[0] == PHASE_ENUMERATING and r.attempts == 2
+        nodes["list"] = ["/dev/sdg", "/dev/sdh"]  # stale sdg lingers, new sdh
+        real_pread = dvr.pread
+
+        def pread(fd, size, off):
+            if dvr.fail_reads and opened[-1] == "/dev/sdh" and pread.flaky > 0:
+                pread.flaky -= 1                 # node present, reads fail a few s
+                raise OSError(errno.EIO, "Input/output error")
+            if opened[-1] == "/dev/sdh":
+                dvr.fail_reads = False
+            return real_pread(fd, size, off)
+        pread.flaky = 2
+        dvr.pread = pread
+        r.step()
+        assert r.status()[0] == PHASE_ENUMERATING
+        assert "MBR read failed" in r.status()[1]
+        r.step()
+        assert r.status()[0] == PHASE_ENUMERATING
+        dvr.seq = 2
+        r.step()                                 # sdg ENODEV, sdh opens + frame
+        assert r._path == "/dev/sdh"
+        assert r.status()[0] == PHASE_LIVE and r.latest().seq == 2
+        assert r.attempts == 0
+        assert opened.count("/dev/sdg") >= 3     # every attempt re-scans and retries
+
+    def test_find_dvr_blocks_lists_all(self, tmp_path):
+        sysb = tmp_path / "block"
+        sysb.mkdir()
+        for name, vid in (("sda", "1234"), ("sdg", "1902"), ("sdh", "1902")):
+            dev = tmp_path / "devices" / name / "usb"
+            dev.mkdir(parents=True)
+            (dev / "idVendor").write_text(vid)
+            (dev / "idProduct").write_text("3241")
+            disk = dev / "host" / name
+            disk.mkdir(parents=True)
+            (sysb / name).symlink_to(disk)
+        assert cp.find_dvr_blocks(str(sysb)) == ["/dev/sdg", "/dev/sdh"]
+        assert cp.find_dvr_block(str(sysb)) == "/dev/sdg"
+
+
+@pytest.fixture()
+def grace_api():
+    import uvicorn
+    from cyberpunk_computer.api import app as app_mod
+
+    h = SvcHarness(grace_s=180.0)
+
+    class Bridge:
+        def attach_loop(self, loop):
+            pass
+
+        def latest_snapshot(self):
+            return {"state": {}}
+
+    app = app_mod.create_app(Bridge(), db=object(), camera_preview=h.svc)
+    port = _free_port()
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port,
+                                           log_level="warning", loop="asyncio"))
+    server.install_signal_handlers = lambda: None
+    t = threading.Thread(target=server.run, daemon=True)
+    t.start()
+    for _ in range(100):
+        if server.started:
+            break
+        time.sleep(0.05)
+    yield h, "http://127.0.0.1:%d/api/v1/camera/preview" % port
+    server.should_exit = True
+    t.join(5)
+
+
+class TestRestGrace:
+    def test_status_with_and_without_slash(self, grace_api):
+        h, base = grace_api
+        for url in (base, base + "/"):
+            st, _, body = _req("GET", url)
+            assert st == 200 and json.loads(body)["phase"] == PHASE_OFF
+
+    def test_soft_release_grace_resume_and_hard_stop(self, grace_api):
+        h, base = grace_api
+        st, _, body = _req("POST", base + "/lease", {"resume": True})
+        assert st == 409 and json.loads(body)["detail"]["reason"] == "not_resumable"
+        st, _, body = _req("POST", base + "/lease", {"resume": "yes"})
+        assert st == 400
+        lid = json.loads(_req("POST", base + "/lease")[2])["lease_id"]
+        h.step(False)
+        h.reader.deliver()
+        _req("POST", base + "/lease/%s/release" % lid, b"")      # beacon = soft
+        h.step(False)
+        st, _, body = _req("GET", base + "/")
+        d = json.loads(body)
+        assert d["phase"] == "grace" and d["grace_left_s"] == 180 and d["camera_phase"] == "live"
+        st, _, body = _req("POST", base + "/lease", {"resume": True})
+        d = json.loads(body)
+        assert st == 200 and d["resumed"] is True and d["phase"] == "live"
+        st, _, body = _req("DELETE", base + "/lease/%s?stop=1" % d["lease_id"])
+        assert json.loads(body) == {"released": True, "stop": True, "leases": 0}
+        h.step(False)
+        assert h.mh.state == STATE_OFF and h.mh.camera.on is False

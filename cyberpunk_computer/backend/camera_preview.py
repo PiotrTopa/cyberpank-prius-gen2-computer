@@ -12,10 +12,18 @@ exists while somebody is watching:
     GET    /api/v1/camera/preview/frame.jpg?w=&q=  latest frame
 
 (routes: ``api.camera_preview_routes``). A lease lives ``ttl_s`` (15 s) unless
-renewed and at most ``max_session_s`` (10 min) in total; after that the client
-must press again (a new lease is granted at once, no cooldown). While at least
-one lease is alive the camera is made available; when the last one expires or
-is deleted, everything returns to what it would have been without a preview.
+renewed. While at least one lease is alive the camera is made available.
+
+Grace and cap (POCO/POWER.md, "Dashboard camera preview"): when the last
+lease ends *softly* (released without ``stop``, TTL expiry, session cap) the
+camera stays exactly as it is for ``grace_s`` (180 s: hold on, reader
+running) so a resume is instant; then everything returns to what it would
+have been without a preview. A user STOP (``release(..., stop=True)``),
+under-voltage and shutdown end it at once; with the stack serving there is
+nothing to keep. A *viewing* starts with an explicit START and ends when the
+camera is released; its leases (renewals and ``resume=True`` leases) all end
+at START + ``max_session_s`` (10 min), so camera-on time per viewing is at
+most ``max_session_s`` + one ``grace_s`` without a new START.
 
 Where the frames come from depends on the roadsense manager
 (``backend.roadsense_power``), which owns the camera hub (powerbox relay ch4)
@@ -76,7 +84,7 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +95,7 @@ PHASE_ENUMERATING = "enumerating"
 PHASE_WAITING = "waiting_for_frame"
 PHASE_LIVE = "live"
 PHASE_ERROR = "error"
+PHASE_GRACE = "grace"     # no lease, camera kept on for a quick resume
 
 SOURCE_STACK = "stack"
 SOURCE_DIRECT = "direct"
@@ -131,7 +140,8 @@ class CameraPreviewConfig:
     """Knobs (``BACKEND_CAMERA_PREVIEW_*`` env vars, see :meth:`from_env`)."""
     enabled: bool = True
     ttl_s: float = 15.0              # lease lifetime without renewal
-    max_session_s: float = 600.0     # hard cap per lease, then press again
+    max_session_s: float = 600.0     # cap on lease time per viewing, then press again
+    grace_s: float = 180.0           # camera kept on after a soft end (0 = off)
     max_leases: int = 8
     capture_interval_s: float = 0.5  # direct reader: one frame per this
     stale_s: float = 5.0             # a frame older than this is not "live"
@@ -155,6 +165,7 @@ class CameraPreviewConfig:
                      in ("1", "true", "yes", "on"))
         c.ttl_s = max(3.0, f("BACKEND_CAMERA_PREVIEW_TTL_S", c.ttl_s))
         c.max_session_s = max(30.0, f("BACKEND_CAMERA_PREVIEW_MAX_SESSION_S", c.max_session_s))
+        c.grace_s = max(0.0, f("BACKEND_CAMERA_PREVIEW_GRACE_S", c.grace_s))
         c.capture_interval_s = max(0.1, f("BACKEND_CAMERA_PREVIEW_CAPTURE_S", c.capture_interval_s))
         return c
 
@@ -168,6 +179,7 @@ class Lease:
     lease_id: str
     created: float      # monotonic
     expires: float      # monotonic
+    cap: float = float("inf")   # monotonic: renewals never go past this
 
 
 class LeaseTable:
@@ -182,17 +194,23 @@ class LeaseTable:
         self._lock = threading.Lock()
         self._leases: Dict[str, Lease] = {}
         self._ended: Dict[str, str] = {}   # recently expired id -> reason (bounded)
+        # How the most recently ended lease ended: expired | max_session |
+        # released | stop | cleared (read by the service for the grace rule).
+        self.last_end: Optional[str] = None
 
     def _expire_locked(self, now: float) -> None:
         for lid in [k for k, v in self._leases.items() if v.expires <= now]:
             v = self._leases.pop(lid)
-            capped = v.expires >= v.created + self.max_session_s - 1e-6
+            capped = v.expires >= v.cap - 1e-6
             self._ended[lid] = "max_session" if capped else "expired"
+            self.last_end = self._ended[lid]
         while len(self._ended) > 64:
             self._ended.pop(next(iter(self._ended)))
 
-    def acquire(self, lease_id: Optional[str] = None) -> Tuple[Lease, bool]:
+    def acquire(self, lease_id: Optional[str] = None,
+                cap_at: Optional[float] = None) -> Tuple[Lease, bool]:
         """New lease (``lease_id`` None) or renewal; returns ``(lease, created)``.
+        A new lease is capped at ``cap_at`` (default: now + ``max_session_s``).
 
         Raises :class:`PreviewRefused`: 410 ``expired`` (unknown/expired id),
         410 ``max_session`` (renewal past the hard cap; the lease is dropped),
@@ -203,11 +221,12 @@ class LeaseTable:
             self._expire_locked(now)
             if lease_id:
                 lease = self._leases.get(lease_id)
-                end = lease.created + self.max_session_s if lease is not None else 0.0
+                end = lease.cap if lease is not None else 0.0
                 if lease is not None and now >= end:
                     del self._leases[lease_id]
                     lease = None
                     self._ended[lease_id] = "max_session"
+                    self.last_end = "max_session"
                 if lease is None:
                     if self._ended.get(lease_id) == "max_session":
                         raise PreviewRefused("max_session", 410,
@@ -219,19 +238,29 @@ class LeaseTable:
             if len(self._leases) >= self.max_leases:
                 raise PreviewRefused("too_many_leases", 429,
                                      "too many preview sessions (max %d)" % self.max_leases)
+            cap = (now + self.max_session_s) if cap_at is None else cap_at
+            if now >= cap:
+                raise PreviewRefused("max_session", 410,
+                                     "maximum session length reached (%.0f s); press again"
+                                     % self.max_session_s)
             lid = secrets.token_hex(8)
-            lease = Lease(lid, now, min(now + self.ttl_s, now + self.max_session_s))
+            lease = Lease(lid, now, min(now + self.ttl_s, cap), cap)
             self._leases[lid] = lease
             return lease, True
 
-    def release(self, lease_id: str) -> bool:
+    def release(self, lease_id: str, how: str = "released") -> bool:
         with self._lock:
-            return self._leases.pop(lease_id, None) is not None
+            ok = self._leases.pop(lease_id, None) is not None
+            if ok:
+                self.last_end = how
+            return ok
 
-    def clear(self) -> int:
+    def clear(self, how: str = "cleared") -> int:
         with self._lock:
             n = len(self._leases)
             self._leases.clear()
+            if n:
+                self.last_end = how
             return n
 
     def count(self) -> int:
@@ -251,7 +280,7 @@ class LeaseTable:
             "ttl_s": self.ttl_s,
             "expires_in_s": round(max(0.0, lease.expires - now), 1),
             "max_session_s": self.max_session_s,
-            "session_left_s": round(max(0.0, lease.created + self.max_session_s - now), 1),
+            "session_left_s": round(max(0.0, lease.cap - now), 1),
         }
 
 
@@ -378,18 +407,27 @@ def _usb_id_of(sys_path: str) -> Optional[Tuple[int, int]]:
     return None
 
 
-def find_dvr_block(sys_block: str = "/sys/block") -> Optional[str]:
-    """First whole-disk block device whose USB parent is 1902:3241 (as
-    ``camerad-dvr --auto``), or None."""
+def find_dvr_blocks(sys_block: str = "/sys/block") -> List[str]:
+    """Every whole-disk block device whose USB parent is 1902:3241 (as
+    ``camerad-dvr --auto``), in name order. After the dashcam's disconnect a
+    stale node (sdg) can linger next to the new one (sdh): the reader tries
+    them all, on every attempt."""
     try:
         names = sorted(os.listdir(sys_block))
     except OSError:
-        return None
+        return []
+    out = []
     for name in names:
         real = os.path.realpath(os.path.join(sys_block, name))
         if _usb_id_of(real) == (DVR_VID, DVR_PID):
-            return "/dev/" + name
-    return None
+            out.append("/dev/" + name)
+    return out
+
+
+def find_dvr_block(sys_block: str = "/sys/block") -> Optional[str]:
+    """First 1902:3241 whole disk, or None."""
+    found = find_dvr_blocks(sys_block)
+    return found[0] if found else None
 
 
 class BlockIO:
@@ -439,8 +477,10 @@ class DvrReader:
     -> newest :class:`Frame` or None. Every external effect is injectable.
     """
 
+    ATTEMPT_LOG_S = 10.0   # while the camera is missing, one log line per this
+
     def __init__(self, capture_interval_s: float = 0.5,
-                 find_device: Callable[[], Optional[str]] = find_dvr_block,
+                 find_device: Callable[[], Union[None, str, Sequence[str]]] = find_dvr_blocks,
                  io_: Optional[object] = None,
                  clock: Callable[[], float] = time.monotonic,
                  wall: Callable[[], float] = time.time,
@@ -465,6 +505,8 @@ class DvrReader:
         self._last_new = clock()
         self.frames = 0
         self.reopens = 0
+        self.attempts = 0                 # open attempts since the last good open
+        self._attempt_log_t = -1e9
 
     # ── public ───────────────────────────────────────────────────────────
 
@@ -526,35 +568,62 @@ class DvrReader:
                 pass
             self._fd = None
 
-    def _open(self) -> bool:
-        path = self.find_device()
-        if not path:
-            self._set_phase(PHASE_ENUMERATING, "no 1902:3241 block device yet")
-            return False
+    def _candidates(self) -> List[str]:
+        found = self.find_device()
+        if not found:
+            return []
+        return [found] if isinstance(found, str) else list(found)
+
+    def _try_open(self, path: str) -> Tuple[bool, str, str]:
+        """``(ok, phase, why)`` for one candidate node."""
         try:
             fd = self.io.open(path)
         except OSError as exc:
-            why = ("device busy (camerad-dvr or a mount holds it)"
+            why = ("%s busy (camerad-dvr or a mount holds it)" % path
                    if exc.errno == errno.EBUSY else "open %s: %s" % (path, exc.strerror or exc))
-            self._set_phase(PHASE_ENUMERATING, why)
-            return False
+            return False, PHASE_ENUMERATING, why
         try:
             mbr = self.io.pread(fd, SECTOR, 0)
         except OSError as exc:
+            # Node present but not readable yet (just re-enumerated) or stale.
             self.io.close(fd)
-            self._set_phase(PHASE_ENUMERATING, "MBR read failed: %s" % (exc.strerror or exc))
-            return False
+            return False, PHASE_ENUMERATING, "%s MBR read failed: %s" % (path, exc.strerror or exc)
         if mbr[510:512] != b"\x55\xaa":
             self.io.close(fd)
-            self._set_phase(PHASE_WAITING, "no MBR on the camera yet")
-            return False
+            return False, PHASE_WAITING, "no MBR on %s yet" % path
         self._layout = LAYOUT_A if _u32(mbr, 0x1C6) == 8 else LAYOUT_B
         self._fd, self._path = fd, path
-        self._last_seq = None
-        self._last_new = self._clock()
-        self.reopens += 1
-        self._set_phase(PHASE_WAITING, "camera open, waiting for the first frame")
-        return True
+        return True, PHASE_WAITING, ""
+
+    def _open(self) -> bool:
+        """Re-scan sysfs and try every 1902:3241 disk (called once per
+        ``retry_s`` while the camera is missing)."""
+        self.attempts += 1
+        paths = self._candidates()
+        if not paths:
+            phase, why = PHASE_ENUMERATING, "no 1902:3241 block device yet"
+        else:
+            phase, why = PHASE_ENUMERATING, ""
+            for path in paths:
+                ok, ph, w = self._try_open(path)
+                if ok:
+                    if self.attempts > 1:
+                        logger.info("camera preview: camera back on %s after %d attempt(s)",
+                                    path, self.attempts)
+                    self.attempts = 0
+                    self._last_seq = None
+                    self._last_new = self._clock()
+                    self.reopens += 1
+                    self._set_phase(PHASE_WAITING, "camera open (%s), waiting for the first frame"
+                                    % path)
+                    return True
+                phase, why = ph, (why + "; " if why else "") + w
+        now = self._clock()
+        if now - self._attempt_log_t >= self.ATTEMPT_LOG_S:
+            self._attempt_log_t = now
+            logger.info("camera preview: open attempt %d: %s", self.attempts, why)
+        self._set_phase(phase, why)
+        return False
 
     def _io_failed(self, what: str, exc: OSError) -> None:
         logger.info("camera preview: %s failed (%s): reopening", what, exc)
@@ -717,32 +786,71 @@ class CameraPreviewService:
         self._scaled: Dict[Tuple[str, int, int], bytes] = {}
         self._last_published: Optional[dict] = None
         self._last_tick = -1e9
+        # Viewing = from the first explicit START until the camera is released.
+        # Resumed leases share its cap; grace keeps the camera after a soft end.
+        self._viewing_cap: Optional[float] = None   # monotonic
+        self._grace_until: Optional[float] = None   # monotonic
+        self._grace_reason: Optional[str] = None
+        self._stop_now = False                      # explicit STOP while in grace
 
     # ── API side (asyncio thread) ─────────────────────────────────────────
 
-    def lease(self, lease_id: Optional[str] = None) -> dict:
-        """Start or renew a lease. Raises :class:`PreviewRefused`."""
+    def lease(self, lease_id: Optional[str] = None, resume: bool = False) -> dict:
+        """Start or renew a lease. Raises :class:`PreviewRefused`.
+
+        ``resume`` (no ``lease_id``): continue the current viewing (a lease
+        that lapsed, a reload, a tab coming back) — refused unless a viewing
+        exists (leases active or grace running: never a cold start) and only
+        up to the viewing's cap. A plain new lease is an explicit START: it
+        gets a fresh ``max_session_s`` cap.
+        """
         if not self.config.enabled:
             raise PreviewRefused("disabled", 503, "camera preview disabled")
-        if not lease_id and self._undervoltage() and not self._stack_serves():
-            raise PreviewRefused("undervoltage", 409,
-                                 "12 V under-voltage protection active: no camera power-up")
-        lease, created = self.leases.acquire(lease_id or None)
-        if created:
+        if lease_id:
+            lease, created = self.leases.acquire(lease_id)
+        else:
+            if self._undervoltage() and not self._stack_serves():
+                raise PreviewRefused("undervoltage", 409,
+                                     "12 V under-voltage protection active: no camera power-up")
+            now = self._clock()
             with self._lock:
+                viewing = self._viewing_cap
+                if resume:
+                    if viewing is None:
+                        raise PreviewRefused("not_resumable", 409,
+                                             "no preview to resume (press start)")
+                    cap = viewing
+                else:
+                    cap = now + self.config.max_session_s
+            lease, created = self.leases.acquire(None, cap_at=cap)
+            with self._lock:
+                if not resume:
+                    self._viewing_cap = max(self._viewing_cap or 0.0, cap)
                 self._end_reason = None
+                self._stop_now = False
                 if self._started_at is None:
                     self._started_at = self._wall()
-            logger.info("camera preview: lease %s started (%d active)",
-                        lease.lease_id, self.leases.count())
+                was_grace = self._grace_until is not None
+            logger.info("camera preview: lease %s %s (%d active)%s", lease.lease_id,
+                        "resumed" if resume else "started", self.leases.count(),
+                        " — camera kept on by the grace, no power-up" if was_grace else "")
         out = self.leases.describe(lease)
         out.update(self.status_brief())
+        out["resumed"] = bool(resume and not lease_id)
         return out
 
-    def release(self, lease_id: str) -> bool:
-        ok = self.leases.release(lease_id)
+    def release(self, lease_id: Optional[str], stop: bool = False) -> bool:
+        """End a lease. ``stop`` = explicit user STOP: when it is the last
+        lease the camera is released at once (no grace); with no lease left
+        it also ends a running grace. Otherwise the end is "soft" (page
+        hidden / closed / navigated away) and the grace keeps the camera."""
+        ok = bool(lease_id) and self.leases.release(lease_id, "stop" if stop else "released")
         if ok:
-            logger.info("camera preview: lease %s released (%d left)", lease_id, self.leases.count())
+            logger.info("camera preview: lease %s %s (%d left)", lease_id,
+                        "stopped" if stop else "released", self.leases.count())
+        if stop and self.leases.count() == 0:
+            with self._lock:
+                self._stop_now = True
         return ok
 
     def _stack_serves(self) -> bool:
@@ -761,7 +869,25 @@ class CameraPreviewService:
         if self.leases.count() == 0:
             with self._lock:
                 reason = self._end_reason or ""
+                grace = self._grace_until
+                why = self._grace_reason
+            if grace is None and self._grace_pending():
+                grace, why = self._clock() + self.config.grace_s, self.leases.last_end
+            if grace is not None:
+                return PHASE_GRACE, "camera kept on for a resume (last lease %s)" % (why or "ended")
             return (PHASE_ERROR, reason) if reason == "undervoltage" else (PHASE_OFF, reason)
+        return self.camera_phase()
+
+    def _grace_pending(self) -> bool:
+        """The last lease just ended softly and the engine tick (<= 0.2 s)
+        has not started the grace yet: report it already, so a page reloading
+        in that instant sees ``grace`` and resumes."""
+        return (self._held and self.config.grace_s > 0 and not self._stop_now
+                and self.leases.last_end not in ("stop", "undervoltage", "shutdown")
+                and not self._stack_serves())
+
+    def camera_phase(self) -> Tuple[str, str]:
+        """Phase of the camera path itself (leases aside)."""
         st = self.power.stack_state()
         now = self._clock()
         if st in STACK_STATES:
@@ -903,14 +1029,55 @@ class CameraPreviewService:
         self._last_tick = now
         active = self.leases.count() > 0
         uv = self._undervoltage()
-        if active and uv and not self._stack_serves():
-            n = self.leases.clear()
+        with self._lock:
+            in_grace = self._grace_until is not None
+            stop_now, self._stop_now = self._stop_now, False
+        force_off = False
+        if (active or in_grace or self._held) and uv and not self._stack_serves():
+            n = self.leases.clear("undervoltage")
             logger.warning("camera preview: 12 V under-voltage protection active: "
-                           "ending %d preview lease(s), camera hub released", n)
+                           "ending %d preview lease(s)%s, camera hub released", n,
+                           " and the grace" if in_grace else "")
             with self._lock:
                 self._end_reason = "undervoltage"
-            active = False
-        want_hold = active
+                self._grace_until = None
+            active = in_grace = False
+            force_off = True
+        if force_off:
+            want_hold = False
+        elif active:
+            want_hold = True
+            if in_grace:
+                with self._lock:
+                    self._grace_until = None
+                logger.info("camera preview: grace ended by a new lease (camera still on)")
+        elif self._held:
+            # Last lease gone (or in grace): grace unless an explicit STOP,
+            # grace disabled, or nothing to keep (the stack has the camera).
+            how = self.leases.last_end
+            if not in_grace:
+                if (how == "stop" or stop_now or self.config.grace_s <= 0
+                        or self._stack_serves()):
+                    want_hold = False
+                else:
+                    want_hold = True
+                    with self._lock:
+                        self._grace_until = now + self.config.grace_s
+                        self._grace_reason = how
+                    logger.info("camera preview: last lease %s: camera kept on for %.0f s "
+                                "(grace) for a resume", how or "ended", self.config.grace_s)
+            else:
+                with self._lock:
+                    until = self._grace_until or now
+                if stop_now or now >= until or self._stack_serves():
+                    want_hold = False
+                    logger.info("camera preview: grace over (%s)",
+                                "stop" if stop_now else "roadsense has the camera"
+                                if self._stack_serves() else "%.0f s elapsed" % self.config.grace_s)
+                else:
+                    want_hold = True
+        else:
+            want_hold = False
         if want_hold != self._held:
             self.power.set_hold(want_hold)
             self._held = want_hold
@@ -919,9 +1086,13 @@ class CameraPreviewService:
                     self._started_at = None
                     self._stack_frame = None
                     self._scaled = {}
+                    self._viewing_cap = None
+                    self._grace_until = None
+                    self._grace_reason = None
                     if self._end_reason is None:
-                        self._end_reason = "ended"
-        want_reader = active and self.power.stack_state() == PREVIEW_STATE
+                        self._end_reason = "stopped" if (stop_now or
+                                                         self.leases.last_end == "stop") else "ended"
+        want_reader = want_hold and self.power.stack_state() == PREVIEW_STATE
         if want_reader and not self.reader.running():
             self.reader.start()
         elif not want_reader and self.reader.running():
@@ -930,18 +1101,30 @@ class CameraPreviewService:
 
     def status(self) -> dict:
         phase, reason = self.phase()
+        now = self._clock()
         with self._lock:
             started = self._started_at
+            grace = self._grace_until
+            cap = self._viewing_cap
+        held = self._held
+        if grace is None and self.leases.count() == 0 and self._grace_pending():
+            grace = now + self.config.grace_s
         return {
             "enabled": self.config.enabled,
             "active": self.leases.count() > 0,
             "phase": phase,
             "reason": reason or None,
-            "source": self.source() if self.leases.count() else None,
+            # what the camera path is doing (also during the grace)
+            "camera_phase": self.camera_phase()[0] if held or self.leases.count() else PHASE_OFF,
+            "source": self.source() if (self.leases.count() or grace is not None) else None,
             "leases": self.leases.count(),
             "started_at": started,
+            "grace": grace is not None,
+            "grace_left_s": int(max(0.0, grace - now) + 0.999) if grace is not None else None,
+            "session_left_s": int(max(0.0, cap - now)) // 10 * 10 if cap is not None else None,
             "ttl_s": self.config.ttl_s,
             "max_session_s": self.config.max_session_s,
+            "grace_s": self.config.grace_s,
             "scaling": self.scaler is not None,
         }
 
@@ -959,7 +1142,10 @@ class CameraPreviewService:
     def shutdown(self) -> None:
         """Backend exit: drop every lease, close the device, cut a preview-only
         camera hub."""
-        n = self.leases.clear()
+        n = self.leases.clear("shutdown")
+        with self._lock:
+            self._grace_until = None
+            self._viewing_cap = None
         if n:
             logger.info("camera preview: shutdown, %d lease(s) dropped", n)
         try:

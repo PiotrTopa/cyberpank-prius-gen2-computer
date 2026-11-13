@@ -207,8 +207,15 @@ export interface Roadsense {
 export interface CameraPreview {
   enabled?: boolean;
   active?: boolean;
-  /** off | powering | enumerating | waiting_for_frame | live | error */
+  /** off | powering | enumerating | waiting_for_frame | live | error | grace */
   phase?: string;
+  /** the camera path itself (also during the grace) */
+  camera_phase?: string;
+  /** no lease, camera kept on for a resume (relay 4 still on) */
+  grace?: boolean;
+  grace_left_s?: number | null;
+  grace_s?: number;
+  session_left_s?: number | null;
   reason?: string | null;
   /** stack (roadsense running) | direct (camera hub powered for the preview) */
   source?: string | null;

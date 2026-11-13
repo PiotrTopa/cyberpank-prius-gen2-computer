@@ -233,28 +233,60 @@ only drives `systemctl` and reads JSON over HTTP.
 The dashboard's Overview tab has a **Camera** panel: START takes a *preview
 lease*, the page shows a downscaled still about once per second, and the
 camera goes back to what it would have been without the preview when the
-last lease ends. REST (`api/camera_preview_routes.py`, same auth as the rest
+last lease ends (after a 3-min grace unless STOP was pressed, below). REST (`api/camera_preview_routes.py`, same auth as the rest
 of `/api/v1`):
 
 | Method + path | What |
 |---|---|
-| `POST /api/v1/camera/preview/lease` `{}` / `{"lease_id": id}` | start / renew → `{lease_id, ttl_s, expires_in_s, max_session_s, session_left_s, phase, reason, source, leases}` |
-| `DELETE /api/v1/camera/preview/lease/{id}` | stop (also `POST …/lease/{id}/release`, the `navigator.sendBeacon` form) |
+| `POST /api/v1/camera/preview/lease` `{}` / `{"lease_id": id}` / `{"resume": true}` | start (explicit START) / renew / resume the current viewing → `{lease_id, ttl_s, expires_in_s, max_session_s, session_left_s, phase, reason, source, leases, resumed}` |
+| `DELETE /api/v1/camera/preview/lease/{id}[?stop=1]` | release: soft (grace keeps the camera) or, with `stop=1`, the user's STOP (camera off now; also ends a running grace, any id). `POST …/lease/{id}/release[?stop=1]` is the `navigator.sendBeacon` form |
 | `GET /api/v1/camera/preview/frame.jpg?w=640&q=70[&lease=id]` | latest frame; `ETag` (304 on `If-None-Match`), `X-Frame-Age`, `X-Frame-Time`, `X-Frame-Seq`, `X-Frame-Source` (`stack`/`direct`), `X-Preview-Scaled`; 503 + `Retry-After` + `{detail:{phase,reason}}` while the camera comes up; 409 without a lease |
-| `GET /api/v1/camera/preview` | status (same dict as the state field) |
+| `GET /api/v1/camera/preview` or `GET /api/v1/camera/preview/` | status (same dict as the state field) |
 
-Refusals: 409 `undervoltage`, 410 `expired` / `max_session` (press again; no
+Refusals: 409 `undervoltage`, 409 `not_resumable` (resume with no viewing to
+continue: never a cold start), 410 `expired` / `max_session` (press again; no
 cooldown), 429 `too_many_leases` (8). State: `roadsense.camera_preview` =
-`{enabled, active, phase, reason, source, leases, started_at, ttl_s,
-max_session_s, scaling}`; phases `off → powering → enumerating →
-waiting_for_frame → live`, or `error` (with `reason`; the reader keeps trying).
+`{enabled, active, phase, reason, camera_phase, source, leases, started_at,
+grace, grace_left_s, session_left_s, ttl_s, max_session_s, grace_s, scaling}`;
+phases `off → powering → enumerating → waiting_for_frame → live`, `error`
+(with `reason`; the reader keeps trying), and `grace` (no lease, camera kept
+on; `camera_phase` says what the camera path is doing, `grace_left_s` how long
+relay 4 stays on).
 
-* **Lease rules:** TTL 15 s without renewal (the page renews every 5 s), hard
-  cap 10 min per lease (`BACKEND_CAMERA_PREVIEW_TTL_S`, `…_MAX_SESSION_S`,
+* **Grace (`BACKEND_CAMERA_PREVIEW_GRACE_S`, default 180, 0 = off).** When
+  the last lease ends *softly* — page hidden, `pagehide`/unload beacon,
+  unmount on navigation, TTL expiry, or the session cap — nothing is switched:
+  the preview hold stays, relay 4 stays on and the reader keeps reading, so a
+  lease taken within the grace is `live` at once with no power-up. When the
+  grace runs out the hold is dropped and the manager cuts relay 4. Ended at
+  once (no grace): the user's STOP (`?stop=1`), 12 V under-voltage, backend
+  shutdown, and situation a (the stack has the camera: nothing to keep; the
+  hold is dropped immediately, the stack is never touched). ACC on during a
+  grace hands the camera to the stack and ends the grace.
+* **Session cap = lease time per viewing.** A *viewing* runs from an explicit
+  START until the camera is released. Every lease of the viewing — renewals
+  and resumes (`{"resume": true}`: tab visible again, reload, re-opened page,
+  a lapsed lease) — ends at the viewing's cap, START + `max_session_s`
+  (10 min); a resume after the cap is refused (`max_session`). Whatever ended
+  the leases, at most one grace follows, so the camera is on for at most
+  10 min + 3 min per viewing without a button press. Pressing START again
+  (also during that grace: instant, no power-up) starts a new viewing with a
+  fresh 10 min.
+* **Client:** the page stops fetching at once when hidden and keeps a
+  "was previewing" marker in `localStorage`. On becoming visible again, on
+  reload or when re-opened it resumes by itself — only with that marker
+  (< 15 min old) and only if `GET /api/v1/camera/preview` reports `grace` or an
+  active preview. While paused it shows "Paused — camera kept on for m:ss"
+  with Resume / Off now. A frame is greyed out with "camera re-enumerating… —
+  frame N s old" (or the matching text) whenever the phase is not `live` or
+  the frame is older than 5 s.
+
+* **Lease rules:** TTL 15 s without renewal (the page renews every 5 s), cap
+  as above (`BACKEND_CAMERA_PREVIEW_TTL_S`, `…_MAX_SESSION_S`, `…_GRACE_S`,
   `…_CAPTURE_S`, `…_ENABLED=0` disables). The page stops renewing at once when
-  it is hidden (Page Visibility API), sends a DELETE (keepalive) on
-  stop/unmount and a `sendBeacon` release on `pagehide`; the server TTL is the
-  guarantee if all of that is lost on the LTE link.
+  it is hidden (Page Visibility API), sends a DELETE (keepalive; `?stop=1`
+  only for STOP) on stop/unmount and a `sendBeacon` release on `pagehide`;
+  the server TTL is the guarantee if all of that is lost on the LTE link.
 * **Stack running (ACC on):** nothing is powered or started. Frames are the
   stack's own `/v1/frame.jpg` (camerad-dvr's copy of the camera JPEG, ~10/s)
   fetched over the HTTP boundary at most every 0.25 s and shared between
@@ -268,7 +300,12 @@ waiting_for_frame → live`, or `error` (with `reason`; the reader keeps trying)
   `O_RDONLY|O_DIRECT|O_EXCL`, MBR → layout, info sector at LBA 0x380/0x300,
   frame at 0x391/0x311, check word, EOI trim) at 2 frames/s. Zero info
   sectors right after power-on → `waiting_for_frame`; a vanished device (the
-  dashcam re-enumerates ~30 s after power-on) → close, `enumerating`, reopen.
+  first car run, 2026-11-13: live at +7 s, `info read failed … short read
+  0/512` at ~+29 s; the node may come back under another name, sdg → sdh, and
+  read-fail for a few seconds first) → close, `enumerating`, then once per
+  second a fresh sysfs scan trying *every* 1902:3241 disk (a stale node next
+  to the new one is skipped), logged every 10 s (`open attempt N: …`) and
+  "camera back on /dev/sdX after N attempt(s)" on recovery.
   ACC on during a preview: the manager calls the preview's `release_device`
   right before `systemctl start` (no settle, the hub is already up) and the
   preview switches to the stack's frames. ACC off during a preview: the normal

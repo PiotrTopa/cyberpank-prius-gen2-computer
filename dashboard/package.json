@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "tsc -p tests && node --test .unit-tests/tests/cameraPreview.test.js"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.1",

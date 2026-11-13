@@ -1,20 +1,24 @@
 """
 REST front of the on-demand camera preview (backend.camera_preview):
 
-    GET    /api/v1/camera/preview                     status (phase, source, leases)
-    POST   /api/v1/camera/preview/lease               {"lease_id"?: str} -> start / renew
-    DELETE /api/v1/camera/preview/lease/{lease_id}    stop
-    POST   /api/v1/camera/preview/lease/{lease_id}/release
-                                                      stop; same as DELETE, for
+    GET    /api/v1/camera/preview  (or .../preview/)  status (phase, source, leases, grace)
+    POST   /api/v1/camera/preview/lease               {"lease_id"?: str, "resume"?: bool}
+                                                      -> start / renew / resume
+    DELETE /api/v1/camera/preview/lease/{lease_id}[?stop=1]
+                                                      release; soft (grace keeps the
+                                                      camera) unless stop=1 (user STOP:
+                                                      off now, also ends a grace)
+    POST   /api/v1/camera/preview/lease/{lease_id}/release[?stop=1]
+                                                      same as DELETE, for
                                                       navigator.sendBeacon (POST only)
     GET    /api/v1/camera/preview/frame.jpg?w=640&q=70[&lease=<id>]
                                                       latest frame (JPEG)
 
 Lease answers: ``{lease_id, ttl_s, expires_in_s, max_session_s,
-session_left_s, phase, reason, source, leases}``. Refusals carry
+session_left_s, phase, reason, source, leases, resumed}``. Refusals carry
 ``{"detail": {"reason": ..., "message": ...}}``: 409 ``undervoltage``,
-410 ``expired`` / ``max_session`` (press again), 429 ``too_many_leases``,
-503 ``disabled``.
+409 ``not_resumable`` (resume with no viewing to continue), 410 ``expired`` /
+``max_session`` (press again), 429 ``too_many_leases``, 503 ``disabled``.
 
 Frame answers: 200 ``image/jpeg`` with ``ETag``, ``X-Frame-Age`` (s),
 ``X-Frame-Time`` (wall clock), ``X-Frame-Seq``, ``X-Frame-Source``
@@ -53,30 +57,38 @@ def register(app, service, prefix: str, require_auth) -> None:
     async def preview_status() -> Dict[str, Any]:
         return service.status()
 
+    @app.get(prefix + "/", dependencies=[Depends(require_auth)], include_in_schema=False)
+    async def preview_status_slash() -> Dict[str, Any]:
+        return service.status()
+
     @app.post(prefix + "/lease", dependencies=[Depends(require_auth)])
     async def preview_lease(body: Optional[Dict[str, Any]] = Body(None)) -> Dict[str, Any]:
         if body is not None and not isinstance(body, dict):
             raise HTTPException(status_code=400, detail={"reason": "bad_body",
                                                          "message": "JSON object expected"})
         lease_id = _valid_id((body or {}).get("lease_id"))
+        resume = (body or {}).get("resume", False)
+        if not isinstance(resume, bool):
+            raise HTTPException(status_code=400, detail={"reason": "bad_body",
+                                                         "message": "resume must be a boolean"})
         try:
-            return service.lease(lease_id)
+            return service.lease(lease_id, resume=resume)
         except PreviewRefused as exc:
             raise HTTPException(status_code=exc.status,
                                 detail={"reason": exc.reason, "message": exc.detail})
 
-    async def _release(lease_id: str) -> Dict[str, Any]:
+    async def _release(lease_id: str, stop: bool) -> Dict[str, Any]:
         lid = _valid_id(lease_id)
-        released = service.release(lid) if lid else False
-        return {"released": released, "leases": service.leases.count()}
+        released = service.release(lid, stop=stop)
+        return {"released": released, "stop": stop, "leases": service.leases.count()}
 
     @app.delete(prefix + "/lease/{lease_id}", dependencies=[Depends(require_auth)])
-    async def preview_lease_delete(lease_id: str) -> Dict[str, Any]:
-        return await _release(lease_id)
+    async def preview_lease_delete(lease_id: str, stop: bool = Query(False)) -> Dict[str, Any]:
+        return await _release(lease_id, stop)
 
     @app.post(prefix + "/lease/{lease_id}/release", dependencies=[Depends(require_auth)])
-    async def preview_lease_release(lease_id: str) -> Dict[str, Any]:
-        return await _release(lease_id)
+    async def preview_lease_release(lease_id: str, stop: bool = Query(False)) -> Dict[str, Any]:
+        return await _release(lease_id, stop)
 
     @app.get(prefix + "/frame.jpg", dependencies=[Depends(require_auth)])
     async def preview_frame(
