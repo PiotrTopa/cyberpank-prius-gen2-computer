@@ -148,3 +148,15 @@ def test_gateway_can_tx_command_builds_action():
     with pytest.raises(CommandError):
         build_command("gateway_can_tx", {"id": 1, "data": [300]})
     assert build_command("panda_bench", {}).reset
+
+
+def test_hv_voltage_above_255_is_not_wrapped():
+    """Hard regeneration: the pack is at ~260 V (0x0104). Byte 3 alone read
+    as 4 V and the power came out ~0 kW (car metrics, 2026-11)."""
+    twin = create_test_twin()
+    raw = (-679) & 0xFFF
+    frame = bytes([(raw >> 8) & 0x0F, raw & 0xFF, 0x01, 0x04, 0x00])
+    assert twin.ingress.ingest_broadcast_can(0x03B, frame, 0, 1000.0, time.monotonic())
+    energy = twin.store.state.energy
+    assert energy.hv_battery_voltage == 260
+    assert abs(energy.battery_power_kw + 17.654) < 1e-3

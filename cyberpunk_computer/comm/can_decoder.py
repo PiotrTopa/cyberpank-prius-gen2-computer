@@ -265,15 +265,13 @@ class CANDecoder:
                 current_raw -= 0x1000
             current_amps = current_raw * 0.1
             
-            # Voltage: bytes 2-3, 16-bit unsigned
-            # Format from wiki: 00DCh = 220V, 0100h = 256V
-            # UPDATE: Per 2009 Gen2 Docs, Byte 3 is voltage [0-255V]
-            # My previous interpretation was 0.5V
-            # Let's check ranges. If raw is > 255, it's likely 2 byte.
-            # But recent data sample showed '229' (0xE5) which is perfect for 229V.
-            # Using byte 3 alone.
-            voltage = data[3]
-            
+            # Voltage: bytes 2-3, 16-bit unsigned [1 V] (wiki: 00DCh = 220 V,
+            # 0100h = 256 V). Byte 3 alone wraps at 256 V: under hard
+            # regeneration the pack goes to ~260 V, which then read as 3-4 V
+            # and made the power ~0 kW exactly when it was highest (seen in
+            # the car's own metrics, 2026-11: V = 3 at -68 A).
+            voltage = (data[2] << 8) | data[3]
+
             msg.values["current"] = current_amps
             msg.values["voltage"] = voltage
             msg.values["is_charging"] = current_amps < 0
