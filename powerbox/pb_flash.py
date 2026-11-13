@@ -136,9 +136,10 @@ def main():
     print("board: %s %s" % (ident.get("role"), ident.get("ver")))
     if ident.get("role") != "powerbox":
         sys.exit("not a powerbox")
-    # main.py first: a new firmware file (e.g. bean_rx.py in 2.3.0) is only
-    # accepted once the main.py that lists it in OTA_FILES is running, so a
-    # name refusal after main.py went in triggers one reboot and a retry.
+    # main.py first: a new firmware file (bean_rx.py in 2.3.0, bean_tx.py in
+    # 2.4.0) is only accepted once the main.py that lists it in OTA_FILES is
+    # running, so a name refusal after main.py went in triggers one reboot
+    # and a retry.
     files = sorted(a.files, key=lambda f: os.path.basename(f) != "main.py")
     sent_main = False
     retried = False

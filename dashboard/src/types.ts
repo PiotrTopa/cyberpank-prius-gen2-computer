@@ -181,7 +181,7 @@ export interface Satellites {
  *  zone of the phone in C (heat-model input). */
 export interface Roadsense {
   enabled?: boolean;
-  /** off | camera_on | starting | running | grace | stopping */
+  /** off | camera_on | starting | running | grace | stopping | preview (camera hub only) */
   state?: string;
   /** auto (follow ACC) | on | off */
   mode?: string;
@@ -199,6 +199,24 @@ export interface Roadsense {
   last_api_ok?: number | null;
   restarts?: number;
   last_error?: string | null;
+  /** on-demand dashboard camera preview (backend.camera_preview) */
+  camera_preview?: CameraPreview | null;
+}
+
+/** Camera preview lease status (roadsense.camera_preview). */
+export interface CameraPreview {
+  enabled?: boolean;
+  active?: boolean;
+  /** off | powering | enumerating | waiting_for_frame | live | error */
+  phase?: string;
+  reason?: string | null;
+  /** stack (roadsense running) | direct (camera hub powered for the preview) */
+  source?: string | null;
+  leases?: number;
+  started_at?: number | null;
+  ttl_s?: number;
+  max_session_s?: number;
+  scaling?: boolean;
 }
 
 export interface AppState {

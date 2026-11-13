@@ -15,7 +15,17 @@ Capture log (``bean_capture`` REST command): one JSON object per line in
     {"type":"mark","ts":1763053340.0,"text":"driver door opened"}
     {"type":"stats","ts":...,"st":{firmware counters}}   (every 10th stats line)
 
-``rsp`` is the raw 2-bit RSP field (01 = ACK); never interpreted here.
+``rsp`` is the raw 2-bit RSP field (01 = ACK); never interpreted here. A
+frame sent by the powerbox's own transmitter carries ``"own":1``.
+
+Transmitter audit (fw >= 2.4.0, REST ``powerbox_bean_tx``): every edge test
+and frame send is written twice, when it is requested and when the firmware
+answers, to ``<dir>/bean_tx_audit.ndjson`` (always; rotated to ``.1`` at
+``AUDIT_BYTES``) and to the capture log when one is running:
+
+    {"type":"tx_req","ts":..,"op":"send","pri":0,"dst":"FE","mes":"48","data":"00"}
+    {"type":"tx","ts":..,"op":"send","ok":1,"acked":1,"attempts":1,"lost_arb":0,
+     "bit_err":0,"fault":0,"t_ms":27,"pri":0,"dst":"FE","mes":"48","data":"00"}
 """
 
 from __future__ import annotations
@@ -34,6 +44,9 @@ logger = logging.getLogger(__name__)
 RING_FRAMES = 200
 MARKS_MAX = 50
 ROTATE_BYTES = 20 * 1024 * 1024
+AUDIT_FILE = "bean_tx_audit.ndjson"
+AUDIT_BYTES = 1024 * 1024
+AUDIT_OPS = ("edge", "send", "allow", "bench")     # ops worth a line
 
 
 def _safe_name(name: str) -> str:
@@ -59,6 +72,8 @@ class BeanMonitor:
         self._stats_n = 0
         self.path: Optional[str] = None
         self.error: Optional[str] = None
+        self.audit_path = os.path.join(directory, AUDIT_FILE)
+        self.audit_error: Optional[str] = None
 
     # ── feed (engine thread) ────────────────────────────────────────────────
     def ingest(self, frames: List[Dict[str, Any]], stats: Optional[dict] = None) -> None:
@@ -76,6 +91,8 @@ class BeanMonitor:
                         "ok": 1 if f.get("ok") else 0}
                 if not f.get("ok"):
                     line["err"] = f.get("err")
+                if f.get("own"):
+                    line["own"] = 1
                 self._write(line)
                 self._frames += 1
             if stats:
@@ -124,6 +141,33 @@ class BeanMonitor:
         else:
             logger.info("BEAN mark (no capture running): %s", rec["text"])
         return rec
+
+    def tx_event(self, kind: str, rec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Audit one transmitter request (``kind`` "tx_req") or firmware
+        reply ("tx"): always into the audit file, and into the capture log
+        when one is running. Never raises."""
+        if rec.get("op") not in AUDIT_OPS:
+            return None
+        line = {"type": kind, "ts": round(self._clock(), 3)}
+        line.update({k: v for k, v in rec.items() if k not in ("ack", "ts", "type")})
+        text = json.dumps(line, separators=(",", ":")) + "\n"
+        try:
+            os.makedirs(self.directory, exist_ok=True)
+            try:
+                if os.path.getsize(self.audit_path) + len(text) > AUDIT_BYTES:
+                    os.replace(self.audit_path, self.audit_path + ".1")
+            except OSError:
+                pass                                    # no file yet
+            with open(self.audit_path, "a", encoding="utf-8") as fh:
+                fh.write(text)
+            self.audit_error = None
+        except OSError as exc:
+            self.audit_error = str(exc)
+            logger.error("BEAN TX audit log %s not writable: %s", self.audit_path, exc)
+        logger.warning("BEAN TX %s: %s", kind, text.strip())
+        if self._fh is not None:
+            self._write(line)
+        return line
 
     def status(self) -> Dict[str, Any]:
         return {"on": self.capturing, "file": self.path, "frames": self._frames,

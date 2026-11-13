@@ -432,6 +432,8 @@ class BackendService:
         self.mfd_power = None
         # roadsense stack manager (backend.roadsense_power).
         self.roadsense_power = None
+        # On-demand dashboard camera preview (backend.camera_preview).
+        self.camera_preview = None
         # Key-off "low" CPU profile deferred until roadsense has stopped
         # (modeld is pinned to cpu4-7, which "low" takes offline).
         self._low_mode_deferred = False
@@ -634,6 +636,15 @@ class BackendService:
         bridge.on_state(twin.store.state)
 
 
+        # On-demand camera preview (lease + frames; powers the camera hub
+        # through the roadsense manager's preview hold when the stack is down).
+        try:
+            from .camera_preview import wire_camera_preview
+            self.camera_preview = wire_camera_preview(self, twin)
+        except Exception:
+            logger.exception("Camera preview could not be wired; disabled")
+            self.camera_preview = None
+
         # roadsense front: the backend re-publishes the stack's API (bound to
         # loopback on this phone) under /api/v1/roadsense.
         roadsense_url = None
@@ -650,6 +661,7 @@ class BackendService:
             log_level="debug" if cfg.verbose else "info",
             roadsense_url=roadsense_url,
             bean_frames=self.bean_monitor.frames_since if self.bean_monitor else None,
+            camera_preview=self.camera_preview,
         )
         
         zmq_srv = ZmqServer(
@@ -724,6 +736,10 @@ class BackendService:
                 self._bean_tick_last = 0.0          # mirror the status now
             elif name == "BeanMarkAction":
                 mon.mark(action.text)
+            elif name == "PowerboxBeanTxAction":
+                mon.tx_event("tx_req", dict(action.params, op=action.op))
+            elif name == "SetPowerboxBeanTxAction":
+                mon.tx_event("tx", action.result)
 
         twin.store.add_middleware(_bean_middleware)
 
@@ -994,11 +1010,13 @@ class BackendService:
                         store.dispatch(SatellitePowerHoldAction(
                             "manual:ui", acquire=action.on))
                     elif pp is not None and ch == pp.camera.relay_ch:
-                        if self.roadsense_power is not None and self.roadsense_power.is_active():
+                        if self.roadsense_power is not None and self.roadsense_power.holds_camera():
                             logger.warning(
                                 "Ignoring manual relay toggle for the camera hub (ch%d) — "
                                 "owned by the roadsense manager while the stack runs "
-                                "(use roadsense_mode off)", ch)
+                                "or a camera preview holds it (state %s; use "
+                                "roadsense_mode off / stop the preview)", ch,
+                                self.roadsense_power.state)
                         else:
                             pp.camera.set(action.on)
                     elif pp is not None and ch == pp.gateway.relay_ch:
@@ -1028,10 +1046,12 @@ class BackendService:
                     self.powerbox_commander.send_bean(action.op, **action.params)
                 elif type(action).__name__ == "PowerboxBeanRxAction":
                     self.powerbox_commander.bean_rx(on=action.on, op=action.op, raw=action.raw)
+                elif type(action).__name__ == "PowerboxBeanTxAction":
+                    logger.warning("Powerbox BEAN TX %s %s requested", action.op, action.params)
+                    self.powerbox_commander.send_bean_tx(action.op, **action.params)
                 elif type(action).__name__ == "PowerboxBeanTxEnableAction":
-                    logger.warning("Powerbox BEAN TX guard %s requested (BENCH ONLY: "
-                                   "never on the car's live bus)",
-                                   "ARM" if action.on else "disarm")
+                    logger.warning("Powerbox BEAN TX guard %s requested",
+                                   "ARM (60 s)" if action.on else "disarm")
                     self.powerbox_commander.bean_tx_enable(action.on)
 
         twin.store.add_middleware(_powerbox_middleware)
@@ -1424,6 +1444,7 @@ class BackendService:
                     self._gateway_usb_power_tick()
                     self._port_power_enforce_tick()
                     self._mfd_power_tick()
+                    self._camera_preview_tick()
                     self._roadsense_power_tick()
                     self._poco_power_tick()
                     self._chassis_fan_tick()
@@ -1460,6 +1481,16 @@ class BackendService:
             self.mfd_power.tick(acc)
         except Exception:
             logger.exception("MFD power tick failed")
+
+    def _camera_preview_tick(self) -> None:
+        """Apply camera preview leases (before the roadsense tick, which acts
+        on the preview hold)."""
+        if self.camera_preview is None:
+            return
+        try:
+            self.camera_preview.tick()
+        except Exception:
+            logger.exception("camera preview tick failed")
 
     def _roadsense_power_tick(self) -> None:
         """Advance the roadsense stack manager (ACC follower) and finish a
@@ -2117,6 +2148,11 @@ class BackendService:
                 self.dashcam.stop()
             except Exception:
                 logger.exception("Error stopping dashcam ingest")
+        if self.camera_preview is not None:
+            try:
+                self.camera_preview.shutdown()
+            except Exception:
+                logger.exception("Error releasing the camera preview")
         if self.api is not None:
             self.api.stop()
         if self.zmq:

@@ -13,6 +13,8 @@ Surface (versioned under /api/v1), designed for the future Android dashboard:
     GET  /api/v1/bean/frames          last BEAN body-bus frames (?since=seq&limit=n)
     GET  /api/v1/roadsense[/...]      roadsense perception API front (see
                                       api.roadsense_proxy; only when wired)
+    *    /api/v1/camera/preview[/...]  on-demand camera preview: lease + frame.jpg
+                                      (api.camera_preview_routes; only when wired)
 
 All /api/v1 routes (and the WS) require a Bearer token when one is configured.
 Blocking SQLite reads run in a thread pool (per-thread connections) so the event
@@ -72,6 +74,7 @@ def create_app(
     on_startup=None,
     roadsense_url: Optional[str] = None,
     bean_frames=None,
+    camera_preview=None,
 ) -> FastAPI:
     """Build the FastAPI app wired to the bridge and metrics database."""
     app = FastAPI(title="CyberPunk Prius Backend", version="1.0.0")
@@ -246,6 +249,13 @@ def create_app(
             require_auth,
             lambda ws: (not auth_token) or _ws_authorized(ws, auth_token),
         )
+
+    # ── on-demand camera preview (backend.camera_preview) ───────────────────
+
+    if camera_preview is not None:
+        from .camera_preview_routes import register as register_camera_preview
+
+        register_camera_preview(app, camera_preview, API_PREFIX + "/camera/preview", require_auth)
 
     # ── all-ECU diagnostics (scan reports, clear log, ECU registry) ─────────
 

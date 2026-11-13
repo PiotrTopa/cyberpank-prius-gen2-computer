@@ -47,6 +47,7 @@ from .ports import (
 from ..state.actions import (
     Action,
     SetPowerboxBeanAction,
+    SetPowerboxBeanTxAction,
     SetPowerboxConnectionAction,
     SetPowerboxIgnitionAction,
     SetPowerboxPowerStatusAction,
@@ -375,8 +376,16 @@ def parse_powerbox_system(data: dict) -> List[Action]:
         return []
     if ack == "bean_tx_enable":
         logger.warning("Powerbox BEAN TX guard %s",
-                       "ARMED for %ss (bench only)" % data.get("s") if data.get("v") else "disarmed")
+                       "ARMED for %ss" % data.get("s") if data.get("v") else "disarmed")
         return [SetPowerboxBeanAction({"tx_enabled": bool(data.get("v")), "s": data.get("s")})]
+    if ack == "bean_tx":
+        # BEAN transmitter reply (fw >= 2.4.0): edge test, frame send or a
+        # guard change; refusals carry "err" + "detail".
+        result = {k: v for k, v in data.items() if k != "ack"}
+        log = logger.warning if result.get("op") in ("edge", "send", "allow", "bench") \
+            else logger.info
+        log("Powerbox BEAN TX %s: %s", result.get("op"), result)
+        return [SetPowerboxBeanTxAction(result)]
     if ack == "bean":
         # BEAN transceiver bench result (fw >= 2.2.3). The firmware also
         # echoes it as a PMEVENT (ev "bean"), which is what gets journalled.
@@ -746,6 +755,131 @@ def build_acc_sim_command(on: Optional[bool]) -> OutgoingCommand:
     )
 
 
+# BEAN transmitter (fw >= 2.4.0, powerbox/bean_tx.py). Same argument checks as
+# the firmware; the firmware alone decides whether anything is sent (arming,
+# per-boot frames flag, edge test, receiver health, block list, budgets).
+BEAN_TX_OPS = ("status", "edge", "allow", "bench", "sp", "send")
+BEAN_TX_SP = (25, 75)
+BEAN_TX_RETRIES_MAX = 3
+
+
+def _bean_tx_int(name: str, value, lo: int, hi: int) -> int:
+    if isinstance(value, bool) or isinstance(value, str) or value is None:
+        raise ValueError("bean_tx '%s' must be an integer" % name)
+    try:
+        ivalue = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("bean_tx '%s' must be an integer" % name)
+    if ivalue != value or not lo <= ivalue <= hi:
+        raise ValueError("bean_tx '%s' must be an integer %d..%d" % (name, lo, hi))
+    return ivalue
+
+
+def _bean_tx_byte(name: str, value) -> str:
+    """Bus byte as two hex digits (accepts "FE", "fe", 254)."""
+    if isinstance(value, bool) or value is None:
+        raise ValueError("bean_tx '%s' must be a byte (hex string or int)" % name)
+    if isinstance(value, str):
+        text = value.strip()
+        if not 1 <= len(text) <= 2:
+            raise ValueError("bean_tx '%s' must be 1-2 hex digits" % name)
+        try:
+            ivalue = int(text, 16)
+        except ValueError:
+            raise ValueError("bean_tx '%s' must be 1-2 hex digits" % name)
+    else:
+        try:
+            ivalue = int(value)
+        except (TypeError, ValueError):
+            raise ValueError("bean_tx '%s' must be a byte (hex string or int)" % name)
+        if ivalue != value:
+            raise ValueError("bean_tx '%s' must be a byte (hex string or int)" % name)
+    if not 0 <= ivalue <= 255:
+        raise ValueError("bean_tx '%s' must be 00..FF" % name)
+    return "%02X" % ivalue
+
+
+def _bean_tx_flag(name: str, value) -> int:
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if value in (0, 1):
+        return int(value)
+    if isinstance(value, str) and value.strip().lower() in ("1", "true", "on", "yes"):
+        return 1
+    if isinstance(value, str) and value.strip().lower() in ("0", "false", "off", "no"):
+        return 0
+    raise ValueError("bean_tx '%s' must be a boolean" % name)
+
+
+def validate_bean_tx_params(op: str, params: Optional[dict] = None) -> dict:
+    """Check a BEAN transmitter op and its fields; returns the wire fields.
+    Raises ValueError on an unknown op, an unknown or missing field or a
+    value out of range.
+
+    status                                   guards, last edge test, budget
+    edge   [wake]                            one dominant pulse of one bit time
+    allow  v                                 per-boot "frames allowed" flag
+    bench  v                                 per-boot bench override
+    sp     pct (25..75)                      readback sample point
+    send   pri (0..15) dst mes data [retries 0..3] [wake]
+    """
+    op = str(op).strip().lower()
+    if op not in BEAN_TX_OPS:
+        raise ValueError("bean_tx op must be one of %s" % ", ".join(BEAN_TX_OPS))
+    p = {k: v for k, v in (params or {}).items() if v is not None}
+    fields = {"status": (), "edge": ("wake",), "allow": ("v",), "bench": ("v",),
+              "sp": ("pct",), "send": ("pri", "dst", "mes", "data", "retries", "wake")}[op]
+    for key in p:
+        if key not in fields:
+            raise ValueError("bean_tx op %s takes no '%s' (fields: %s)"
+                             % (op, key, ", ".join(fields) or "none"))
+    out: dict = {}
+    if "wake" in p:
+        if _bean_tx_flag("wake", p["wake"]):
+            out["wake"] = 1
+    if op in ("allow", "bench"):
+        if "v" not in p:
+            raise ValueError("bean_tx op %s needs 'v'" % op)
+        out["v"] = _bean_tx_flag("v", p["v"])
+    elif op == "sp":
+        if "pct" not in p:
+            raise ValueError("bean_tx op sp needs 'pct'")
+        out["pct"] = _bean_tx_int("pct", p["pct"], BEAN_TX_SP[0], BEAN_TX_SP[1])
+    elif op == "send":
+        for key in ("pri", "dst", "mes", "data"):
+            if key not in p:
+                raise ValueError("bean_tx op send needs '%s'" % key)
+        out["pri"] = _bean_tx_int("pri", p["pri"], 0, 15)
+        out["dst"] = _bean_tx_byte("dst", p["dst"])
+        out["mes"] = _bean_tx_byte("mes", p["mes"])
+        data = p["data"]
+        if not isinstance(data, str):
+            raise ValueError("bean_tx 'data' must be a hex string")
+        data = data.strip().replace(" ", "").upper()
+        try:
+            raw = bytes.fromhex(data)
+        except ValueError:
+            raise ValueError("bean_tx 'data' must be a hex string")
+        if not 1 <= len(raw) <= 11:
+            raise ValueError("bean_tx 'data' must be 1..11 bytes")
+        out["data"] = data
+        if "retries" in p:
+            out["retries"] = _bean_tx_int("retries", p["retries"], 0, BEAN_TX_RETRIES_MAX)
+    return out
+
+
+def build_bean_tx_command(op: str, **kw) -> OutgoingCommand:
+    """BEAN transmitter op: ``{"a":"bean_tx","op":op,...}`` (validated by
+    :func:`validate_bean_tx_params`; ValueError on bad input). The firmware
+    answers ``{"ack":"bean_tx","op":op,"ok":0|1,...}`` (mirrored into
+    ``powerbox.bean_tx``)."""
+    fields = validate_bean_tx_params(op, kw)
+    payload = {"a": "bean_tx", "op": str(op).strip().lower()}
+    payload.update(fields)
+    return OutgoingCommand(device_id=POWERBOX_LOCAL_SYSTEM, command_type="power",
+                           payload=payload, priority=50)
+
+
 BEAN_RX_RAW_MAX = 512
 
 
@@ -862,6 +996,15 @@ class PowerboxCommander:
     def bean_tx_enable(self, on: bool) -> bool:
         return self._send(build_bean_tx_enable_command(on),
                           "bean_tx_enable %s" % bool(on), warn=True)
+
+    def send_bean_tx(self, op: str, **kw) -> bool:
+        """BEAN transmitter op (see :func:`build_bean_tx_command`)."""
+        try:
+            cmd = build_bean_tx_command(op, **kw)
+        except ValueError as exc:
+            logger.error("Powerbox bean_tx command refused: %s", exc)
+            return False
+        return self._send(cmd, "bean_tx %s" % cmd.payload, warn=True)
 
     def send_bean(self, op: str, **kw) -> bool:
         """BEAN transceiver bench op (see :func:`build_bean_command`)."""

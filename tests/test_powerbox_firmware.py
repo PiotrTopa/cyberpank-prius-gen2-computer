@@ -328,7 +328,7 @@ def _cmd(fw, payload, cfg):
 
 class TestCommandSurface:
     def test_version_bumped(self, fw):
-        assert fw.main.VERSION == "2.3.0"
+        assert fw.main.VERSION == "2.4.0"
         assert fw.main.I2C_FREQ == 100000  # PCF8574 is a 100 kHz part
 
     def test_relay_command_sets_load_channels(self, fw, pm):
@@ -747,6 +747,8 @@ def bean(fw, pm):
     FakePin.readers[6] = lambda: 1 - FakePin.levels.get(7, 0)
     b = fw.main.Bean()
     fw.main._bean = b
+    # fw 2.4.0: ... and the per-boot bench override of the transmitter
+    fw.main._btx = _btx_stub(bench=True)
     # fw 2.3.0: TX-driving ops need the (expiring) guard
     with Recorder(fw):
         _cmd(fw, {"a": "bean_tx_enable", "v": 1}, pm.cfg)
@@ -755,7 +757,23 @@ def bean(fw, pm):
     yield types.SimpleNamespace(bean=b, cfg=pm.cfg)
     fw.main.BEAN_TX_ENABLED = False
     fw.main._bean = None
+    fw.main._btx = None
     FakePin.readers.clear()
+
+
+def _btx_stub(bench=False):
+    """Stands for bean_tx.BeanTx in main.py's wiring."""
+    st = types.SimpleNamespace(bench=bench, busy=False, guards=0, releases=0, busy_seen=[])
+
+    def guard():
+        st.guards += 1
+        st.busy_seen.append(st.busy)
+
+    def release():
+        st.releases += 1
+    st.guard = guard
+    st.release = release
+    return st
 
 
 def _bean_cmd(fw, cfg, **kw):
@@ -998,10 +1016,12 @@ class TestBeanTxGuard:
         FakePin.writes.clear()
         FakePin.readers[6] = lambda: 1 - FakePin.levels.get(7, 0)
         m._bean = m.Bean()
+        m._btx = _btx_stub(bench=True)
         m.BEAN_TX_ENABLED = False
         yield types.SimpleNamespace(m=m, t=t, cfg=pm.cfg)
         m.BEAN_TX_ENABLED = False
         m._bean = None
+        m._btx = None
         FakePin.readers.clear()
 
     def test_off_by_default_in_source(self, fw):
@@ -1043,6 +1063,119 @@ class TestBeanTxGuard:
         assert {"ack": "bean_tx_enable", "v": 0, "s": 0} in rec.lines
         _, acks, errs = _bean_cmd(fw, guard.cfg, op="tx", v=1, ms=1)
         assert not acks and errs[0]["code"] == "BEAN_TX_DISABLED"
+
+    @pytest.mark.parametrize("op,kw", [("tx", {"v": 1, "ms": 5}), ("pulse", {"us": 100}),
+                                       ("loop", {"n": 2}), ("square", {"hz": 1000, "ms": 5})])
+    def test_bench_ops_need_the_bench_override_too(self, fw, guard, op, kw):
+        # fw 2.4.0: these hold the bus dominant longer than a frame may
+        with Recorder(fw):
+            _cmd(fw, {"a": "bean_tx_enable", "v": 1}, guard.cfg)
+        FakePin.writes.clear()
+        for btx in (_btx_stub(bench=False), None):       # flag off / no transmitter
+            guard.m._btx = btx
+            _, acks, errs = _bean_cmd(fw, guard.cfg, op=op, **kw)
+            assert not acks and errs[0]["code"] == "BEAN_TX_DISABLED"
+            assert "bench" in errs[0]["detail"]
+            assert (7, 1) not in FakePin.writes
+        guard.m._btx = _btx_stub(bench=False)
+        _, (ack,), errs = _bean_cmd(fw, guard.cfg, op="status")
+        assert not errs
+
+    def test_bench_op_suspends_the_gp7_guard(self, fw, guard):
+        with Recorder(fw):
+            _cmd(fw, {"a": "bean_tx_enable", "v": 1}, guard.cfg)
+        btx = guard.m._btx
+        _, (ack,), errs = _bean_cmd(fw, guard.cfg, op="tx", v=1, ms=20)
+        assert not errs and btx.guards >= 3 and all(btx.busy_seen)   # busy during the hold
+        assert btx.busy is False
+
+
+class TestBeanTxWiring:
+    def test_ota_and_boot_state(self, fw):
+        assert "bean_tx.py" in fw.main.OTA_FILES
+        src = open(os.path.join(POWERBOX_DIR, "main.py")).read()
+        assert "\n_btx = None\n" in src                 # RAM only, off at boot
+        assert "bean_rx_start()\n    bean_tx_start()" in src
+
+    def test_command_without_transmitter(self, fw, pm, monkeypatch):
+        monkeypatch.setattr(fw.main, "_btx", None)
+        monkeypatch.setattr(fw.main, "_btx_err", "no receiver")
+        with Recorder(fw) as rec:
+            _cmd(fw, {"a": "bean_tx", "op": "send", "pri": 0, "dst": "FE", "mes": "48",
+                      "data": "00"}, pm.cfg)
+        assert rec.lines == [{"ack": "bean_tx", "op": "send", "ok": 0, "err": "off",
+                              "detail": "no receiver"}]
+
+    def test_start_needs_the_receiver_and_never_raises(self, fw, monkeypatch):
+        m = fw.main
+        monkeypatch.setattr(m, "_btx", None)
+        monkeypatch.setattr(m, "_brx", None)
+        m.bean_tx_start()
+        assert m._btx is None and m._btx_err == "no receiver"
+        import builtins
+        real = builtins.__import__
+
+        def fake(name, *a, **kw):
+            if name == "bean_tx":
+                raise MemoryError("alloc")
+            return real(name, *a, **kw)
+        monkeypatch.setattr(builtins, "__import__", fake)
+        monkeypatch.setattr(m, "_brx", object())
+        m.bean_tx_start()
+        assert m._btx is None and "MemoryError" in m._btx_err
+        assert m._evlog[-1]["ev"] == "bean_txm"
+
+    def test_start_builds_the_transmitter_and_commands_reach_it(self, fw, pm, monkeypatch):
+        m = fw.main
+        sys.path.insert(0, POWERBOX_DIR)
+        try:
+            import bean_tx
+        finally:
+            sys.path.remove(POWERBOX_DIR)
+        FakePin.readers[7] = lambda: FakePin.levels.get(7, 0)
+        monkeypatch.setattr(sys.modules["machine"], "mem32", {}, raising=False)
+        brx = types.SimpleNamespace(poll=lambda: None, hold=False, bus=lambda: 0,
+                                    health=lambda: None, tb16=1600, seen=set(),
+                                    tb_measured=lambda: True)
+        monkeypatch.setattr(m, "_brx", brx)
+        monkeypatch.setattr(m, "_btx", None)
+        monkeypatch.setattr(m, "BEAN_TX_ENABLED", False)
+        try:
+            m.bean_tx_start()
+            assert isinstance(m._btx, bean_tx.BeanTx) and m._btx.idle is m.wdt_sleep_ms
+            assert FakePin.levels[7] == 0
+            FakePin.writes.clear()
+            with Recorder(fw) as rec:
+                _cmd(fw, {"a": "bean_tx", "op": "status"}, pm.cfg)
+                _cmd(fw, {"a": "bean_tx", "op": "send", "pri": 0, "dst": "FE", "mes": "48",
+                          "data": "00"}, pm.cfg)
+                _cmd(fw, {"a": "bean_tx", "op": "edge"}, pm.cfg)
+                _cmd(fw, {"a": "bean_tx", "op": "bench", "v": 1}, pm.cfg)
+            st, send, edge, bench = [l for l in rec.lines if l.get("ack") == "bean_tx"]
+            assert st["ok"] == 1 and st["armed"] == 0 and st["allow"] == 0 and st["bench"] == 0
+            assert send["err"] == "disarmed" and edge["err"] == "disarmed" and bench["err"] == "disarmed"
+            assert FakePin.levels[7] == 0 and (7, 1) not in FakePin.writes
+        finally:
+            FakePin.readers.clear()
+
+    def test_wdt_sleep_runs_the_gp7_guard_every_slice(self, fw, pm, monkeypatch):
+        c = FakeClockMs()
+        monkeypatch.setattr(fw.main.time, "ticks_ms", c.ticks)
+        monkeypatch.setattr(fw.main.time, "sleep_ms", c.sleep)
+        btx = _btx_stub()
+        monkeypatch.setattr(fw.main, "_btx", btx)
+        with Recorder(fw):
+            fw.main.wdt_sleep_ms(100)
+        assert btx.guards == 21
+
+    def test_release_paths_reach_the_transmitter(self, fw, pm, monkeypatch):
+        btx = _btx_stub()
+        monkeypatch.setattr(fw.main, "_btx", btx)
+        fw.main.bean_release()
+        assert btx.releases == 1
+        with Recorder(fw):
+            _cmd(fw, {"a": "bean_tx_enable", "v": 0}, pm.cfg)      # disarm releases
+        assert btx.releases == 2
 
 
 class _IdRecorder(Recorder):

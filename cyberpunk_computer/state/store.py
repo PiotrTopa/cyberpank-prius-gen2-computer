@@ -1176,6 +1176,16 @@ class Store:
             )
             affected.add(StateSlice.POWERBOX)
 
+        elif action.type == ActionType.SET_POWERBOX_BEAN_TX:
+            import time as _t
+            res = dict(action.result)
+            res["ts"] = _t.time()
+            self._state = replace(
+                self._state,
+                powerbox=replace(self._state.powerbox, bean_tx=res),
+            )
+            affected.add(StateSlice.POWERBOX)
+
         elif action.type == ActionType.SET_BEAN_RX:
             affected |= self._reduce_bean_rx(action)
 
@@ -1425,8 +1435,9 @@ class Store:
         from ..comm.bean import update_decoded, update_messages
         now = a.recv_ts or _t.time()
         bean = self._state.bean
-        ok = [f for f in a.frames if f.get("ok")]
-        n_err = len(a.frames) - len(ok)
+        # frames our own transmitter sent are not the car's traffic
+        ok = [f for f in a.frames if f.get("ok") and not f.get("own")]
+        n_err = len([f for f in a.frames if not f.get("ok") and not f.get("own")])
         # fps over the last 5 s in 1 s buckets (also decays on stats lines)
         sec = int(now)
         buckets = list(bean.rate_buckets)

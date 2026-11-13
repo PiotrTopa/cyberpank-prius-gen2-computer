@@ -5,13 +5,16 @@ the few known message IDs.
 
 Wire record from the firmware (device 203, ``{"t":ms,"bf":[...],"st":{...}}``):
 
-    [t_ms, pri, "DST", "MES", "DATAHEX", rsp, code]
+    [t_ms, pri, "DST", "MES", "DATAHEX", rsp, code]      (+ ", 1" = our own)
 
 ``t_ms`` is the firmware ticks_ms of the frame's SOF (wraps at 2^30), ``t``
 the firmware ticks_ms when the line was sent; ``rsp`` the two raw RSP bits
 (0..3, ``01`` = ACK; null if the frame broke before RSP); ``code`` 0 = ok,
 else :data:`ERROR_NAMES`. For failed frames DATAHEX holds every byte after
-MES that arrived (it may include the CRC byte).
+MES that arrived (it may include the CRC byte). An 8th element 1 (fw >=
+2.4.0) marks a frame, a fragment or the edge-test pulse sent by the
+powerbox's own transmitter (``"own": True`` in the frame dict); such frames
+stay in the frame ring and the capture log but not in the message table.
 
 Known IDs (docs/BEAN_PROTOCOL.md §4): ALL of these are UNVERIFIED on the
 NHW20 Prius. They come from other Toyota/Lexus models (RX300, IS300) or from
@@ -47,7 +50,7 @@ def frame_from_wire(rec: list, line_t: Optional[int], recv_ts: float) -> Optiona
         code = int(code)
     except (TypeError, ValueError):
         code = 4
-    return {
+    out = {
         "ts": round(ts, 3),
         "t_ms": t_ms,
         "pri": pri,
@@ -58,6 +61,9 @@ def frame_from_wire(rec: list, line_t: Optional[int], recv_ts: float) -> Optiona
         "ok": code == 0,
         "err": None if code == 0 else (ERROR_NAMES[code] if 0 < code < len(ERROR_NAMES) else str(code)),
     }
+    if len(rec) > 7 and rec[7]:
+        out["own"] = True
+    return out
 
 
 def _b(data: bytes, i: int) -> Optional[int]:

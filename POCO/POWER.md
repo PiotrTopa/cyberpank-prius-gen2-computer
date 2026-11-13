@@ -228,6 +228,69 @@ backend's `RoadsenseManager` (`backend/roadsense_power.py`, env
 provider is AGPL and only ever talks to the stack over its sockets; this repo
 only drives `systemctl` and reads JSON over HTTP.
 
+### Dashboard camera preview (on demand, `backend/camera_preview.py`)
+
+The dashboard's Overview tab has a **Camera** panel: START takes a *preview
+lease*, the page shows a downscaled still about once per second, and the
+camera goes back to what it would have been without the preview when the
+last lease ends. REST (`api/camera_preview_routes.py`, same auth as the rest
+of `/api/v1`):
+
+| Method + path | What |
+|---|---|
+| `POST /api/v1/camera/preview/lease` `{}` / `{"lease_id": id}` | start / renew → `{lease_id, ttl_s, expires_in_s, max_session_s, session_left_s, phase, reason, source, leases}` |
+| `DELETE /api/v1/camera/preview/lease/{id}` | stop (also `POST …/lease/{id}/release`, the `navigator.sendBeacon` form) |
+| `GET /api/v1/camera/preview/frame.jpg?w=640&q=70[&lease=id]` | latest frame; `ETag` (304 on `If-None-Match`), `X-Frame-Age`, `X-Frame-Time`, `X-Frame-Seq`, `X-Frame-Source` (`stack`/`direct`), `X-Preview-Scaled`; 503 + `Retry-After` + `{detail:{phase,reason}}` while the camera comes up; 409 without a lease |
+| `GET /api/v1/camera/preview` | status (same dict as the state field) |
+
+Refusals: 409 `undervoltage`, 410 `expired` / `max_session` (press again; no
+cooldown), 429 `too_many_leases` (8). State: `roadsense.camera_preview` =
+`{enabled, active, phase, reason, source, leases, started_at, ttl_s,
+max_session_s, scaling}`; phases `off → powering → enumerating →
+waiting_for_frame → live`, or `error` (with `reason`; the reader keeps trying).
+
+* **Lease rules:** TTL 15 s without renewal (the page renews every 5 s), hard
+  cap 10 min per lease (`BACKEND_CAMERA_PREVIEW_TTL_S`, `…_MAX_SESSION_S`,
+  `…_CAPTURE_S`, `…_ENABLED=0` disables). The page stops renewing at once when
+  it is hidden (Page Visibility API), sends a DELETE (keepalive) on
+  stop/unmount and a `sendBeacon` release on `pagehide`; the server TTL is the
+  guarantee if all of that is lost on the LTE link.
+* **Stack running (ACC on):** nothing is powered or started. Frames are the
+  stack's own `/v1/frame.jpg` (camerad-dvr's copy of the camera JPEG, ~10/s)
+  fetched over the HTTP boundary at most every 0.25 s and shared between
+  viewers. No second block-device reader: camerad-dvr opens the disk
+  `O_EXCL`, and a second reader would steal USB bandwidth from it.
+* **Stack down (car off):** the lease sets the manager's *preview hold*:
+  `off → preview` = relay ch4 on, **no** roadsense unit, **no** `full` CPU
+  profile (PREVIEW counts as off for the deferred `low` switch; a manual
+  `set_relay` ch4 is still refused). The backend then reads the camera itself,
+  read-only, with the camerad-dvr protocol (1902:3241 found via sysfs, raw disk
+  `O_RDONLY|O_DIRECT|O_EXCL`, MBR → layout, info sector at LBA 0x380/0x300,
+  frame at 0x391/0x311, check word, EOI trim) at 2 frames/s. Zero info
+  sectors right after power-on → `waiting_for_frame`; a vanished device (the
+  dashcam re-enumerates ~30 s after power-on) → close, `enumerating`, reopen.
+  ACC on during a preview: the manager calls the preview's `release_device`
+  right before `systemctl start` (no settle, the hub is already up) and the
+  preview switches to the stack's frames. ACC off during a preview: the normal
+  grace + stop runs, then the manager stays in `preview` (camera kept) instead
+  of cutting ch4. Last lease gone: `preview → off`, ch4 cut.
+* **Safety:** no preview-driven power-up while `powerbox.undervoltage` (or a
+  shutdown request) is set — the lease is refused, and a direct preview
+  already running is ended and ch4 released (viewing an already-running stack
+  stays allowed: it powers nothing). Backend shutdown drops every lease,
+  closes the device and cuts a preview-only ch4 (a running stack is left
+  alone, as on every backend restart).
+* **Downscaling:** Pillow (`py3-pillow`, POCO/packages.txt) in JPEG draft mode
+  (DCT-domain decode at 1/2 then a small resize; 6-8 ms per 1280×720 frame on the laptop, not yet measured on the phone);
+  without Pillow frames are served full size (~50-65 KB, `X-Preview-Scaled: 0`).
+  The page asks for 640 px and drops to 480/320 px and up to one frame per
+  5 s when frames arrive slowly.
+* **Battery (car off):** relay ch4 on draws about **+84 mA at 12 V (≈1 W)**
+  for the VIA hub + dashcam (powerbox/README.md relay table), so a full 10-min
+  session costs ≈ 14 mAh of the 12 V battery, on top of the POCO's own idle
+  draw (the preview keeps the `low` profile; reading two ~60 KB frames per second is light, not yet measured on the phone).
+  The dashcam may record to its TF card while it is powered.
+
 ## Key-off / key-on sequence (as measured 2026-11-04, bench)
 
 Everything follows `powerbox.acc_on` in the store (ACC-off is debounced
@@ -282,7 +345,7 @@ the behaviour the POCO side depends on:
 | 1 | **NC** | the powerbox's **own** supply — `{"a":"hard_restart"}` only, refused by `relay` | n/a (it *is* the restart) | `powerbox_hard_restart` API command |
 | 2 | NO | MFD Raspberry Pi Zero | OFF | `backend/mfd_power.py` (ssh poweroff + wait, then cut) |
 | 3 | NO | USB hub: CAN gateway **and** comma.ai panda | OFF | gateway power path (`SetGatewayUsbPowerAction`, satellite wake-locks) |
-| 4 | NO | USB hub (VIA): fvision dashcam / aux | OFF | `backend/roadsense_power.py` while the roadsense stack runs (on with ACC, off after the stop); `set_relay` ch4 otherwise |
+| 4 | NO | USB hub (VIA): fvision dashcam / aux | OFF | `backend/roadsense_power.py` while the roadsense stack runs (on with ACC, off after the stop) or a dashboard camera preview holds it (state `preview`); `set_relay` ch4 otherwise |
 | 5 | NO | RS485 satellite power | OFF | `state/rules/satellite_power.py` wake-locks |
 | 6-8 | NO | unassigned | OFF | `set_relay` |
 

@@ -151,6 +151,62 @@ converge the rest. The MFD manager recovers through its ON-state watchdog.
   `pb_flash.py` reboots once mid-update, because the old firmware refuses
   the new file name.
 
+**2.4.0 (2026-11-13), BEAN transmitter (guarded) + receiver idle cost.**
+- New firmware file **`bean_tx.py`** (README "BEAN transmitter"). Not yet
+  run on hardware when written: every number below is from the CPython
+  simulation of the PIO programs.
+  - PIO0 (PIO1 is full with the receiver): SM0 = frame program or edge-test
+    program (25 instructions each, swapped), SM1 = dominant-time watchdog
+    (6 instructions).
+  - Frame program: whole frame preloaded in the joined 8-word TX FIFO; idle
+    check of 11 bit times; per-bit readback of GP6 at a configurable sample
+    point (default 50 %); stops on "sent recessive, read dominant"
+    (arbitration lost / bit error) and on "sent dominant, read recessive"
+    (line fault); at most 6 dominant bits in a row whatever the data; RSP
+    sampled in the two slots after the EOM.
+  - Firmware: retries (default 2, 0–3) with backoff, never after a line
+    fault; result read back from the stopped state machine (RSP samples and
+    the wire bit of a loss).
+- Commands `{"a":"bean_tx","op":...}`: `status`, `edge` (one pulse of one bit
+  time, rise/fall as seen on GP6), `allow` (per-boot frames flag), `bench`
+  (per-boot override), `sp` (sample point), `send`.
+- Guards, all in the firmware: arming (`bean_tx_enable`, unchanged, 60 s) for
+  everything; frames also need the `allow` flag and a measured edge test;
+  watchdog SM (0.8 ms) + 1 kHz firmware timer (GP7 high > 1 ms) + `guard()`
+  every `wdt_sleep_ms` slice; budget 5/s and 50 per 10 min; block list (only
+  the test frame `FE:48` without the bench override; real destinations, real
+  broadcast IDs and anything seen on the bus are refused); receiver must be
+  healthy and the bit time 95–108 µs; a sleeping bus needs `wake`.
+- **Behaviour change:** the old bench ops (`bean` `tx`/`pulse`/`loop`/
+  `square`) now also need the bench override (`bean_tx` `op:"bench"`); they
+  hold the bus dominant for up to 500 ms and must not run on the car.
+- Receiver (`bean_rx.py`):
+  - Idle fast path: 2.3.0 showed `cpu` 87–94 ‰ with the bus asleep; timeout
+    words are now consumed without the decoder, a full pass runs every 40
+    polls, and a bus asleep for 1 s is looked at every 4th poll (wake latency
+    ≤ 20 ms).
+  - Frames sent by our own transmitter carry an 8th record element `1`.
+  - `idle_ms` no longer wraps after 9 min; the run counter saturates.
+  - New hooks for the transmitter: `health()`, `bus()`, `tap()`, `seen`.
+- `main.py` changes: `VERSION`, `OTA_FILES += bean_tx.py`, `bean_tx_start()`
+  after the receiver, the `bean_tx` command, `_btx.guard()` in
+  `wdt_sleep_ms`, `_btx.release()` in `bean_release()`, the bench override
+  check in `bean_command`.
+- Backend: REST `powerbox_bean_tx`, state `powerbox.bean_tx`, audit log
+  `logs/bean/bean_tx_audit.ndjson` (+ `tx_req`/`tx` lines in a running
+  capture), own frames flagged (`"own":1`) and kept out of the message table.
+- Tests: `tests/test_bean_tx.py` (the PIO programs assembled by MicroPython's
+  own assembler, `tests/fixtures/micropython_rp2_v1_21.py`, and run cycle by
+  cycle against a bus model in `tests/bean_pio_sim.py`), `TestBeanTxWiring`
+  in `tests/test_powerbox_firmware.py`, the TX classes in
+  `tests/test_bean_backend.py`.
+- Flash `main.py`, `boot.py`, `bean_rx.py`, `bean_tx.py` (the default of
+  `prius-flash-powerbox`); the first update reboots twice (new file name).
+- Not verifiable off the board (check at the first flash): that both PIO0
+  programs load (31 of 32 instructions), `rp2.StateMachine` with
+  `fifo_join=JOIN_TX`, the result readout through `SM0_INSTR`, the 1 kHz
+  `machine.Timer`, and the real rise/fall times on the car.
+
 ## Bench verification checklist (after flashing `pcf8574.py` + `main.py`)
 
 1. Banner: `POWERBOX_READY` with `ver 2.1.0` and `rc` arrives once the heartbeat daemon runs; STATUS shows `rc`, `up`, `rly: [null,0,0,0,0,0,0,0]`, `rly_fix 0`, `rly_err 0`.

@@ -56,7 +56,16 @@ Inbound commands from the computer (device 0):
             Every TX-driving op (tx/pulse/loop/square) needs the guard
             first (fw 2.3.0): {"a":"bean_tx_enable","v":1} arms it for
             BEAN_TX_ENABLE_MS (60 s), "v":0 disarms; otherwise ERROR
-            BEAN_TX_DISABLED and the pin is never touched.
+            BEAN_TX_DISABLED and the pin is never touched. fw 2.4.0: they
+            also need the per-boot bench override (bean_tx op "bench"),
+            because they hold the bus dominant for longer than a frame may.
+    {"id": 0, "d": {"a": "bean_tx", "op": "status"|"edge"|"allow"|"bench"|"sp"|"send", ...}}
+            BEAN transmitter (fw 2.4.0, bean_tx.py, PIO0): per-bit readback,
+            arbitration, RSP sampling, retries; guarded by the arming above,
+            a per-boot "frames allowed" flag, an edge test, rate budgets and
+            a block list. Never transmits on its own. Reply
+            {"ack":"bean_tx","op":..,"ok":0|1,..}; see README "BEAN
+            transmitter".
     {"id": 0, "d": {"a": "bean_rx", "on": 0|1}}   BEAN receiver (fw 2.3.0,
             bean_rx.py, GP6 only, never drives the bus; ON at boot)
             -> {"ack":"bean_rx","on":..,"mode":"dma"|"irq"|"poll"}
@@ -154,7 +163,7 @@ import pcf8574                      # PCF8574 driver + RelayBoard (pin map, NC, 
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-VERSION = "2.3.0"
+VERSION = "2.4.0"
 
 # Device role — reported in the unified identify ("whoami") response and the
 # ready banner so the computer can discover which USB-CDC port is the powerbox
@@ -503,6 +512,8 @@ def wdt_sleep_ms(total_ms):
             _pm.relay_poll()
         if _brx is not None:
             _brx.poll()                   # BEAN receiver (bounded, never raises)
+        if _btx is not None:
+            _btx.guard()                  # GP7 high outside a TX op -> release
         left = time.ticks_diff(t_end, time.ticks_ms())
         if left <= 0:
             break
@@ -949,6 +960,8 @@ def bean_release():
     """Belt and braces: force BEAN TX low (main loop, exception paths)."""
     if _bean is not None:
         _bean.release()
+    if _btx is not None:
+        _btx.release()                # also takes GP7 back from the PIO
 
 
 # TX guard (fw 2.3.0): the receiver runs on the car's live bus, so no op may
@@ -1007,6 +1020,34 @@ def bean_rx_command(data):
         tx(ID_SYSTEM, reply)
 
 
+# BEAN transmitter (bean_tx.py, PIO0 + GP7): needs the running receiver.
+_btx = None
+_btx_err = None
+
+
+def bean_tx_start():
+    global _btx, _btx_err
+    if _brx is None:
+        _btx_err = "no receiver"
+        return
+    try:
+        import bean_tx
+        _btx = bean_tx.BeanTx(tx, ID_SYSTEM, _brx, bean_tx_allowed,
+                              wdt_sleep_ms, log_event)
+    except Exception as e:
+        _btx = None
+        _btx_err = repr(e)
+        log_event("bean_txm", err=_btx_err)
+
+
+def bean_tx_command(data):
+    if _btx is None:
+        tx(ID_SYSTEM, {"ack": "bean_tx", "op": data.get("op"), "ok": 0,
+                       "err": "off", "detail": _btx_err or "not started"})
+        return
+    _btx.command(data)                # replies itself; always ends released
+
+
 def bean_command(data):
     """Run one {"a":"bean","op":...} bench op; reply ack + PMEVENT echo."""
     if _bean is None:
@@ -1016,6 +1057,11 @@ def bean_command(data):
     if op != "status" and not bean_tx_allowed():
         _bean.release()
         tx_error("BEAN_TX_DISABLED", "op=%s: send bean_tx_enable v=1 first" % op)
+        return
+    if op != "status" and (_btx is None or not _btx.bench):
+        # these ops hold GP7 high far longer than a frame may (fw 2.4.0)
+        _bean.release()
+        tx_error("BEAN_TX_DISABLED", "op=%s: bench override needed (bean_tx op=bench v=1)" % op)
         return
     try:
         if op == "status":
@@ -1037,6 +1083,8 @@ def bean_command(data):
         tx_error("BEAN_ARGS", str(e))
         return
     try:
+        if _btx is not None:
+            _btx.busy = True              # guard() off while the bench op drives
         if op == "status":
             res = _bean.status()
         elif op == "tx":
@@ -1051,6 +1099,9 @@ def bean_command(data):
         _bean.release()
         tx_error("BEAN", "%s: %s" % (op, e))
         return
+    finally:
+        if _btx is not None:
+            _btx.busy = False
     res["op"] = op
     tx(ID_SYSTEM, dict(res, ack="bean"))
     # Live echo for the journal; deliberately NOT appended to the PMLOG ring
@@ -1475,7 +1526,7 @@ class Config:
 # ─── Firmware update over NDJSON ─────────────────────────────────────────────
 
 OTA_FILES = ("main.py", "boot.py", "pcf8574.py", "ina219.py", "bmp280.py", "ahtx0.py",
-             "bean_rx.py")
+             "bean_rx.py", "bean_tx.py")
 
 
 def _rm(path):
@@ -1707,6 +1758,9 @@ def process_command(line: str, config: Config):
     elif action == "bean_tx_enable":
         bean_tx_enable(data)
 
+    elif action == "bean_tx":
+        bean_tx_command(data)
+
     elif action == "acc_sim":
         # BENCH ONLY: override the ACC input (null/absent clears).
         v = data.get("v")
@@ -1822,6 +1876,7 @@ def main():
 
     # BEAN receiver: after the safe-boot window (nothing drains it before).
     bean_rx_start()
+    bean_tx_start()
 
     # I2C setup
     i2c, devices = setup_i2c()

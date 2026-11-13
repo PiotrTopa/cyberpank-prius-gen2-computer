@@ -208,12 +208,20 @@ A rolling "automotive" counter lets each side detect if the other died:
 | Ping | `{"a":"ping"}` | PONG. |
 | Get event log | `{"a":"getlog"}` | Dump the power-event ring buffer as `PMLOG` (cold-boot timeline). |
 | Reset mAh | `{"a":"reset_mah"}` | Zero the coulomb counter. |
-| BEAN bench | `{"a":"bean","op":...}` | fw ≥ 2.2.3, see *BEAN transceiver bench* below. TX-driving ops need the TX guard (fw 2.3.0). |
-| BEAN TX guard (**bench only**) | `{"a":"bean_tx_enable","v":1\|0}` | fw ≥ 2.3.0. Arms the `bean` TX ops for 60 s (`BEAN_TX_ENABLE_MS`), `v:0` disarms. Ack `{"ack":"bean_tx_enable","v":..,"s":60}`, logged as a `bean_tx` PMEVENT. |
+| BEAN bench (**bench only**) | `{"a":"bean","op":...}` | fw ≥ 2.2.3, see *BEAN transceiver bench* below. TX-driving ops need the TX guard (fw 2.3.0) **and** the bench override `{"a":"bean_tx","op":"bench","v":1}` (fw 2.4.0). Never on the car: they hold the bus dominant for up to 500 ms. |
+| BEAN TX guard | `{"a":"bean_tx_enable","v":1\|0}` | fw ≥ 2.3.0. Arms everything that can drive GP7 for 60 s (`BEAN_TX_ENABLE_MS`): the `bean_tx` ops and the `bean` bench ops. `v:0` disarms. Ack `{"ack":"bean_tx_enable","v":..,"s":60}`, logged as a `bean_tx` PMEVENT. |
+| BEAN transmitter | `{"a":"bean_tx","op":"status"\|"edge"\|"allow"\|"bench"\|"sp"\|"send",...}` | fw ≥ 2.4.0, see *BEAN transmitter* below. |
 | BEAN receiver | `{"a":"bean_rx","on":0\|1}` / `{"a":"bean_rx","op":"stats"}` / `{"a":"bean_rx","raw":N}` | fw ≥ 2.3.0, see *BEAN receiver* below. |
 | ACC override (**bench only**) | `{"a":"acc_sim","v":0\|1\|null}` | fw ≥ 2.2.5. Simulates key-on (1) or key-off (0) without touching the ACC wire; `null` or no `v` clears it. The override is applied in `read_acc()`, the single place the pin enters the logic, so it reaches the Events `{"acc":..}` messages (sent on the next main-loop pass when the effective state changes), STATUS `acc` and the wake/sleep logic. STATUS carries `"acc_sim":1` while it is active. Ack: `{"ack":"acc_sim","v":0\|1\|null,"pin":<real ACC, 1 = on>}`; any other `v` → `ERROR ACC_SIM`. **RAM only:** a firmware boot clears it. It also **auto-expires 30 min** (`ACC_SIM_MAX_MS`) after the last set, then the real pin takes over again (`acc_sim` PMEVENT with `why: expired`). Re-sending restarts the 30 min. Set and clear are logged as `acc_sim` PMEVENTs. Backend: REST `powerbox_acc_sim {"on": true\|false\|null}`, mirrored in `powerbox.acc_sim`. |
 
 ### BEAN transceiver bench (fw 2.2.3, 2026-11-11)
+
+**Bench only since fw 2.4.0.** These ops hold GP7 high for far longer than a
+frame may (up to 500 ms), which on the car is a +B short on the body bus.
+They need the TX guard and the per-boot bench override
+(`{"a":"bean_tx","op":"bench","v":1}`); without it they answer
+`ERROR BEAN_TX_DISABLED`. For the car there is `bean_tx` `op:"edge"` (one
+pulse of one bit time).
 
 Logic verification of the discrete BEAN transceiver on GP7 (TX) / GP6 (RX,
 inverted); BEAN itself is 10 kbit/s (100 µs bits), dominant = +B, recessive =
@@ -311,7 +319,7 @@ power model + the host-side staleness watchdog that detects a silent USB-CDC lin
 | GP29 | Chassis fan PWM | PWM 25 kHz, **not inverted** | Straight to the fan's PWM wire, no transistor: GPIO duty = fan duty. Undriven (bootloader, safe-boot) = fan at full speed; the firmware takes it over first thing in `main()`. |
 | — | "poco 2" slot | not connected | `POCO2_BTN_PIN = None`; no second POCO exists. Must never share a fan pin (a fan PWM on a button line presses the phone). |
 | GP6 | BEAN transceiver RX (fw 2.2.3) | IN, **no internal pull** | Q3 collector with R8 10k pull-up to 3V3 on the board. **Inverted**: bus idle (0 V, recessive) → 1, bus at +B (dominant) → 0. |
-| GP7 | BEAN transceiver TX (fw 2.2.3) | OUT, **LOW at boot** | R2 5.1k → Q1 BC547 → Q2 BC327 high side → D1 → R5 220R → bus. HIGH = bus driven to ~+B (dominant), LOW = released. Set LOW in `boot.py` and again first thing in `main()` (the reset-default pad pull-down keeps Q1 off before that); every `bean` op releases it in a `finally` and the main loop forces it low each pass. R5 is a short-circuit limit only: never hold TX high for long (op cap 500 ms). |
+| GP7 | BEAN transceiver TX (fw 2.2.3) | OUT, **LOW at boot** | R2 5.1k → Q1 BC547 → Q2 BC327 high side → D1 → R5 220R → bus. HIGH = bus driven to ~+B (dominant), LOW = released. Set LOW in `boot.py` and again first thing in `main()` (the reset-default pad pull-down keeps Q1 off before that); every `bean` / `bean_tx` op releases it in a `finally`, the main loop forces it low each pass and (fw 2.4.0) every `wdt_sleep_ms` slice checks it. During a `bean_tx` op the pin belongs to PIO0 (see *BEAN transmitter*); otherwise it is a plain output. R5 is a short-circuit limit only: never hold TX high for long. |
 | GP14, GP15 | unused, **dead** | — | Both pads are blown inside the RP2040 (2026-10-27: diode mode to GND 0.045 V instead of ~0.5 V, 11 Ω between the two pins, carrier wiring verified clean). Never assign them. |
 
 **Button wiring, verified on the bench** (2026-10-26 with the phone's
@@ -394,7 +402,8 @@ a 2-cycle count loop gives 1 µs resolution. It pushes one word per edge, with
 bit 16 = the GP6 level of the run that ended and bits 15..0 = the count left,
 so run = `10000 − x + 3` µs. A run longer than 10 ms pushes a timeout word
 (`x = 0xFFFF`) and keeps counting, so idle and stuck-bus periods are seen in
-real time (~100 words/s while the bus sleeps). The program is 27
+real time (~100 words/s while the bus sleeps; fw 2.4.0 consumes these without
+the decoder, see *Cost*). The program is 27
 instructions. The words go to a 1024-word RAM ring through **rp2.DMA**
 (MicroPython ≥ 1.21; the write address wraps on the 4 KB-aligned ring, and
 the producer index comes from the DMA transfer count). Without `rp2.DMA` the
@@ -435,7 +444,11 @@ up to 16 frames per line, with a 64-frame queue:
  "st":{...every 2 s...}}
 ```
 
-- Record: `[t_ms, pri, "DST", "MES", "DATAHEX", rsp, code]`.
+- Record: `[t_ms, pri, "DST", "MES", "DATAHEX", rsp, code]`. fw 2.4.0: an
+  8th element `1` marks what our own transmitter put on the bus (a frame, an
+  aborted attempt, the edge-test pulse, which shows as a `trunc` record
+  without bytes). The backend keeps such frames in the frame ring and the
+  capture log (`"own":1`) but out of the message table and the error count.
 - `t_ms` is the firmware `ticks_ms` of the SOF (±~1 ms). `t` is `ticks_ms`
   at send time, so the backend gets the frame age from `t − t_ms`.
 - `rsp` is the 2 raw RSP bits (`1` = `01` = ACK, `0` = no ACK, `2` = NAK,
@@ -456,7 +469,8 @@ up to 16 frames per line, with a 64-frame queue:
   words since the last stats).
 - Reporting: `qdrop`, `txdrop`, `esup`.
 - Timing: `tb` (bit time in 0.1 µs), `skew` (µs, dominant longer = +),
-  `idle_ms` (time since the last edge), `age_ms` (time since the last good
+  `idle_ms` (time since the last edge; fw 2.4.0: correct for sleeps longer
+  than 9 min, saturating at ~1,073,000), `age_ms` (time since the last good
   frame, −1 = none).
 - Load: `cpu` (decoder time in per mille of wall time).
 - State: `on`, `mode`, plus `err` / `exc` when something failed.
@@ -477,6 +491,19 @@ native Python per run, plus ~0.1 ms per poll:
 - ~2–4 % CPU at 15 frames/s;
 - ~8–14 % during the 45 frames/s IG-ON burst.
 
+*Idle (fw 2.4.0).* 2.3.0 measured `cpu` 87–94 ‰ with the bus asleep: every
+5 ms poll ran the whole path, and every second one decoded a timeout word.
+Now a quiet bus (decoder idle, nothing queued) takes a fast path
+(`_quick`, native): timeout words are only added to the idle time, without
+the decoder, the time anchor or the report code. A full pass still runs
+every 40 polls (200 ms; stats keep their 2 s rhythm). Once the bus has been
+recessive for 1 s the capture is looked at only every 4th poll. Wake
+detection is not affected: an edge word ends the fast path at the next look,
+at most 20 ms later, when the ring holds at most ~40 words of a possible
+1024 (test: `TestReceiverIdle`). Expected `cpu` asleep: a few ‰ (to be read
+off the car). The run-length counter now saturates at 2^30 µs instead of
+growing into heap integers after 18 min of sleep.
+
 RAM: ~8 KB for the DMA ring (allocated at twice the size for alignment), a
 compiled module of ~10 KB, and up to 64 queued frame records. MicroPython
 ≥ 1.21 is needed for DMA; any rp2 port works with the `irq`/`poll`
@@ -486,7 +513,9 @@ fallbacks.
 bench op (`bean` `tx` / `pulse` / `loop` / `square`) answers
 `ERROR BEAN_TX_DISABLED` without touching GP7 unless
 `{"a":"bean_tx_enable","v":1}` was sent less than 60 s ago. `status` always
-works. `BEAN_TX_ENABLED = False` at boot (RAM only).
+works. `BEAN_TX_ENABLED = False` at boot (RAM only). fw 2.4.0: the same
+guard arms the transmitter (next section), and the bench ops additionally
+need its bench override.
 
 Backend:
 - `powerbox.bean_rx`: counters, `fps` over 5 s, `last_frame_ts`, `mode`,
@@ -501,6 +530,224 @@ Backend:
   (log in `logs/bean/`, rotated at 20 MB; env `BACKEND_BEAN_CAPTURE_DIR`),
   `bean_mark {"text":".."}`, `powerbox_bean_tx_enable {"on":bool}`.
 
+### BEAN transmitter (fw 2.4.0, `bean_tx.py`)
+
+Sends single frames on the car's BEAN body bus, on command only. There is
+no periodic or automatic transmission of any kind and the node never ACKs
+other nodes' frames. Protocol background and the assumptions made:
+`docs/BEAN_PROTOCOL.md` §3, §5, §7.2. If `bean_tx.py` is missing or fails to
+start, the firmware runs as 2.3.0 did (`bean_txm` PMEVENT with the error;
+`bean_tx` commands answer `{"ok":0,"err":"off"}`; the bench ops are refused).
+
+#### Hardware side: PIO0
+
+The receiver's program fills PIO1 (27 of 32 instructions), so the
+transmitter lives on **PIO0**: SM0 runs the frame program *or* the edge-test
+program (25 instructions each, one loaded at a time), SM1 a 6-instruction
+watchdog. GP7 is handed to PIO0 only for the duration of an operation;
+between operations it is a plain output held LOW, so no state machine can
+reach the pin.
+
+**Frame program (SM0).** Clock = 32 cycles per bit, derived from the bit
+time the receiver measured on the live bus (3.2 µs per cycle at 103.3 µs).
+The firmware builds the complete wire bit stream first (SOF, stuffed
+PRI/ML … CRC, EOM `01111110`, MSB first) and loads it into the joined
+8-word TX FIFO before the state machine starts: 2 count words + up to 5 data
+words, always padded to 8. After that the program needs nothing from the
+firmware, so it cannot stall half way through a frame.
+
+1. *Idle check.* 11 bit times (`IFS_BITS`) of continuously recessive bus,
+   GP6 sampled every 2 cycles (6.5 µs). Any dominant sample ends the attempt
+   before anything was driven ("busy"; the firmware waits and starts again).
+   From the last idle sample to our SOF edge there are 8 cycles (26 µs).
+   Other nodes start 7 bit times after the last edge, so after a frame they
+   go first; after a frame that was not ACKed our SOF comes 2 bit times
+   after its EOF.
+2. *Per bit:* drive GP7 (`set pins`), wait to the sample point, read GP6.
+
+   ```
+   one bit = 32 PIO cycles (Tb)        d1 = sample point, default 16 cycles = 50 %
+   cycle   0  1  2  3  4  5 | 6 ......................... 6+d1 ........ 31 | 0
+   SM0     fetch bit, run   |set|      wait d1 cycles      |jmp pin|  wait  |
+           counter          |pins|                          (reads GP6)
+   GP7     previous bit ____/‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+   bus     ______________________/‾‾‾ (rise delay)       ^
+   GP6     ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\___ (inverted)         sample: d1 cycles after the edge
+   ```
+
+   - sent **recessive**, read **dominant** → the program stops on the spot
+     (flag 4). GP7 was already released for this bit, so nothing of ours is
+     on the bus from the lost bit on. Lost within SOF…MES = arbitration
+     lost (`lost_arb`); later = `bit_err`.
+   - sent **dominant**, read **recessive** → line fault (flag 5): GP7 is
+     released 4 cycles (13 µs) after the sample. Never retried; TX latches
+     off.
+3. *Dominant-run limit inside the program.* X counts the dominant bits in a
+   row and is reloaded with 6 by every recessive bit. If the data asked for
+   a 7th (the firmware never builds such a stream: stuffing allows 5, the
+   EOM has 6), the program sends a recessive bit instead. Whatever is in
+   the FIFO, GP7 is never high for more than 6 bit times (+ 2 cycles in
+   that forced case).
+4. *RSP.* After the EOM the program samples GP6 in the next two bit slots
+   (RSP1, RSP2) and stops with GP7 low (flag 7). The answering node times
+   its bits from the bus edge of the EOM, which follows our release by the
+   fall time, so the samples are placed in the middle of its RSP1 and RSP2
+   slots, 1.5 and 2.5 bit times after *that* edge: 1.5 / 2.5 bit times +
+   the measured fall time after our release (at most 1.8 / 2.8).
+5. The firmware then reads the result: flags, how many FIFO words were
+   consumed, and — by executing `push` / `mov isr, y` / `push` on the
+   stopped state machine — the two RSP samples and the bit counter, i.e.
+   the exact wire bit an attempt was lost in (`pos`). If that readout does
+   not work on the board, the RSP comes from the receiver's decode of our
+   own frame (`rx_rsp`) and the position from the FIFO level (first 32 wire
+   bits = arbitration).
+
+**Watchdog (SM1).** Watches GP7 itself. 64 cycles of 12.5 µs continuously
+high (0.80–0.83 ms; the longest legal run is 0.65 ms at 108 µs bits) turn
+the pin into an **input** (`set pindirs, 0`): released, and SM0 cannot take
+it back because it only writes pin values. Independent of SM0's program
+counter, FIFO and clock, and of the firmware.
+
+**Timing budget.**
+
+| quantity | value (Tb = 103.3 µs) | depends on |
+|---|---|---|
+| bit time | measured by the receiver, must be 95–108 µs | else refused |
+| sample point `S` | 25–75 % of the bit (`op:"sp"`), default 50 % = 51.6 µs | — |
+| rise (GP7↑ → GP6↓) | ≤ 40 µs and ≤ `S` − 10 µs | **edge test**; bench: < 2 µs |
+| fall (GP7↓ → GP6↑) | ≤ 40 µs and ≤ `S` − 10 µs | **edge test, not yet measured on the car**; open bench bus: ~340 µs |
+| loss → off the bus | 0 (the lost bit is a released bit) | — |
+| fault → released | 13 µs after the sample | — |
+| RSP samples | 1.5 and 2.5 bit times after the EOM's falling edge *on the bus* (= our release + measured fall) | measured fall, bit time |
+| idle before SOF | 11 bit times = 1.14 ms | — |
+| longest dominant | 6 bit times = 0.62 ms (EOM) | — |
+| watchdog SM | 0.80–0.83 ms | — |
+| firmware timer | 0.8–1.8 ms | — |
+
+The fall time is the open number. With the ECUs' pull-downs it should be a
+few µs. The limit of 40 µs does not come from our readback (a later sample
+point would cope with more) but from the other nodes: a slow release makes
+every recessive bit after a dominant one shorter on the bus (bit time −
+fall), and a receiver that resyncs on the edge and samples half a bit later
+must still land inside it. Above 40 µs no frame is sent at any sample
+point; the fix is in the hardware (a pull-down on the transceiver side).
+The sample point setting only matters downwards: at less than 50 % the
+limit is `S` − 10 µs.
+
+**Edge-test program (SM0).** One dominant pulse of exactly one bit time
+(206 cycles of Tb/206 ≈ 0.5 µs; all counts are constants built inside the
+program, no data from the firmware). It first requires 7.8 bit times of idle
+bus, then drives GP7 and counts loop passes until GP6 goes low (rise, 1 µs
+steps), holds the rest of the bit time, releases and counts until GP6 is
+high again (fall, 1 µs steps, gives up after 800 µs). The receiver's raw
+run lengths around the pulse come back with it (`runs`, `rx_dom_us` ≈ width
+− rise + fall), and the pulse shows in the frame stream as an own `trunc`
+record. **To the ECUs one 100 µs pulse is a noise glitch, but it is an edge
+on the line: it wakes a sleeping bus** (hence `wake`).
+
+#### Firmware side: guards (all in the firmware, the host cannot bypass them)
+
+| # | layer | behaviour |
+|---|---|---|
+| a1 | arming | every op that can drive GP7 needs `bean_tx_enable` (60 s). Checked again before every retry. |
+| a2 | frames flag | a frame also needs the per-boot flag `op:"allow","v":1` (RAM, off at boot, cleared by any fault). `allow` itself needs arming and a measured edge test. |
+| a3 | edge test first | no frame until an edge test in this boot measured rise and fall, both are ≤ 40 µs and they fit the sample point (table above). |
+| b1 | program run limit | at most 6 dominant bits in a row, in the PIO program itself. |
+| b2 | watchdog SM | GP7 high for 0.8 ms → pin becomes an input. |
+| b3 | firmware timer | 1 kHz `machine.Timer` during every op: GP7 still high 0.8 ms after a tick → GP7 back to a plain LOW output, both state machines off, fault latched (`gp7 high > 1 ms`). |
+| b4 | outside ops | `guard()` in every `wdt_sleep_ms` slice (5 ms) and `bean_release()` in every main-loop pass: GP7 high with no op running → released, fault latched. Every op ends in a `finally` that releases; `boot.py` holds GP7 LOW on any reset, soft reset or OTA reboot. |
+| c | budget | 5 wire events per second and 50 per 10 minutes (`RATE_*`), counted per attempt on the wire (retries count, edge pulses count). Beyond → `err:"rate"`. |
+| d | block list | without the bench override only **`FE:48`** (the test frame) is accepted. Refused: every destination of a real node (`19 40 52 62 98 B5 C1 E9`, other-model `45 46 D1 D2 E0`, `FF`), every broadcast ID seen in the NHW20 captures or on this car or known from other models (status/alive `AB`, wake `C2`, meter lamps `7F`, odometer `3F`, speed `24`, shift `40`, READY/HV `91`, power/key `62`, lock event `E1`, …; `DENY_FE_MES`), everything else as "not on the allow list", and — whatever the lists say — any DST:MES pair the receiver has seen from another node since boot. `op:"bench","v":1` (armed, per boot, logged) lifts this. |
+| e1 | receiver health | no TX while the receiver is off, failed, in lossy `poll` mode, or reported an overflow, PIO stall, exception or a bad frame (crc/stuff/len/frm) in the last 5 s, or the bus is stuck dominant. |
+| e2 | bit time | measured bit time outside 95–108 µs → refused; not measured since boot (no traffic seen) → refused (the bench override allows the nominal 100 µs). |
+| e3 | no ACK | the node never drives the RSP slot of other nodes' frames (there is no code path for it). |
+| f | sleeping bus | bus recessive for ≥ 1 s = asleep: `edge` and `send` are refused unless `"wake":1` is given. The frame (or pulse) itself is the wake-up, as with the real nodes. On the car the first frame after a wake is not ACKed and is repeated (this car, 19 of 19 wakes: the waker's `FE C2` again at +42 ms, the other nodes answer from +7 ms on; `docs/BEAN_ANALYSIS.md`). Our retries come about 35 ms and 85 ms after the first SOF. |
+| g | unresolved stuffing | a frame whose CRC ends in 5 equal bits is refused (nobody knows whether a stuff bit belongs before the EOM); the bench override sends it without one. |
+| h | latched faults | line fault, watchdog trip, timeout, GP7 high outside an op: TX is off (`fault` in `status`) until an edge test passes (`ok:1`); `allow` must be given again. |
+
+**Retries.** A frame is resent when it was not ACKed (`RSP` ≠ `01`), lost
+arbitration or hit a bit error: default 2 retries (3 attempts), `retries`
+0–3. Before a retry the firmware waits for the receiver to report our frame
+(≈ 10 ms after an ACKed frame, ≈ 20 ms after an un-ACKed one, 40 ms at
+most) plus 10 ms per attempt made, and the PIO idle check then waits for
+the bus. One `send` takes at most 400 ms (`err:"busy"` if the bus never
+frees up). Never retried: line fault, watchdog, budget exhausted, disarmed.
+
+#### Commands
+
+Everything answers `{"ack":"bean_tx","op":<op>,"ok":0|1,...}` on id 0; a
+refusal has `err` and `detail`.
+
+| command | reply |
+|---|---|
+| `{"a":"bean_tx","op":"status"}` | `armed`, `allow`, `bench`, `sp`, `fault`, `edge` (last test), `budget` (events left in the 10 min window), `frames`, `edges`, `test` (`"FE:48"`), `bus` (0 active, 1 asleep, 2 stuck), `rx` (null = healthy), `tb`, `tb_meas` |
+| `{"a":"bean_tx","op":"edge"[,"wake":1]}` | `ok` (rise and fall ≤ 40 µs), `rise_us`, `fall_us` (null = not seen / > 800 µs), `w_us` (pulse width = bit time), `rx_dom_us` (the pulse as the receiver measured it), `runs` (raw run lengths around it, + dominant), `ok_meas`. On a busy bus it waits up to 150 ms for 7.8 idle bit times (`err:"busy"` after that, nothing sent). |
+| `{"a":"bean_tx","op":"allow","v":1\|0}` | `allow` |
+| `{"a":"bean_tx","op":"bench","v":1\|0}` | `bench` (also logged as `bean_tx_bench` PMEVENT) |
+| `{"a":"bean_tx","op":"sp","pct":25-75}` | `sp` |
+| `{"a":"bean_tx","op":"send","pri":0-15,"dst":"FE","mes":"48","data":"00"[,"retries":0-3][,"wake":1]}` | `ok` (ACKed), `acked` (raw RSP bits as sampled: 1 = `01` ACK, 0 none, 2 = `10` NAK, 3 both; null if no attempt completed), `rx_rsp` (the receiver's view of the same frame), `attempts`, `lost_arb`, `bit_err`, `fault`, `busy` (starts that found the bus busy), `pos` (wire bit of the last loss), `t_ms`, the frame, and `err` when not ok |
+
+`err` codes: `disarmed`, `frames_off`, `edge`, `rx`, `tb`, `asleep`,
+`blocked`, `crc_stuff`, `rate`, `fault`, `busy`, `args`, `exc`, `off`; after
+attempts: `no_ack`, `nak`, `rsp`, `lost_arb`, `bit_err`.
+
+Backend: REST `powerbox_bean_tx` (`op` + the same fields, same argument
+checks, HTTP 400 outside them); the reply is mirrored into
+`/api/v1/state` → `powerbox.bean_tx`. Every `edge` / `send` / `allow` /
+`bench`, request and reply, is appended to `logs/bean/bean_tx_audit.ndjson`
+(always; 1 MB, one `.1` generation) and to the running BEAN capture log
+(`{"type":"tx_req",...}` / `{"type":"tx",...}`). There is no dashboard
+control.
+
+#### First transmission on the car
+
+Preconditions: fw 2.4.0 flashed (`status` answers), receiver healthy
+(`powerbox.bean_rx`: `mode` dma, no errors), a capture running
+(`bean_capture {"on":true,"name":"tx1"}`), diagnostics tool at hand. Arm
+with `powerbox_bean_tx_enable {"on":true}` before each step (60 s).
+
+1. **Edge test, bus awake** (door open, so there is traffic and the bit
+   time is measured): `powerbox_bean_tx {"op":"edge"}`.
+   - Expect `ok:1`, `rise_us` 0–3, `fall_us` a few µs, `w_us` ≈ 103,
+     `rx_dom_us` ≈ `w_us − rise + fall`, and no change in the receiver's
+     error counters besides one own `trunc` record.
+   - `fall_us` ≤ 40 (and ideally ≤ 15): go on. Above 40 or `null`: stop;
+     frames are refused anyway (`ok:0`, `err:"edge"`). The bus is not being
+     pulled down fast enough with our node attached: fix the hardware
+     (pull-down on the transceiver side) and measure again.
+   - `rise_us` `null`: the driver did not move the bus (wiring, +B feed).
+   - Repeat 3–5 times a few seconds apart; the values should agree within
+     2 µs. Watch that the periodic frames keep coming without `crc`/`frm`.
+2. **First frame, bus awake:** `{"op":"allow","v":true}`, then
+   `{"op":"send","pri":0,"dst":"FE","mes":"48","data":"00","retries":0}`.
+   - Expect `ok:1`, `acked:1`, `rx_rsp:1`, `attempts:1`, `t_ms` ≈ 20–30,
+     and in the capture one own frame `FE 48 00` with rsp 1 in sequence
+     with the car's frames. Broadcast frames were ACKed in every capture,
+     so `acked:0` here means nobody accepted it (check `rx_rsp`, the edge
+     numbers and the bit time before trying again).
+   - `lost_arb` with a retry is normal on a busy bus. `bit_err` is not:
+     stop and look at `pos` and the raw runs.
+   - Then the same with default retries, a few times, at most 5 per second.
+3. **Wake-up, bus asleep** (car locked, wait until `status` shows `bus:1`):
+   `{"op":"send",...,"wake":true}`.
+   - Expect the first attempt un-ACKed and the second ACKed (`attempts:2`,
+     possibly with a `lost_arb` against the nodes' own `FE C2` frames, which
+     have PRI 8), and the nodes' wake burst (`FE C2`, `52:3F`, `FE:B6`, …)
+     in the capture. With nothing else going on the bus should sleep again
+     about 4.6 s later, as after the car's own "nothing changed" wakes
+     (`docs/BEAN_ANALYSIS.md` §2.3).
+4. **Afterwards.**
+   - Read the DTCs of all ECUs with the diagnostics tool: no new B12xx
+     (B1214 = +B short on the BEAN, B1215 = GND short, B1200…B1294 =
+     communication stop).
+   - The bus must go back to sleep by itself (`status` `bus:1`, receiver
+     `idle_ms` growing) as it did before; an edge or frame every few
+     minutes would keep it awake.
+   - 12 V current (`ma` in the telemetry) back at the parked level once
+     the bus sleeps.
+   - `status`: `fault` null, `frames`/`edges` equal to what was sent; the
+     audit log lists every request and reply.
+
 ## Flashing firmware (over the NDJSON link, firmware >= 2.2.0)
 
 Updates never use the REPL. The firmware receives files over its normal link
@@ -513,20 +760,24 @@ was interrupted).
 On the POCO (files synced by `POCO/sync.sh --app` to `/home/user/cyberpunk/powerbox`):
 
 ```bash
-sudo prius-flash-powerbox                    # main.py + boot.py + bean_rx.py; stops/starts prius-backend
+sudo prius-flash-powerbox                    # main.py + boot.py + bean_rx.py + bean_tx.py; stops/starts prius-backend
 ```
 
 From a bench host with the board on USB (nothing else may hold the port):
 
 ```bash
-python3 powerbox/pb_flash.py powerbox/main.py powerbox/boot.py powerbox/bean_rx.py
+python3 powerbox/pb_flash.py powerbox/main.py powerbox/boot.py powerbox/bean_rx.py powerbox/bean_tx.py
 ```
 
-`pb_flash.py` always sends `main.py` first. A firmware older than 2.3.0
-refuses the new name `bean_rx.py` (`OTA_FILES`). In that case `pb_flash.py`
-reboots into the new `main.py`, which runs without the receiver until the
-file arrives, and then retries the file once. The first 2.3.0 update
-therefore reboots twice.
+`pb_flash.py` always sends `main.py` first. A running firmware refuses file
+names it does not know (`OTA_FILES`): 2.3.0 refuses `bean_tx.py`, anything
+older also `bean_rx.py`. In that case `pb_flash.py` reboots into the new
+`main.py`, which runs without the missing module until the file arrives
+(receiver and transmitter report why they are off), and then retries the
+file once. The first update to 2.4.0 therefore reboots twice. Keep
+`bean_rx.py` before `bean_tx.py` on the command line: 2.4.0's transmitter
+needs 2.4.0's receiver (with an older `bean_rx.py` every `bean_tx` op is
+refused with `err:"exc"`).
 
 `pb_flash.py` sends the host heartbeat itself, so the wake ladder never presses
 the POCO button during an update. A full update of `main.py` + `boot.py` takes

@@ -1,5 +1,6 @@
 """
-BEAN (Toyota MPX body bus) receive-only decoder for the powerbox, fw 2.3.0.
+BEAN (Toyota MPX body bus) receiver/decoder for the powerbox (fw 2.3.0;
+2.4.0: idle fast path, own-frame flag and hooks for bean_tx.py).
 
 Listens on GP6 (the transceiver's RX, INVERTED: bus idle 0 V -> GP6 high,
 bus dominant +B -> GP6 low). It never touches GP7 (TX) and never ACKs.
@@ -24,6 +25,14 @@ frame state machine, CRC check, EOM search (tolerant of the unresolved stuff
 bit before EOM), two raw RSP bits. Decoded frames are batched to the host on
 the BEAN id (3 -> backend 203) at most every BATCH_MS:
     {"t":ms,"bf":[[t_ms,pri,"DST","MES","DATAHEX",rsp,code],...],"st":{...}}
+A frame sent by our own transmitter (bean_tx.py sets ``own``) carries an
+8th element 1.
+
+Idle cost (2.4.0): while the bus is quiet the ~100 timeout words/s are
+consumed by a short fast path (no decoder, no time anchor), a full pass runs
+every IDLE_SKIP polls, and once the bus has slept for 1 s the capture is
+only looked at every SLEEP_DIV-th poll (wake latency <= 20 ms, far inside
+the ring).
 """
 
 import time
@@ -80,6 +89,14 @@ ERR_PER_S = 5                # failed frames reported per second (all counted)
 RAW_MAX = 512
 RAW_CHUNK = 64
 ERR_LIMIT = 10               # consecutive poll() exceptions before giving up
+IDLE_SKIP = 40               # fast-path polls between two full passes (200 ms)
+SLEEP_US = 1000000           # recessive this long = bus asleep
+SLEEP_DIV = 4                # asleep: look at the capture every 4th poll
+SEEN_MAX = 160               # distinct foreign DST:MES pairs remembered
+BAD_QUIET_MS = 5000          # health(): no receive error for this long
+TB16_TX_MIN = 95 * 16        # bit time accepted for transmitting (x16 us)
+TB16_TX_MAX = 108 * 16
+ADAPT_MIN = 16               # runs measured before the bit time counts
 
 # frame result codes ("code" in a frame record)
 E_OK = 0
@@ -353,6 +370,15 @@ class BeanRx:
         self.t_err = now
         self.t_cpu = now
         self.last_ok = None
+        self.own = None              # bytearray PRI/ML..DATA of our TX frame
+        self.own_until = 0           # ticks_ms: ``own`` is ignored afterwards
+        self.own_n = 0               # own frames/fragments seen
+        self.own_res = None          # (code, rsp) of the last one
+        self.seen = set()            # (dst << 8) | mes of foreign good frames
+        self.bad_ms = None           # ticks_ms of the last receive error
+        self.stall0 = 0
+        self.tapping = False         # raw buffer belongs to bean_tx
+        self.hold = False            # bean_tx busy: no idle fast path
         self._reset_decoder()
         self.tb16 = TB16_NOM
         self.nadapt = 0
@@ -368,6 +394,9 @@ class BeanRx:
         self.pd = 0
         self.gl = 0
         self.idled = False
+        self.ilv = 0                 # level of the run that went idle
+        self.nskip = 0
+        self.ndiv = 0
         self.st = ST_HUNT
         self.rsp = None
         self.nby = 0
@@ -418,6 +447,7 @@ class BeanRx:
             self.raw = array("i", bytearray(4 * n))
             self.raw_n = 0
             self.raw_sent = 0
+            self.tapping = False
             return {"ack": "bean_rx", "raw": n}, None
         op = str(d.get("op", "stats")).lower()
         if op == "stats":
@@ -438,7 +468,10 @@ class BeanRx:
               "lag": self.lag, "qdrop": self.qdrop, "txdrop": self.txdrop,
               "esup": self.esup, "cpu": cpu,
               "tb": (self.tb16 * 10) >> 4, "skew": self.skew,
-              "idle_ms": ticks_diff(self.now_us, ticks_add(self.last_edge, self.off)) // 1000,
+              # ticks_us wraps after 17.9 min: long sleeps come from the
+              # word-domain run length (saturates at 2^30 us)
+              "idle_ms": self.cur // 1000 if self.cur > 60000000 else
+              ticks_diff(self.now_us, ticks_add(self.last_edge, self.off)) // 1000,
               "age_ms": -1 if self.last_ok is None else ticks_diff(now, self.last_ok)}
         for i in range(7):
             st[CODE_KEYS[i]] = c[i]
@@ -457,17 +490,60 @@ class BeanRx:
             return
         t0 = ticks_us()
         try:
-            self._poll()
+            if not self._quick():
+                self._poll()
             self.exc_run = 0
         except Exception as e:
             self.exc += 1
             self.exc_run += 1
+            self.bad_ms = ticks_ms()
             self.last_exc = repr(e)[:60]
             self._abort()
             if self.exc_run >= ERR_LIMIT:
                 self.err = "stopped after %d errors" % self.exc_run
                 self.enable(False)
         self.cpu_us += ticks_diff(ticks_us(), t0)
+
+    @micropython.native
+    def _quick(self):
+        """Idle fast path. True = nothing for the decoder: the bus is quiet,
+        nothing is queued and the new words (if any) are pure timeouts."""
+        if not self.idled or self.hold or self.q or self.raw is not None:
+            return False
+        skip = self.nskip
+        if skip >= IDLE_SKIP or self.gl or self.pl >= 0:
+            return False
+        self.nskip = skip + 1
+        cur = self.cur
+        if cur >= SLEEP_US:                     # asleep: decimate
+            d = self.ndiv + 1
+            if d < SLEEP_DIV:
+                self.ndiv = d
+                return True
+            self.ndiv = 0
+        cap = self.cap
+        p = cap.produced()
+        tail = self.tail
+        n = (p - tail) & M30
+        if n == 0:
+            return True
+        if cap.mode == "dma":
+            n -= 1                              # newest slot may be in flight
+        if n > 8:
+            return False
+        buf = cap.buf
+        base = cap.base
+        i = 0
+        while i < n:
+            if buf[base + ((tail + i) & RMASK)] & 0xFFFF != TO_MARK:
+                return False                    # an edge: full decode
+            i += 1
+        if n:
+            cur += n * TO_US
+            self.cur = cur if cur < M30 else M30
+            self.wt = ticks_add(self.wt, n * TO_US)
+            self.tail = (tail + n) & M30
+        return True
 
     def _poll(self):
         cap = self.cap
@@ -476,8 +552,11 @@ class BeanRx:
         n = (p - tail) & M30
         self.now_us = ticks_us()
         self.now_ms = ticks_ms()
+        skipped = self.nskip
+        self.nskip = 0
         if n > RING - 16:
             self.ovf += 1
+            self.bad_ms = self.now_ms
             self.lost += n
             self._abort()
             tail = p
@@ -500,7 +579,7 @@ class BeanRx:
         if obs < self.off:
             self.off = obs
         else:
-            self.off += LEAK_US
+            self.off += LEAK_US * (1 + skipped)
         self._flush(self.now_ms)
 
     def _abort(self):
@@ -528,7 +607,8 @@ class BeanRx:
             x = w & 0xFFFF
             lv = 0 if w & 0x10000 else 1      # GP6 high = recessive = 0
             if x == TO_MARK:
-                cur += TO_US
+                if cur < M30:                 # saturate (no big ints)
+                    cur += TO_US
                 wt = ticks_add(wt, TO_US)
                 if gl:                        # held run still growing
                     cur += pd + gl
@@ -539,6 +619,7 @@ class BeanRx:
                     pl = -1
                 if not self.idled and cur > 2000:
                     self.idled = True
+                    self.ilv = lv
                     self._idle(lv)
                 continue
             d = cur + T_CNT - x + OFF_US
@@ -735,9 +816,26 @@ class BeanRx:
             code = E_CRC
         self.cnt[code] += 1
         now = self.now_ms
+        mine = 0
+        own = self.own
+        if own is not None and ticks_diff(now, self.own_until) >= 0:
+            own = self.own = None
+        if own is not None:
+            # ours: the complete frame, or (failed) a prefix of it, e.g. the
+            # single pulse of the edge test or an attempt we aborted
+            k = nby - 1 if code == E_OK else nby
+            lo = len(own)
+            if (k == lo if code == E_OK else k <= lo) and b[:k] == own[:k]:
+                mine = 1
+                self.own_n += 1
+                self.own_res = (code, self.rsp)
         if code == E_OK:
             self.last_ok = now
+            if not mine and len(self.seen) < SEEN_MAX:
+                self.seen.add((b[1] << 8) | b[2])
         else:
+            if not mine and code <= E_FRAME:
+                self.bad_ms = now
             if ticks_diff(now, self.t_err) >= 1000:
                 self.t_err = now
                 self.etok = ERR_PER_S
@@ -751,19 +849,74 @@ class BeanRx:
         age = ticks_diff(self.now_us, ticks_add(self.sof_t, self.off))
         t = ticks_add(now, -((age + 500) // 1000))
         end = nby - 1 if code == E_OK else nby
-        self.q.append([
+        rec = [
             t,
             b[0] >> 4 if nby else None,
             "%02X" % b[1] if nby > 1 else "",
             "%02X" % b[2] if nby > 2 else "",
             hexlify(b[3:end]).decode().upper() if end > 3 else "",
             self.rsp,
-            code])
+            code]
+        if mine:
+            rec.append(1)
+        self.q.append(rec)
+
+    # -- hooks for the transmitter (bean_tx.py) ----------------------------------
+    def bus(self):
+        """0 = active, 1 = asleep (recessive >= 1 s), 2 = stuck dominant."""
+        if not self.idled:
+            return 0
+        if self.ilv:
+            return 2
+        return 1 if self.cur >= SLEEP_US else 0
+
+    def health(self):
+        """None when the receiver is fit to supervise a transmission, else
+        the reason: off, failed, lossy capture, a receive error (overflow,
+        stall, exception, bad frame) in the last BAD_QUIET_MS, stuck bus,
+        bit time outside 95..108 us."""
+        if not self.on:
+            return "rx off"
+        if self.err:
+            return "rx failed"
+        if self.cap.mode == "poll":
+            return "rx lossy (poll mode)"
+        now = ticks_ms()
+        if self.cap.stalls != self.stall0:
+            self.stall0 = self.cap.stalls
+            self.bad_ms = now
+        if self.bad_ms is not None:
+            if 0 <= ticks_diff(now, self.bad_ms) < BAD_QUIET_MS:
+                return "rx errors"
+            self.bad_ms = None
+        if self.bus() == 2:
+            return "bus stuck dominant"
+        if self.tb16 < TB16_TX_MIN or self.tb16 > TB16_TX_MAX:
+            return "bit time %d" % ((self.tb16 * 10) >> 4)
+        return None
+
+    def tb_measured(self):
+        return self.nadapt >= ADAPT_MIN
+
+    def tap(self, n):
+        """Record the next ``n`` raw runs for bean_tx (not sent to the host)."""
+        self.raw = array("i", bytearray(4 * n))
+        self.raw_n = 0
+        self.raw_sent = 0
+        self.tapping = True
+
+    def tap_take(self):
+        raw = self.raw
+        out = [] if raw is None or not self.tapping else list(raw[:self.raw_n])
+        if self.tapping:
+            self.raw = None
+            self.tapping = False
+        return out
 
     # -- host reporting ----------------------------------------------------------
     def _flush(self, now):
         raw = self.raw
-        if raw is not None and self.raw_n >= len(raw):
+        if raw is not None and self.raw_n >= len(raw) and not self.tapping:
             k = self.raw_sent
             self.tx(self.dev, {"t": now, "raw": list(raw[k:k + RAW_CHUNK]),
                                "ri": k, "rn": len(raw)})

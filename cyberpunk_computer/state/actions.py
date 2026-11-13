@@ -125,6 +125,8 @@ class ActionType(Enum):
     POWERBOX_ACC_SIM = auto()         # bench ACC override (fw >= 2.2.5)
     POWERBOX_BEAN_RX = auto()         # BEAN receiver control (fw >= 2.3.0)
     POWERBOX_BEAN_TX_ENABLE = auto()  # arm/disarm the BEAN TX guard (60 s, bench)
+    POWERBOX_BEAN_TX = auto()         # BEAN transmitter op (fw >= 2.4.0)
+    SET_POWERBOX_BEAN_TX = auto()     # mirror of the last BEAN transmitter reply
     SET_BEAN_RX = auto()              # decoded BEAN frames/stats/ack from the powerbox
     BEAN_CAPTURE = auto()             # start/stop the BEAN capture log
     BEAN_MARK = auto()                # event mark in the BEAN capture log
@@ -1531,6 +1533,27 @@ class PowerboxBeanTxEnableAction(Action):
     def __init__(self, on: bool, source: ActionSource = ActionSource.UI):
         super().__init__(ActionType.POWERBOX_BEAN_TX_ENABLE, source)
         self.on = bool(on)
+
+
+class PowerboxBeanTxAction(Action):
+    """One BEAN transmitter op on the powerbox (fw >= 2.4.0): ``op`` in
+    status|edge|allow|bench|sp|send with the validated fields
+    (io.powerbox.validate_bean_tx_params). The firmware decides (arming,
+    frames-allowed flag, edge test, block list, budgets); its reply lands in
+    PowerboxState.bean_tx via SetPowerboxBeanTxAction."""
+    def __init__(self, op: str, params: Optional[dict] = None,
+                 source: ActionSource = ActionSource.UI):
+        super().__init__(ActionType.POWERBOX_BEAN_TX, source)
+        self.op = op
+        self.params = dict(params or {})
+
+
+class SetPowerboxBeanTxAction(Action):
+    """Mirror the firmware's ``{"ack":"bean_tx","op":..,"ok":..,...}`` reply
+    into PowerboxState.bean_tx."""
+    def __init__(self, result: dict, source: ActionSource = ActionSource.GATEWAY):
+        super().__init__(ActionType.SET_POWERBOX_BEAN_TX, source)
+        self.result = dict(result)
 
 
 class SetBeanRxAction(Action):

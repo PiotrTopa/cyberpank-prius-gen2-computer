@@ -409,6 +409,8 @@ candidate without capture evidence [I].
 | Waking the bus while parked | Every ECU wakes (SAE: wake-up by "detecting voltage changes on the transmission line"); repeated wake-ups drain the 12 V battery | [P] mechanism, [I] consequence |
 | FE C2 / FE AB look-alikes (node announcements) | They look like network management. Spoofing one could make the gateway believe a node is alive when it is not, or the opposite | [I] |
 
+(Implemented in powerbox fw 2.4.0 with stricter numbers, see §7.2 and
+`powerbox/README.md` "BEAN transmitter".)
 TX safety rules [I]: hardware default recessive; firmware watchdog that releases TX if it is dominant for longer
 than 700 µs (no valid frame has more than 6 dominant bit times in a row); arbitration-loss detection on every
 recessive bit; at most 3 attempts per frame; a frame rate limit (≥ 50 ms between own frames); never transmit
@@ -493,6 +495,74 @@ filter.
 * PIO side-set can drive TX while another state machine (or the same program) reads RX for the bit-by-bit
   comparison. Remember your own echo: on a single-wire bus you read your own bits back, so do not decode your
   own frames as foreign ones (tag frames that you sent).
+
+**Implementation (powerbox fw 2.4.0, 2026-11-13; not yet run on the car
+when written).** `powerbox/bean_tx.py`, described in `powerbox/README.md`
+under "BEAN transmitter" (design, timing diagram, guards, commands, the
+first-transmission procedure). What it assumes about the protocol:
+
+- **Bit time.** The transmitter uses the bit time the receiver measured on
+  the live bus (103.3 µs on this car) and refuses to send outside 95–108 µs.
+- **Idle / IFS.** SOF only after 11 bit times of continuously recessive bus,
+  checked in the PIO program (the references wait 7; we go last on purpose).
+  No source says a longer wait is harmful.
+- **Arbitration.** Checked on every recessive bit, at the sample point
+  (default mid-bit). A loss inside SOF…MES is counted as arbitration lost,
+  a later one as a bit error; both stop the frame on the spot and are
+  retried. A dominant bit that reads back recessive is a line fault and is
+  never retried.
+- **Stuffing.** Inserted after 5 equal bits from SOF through CRC; none after
+  the last CRC bit (as specadmin and BeanMPX). Because that case is
+  unresolved (§3.2), frames whose CRC ends in 5 equal bits are refused
+  outside bench use. The test frame below is not such a frame.
+- **RSP / ACK.** After the EOM the line is released and sampled in the next
+  two bit slots. Only `01` counts as ACK. `00` (nobody), `10` (NAK) and `11`
+  lead to a retry. The bits are reported raw (`acked`), next to the
+  receiver's own decode of the same frame (`rx_rsp`). On this car every
+  frame so far, broadcast `FE` included, was ACKed with `01`, except the
+  first frame after a wake-up.
+- **Retries.** Default 2 retries (3 attempts, the doc's "at most 3 attempts"
+  and BeanMPX's behaviour); SAE says "resent up to three times", so 3
+  retries is the configurable maximum. Spacing: the wait for our own frame
+  to come back through the receiver (10–20 ms) plus 10 ms per attempt. The
+  cars repeat an un-ACKed wake frame after 14 ms (bean_tools JP capture)
+  and after 42 ms (this car, `docs/BEAN_ANALYSIS.md`).
+- **Wake-up.** There is no separate wake pattern in any source: nodes just
+  send (`FE C2` first, un-ACKed, then repeated). The transmitter does the
+  same, but only when told to (`wake`), since every wake costs 12 V charge.
+- **Never ACKing.** Unchanged: no code path drives the RSP slot of a frame
+  we did not send.
+
+**The test frame: `PRI 0, DST FE, MES 48, DATA 00`** (CRC 0x15, 53 wire bits
+SOF…EOM, 61 with RSP and EOF: 6.3 ms at 103.3 µs bits).
+
+- `FE` because broadcast frames are ACKed on this car, so a correct frame
+  gets an answer without addressing any particular node.
+- MES `48`: not used with any DST in the 8,627 published NHW20 frames (42
+  DST/MES pairs, §4.2), not in the first capture of this car (16 pairs,
+  `docs/BEAN_FINDINGS.md`), not in the other-model tables (§4.3, specadmin
+  `MPX-codes.md`, BeanMPX, IS300), not a known node address, and in the
+  middle of the largest unused gap (`41`…`4F`), away from the ID families
+  that sit next to each other (`DB`…`DF`, `24`…`26`, `53`/`54`).
+- DATA `00` (no bit set = no request, if the ID did mean something) and
+  PRI 0 (loses every arbitration, so it can only delay itself).
+- **Residual risk.** The captures do not cover every state of the car
+  (driving, diagnostics, every option), so `48` could still be an ID some
+  ECU knows. Mitigations: the firmware refuses any DST/MES pair the
+  receiver has seen from another node since boot; the payload is all zero;
+  the frame is sent a handful of times, not periodically; and the DTCs are
+  read afterwards (procedure step 4). If `FE 48` ever shows up in a capture
+  from the car itself, pick another ID from the gap and change `TEST_MES`.
+
+The block list (`DENY_DST`, `DENY_FE_MES` in `bean_tx.py`) holds what must
+not be sent without the bench override: every destination of a real node,
+every broadcast ID of §4.2 and of this car's captures (among them the
+traffic §5.2 warns about: node announcements `C2`/`AB`, shift `40`, speed
+`24`, READY/HV status `91`, power/key state `62`, the key authentication
+exchange `B5:D9`/`C1:E2` by destination), and the IDs with a known meaning
+on other models. `FE E1` (lock/unlock event, `docs/BEAN_FINDINGS.md`), the
+first frame worth sending for a purpose, is on it as well: sending it is a
+deliberate bench-override step after the test frame works.
 
 ### 7.3 Capture format for reverse engineering [I]
 

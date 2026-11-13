@@ -313,3 +313,205 @@ class TestServiceWiring:
     def test_bean_rx_action_reaches_wire(self):
         a = PowerboxBeanRxAction(on=False)
         assert (a.on, a.op, a.raw) == (False, None, None)
+
+
+# ─── fw 2.4.0: transmitter (REST powerbox_bean_tx, state, audit log) ─────────
+
+from cyberpunk_computer.io.powerbox import (  # noqa: E402
+    build_bean_tx_command,
+    validate_bean_tx_params,
+)
+from cyberpunk_computer.state.actions import (  # noqa: E402
+    PowerboxBeanTxAction,
+    SetPowerboxBeanTxAction,
+)
+
+SEND = {"pri": 0, "dst": "FE", "mes": "48", "data": "00"}
+ACK_SEND = {"ack": "bean_tx", "op": "send", "ok": 1, "acked": 1, "rx_rsp": 1, "attempts": 1,
+            "lost_arb": 0, "bit_err": 0, "fault": 0, "busy": 0, "pri": 0, "dst": "FE",
+            "mes": "48", "data": "00", "t_ms": 27}
+
+
+class TestTxValidation:
+    def test_ops_and_wire_payloads(self):
+        assert build_bean_tx_command("status").payload == {"a": "bean_tx", "op": "status"}
+        assert build_bean_tx_command("edge").payload == {"a": "bean_tx", "op": "edge"}
+        assert build_bean_tx_command("edge", wake=True).payload == \
+            {"a": "bean_tx", "op": "edge", "wake": 1}
+        assert build_bean_tx_command("allow", v=True).payload == {"a": "bean_tx", "op": "allow", "v": 1}
+        assert build_bean_tx_command("bench", v="off").payload == {"a": "bean_tx", "op": "bench", "v": 0}
+        assert build_bean_tx_command("sp", pct=60).payload == {"a": "bean_tx", "op": "sp", "pct": 60}
+        assert build_bean_tx_command("send", **SEND).payload == dict({"a": "bean_tx", "op": "send"}, **SEND)
+        p = build_bean_tx_command("send", pri=15, dst=254, mes="7f", data="00 10 80 00 00 00",
+                                  retries=0, wake=False).payload
+        assert p == {"a": "bean_tx", "op": "send", "pri": 15, "dst": "FE", "mes": "7F",
+                     "data": "001080000000", "retries": 0}
+        cmd = build_bean_tx_command("send", **SEND)
+        assert cmd.device_id == 0 and cmd.command_type == "power"
+
+    @pytest.mark.parametrize("op,kw", [
+        ("nope", {}), ("status", {"v": 1}), ("edge", {"us": 100}), ("allow", {}), ("allow", {"v": 2}),
+        ("bench", {"v": "maybe"}), ("sp", {}), ("sp", {"pct": 24}), ("sp", {"pct": 76}),
+        ("sp", {"pct": "50"}), ("sp", {"pct": 50.5}),
+        ("send", {}), ("send", dict(SEND, pri=16)), ("send", dict(SEND, pri=-1)),
+        ("send", dict(SEND, pri="0")), ("send", dict(SEND, pri=True)),
+        ("send", dict(SEND, dst="FEE")), ("send", dict(SEND, dst=256)), ("send", dict(SEND, dst="zz")),
+        ("send", dict(SEND, mes="")), ("send", dict(SEND, mes=1.5)),
+        ("send", dict(SEND, data="")), ("send", dict(SEND, data="0")), ("send", dict(SEND, data="xx")),
+        ("send", dict(SEND, data="00" * 12)), ("send", dict(SEND, data=0)),
+        ("send", dict(SEND, retries=4)), ("send", dict(SEND, retries=-1)),
+        ("send", dict(SEND, retries=1.5)), ("send", dict(SEND, extra=1)),
+        ("send", {k: v for k, v in SEND.items() if k != "mes"}),
+    ])
+    def test_refused(self, op, kw):
+        with pytest.raises(ValueError):
+            validate_bean_tx_params(op, kw)
+        with pytest.raises(CommandError):
+            build_command("powerbox_bean_tx", dict(kw, op=op))
+
+    def test_same_limits_as_the_firmware(self):
+        import importlib.util
+        import sys
+        import time
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+        import bean_pio_sim
+        bean_pio_sim.install_time_shims()
+        spec = importlib.util.spec_from_file_location(
+            "bean_tx_limits", os.path.join(bean_pio_sim.POWERBOX_DIR, "bean_tx.py"))
+        fw = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fw)
+        from cyberpunk_computer.io import powerbox as io
+        assert io.BEAN_TX_SP == (fw.SP_MIN, fw.SP_MAX)
+        assert io.BEAN_TX_RETRIES_MAX == fw.RETRIES_MAX
+        assert time.ticks_ms                                    # shim present
+
+    def test_rest_command(self):
+        a = build_command("powerbox_bean_tx", dict(SEND, op="SEND", retries=2))
+        assert isinstance(a, PowerboxBeanTxAction) and a.op == "send"
+        assert a.params == dict(SEND, retries=2)
+        a = build_command("powerbox_bean_tx", {"op": "edge", "wake": True})
+        assert (a.op, a.params) == ("edge", {"wake": 1})
+        from cyberpunk_computer.api.commands import COMMANDS
+        assert "op" in COMMANDS["powerbox_bean_tx"]["params"]
+        with pytest.raises(CommandError):
+            build_command("powerbox_bean_tx", {})
+
+    def test_commander(self):
+        sent = []
+
+        class Port:
+            def send(self, cmd):
+                sent.append(cmd.payload)
+                return True
+        c = PowerboxCommander(Port())
+        assert c.send_bean_tx("send", **SEND)
+        assert c.send_bean_tx("send", **dict(SEND, pri=99)) is False     # refused, not sent
+        assert c.send_bean_tx("edge")
+        assert sent == [dict({"a": "bean_tx", "op": "send"}, **SEND), {"a": "bean_tx", "op": "edge"}]
+
+
+class TestTxState:
+    def test_reply_mirrored_into_powerbox_bean_tx(self):
+        (a,) = parse_powerbox_system(dict(ACK_SEND))
+        assert isinstance(a, SetPowerboxBeanTxAction) and "ack" not in a.result
+        store = Store()
+        store.dispatch(a)
+        tx = store.state.powerbox.bean_tx
+        assert tx["op"] == "send" and tx["ok"] == 1 and tx["acked"] == 1 and tx["attempts"] == 1
+        assert isinstance(tx["ts"], float)
+        from cyberpunk_computer.api.serialization import serialize_state
+        assert serialize_state(store.state)["powerbox"]["bean_tx"]["mes"] == "48"
+
+    def test_refusal_mirrored(self):
+        (a,) = parse_powerbox_system({"ack": "bean_tx", "op": "send", "ok": 0, "err": "blocked",
+                                      "detail": "FE:7F is real node traffic"})
+        store = Store()
+        store.dispatch(a)
+        assert store.state.powerbox.bean_tx["err"] == "blocked"
+
+    def test_own_frames_flagged_and_kept_out_of_the_table(self):
+        f = frame_from_wire([100, 0, "FE", "48", "00", 1, 0, 1], 110, T0)
+        assert f["own"] is True and f["ok"]
+        assert "own" not in frame_from_wire([100, 6, "FE", "2C", "64", 1, 0], 110, T0)
+        (a,) = parse_bean_message(_line(200, [[100, 0, "FE", "48", "00", 1, 0, 1],
+                                              [120, 6, "FE", "2C", "64", 1, 0],
+                                              [130, None, "", "", "", None, 5, 1]]), recv_ts=T0)
+        store = Store()
+        store.dispatch(a)
+        bean = store.state.bean
+        assert list(bean.messages) == ["FE:2C"] and bean.frames_total == 1
+        assert bean.errors_total == 0                           # our edge pulse is no bus error
+
+
+class TestTxAudit:
+    def test_audit_file_always_and_capture_when_running(self, tmp_path):
+        t = [T0]
+        mon = BeanMonitor(str(tmp_path / "bean"), clock=lambda: t[0])
+        mon.tx_event("tx_req", dict(SEND, op="send"))
+        t[0] += 0.03
+        mon.tx_event("tx", dict(ACK_SEND))
+        audit = [json.loads(l) for l in open(mon.audit_path)]
+        assert mon.audit_path.endswith("bean_tx_audit.ndjson") and len(audit) == 2
+        assert audit[0] == dict(SEND, type="tx_req", ts=T0, op="send")
+        assert audit[1]["type"] == "tx" and audit[1]["ts"] == T0 + 0.03
+        assert audit[1]["ok"] == 1 and audit[1]["acked"] == 1 and audit[1]["data"] == "00"
+        assert "ack" not in audit[1]
+        assert mon.path is None                                 # no capture was running
+        # with a capture: the same lines, in sequence with the frames
+        assert mon.start("tx")
+        mon.tx_event("tx_req", {"op": "edge"})
+        mon.ingest([frame_from_wire([1, None, "", "", "", None, 5, 1], 2, T0)])
+        mon.tx_event("tx", {"ack": "bean_tx", "op": "edge", "ok": 1, "rise_us": 1, "fall_us": 8,
+                            "runs": [-30000, 104]})
+        mon.stop()
+        lines = [json.loads(l) for l in open(mon.path)]
+        assert [l["type"] for l in lines] == ["header", "tx_req", "frame", "tx"]
+        assert lines[2]["own"] == 1 and lines[3]["fall_us"] == 8
+        assert len(open(mon.audit_path).readlines()) == 4
+
+    def test_only_transmitting_and_guard_ops_are_audited(self, tmp_path):
+        mon = BeanMonitor(str(tmp_path / "bean"))
+        assert mon.tx_event("tx", {"op": "status", "ok": 1}) is None
+        assert mon.tx_event("tx", {"op": "sp", "ok": 1}) is None
+        assert not os.path.exists(mon.audit_path)
+        for op in ("edge", "send", "allow", "bench"):
+            assert mon.tx_event("tx", {"op": op, "ok": 0, "err": "disarmed"})["op"] == op
+        assert len(open(mon.audit_path).readlines()) == 4
+
+    def test_audit_rotates_and_survives_an_unwritable_dir(self, tmp_path, monkeypatch):
+        from cyberpunk_computer.backend import bean_monitor as bm
+        monkeypatch.setattr(bm, "AUDIT_BYTES", 400)
+        mon = BeanMonitor(str(tmp_path / "bean"))
+        for i in range(12):
+            mon.tx_event("tx", dict(ACK_SEND, t_ms=i))
+        assert os.path.getsize(mon.audit_path) <= 400
+        assert os.path.exists(mon.audit_path + ".1")
+        blocked = tmp_path / "file"
+        blocked.write_text("x")
+        mon2 = BeanMonitor(str(blocked / "sub"))
+        assert mon2.tx_event("tx", dict(ACK_SEND))["ok"] == 1   # no exception
+        assert mon2.audit_error
+
+    def test_service_audits_request_and_reply(self, tmp_path):
+        from cyberpunk_computer.backend.service import BackendConfig, BackendService
+        svc = BackendService(BackendConfig(bean_capture_dir=str(tmp_path / "bean")))
+
+        class Twin:
+            store = Store()
+        twin = Twin()
+        svc.twin = twin
+        svc._wire_bean(twin)
+        twin.store.dispatch(build_command("powerbox_bean_tx", dict(SEND, op="send")))
+        for a in parse_powerbox_system(dict(ACK_SEND)):
+            twin.store.dispatch(a)
+        twin.store.dispatch(build_command("powerbox_bean_tx", {"op": "status"}))
+        lines = [json.loads(l) for l in open(svc.bean_monitor.audit_path)]
+        assert [(l["type"], l["op"]) for l in lines] == [("tx_req", "send"), ("tx", "send")]
+        assert twin.store.state.powerbox.bean_tx["ok"] == 1
+
+    def test_service_sends_the_command_to_the_powerbox(self):
+        import inspect
+        from cyberpunk_computer.backend import service
+        src = inspect.getsource(service)
+        assert '"PowerboxBeanTxAction"' in src
+        assert "send_bean_tx(action.op, **action.params)" in src

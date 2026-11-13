@@ -400,6 +400,10 @@ class RoadsenseState:
     last_api_ok: Optional[float] = None  # wall clock of the last good health probe
     restarts: int = 0                    # automatic/operator restarts since backend start
     last_error: Optional[str] = None
+    # On-demand dashboard camera preview (backend.camera_preview): phase
+    # off|powering|enumerating|waiting_for_frame|live|error, reason, source
+    # stack|direct, leases, started_at, ttl_s, max_session_s, scaling.
+    camera_preview: Optional[dict] = None
 
 
 @dataclass(frozen=True)
@@ -705,6 +709,12 @@ class PowerboxState:
     # ...), "fps" (frames/s over the last 5 s), "last_frame_ts", "ts",
     # "error"}. None until the first BEAN line / ack.
     bean_rx: Optional[Mapping] = None
+    # Last BEAN transmitter reply (fw >= 2.4.0, REST powerbox_bean_tx): the
+    # firmware ack fields ({"op","ok", and for a send "acked" (raw RSP bits,
+    # 1 = ACK), "attempts", "lost_arb", "bit_err", "fault", "t_ms"; for an
+    # edge test "rise_us", "fall_us", "runs"; a refusal "err" + "detail"})
+    # plus "ts" (time.time() of receipt).
+    bean_tx: Optional[Mapping] = None
 
     last_update_time: float = 0.0
 

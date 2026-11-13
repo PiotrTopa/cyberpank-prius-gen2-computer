@@ -9,7 +9,7 @@
 # quiet while prius-backend is stopped.
 #
 # Usage:
-#   sudo prius-flash-powerbox                 # main.py + boot.py + bean_rx.py from $DIR
+#   sudo prius-flash-powerbox                 # main.py + boot.py + bean_rx.py + bean_tx.py from $DIR
 #   sudo prius-flash-powerbox FILE [FILE ...] # e.g. .../pcf8574.py
 #
 # Env: PRIUS_POWERBOX_DIR (default /home/user/cyberpunk/powerbox, filled by
@@ -19,9 +19,10 @@ set -eu
 DIR="${PRIUS_POWERBOX_DIR:-/home/user/cyberpunk/powerbox}"
 BYID="${PRIUS_POWERBOX_BYID:-/dev/serial/by-id/usb-MicroPython_Board_in_FS_mode_503359277a7c699f-if00}"
 
-# bean_rx.py (fw >= 2.3.0): pb_flash sends main.py first and, if the running
-# firmware (< 2.3.0) refuses the new file name, reboots once and retries.
-[ "$#" -gt 0 ] || set -- "$DIR/main.py" "$DIR/boot.py" "$DIR/bean_rx.py"
+# bean_rx.py (fw >= 2.3.0), bean_tx.py (fw >= 2.4.0): pb_flash sends main.py
+# first and, if the running firmware is older and refuses a new file name,
+# reboots once into the new main.py and retries.
+[ "$#" -gt 0 ] || set -- "$DIR/main.py" "$DIR/boot.py" "$DIR/bean_rx.py" "$DIR/bean_tx.py"
 [ -e "$BYID" ] || { echo "flash: powerbox not present at $BYID" >&2; exit 1; }
 
 restart() { systemctl start prius-backend.service || true; }

@@ -33,6 +33,22 @@ runs **only while ACC is on** and is stopped cleanly when the key goes away:
 * A manual ``mode`` (``auto`` | ``on`` | ``off``, API command ``roadsense_mode``)
   overrides the ACC follower: ``on`` keeps the stack up with the key off (bench
   work; the fan rules still apply), ``off`` keeps it down.
+* A **preview hold** (:meth:`RoadsenseManager.set_preview_hold`, driven by the
+  dashboard camera preview, ``backend.camera_preview``) powers the camera hub
+  WITHOUT the stack while the stack is not wanted::
+
+      OFF ──hold──▶ PREVIEW (relay ch4 on, no units, no ``full`` profile)
+       ▲              │ hold released ─▶ camera hub off ─▶ OFF
+       │              │ stack wanted (ACC on) ─▶ preview_release() ─▶ STARTING
+      a stop that finishes while the hold is set ends in PREVIEW, not OFF
+
+  The hold never starts, stops or delays the stack: with the stack wanted it
+  is only remembered for the moment the stack goes away. ``preview_release``
+  (callback) is called right before ``systemctl start`` so the preview's own
+  block-device reader lets go of the camera before ``camerad-dvr`` opens it
+  (both use ``O_EXCL``). PREVIEW counts as "off" for :meth:`is_off` (no unit
+  runs: the low CPU profile is allowed) but :meth:`holds_camera` is True, so
+  a manual ``set_relay`` on ch4 is still refused.
 
 The POCO ``low`` power profile (Gold cluster offline) must not be applied while
 modeld is pinned to cpu4-7, so the backend defers the key-off ``low`` switch
@@ -68,6 +84,7 @@ STATE_STARTING = "starting"
 STATE_RUNNING = "running"
 STATE_GRACE = "grace"
 STATE_STOPPING = "stopping"
+STATE_PREVIEW = "preview"     # camera hub powered for a dashboard preview, stack down
 
 # Operator modes.
 MODE_AUTO = "auto"   # follow ACC
@@ -195,8 +212,13 @@ class RoadsenseManager:
         thermals: Optional[Callable[[], Dict[str, float]]] = None,
         clock: Callable[[], float] = time.monotonic,
         async_probe: bool = True,
+        preview_release: Optional[Callable[[], None]] = None,
     ) -> None:
         self.config = config
+        # Called right before the stack starts while a preview may hold the
+        # camera device (backend.camera_preview closes its O_EXCL reader).
+        self.preview_release = preview_release
+        self._preview_hold = False
         self._publish = publish
         self._run = runner or self._default_runner
         self._camera = camera
@@ -365,8 +387,50 @@ class RoadsenseManager:
         self._last_tick = 0.0
 
     def is_off(self) -> bool:
-        """True when no roadsense unit is meant to run (safe for the low profile)."""
-        return self._state in (STATE_OFF, STATE_DISABLED)
+        """True when no roadsense unit is meant to run (safe for the low profile).
+
+        PREVIEW counts as off: only the camera hub is powered."""
+        return self._state in (STATE_OFF, STATE_DISABLED, STATE_PREVIEW)
+
+    def holds_camera(self) -> bool:
+        """True while this manager owns the camera hub relay (stack phases and
+        PREVIEW): a manual ``set_relay`` on ch4 must be refused then."""
+        return self._state not in (STATE_OFF, STATE_DISABLED)
+
+    # ── preview hold (backend.camera_preview) ────────────────────────────
+
+    @property
+    def preview_hold(self) -> bool:
+        return self._preview_hold
+
+    def set_preview_hold(self, on: bool) -> bool:
+        """Ask for the camera hub without the stack (dashboard preview).
+        Returns True on change; the next :meth:`tick` acts on it."""
+        on = bool(on)
+        if on == self._preview_hold:
+            return False
+        logger.info("roadsense: preview hold %s", "ON" if on else "off")
+        self._preview_hold = on
+        self._last_tick = 0.0  # react on the next loop iteration
+        return True
+
+    def shutdown_preview(self) -> None:
+        """Backend shutdown: drop the hold and, if only the preview powers the
+        camera hub, cut it now (the stack itself is left alone, as on every
+        backend restart; the next start's reconcile adopts or cuts)."""
+        self._preview_hold = False
+        if self._state == STATE_PREVIEW:
+            self._set_camera(False)
+            self._enter(STATE_OFF)
+            self._emit()
+
+    def _release_preview_device(self) -> None:
+        if self.preview_release is None:
+            return
+        try:
+            self.preview_release()
+        except Exception:  # noqa: BLE001 - never block the stack start
+            logger.exception("roadsense: preview release hook failed")
 
     def is_active(self) -> bool:
         return not self.is_off()
@@ -397,6 +461,7 @@ class RoadsenseManager:
             "last_api_ok": self._last_api_ok,
             "restarts": self._restarts,
             "last_error": self._last_error,
+            "preview_hold": self._preview_hold,
             "deadline_in_s": (
                 max(0.0, self._deadline - self._clock())
                 if self._deadline is not None else None
@@ -405,7 +470,7 @@ class RoadsenseManager:
 
     def _emit(self) -> None:
         key = (self._state, self._mode, self._camera_power, self._api_ok,
-               self._restarts, self._last_error,
+               self._restarts, self._last_error, self._preview_hold,
                tuple(sorted((self._units or {}).items())))
         now = self._clock()
         if key == self._last_published and \
@@ -444,21 +509,29 @@ class RoadsenseManager:
             self._set_camera(True)
             self._enter(STATE_CAMERA_ON, self.config.camera_settle_s)
         else:
+            self._release_preview_device()
             self._start_target()
             self._enter(STATE_STARTING, self.config.start_timeout_s)
+
+    def _enter_preview(self) -> None:
+        self._set_camera(True)
+        self._enter(STATE_PREVIEW)
 
     def _begin_stop(self) -> None:
         self._stop_target()
         self._enter(STATE_STOPPING, self.config.stop_timeout_s)
 
     def _finish_stop(self) -> None:
-        self._set_camera(False)
+        if self._preview_hold:
+            self._set_camera(True)   # the preview keeps the camera hub
+        else:
+            self._set_camera(False)
         self._api_ok = None
         self._health = None
         self._api_silent_since = None
         if self._probe is not None:
             self._probe.reset()
-        self._enter(STATE_OFF)
+        self._enter(STATE_PREVIEW if self._preview_hold else STATE_OFF)
 
     def tick(self, acc_on: bool) -> None:
         now = self._clock()
@@ -488,11 +561,27 @@ class RoadsenseManager:
             self._units = None
             if desired:
                 self._begin_start()
+            elif self._preview_hold:
+                self._enter_preview()
+
+        elif self._state == STATE_PREVIEW:
+            self._units = None
+            if desired:
+                # The stack wins: the preview's reader lets go of the device,
+                # the hub is already powered and enumerated (no settle).
+                self._release_preview_device()
+                self._set_camera(True)
+                self._start_target()
+                self._enter(STATE_STARTING, cfg.start_timeout_s)
+            elif not self._preview_hold:
+                self._set_camera(False)
+                self._enter(STATE_OFF)
 
         elif self._state == STATE_CAMERA_ON:
             if not desired:
                 self._finish_stop()
             elif now >= (self._deadline or 0):
+                self._release_preview_device()
                 self._start_target()
                 self._enter(STATE_STARTING, cfg.start_timeout_s)
 

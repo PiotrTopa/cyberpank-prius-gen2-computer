@@ -7,6 +7,7 @@ import type { HistoryData } from '../hooks/useHistory';
 import { DataRow, Meter, Panel, StatusRow } from '../components/ui';
 import { SatellitesPanel } from '../components/SatellitesPanel';
 import { UsbHubPanel } from '../components/UsbHubPanel';
+import { CameraPreviewPanel } from '../components/CameraPreviewPanel';
 
 export function OverviewTab({ state, hist, now, satNodes, satHolders, onOpenDebug, onOpenSatellites }: {
   state: AppState;
@@ -119,6 +120,8 @@ export function OverviewTab({ state, hist, now, satNodes, satHolders, onOpenDebu
           </p>
         )}
       </Panel>
+
+      <CameraPreviewPanel server={state.roadsense?.camera_preview} now={now} />
 
       <UsbHubPanel state={state} now={now} />
 

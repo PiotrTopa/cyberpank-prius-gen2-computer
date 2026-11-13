@@ -247,6 +247,18 @@ def _build_powerbox_bean_tx_enable(params: Dict[str, Any]) -> Action:
                                       source=ActionSource.UI)
 
 
+def _build_powerbox_bean_tx(params: Dict[str, Any]) -> Action:
+    from ..io.powerbox import validate_bean_tx_params
+    from ..state.actions import PowerboxBeanTxAction
+    op = str(_require(params, "op")).strip().lower()
+    fields = {k: v for k, v in params.items() if k != "op"}
+    try:
+        fields = validate_bean_tx_params(op, fields)
+    except ValueError as exc:
+        raise CommandError(str(exc))
+    return PowerboxBeanTxAction(op, fields, source=ActionSource.UI)
+
+
 def _build_bean_capture(params: Dict[str, Any]) -> Action:
     import re
     from ..state.actions import BeanCaptureAction
@@ -515,11 +527,40 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
     "powerbox_bean_tx_enable": {
         "builder": _build_powerbox_bean_tx_enable,
         "description": (
-            "BENCH ONLY: arm (on=true) the powerbox BEAN TX guard for 60 s, or disarm "
-            "it. Every TX-driving powerbox_bean op (tx/pulse/loop/square) is refused "
-            "with BEAN_TX_DISABLED unless armed. Never arm it on the car's live bus."
+            "Arm (on=true) the powerbox BEAN TX guard for 60 s, or disarm it. Nothing "
+            "drives the bus unless armed: powerbox_bean_tx edge/send/allow/bench and "
+            "the bench ops of powerbox_bean (tx/pulse/loop/square, which also need "
+            "powerbox_bean_tx op=bench since fw 2.4.0 and must never run on the car)."
         ),
         "params": {"on": "bool"},
+    },
+    "powerbox_bean_tx": {
+        "builder": _build_powerbox_bean_tx,
+        "description": (
+            "BEAN transmitter on the powerbox (fw >= 2.4.0). TRANSMITS ON THE CAR'S "
+            "BODY BUS; nothing is sent unless the firmware guards agree: armed "
+            "(powerbox_bean_tx_enable, 60 s), a passing edge test since boot, the "
+            "per-boot frames flag (op=allow), a healthy receiver, the block list "
+            "(only the test frame FE:48 without op=bench) and the budgets (5/s, "
+            "50 per 10 min). op=edge sends one dominant pulse of one bit time and "
+            "reports rise/fall as seen on GP6 (it wakes a sleeping bus: wake=true "
+            "needed then). op=send sends one frame with per-bit readback, "
+            "arbitration and up to 'retries' resends; result in powerbox.bean_tx "
+            "(ok, acked = raw RSP bits with 1 = ACK, attempts, lost_arb, bit_err, "
+            "fault, t_ms; a refusal has err + detail). Every edge/send/allow/bench "
+            "is written to the TX audit log and to a running BEAN capture."
+        ),
+        "params": {
+            "op": "status | edge | allow | bench | sp | send",
+            "v": "allow, bench: bool",
+            "pct": "sp: int 25..75 (readback sample point, % of the bit; default 50)",
+            "pri": "send: int 0..15",
+            "dst": "send: byte, hex string ('FE') or int",
+            "mes": "send: byte, hex string or int",
+            "data": "send: hex string, 1..11 bytes",
+            "retries": "send: int 0..3 (default 2)",
+            "wake": "edge, send: bool, needed when the bus is asleep",
+        },
     },
     "bean_capture": {
         "builder": _build_bean_capture,
