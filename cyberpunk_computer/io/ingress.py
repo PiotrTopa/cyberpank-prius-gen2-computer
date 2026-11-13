@@ -156,6 +156,10 @@ class IngressController:
         
         # Solicited CAN debug mode
         self._solicited_debug = False
+        # All-ECU diagnostics engine (cyberpunk_computer/diag): gets first
+        # refusal on one-shot gateway replies and a tap on 0x7xx bus frames.
+        self._diag_hook: Optional[Callable[[dict], bool]] = None
+        self._diag_bus_tap: Optional[Callable[[int, bytes, float], None]] = None
         
         # Message logging callbacks (multiple can be registered)
         self._message_log_callbacks: list[Callable[[RawMessage, str], None]] = []
@@ -197,6 +201,15 @@ class IngressController:
         """
         self._input_port = input_port
     
+    def set_diag_hooks(self, on_gateway_reply: Optional[Callable[[dict], bool]],
+                       on_bus_frame: Optional[Callable[[int, bytes, float], None]] = None) -> None:
+        """Hook the diagnostics engine in: ``on_gateway_reply(data) -> bool``
+        sees every one-shot ``resp`` and returns True when it consumed it;
+        ``on_bus_frame(id, data, t_mono)`` sees 0x700-0x7FF broadcast frames
+        (panda reader thread)."""
+        self._diag_hook = on_gateway_reply
+        self._diag_bus_tap = on_bus_frame
+
     def set_solicited_debug(self, enabled: bool) -> None:
         """Enable/disable solicited CAN debug mode (prints 0x788/0x7E8/0x7EA/0x7EB responses)."""
         self._solicited_debug = enabled
@@ -471,6 +484,14 @@ class IngressController:
         if action in ("sub", "resp") and not msg.data.get("err"):
             self._stats.last_solicited_time = time.time()
             self._stats.last_solicited_mono = time.monotonic()
+
+        # Diagnostics engine: a reply to its outstanding request is its alone.
+        if action == "resp" and self._diag_hook is not None:
+            try:
+                if self._diag_hook(msg.data):
+                    return
+            except Exception:
+                logger.exception("Diagnostics reply hook failed")
         
         # Normalize CAN ID for comparison (handle both string and int)
         can_id_int = None
@@ -553,6 +574,9 @@ class IngressController:
         st.can_messages += 1
         st.last_can_time = now_w
         st.last_can_mono = now_m
+
+        if self._diag_bus_tap is not None and 0x700 <= can_id <= 0x7FF:
+            self._diag_bus_tap(can_id, bytes(data), now_m)
 
         if self._bench_pending:
             t_tx = self._bench_pending.pop((can_id, bytes(data)), None)

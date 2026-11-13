@@ -31,9 +31,9 @@ To check the current pin level over the REPL on `prius`:
 # prints 0 when ACC is ON (inverted logic), 1 when ACC is OFF
 ```
 
-Current firmware: **2.2.5** (2.2.3: BEAN transceiver bench on GP6/GP7 and
+Current firmware: **2.3.0** (2.2.3: BEAN transceiver bench on GP6/GP7 and
 5 ms relay read-back; 2.2.4: I2C at 100 kHz; 2.2.5: bench ACC override
-`acc_sim`).
+`acc_sim`; 2.3.0: receive-only BEAN decoder `bean_rx.py` + TX guard).
 
 ## Power Management (POCO button + relay board + heartbeat + sleep) — firmware 2.1
 
@@ -208,7 +208,9 @@ A rolling "automotive" counter lets each side detect if the other died:
 | Ping | `{"a":"ping"}` | PONG. |
 | Get event log | `{"a":"getlog"}` | Dump the power-event ring buffer as `PMLOG` (cold-boot timeline). |
 | Reset mAh | `{"a":"reset_mah"}` | Zero the coulomb counter. |
-| BEAN bench | `{"a":"bean","op":...}` | fw ≥ 2.2.3, see *BEAN transceiver bench* below. |
+| BEAN bench | `{"a":"bean","op":...}` | fw ≥ 2.2.3, see *BEAN transceiver bench* below. TX-driving ops need the TX guard (fw 2.3.0). |
+| BEAN TX guard (**bench only**) | `{"a":"bean_tx_enable","v":1\|0}` | fw ≥ 2.3.0. Arms the `bean` TX ops for 60 s (`BEAN_TX_ENABLE_MS`), `v:0` disarms. Ack `{"ack":"bean_tx_enable","v":..,"s":60}`, logged as a `bean_tx` PMEVENT. |
+| BEAN receiver | `{"a":"bean_rx","on":0\|1}` / `{"a":"bean_rx","op":"stats"}` / `{"a":"bean_rx","raw":N}` | fw ≥ 2.3.0, see *BEAN receiver* below. |
 | ACC override (**bench only**) | `{"a":"acc_sim","v":0\|1\|null}` | fw ≥ 2.2.5. Simulates key-on (1) or key-off (0) without touching the ACC wire; `null` or no `v` clears it. The override is applied in `read_acc()`, the single place the pin enters the logic, so it reaches the Events `{"acc":..}` messages (sent on the next main-loop pass when the effective state changes), STATUS `acc` and the wake/sleep logic. STATUS carries `"acc_sim":1` while it is active. Ack: `{"ack":"acc_sim","v":0\|1\|null,"pin":<real ACC, 1 = on>}`; any other `v` → `ERROR ACC_SIM`. **RAM only:** a firmware boot clears it. It also **auto-expires 30 min** (`ACC_SIM_MAX_MS`) after the last set, then the real pin takes over again (`acc_sim` PMEVENT with `why: expired`). Re-sending restarts the 30 min. Set and clear are logged as `acc_sim` PMEVENTs. Backend: REST `powerbox_acc_sim {"on": true\|false\|null}`, mirrored in `powerbox.acc_sim`. |
 
 ### BEAN transceiver bench (fw 2.2.3, 2026-11-11)
@@ -378,6 +380,127 @@ The `prius` host has been configured to remotely manage and program the RP2040 w
    sudo uhubctl -f -l 1-1 -p 1 -a on
    ```
 
+### BEAN receiver (fw 2.3.0, `bean_rx.py`)
+
+Receive-only decoder for the Toyota BEAN body bus (protocol:
+`docs/BEAN_PROTOCOL.md`). It only reads GP6; it never drives GP7 and never
+ACKs. It starts after the safe-boot window and is ON at boot. If
+`bean_rx.py` is missing or fails to import or start, the firmware runs as
+before: the `bean_rx` PMEVENT carries the error, and `bean_rx` commands answer
+`ERROR BEAN_RX <detail>`.
+
+**Capture.** A PIO program on PIO1 SM0 at 2 MHz measures every GP6 level run:
+a 2-cycle count loop gives 1 µs resolution. It pushes one word per edge, with
+bit 16 = the GP6 level of the run that ended and bits 15..0 = the count left,
+so run = `10000 − x + 3` µs. A run longer than 10 ms pushes a timeout word
+(`x = 0xFFFF`) and keeps counting, so idle and stuck-bus periods are seen in
+real time (~100 words/s while the bus sleeps). The program is 27
+instructions. The words go to a 1024-word RAM ring through **rp2.DMA**
+(MicroPython ≥ 1.21; the write address wraps on the 4 KB-aligned ring, and
+the producer index comes from the DMA transfer count). Without `rp2.DMA` the
+firmware falls back to a hard IRQ handler that drains the 4-word RX FIFO into
+the ring (mode `irq`). If that also fails it polls the FIFO (mode `poll`,
+which loses data whenever the loop blocks for more than ~1 ms). The mode is
+in the ack, the stats and the `bean_rx` PMEVENT. PIO RX stalls are counted
+(`stall`).
+
+*Ring capacity:* busy traffic is 45 frames/s × ~40 runs = ~1800 words/s, so
+1024 words cover **~550 ms** of a blocked main loop with no loss (more at
+normal rates). A 100 ms I2C/USB stall uses ~20 % of the ring. A blocked loop
+longer than that drops the backlog: `ovf` +1, `lost` += words, and the frame
+in progress is reported as `ovf`. The decoder then resyncs on the next idle
+gap.
+
+**Decode** runs in `poll()`, called from every `wdt_sleep_ms` slice (~5 ms)
+and never more than 256 words per call. The steps:
+- Each run is rounded to whole bit times. The bit time adapts (fast for the
+  first ~250 runs after start, slow afterwards), and a dominant/recessive
+  skew estimate compensates an asymmetric comparator.
+- Pulses shorter than 12 µs are merged into their neighbours (glitch filter).
+- Destuffing is done per run, followed by the frame state machine and the
+  CRC-8 check.
+- The EOM `0111111` is searched for after the CRC, tolerating a stuff bit
+  before it or its absence.
+- The two RSP bits are reported raw.
+
+Tested tolerance (CPython, see tests): ±20 µs jitter on every edge with no
+loss, ±30 µs comparator skew, and a bit clock of 80–120 µs (from cold, ±8 %
+loses at most the first frame).
+
+**Frames** go out on **id 3** (backend 203), batched at most every 200 ms,
+up to 16 frames per line, with a 64-frame queue:
+
+```json
+{"t":123456,"bf":[[123290,6,"FE","2C","64",1,0],[123301,2,"FE","7F","001000000000",1,0]],
+ "st":{...every 2 s...}}
+```
+
+- Record: `[t_ms, pri, "DST", "MES", "DATAHEX", rsp, code]`.
+- `t_ms` is the firmware `ticks_ms` of the SOF (±~1 ms). `t` is `ticks_ms`
+  at send time, so the backend gets the frame age from `t − t_ms`.
+- `rsp` is the 2 raw RSP bits (`1` = `01` = ACK, `0` = no ACK, `2` = NAK,
+  `3` = both). It is `null` when the frame broke before RSP.
+- `code`: 0 ok, 1 crc, 2 stuff, 3 len (ML outside 3..13), 4 frm (EOM, RSP or
+  EOF shape wrong, or bus stuck dominant), 5 trunc (idle inside the frame),
+  6 ovf.
+- For failed frames DATAHEX holds every byte after MES that arrived, which
+  may include the CRC.
+- At most 5 failed frames are reported per second. All of them are counted;
+  the ones not reported go to `esup`.
+- `qdrop` counts frames dropped because the queue was full. `txdrop` counts
+  frames lost because the host was absent (the TX gate was closed).
+
+`st` counters:
+- Frame results: `ok`, `crc`, `stuff`, `len`, `frm`, `trunc`, `ovf`.
+- Capture: `edges`, `glitch`, `lost`, `stall`, `lag` (largest backlog in
+  words since the last stats).
+- Reporting: `qdrop`, `txdrop`, `esup`.
+- Timing: `tb` (bit time in 0.1 µs), `skew` (µs, dominant longer = +),
+  `idle_ms` (time since the last edge), `age_ms` (time since the last good
+  frame, −1 = none).
+- Load: `cpu` (decoder time in per mille of wall time).
+- State: `on`, `mode`, plus `err` / `exc` when something failed.
+
+| command | reply |
+|---|---|
+| `{"a":"bean_rx","on":0\|1}` | `{"ack":"bean_rx","on":..,"mode":"dma"\|"irq"\|"poll"\|null}`; start failure → `ERROR BEAN_RX` |
+| `{"a":"bean_rx","op":"stats"}` | ack on id 0 + an immediate `{"t":..,"st":{..}}` on id 3 |
+| `{"a":"bean_rx","raw":N}` (1–512) | ack; then the next N raw runs on id 3: `{"raw":[-2000,100,-300,..],"ri":0,"rn":N}` in chunks of 64 (µs, + = dominant, − = recessive) for checking the analogue side |
+
+**Robustness.** `poll()` never raises. After 10 consecutive internal errors
+it stops itself (`err` in the stats). It uses preallocated buffers: no
+allocation per edge. Allocation happens only per decoded frame (the record)
+and per line.
+
+**Cost (estimate, verify with `cpu`).** About 40–80 µs of interpreted or
+native Python per run, plus ~0.1 ms per poll:
+- ~2–4 % CPU at 15 frames/s;
+- ~8–14 % during the 45 frames/s IG-ON burst.
+
+RAM: ~8 KB for the DMA ring (allocated at twice the size for alignment), a
+compiled module of ~10 KB, and up to 64 queued frame records. MicroPython
+≥ 1.21 is needed for DMA; any rp2 port works with the `irq`/`poll`
+fallbacks.
+
+**TX guard.** The receiver runs on the car's live bus, so every TX-driving
+bench op (`bean` `tx` / `pulse` / `loop` / `square`) answers
+`ERROR BEAN_TX_DISABLED` without touching GP7 unless
+`{"a":"bean_tx_enable","v":1}` was sent less than 60 s ago. `status` always
+works. `BEAN_TX_ENABLED = False` at boot (RAM only).
+
+Backend:
+- `powerbox.bean_rx`: counters, `fps` over 5 s, `last_frame_ts`, `mode`,
+  `error`, `raw`.
+- `bean.messages`: the table keyed by "DST:MES" (count, last data, changes,
+  period, pri).
+- `bean.decoded`: known IDs, all *unverified* on the Prius (coolant 0x2C,
+  shift 0x40, speed 0x24, ambient 0xCD, lamps 0x7F, odometer 0x3F).
+- `GET /api/v1/bean/frames?since=<seq>&limit=<n>`: the last 200 frames
+  (kept out of the 1 Hz state).
+- REST commands: `powerbox_bean_rx`, `bean_capture {"on":true,"name":".."}`
+  (log in `logs/bean/`, rotated at 20 MB; env `BACKEND_BEAN_CAPTURE_DIR`),
+  `bean_mark {"text":".."}`, `powerbox_bean_tx_enable {"on":bool}`.
+
 ## Flashing firmware (over the NDJSON link, firmware >= 2.2.0)
 
 Updates never use the REPL. The firmware receives files over its normal link
@@ -390,14 +513,20 @@ was interrupted).
 On the POCO (files synced by `POCO/sync.sh --app` to `/home/user/cyberpunk/powerbox`):
 
 ```bash
-sudo prius-flash-powerbox                    # main.py + boot.py; stops/starts prius-backend
+sudo prius-flash-powerbox                    # main.py + boot.py + bean_rx.py; stops/starts prius-backend
 ```
 
 From a bench host with the board on USB (nothing else may hold the port):
 
 ```bash
-python3 powerbox/pb_flash.py powerbox/main.py powerbox/boot.py
+python3 powerbox/pb_flash.py powerbox/main.py powerbox/boot.py powerbox/bean_rx.py
 ```
+
+`pb_flash.py` always sends `main.py` first. A firmware older than 2.3.0
+refuses the new name `bean_rx.py` (`OTA_FILES`). In that case `pb_flash.py`
+reboots into the new `main.py`, which runs without the receiver until the
+file arrives, and then retries the file once. The first 2.3.0 update
+therefore reboots twice.
 
 `pb_flash.py` sends the host heartbeat itself, so the wake ladder never presses
 the POCO button during an update. A full update of `main.py` + `boot.py` takes

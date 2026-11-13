@@ -328,7 +328,7 @@ def _cmd(fw, payload, cfg):
 
 class TestCommandSurface:
     def test_version_bumped(self, fw):
-        assert fw.main.VERSION == "2.2.5"
+        assert fw.main.VERSION == "2.3.0"
         assert fw.main.I2C_FREQ == 100000  # PCF8574 is a 100 kHz part
 
     def test_relay_command_sets_load_channels(self, fw, pm):
@@ -747,7 +747,13 @@ def bean(fw, pm):
     FakePin.readers[6] = lambda: 1 - FakePin.levels.get(7, 0)
     b = fw.main.Bean()
     fw.main._bean = b
+    # fw 2.3.0: TX-driving ops need the (expiring) guard
+    with Recorder(fw):
+        _cmd(fw, {"a": "bean_tx_enable", "v": 1}, pm.cfg)
+    assert fw.main.BEAN_TX_ENABLED
+    FakePin.writes.clear()                 # the arm itself forces TX low
     yield types.SimpleNamespace(bean=b, cfg=pm.cfg)
+    fw.main.BEAN_TX_ENABLED = False
     fw.main._bean = None
     FakePin.readers.clear()
 
@@ -974,3 +980,145 @@ class TestAccSim:
     def test_cleared_on_boot(self, fw):
         src = open(os.path.join(POWERBOX_DIR, "main.py")).read()
         assert "\n_acc_sim = None " in src                 # RAM only, module init
+
+
+# ─── fw 2.3.0: BEAN TX guard + receiver wiring ──────────────────────────────
+
+class TestBeanTxGuard:
+    @pytest.fixture
+    def guard(self, fw, pm, monkeypatch):
+        m = fw.main
+        t = [7_000_000]
+        monkeypatch.setattr(m.time, "ticks_ms", lambda: t[0])
+
+        def sleep(ms):
+            t[0] += ms
+        monkeypatch.setattr(m.time, "sleep_ms", sleep)
+        FakePin.levels.clear()
+        FakePin.writes.clear()
+        FakePin.readers[6] = lambda: 1 - FakePin.levels.get(7, 0)
+        m._bean = m.Bean()
+        m.BEAN_TX_ENABLED = False
+        yield types.SimpleNamespace(m=m, t=t, cfg=pm.cfg)
+        m.BEAN_TX_ENABLED = False
+        m._bean = None
+        FakePin.readers.clear()
+
+    def test_off_by_default_in_source(self, fw):
+        src = open(os.path.join(POWERBOX_DIR, "main.py")).read()
+        assert "\nBEAN_TX_ENABLED = False\n" in src
+        assert fw.main.BEAN_TX_ENABLE_MS == 60000
+
+    @pytest.mark.parametrize("op,kw", [("tx", {"v": 1, "ms": 5}), ("pulse", {"us": 100}),
+                                       ("loop", {"n": 2}), ("square", {"hz": 1000, "ms": 5})])
+    def test_tx_ops_refused_without_guard(self, fw, guard, op, kw):
+        lines, acks, errs = _bean_cmd(fw, guard.cfg, op=op, **kw)
+        assert not acks and errs[0]["code"] == "BEAN_TX_DISABLED"
+        assert (7, 1) not in FakePin.writes and FakePin.levels.get(7, 0) == 0
+
+    def test_status_allowed_without_guard(self, fw, guard):
+        _, (ack,), errs = _bean_cmd(fw, guard.cfg, op="status")
+        assert not errs and ack["tx"] == 0
+
+    def test_enable_then_expires_after_60_s(self, fw, guard):
+        t_arm = guard.t[0]
+        with Recorder(fw) as rec:
+            _cmd(fw, {"a": "bean_tx_enable", "v": 1}, guard.cfg)
+        assert {"ack": "bean_tx_enable", "v": 1, "s": 60} in rec.lines
+        assert any(e.get("ev") == "bean_tx" and e.get("v") == 1 for e in fw.main._evlog)
+        _, (ack,), errs = _bean_cmd(fw, guard.cfg, op="tx", v=1, ms=1)
+        assert not errs and FakePin.levels[7] == 0
+        guard.t[0] = t_arm + 59_999
+        _, acks, errs = _bean_cmd(fw, guard.cfg, op="pulse", us=50)
+        assert acks and not errs
+        guard.t[0] = t_arm + 60_000
+        _, acks, errs = _bean_cmd(fw, guard.cfg, op="pulse", us=50)
+        assert not acks and errs[0]["code"] == "BEAN_TX_DISABLED"
+        assert fw.main.BEAN_TX_ENABLED is False
+
+    def test_disable_command(self, fw, guard):
+        with Recorder(fw) as rec:
+            _cmd(fw, {"a": "bean_tx_enable", "v": 1}, guard.cfg)
+            _cmd(fw, {"a": "bean_tx_enable", "v": 0}, guard.cfg)
+        assert {"ack": "bean_tx_enable", "v": 0, "s": 0} in rec.lines
+        _, acks, errs = _bean_cmd(fw, guard.cfg, op="tx", v=1, ms=1)
+        assert not acks and errs[0]["code"] == "BEAN_TX_DISABLED"
+
+
+class _IdRecorder(Recorder):
+    def _w(self, s):
+        d = json.loads(s)
+        self.lines.append((d["id"], d["d"]))
+        return len(s)
+
+
+class TestBeanRxWiring:
+    def test_ids_and_ota(self, fw):
+        assert fw.main.ID_BEAN == 3
+        assert "bean_rx.py" in fw.main.OTA_FILES
+
+    def test_command_without_receiver(self, fw, pm, monkeypatch):
+        monkeypatch.setattr(fw.main, "_brx", None)
+        monkeypatch.setattr(fw.main, "_brx_err", "ImportError('no module named bean_rx')")
+        with Recorder(fw) as rec:
+            _cmd(fw, {"a": "bean_rx", "op": "stats"}, pm.cfg)
+        err, = [l for l in rec.lines if l.get("msg") == "ERROR"]
+        assert err["code"] == "BEAN_RX" and "bean_rx" in err["detail"]
+
+    def test_start_failure_is_logged_not_fatal(self, fw, monkeypatch):
+        import builtins
+        real = builtins.__import__
+
+        def fake(name, *a, **kw):
+            if name == "bean_rx":
+                raise MemoryError("alloc")
+            return real(name, *a, **kw)
+        monkeypatch.setattr(builtins, "__import__", fake)
+        monkeypatch.setattr(fw.main, "_brx", None)
+        fw.main.bean_rx_start()
+        assert fw.main._brx is None and "MemoryError" in fw.main._brx_err
+        assert fw.main._evlog[-1]["ev"] == "bean_rx"
+
+    def test_commands_reach_receiver_and_stats_go_to_id_3(self, fw, pm, monkeypatch):
+        sys.path.insert(0, POWERBOX_DIR)
+        try:
+            import bean_rx
+        finally:
+            sys.path.remove(POWERBOX_DIR)
+
+        class Cap:
+            mode, buf, base, stalls = "test", [0] * 1024, 0, 0
+
+            def start(self):
+                return "test"
+
+            def stop(self):
+                pass
+
+            def produced(self):
+                return 0
+        rx = bean_rx.BeanRx(fw.main.tx, fw.main.ID_BEAN, 6, capture=Cap())
+        rx.enable(True)
+        monkeypatch.setattr(fw.main, "_brx", rx)
+        with _IdRecorder(fw) as rec:
+            _cmd(fw, {"a": "bean_rx", "op": "stats"}, pm.cfg)
+            _cmd(fw, {"a": "bean_rx", "on": 0}, pm.cfg)
+            _cmd(fw, {"a": "bean_rx", "raw": 9999}, pm.cfg)
+        assert (0, {"ack": "bean_rx", "op": "stats"}) in rec.lines
+        assert any(i == 3 and "st" in d and d["st"]["mode"] == "test" for i, d in rec.lines)
+        assert (0, {"ack": "bean_rx", "on": 0, "mode": None}) in rec.lines
+        assert any(i == 0 and d.get("code") == "BEAN_RX" for i, d in rec.lines)
+
+    def test_wdt_sleep_polls_receiver_every_slice(self, fw, pm, monkeypatch):
+        c = FakeClockMs()
+        monkeypatch.setattr(fw.main.time, "ticks_ms", c.ticks)
+        monkeypatch.setattr(fw.main.time, "sleep_ms", c.sleep)
+        pm.pm.relay_verify_ms = c.t
+        polls = []
+        monkeypatch.setattr(fw.main, "_brx", types.SimpleNamespace(poll=lambda: polls.append(c.t)))
+        reads = []
+        orig = pm.bus.read
+        pm.bus.read = lambda: (reads.append(c.t), orig())[1]
+        with Recorder(fw):
+            fw.main.wdt_sleep_ms(100)
+        assert len(polls) == 21 and len(reads) == 20      # relay read-back unchanged

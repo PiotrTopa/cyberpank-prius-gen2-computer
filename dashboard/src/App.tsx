@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import {
-  Activity, Bug, Car, Clock, Cpu, LayoutDashboard, Power, SatelliteDish, Thermometer,
+  Activity, Bug, Car, Clock, Cpu, LayoutDashboard, Power, SatelliteDish, Stethoscope, Thermometer,
   Wifi, WifiOff, Zap,
 } from 'lucide-react';
 import type { Satellites, Tab, TimeRange } from './types';
@@ -13,12 +13,14 @@ import { OverviewTab } from './tabs/OverviewTab';
 import { TelemetryTab } from './tabs/TelemetryTab';
 import { ControlsTab } from './tabs/ControlsTab';
 import { SatellitesTab } from './tabs/SatellitesTab';
+import { DiagnosticsTab } from './tabs/DiagnosticsTab';
 import { transportOf } from './lib/satellites';
 
 const TABS: [Tab, string, typeof LayoutDashboard][] = [
   ['dashboard', 'Overview', LayoutDashboard],
   ['satellites', 'Satellites', SatelliteDish],
   ['charts', 'Telemetry', Activity],
+  ['diagnostics', 'Diagnostics', Stethoscope],
   ['controls', 'Controls', Power],
 ];
 
@@ -171,6 +173,9 @@ export default function App() {
           )}
           {activeTab === 'charts' && (
             <TelemetryTab hist={hist} timeRange={timeRange} onTimeRange={setTimeRange} />
+          )}
+          {activeTab === 'diagnostics' && (
+            <DiagnosticsTab diag={state.diagnostics} connected={connected} now={serverNow} />
           )}
           {activeTab === 'controls' && (
             <ControlsTab state={state} connected={connected} now={serverNow}

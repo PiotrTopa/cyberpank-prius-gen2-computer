@@ -146,6 +146,13 @@ def _build_port_power():
     return PortPowerConfig(**kw)
 
 
+def _build_bean() -> dict:
+    """BEAN capture log location (env BACKEND_BEAN_CAPTURE_DIR, default
+    logs/bean under the working directory, next to logs/trips)."""
+    d = (os.environ.get("BACKEND_BEAN_CAPTURE_DIR") or "").strip()
+    return {"bean_capture_dir": d} if d else {}
+
+
 def _build_dashcam() -> dict:
     """Dashcam vision config from env (io.dashcam_ingest; disabled by default):
 
@@ -262,6 +269,7 @@ def _build_config(args: argparse.Namespace) -> BackendConfig:
     roadsense_enabled, roadsense_config = _build_roadsense()
     return BackendConfig(
         **_build_dashcam(),
+        **_build_bean(),
         **_build_satellites(),
         gateway_port=args.gateway_port,
         powerbox_port=args.powerbox_port,

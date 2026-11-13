@@ -209,8 +209,94 @@ export interface AppState {
   connection?: Connection;
   satellites?: Satellites;
   roadsense?: Roadsense;
+  diagnostics?: Diagnostics;
+}
+
+/** One trouble code of an ECU, annotated from the repair-manual dictionary. */
+export interface DiagDtc {
+  code: string;
+  status: string[];
+  sources?: string[];
+  description?: string;
+  system?: string;
+  manual_page?: string | null;
+  manual_url?: string | null;
+  trouble_area?: string[];
+  known?: boolean;
+  other_ecu?: boolean;
+  master_warning?: 'all' | 'some' | 'none';
+  inf_codes?: string[];
+}
+
+export interface DiagEcu {
+  key: string;
+  name: string;
+  address?: string | null;
+  response_address?: string | null;
+  sub_address?: string | null;
+  protocol?: string;
+  bus?: string;
+  confidence?: string;
+  probe?: boolean;
+  note?: string;
+  can_clear?: boolean;
+  status: string;
+  responded?: boolean;
+  dtcs?: DiagDtc[];
+  mil?: boolean | null;
+  dtc_count?: number | null;
+  monitors?: { complete: string[]; incomplete: string[] } | null;
+  freeze_frame?: { dtc?: string; values?: Record<string, { value: number; unit: string }> } | null;
+  ident?: Record<string, unknown>;
+  last_scan_ts?: number | null;
+  last_clear?: { ts: number; ok: boolean; result: string; cleared?: string[]; remaining?: string[] | null; origin?: string } | null;
+  error?: string | null;
+  partial?: boolean;
+  log?: string[];
+}
+
+export interface DiagScan {
+  state: string;
+  op?: string | null;
+  total?: number;
+  done?: number;
+  current?: string | null;
+  started_ts?: number | null;
+  finished_ts?: number | null;
+  report_file?: string | null;
+  error?: string | null;
+  kinds?: string[];
+}
+
+export interface DiagAutoClearEntry { ecu: string; code: string; enabled?: boolean }
+export interface DiagAutoClearAction { ts: number; ecu: string; codes: string[]; ok: boolean; result: string; deferred?: boolean }
+
+export interface DiagAutoClear {
+  enabled: boolean;
+  codes: DiagAutoClearEntry[];
+  trigger?: string;
+  speed_policy?: string;
+  min_interval_s?: number;
+  max_per_day?: number;
+  poll_s?: number;
+  last_check_ts?: number | null;
+  last_action?: DiagAutoClearAction | null;
+  recent?: DiagAutoClearAction[];
+  blocked?: Record<string, { by: string[]; codes: string[]; reason: string; since: number }>;
+  waiting?: Record<string, string>;
+  counters?: Record<string, number>;
+}
+
+export interface Diagnostics {
+  ecus?: Record<string, DiagEcu> | null;
+  scan?: DiagScan | null;
+  vehicle?: { vin?: string } | null;
+  last_read?: Record<string, unknown> | null;
+  autoclear?: DiagAutoClear | null;
+  mil_on?: boolean;
+  last_scan_time?: number | null;
 }
 
 export type TimeRange = '1h' | '24h' | '7d';
-export type Tab = 'dashboard' | 'satellites' | 'charts' | 'controls';
+export type Tab = 'dashboard' | 'satellites' | 'charts' | 'diagnostics' | 'controls';
 export type Series = { time: string; value: number }[];

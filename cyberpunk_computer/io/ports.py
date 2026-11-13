@@ -46,6 +46,7 @@ SATELLITE_NAMES = {
 DEVICE_POWERBOX_BASE = 200       # Powerbox system/control
 DEVICE_POWERBOX_POWER = 201      # Powerbox power/voltage telemetry
 DEVICE_POWERBOX_EVENTS = 202     # Powerbox discrete power events (ignition/source)
+DEVICE_POWERBOX_BEAN = 203       # Powerbox BEAN receiver: body-bus frames + counters (fw >= 2.3.0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

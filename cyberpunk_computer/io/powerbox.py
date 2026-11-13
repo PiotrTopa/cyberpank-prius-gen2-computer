@@ -9,6 +9,7 @@ reports:
     device 200 (DEVICE_POWERBOX_BASE)   system / status / command acks
     device 201 (DEVICE_POWERBOX_POWER)  INA219 telemetry: voltage / current / power
     device 202 (DEVICE_POWERBOX_EVENTS) ignition (ACC) + constant battery line
+    device 203 (DEVICE_POWERBOX_BEAN)   BEAN body-bus receiver: frames + counters (fw >= 2.3.0)
 
 This module provides:
 
@@ -38,6 +39,7 @@ from typing import TYPE_CHECKING, Callable, List, Optional
 
 from .ports import (
     DEVICE_POWERBOX_BASE,
+    DEVICE_POWERBOX_BEAN,
     DEVICE_POWERBOX_EVENTS,
     DEVICE_POWERBOX_POWER,
     OutgoingCommand,
@@ -49,6 +51,7 @@ from ..state.actions import (
     SetPowerboxIgnitionAction,
     SetPowerboxPowerStatusAction,
     SetPowerboxTelemetryAction,
+    SetBeanRxAction,
 )
 from ..state.app_state import (  # noqa: F401
     RELAY_CH_CAM_HUB,
@@ -346,7 +349,9 @@ def parse_powerbox_system(data: dict) -> List[Action]:
     if msg == "ERROR":
         code = str(data.get("code", ""))
         logger.warning("Powerbox ERROR %s: %s", code, data.get("detail", ""))
-        if code in ("BEAN", "BEAN_ARGS"):
+        if code == "BEAN_RX":
+            return [SetBeanRxAction(error=data.get("detail", ""), recv_ts=time.time())]
+        if code in ("BEAN", "BEAN_ARGS", "BEAN_TX_DISABLED"):
             # BEAN bench op refused / failed: surface it in powerbox.bean so a
             # REST caller polling the state sees why nothing came back.
             return [SetPowerboxBeanAction({"error": code,
@@ -360,6 +365,18 @@ def parse_powerbox_system(data: dict) -> List[Action]:
                        "cleared" if v is None else ("ON" if v else "OFF"),
                        data.get("pin"))
         return [SetPowerboxPowerStatusAction(acc_sim=v is not None)]
+    if ack == "bean_rx":
+        # BEAN receiver control ack (fw >= 2.3.0): on/off + capture mode, or
+        # a stats/raw request (the data itself follows on device 203).
+        result = {k: v for k, v in data.items() if k != "ack"}
+        logger.info("Powerbox BEAN receiver: %s", result)
+        if "on" in result:
+            return [SetBeanRxAction(ack=result, recv_ts=time.time())]
+        return []
+    if ack == "bean_tx_enable":
+        logger.warning("Powerbox BEAN TX guard %s",
+                       "ARMED for %ss (bench only)" % data.get("s") if data.get("v") else "disarmed")
+        return [SetPowerboxBeanAction({"tx_enabled": bool(data.get("v")), "s": data.get("s")})]
     if ack == "bean":
         # BEAN transceiver bench result (fw >= 2.2.3). The firmware also
         # echoes it as a PMEVENT (ev "bean"), which is what gets journalled.
@@ -371,8 +388,45 @@ def parse_powerbox_system(data: dict) -> List[Action]:
     return []
 
 
+_bean_raw: list = []
+
+
+def parse_bean_message(data: dict, recv_ts: Optional[float] = None) -> List[Action]:
+    """Decode a device 203 BEAN receiver line (fw >= 2.3.0).
+
+    ``{"t":ms,"bf":[[t_ms,pri,"DST","MES","DATA",rsp,code],..],"st":{..}}``
+    or a raw run-length dump chunk ``{"raw":[us..],"ri":k,"rn":N}`` (+ =
+    dominant, - = recessive); the chunks are joined and published once
+    complete (powerbox.bean_rx.raw)."""
+    from ..comm.bean import frame_from_wire
+    global _bean_raw
+    now = time.time() if recv_ts is None else recv_ts
+    if "raw" in data:
+        chunk = data.get("raw") or []
+        if data.get("ri", 0) == 0:
+            _bean_raw = []
+        _bean_raw.extend(chunk)
+        rn = data.get("rn")
+        if rn is not None and len(_bean_raw) >= int(rn):
+            raw, _bean_raw = _bean_raw, []
+            logger.info("Powerbox BEAN raw runs (%d): %s", len(raw), raw)
+            return [SetBeanRxAction(raw=raw, recv_ts=now)]
+        return []
+    frames = []
+    for rec in data.get("bf") or []:
+        f = frame_from_wire(rec, data.get("t"), now)
+        if f is not None:
+            frames.append(f)
+    stats = data.get("st") if isinstance(data.get("st"), dict) else None
+    if not frames and stats is None:
+        return []
+    return [SetBeanRxAction(frames=frames, stats=stats, recv_ts=now)]
+
+
 def parse_powerbox_message(device_id: int, data: dict) -> List[Action]:
     """Route a powerbox payload to the right parser by (offset) device id."""
+    if device_id == DEVICE_POWERBOX_BEAN:
+        return parse_bean_message(data)
     if device_id == DEVICE_POWERBOX_POWER:
         return parse_power_telemetry(data)
     if device_id == DEVICE_POWERBOX_EVENTS:
@@ -460,8 +514,9 @@ def register_powerbox_ingress(
     ingress.register_satellite_handler(DEVICE_POWERBOX_BASE, _handler(DEVICE_POWERBOX_BASE))
     ingress.register_satellite_handler(DEVICE_POWERBOX_POWER, _handler(DEVICE_POWERBOX_POWER))
     ingress.register_satellite_handler(DEVICE_POWERBOX_EVENTS, _handler(DEVICE_POWERBOX_EVENTS))
+    ingress.register_satellite_handler(DEVICE_POWERBOX_BEAN, _handler(DEVICE_POWERBOX_BEAN))
     logger.info("Powerbox ingress handlers registered (devices %d-%d)",
-                DEVICE_POWERBOX_BASE, DEVICE_POWERBOX_EVENTS)
+                DEVICE_POWERBOX_BASE, DEVICE_POWERBOX_BEAN)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -691,6 +746,39 @@ def build_acc_sim_command(on: Optional[bool]) -> OutgoingCommand:
     )
 
 
+BEAN_RX_RAW_MAX = 512
+
+
+def build_bean_rx_command(on: Optional[bool] = None, op: Optional[str] = None,
+                          raw: Optional[int] = None) -> OutgoingCommand:
+    """BEAN receiver control (fw >= 2.3.0): ``{"a":"bean_rx","on":0|1}``,
+    ``{"a":"bean_rx","op":"stats"}`` or ``{"a":"bean_rx","raw":N}`` (exactly
+    one; ValueError otherwise). The receiver never drives the bus."""
+    given = [x is not None for x in (on, op, raw)]
+    if sum(given) != 1:
+        raise ValueError("bean_rx takes exactly one of on / op / raw")
+    if on is not None:
+        payload = {"a": "bean_rx", "on": 1 if on else 0}
+    elif op is not None:
+        if str(op).lower() != "stats":
+            raise ValueError("bean_rx op must be 'stats'")
+        payload = {"a": "bean_rx", "op": "stats"}
+    else:
+        raw = int(raw)
+        if not 1 <= raw <= BEAN_RX_RAW_MAX:
+            raise ValueError("bean_rx raw must be 1..%d" % BEAN_RX_RAW_MAX)
+        payload = {"a": "bean_rx", "raw": raw}
+    return OutgoingCommand(device_id=POWERBOX_LOCAL_SYSTEM, command_type="power",
+                           payload=payload, priority=40)
+
+
+def build_bean_tx_enable_command(on: bool) -> OutgoingCommand:
+    """BENCH ONLY: arm (60 s) / disarm the firmware BEAN TX guard (fw >= 2.3.0)."""
+    return OutgoingCommand(device_id=POWERBOX_LOCAL_SYSTEM, command_type="power",
+                           payload={"a": "bean_tx_enable", "v": 1 if on else 0},
+                           priority=50)
+
+
 class PowerboxCommander:
     """Send commands to the powerbox over an OutputPort (None = log only)."""
 
@@ -760,6 +848,20 @@ class PowerboxCommander:
     def set_acc_sim(self, on: Optional[bool]) -> bool:
         """BENCH ONLY ACC override (None clears)."""
         return self._send(build_acc_sim_command(on), "acc_sim %s" % on, warn=True)
+
+    def bean_rx(self, on: Optional[bool] = None, op: Optional[str] = None,
+                raw: Optional[int] = None) -> bool:
+        """BEAN receiver control (see :func:`build_bean_rx_command`)."""
+        try:
+            cmd = build_bean_rx_command(on=on, op=op, raw=raw)
+        except ValueError as exc:
+            logger.error("Powerbox bean_rx command refused: %s", exc)
+            return False
+        return self._send(cmd, "bean_rx %s" % cmd.payload, warn=True)
+
+    def bean_tx_enable(self, on: bool) -> bool:
+        return self._send(build_bean_tx_enable_command(on),
+                          "bean_tx_enable %s" % bool(on), warn=True)
 
     def send_bean(self, op: str, **kw) -> bool:
         """BEAN transceiver bench op (see :func:`build_bean_command`)."""

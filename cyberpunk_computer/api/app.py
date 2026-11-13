@@ -10,6 +10,7 @@ Surface (versioned under /api/v1), designed for the future Android dashboard:
     GET  /api/v1/metrics              time-series history (auto/raw/1m/1h/1d)
     GET  /api/v1/events               discrete power/vehicle events
     POST /api/v1/commands/{name}      send a command to the vehicle/twin
+    GET  /api/v1/bean/frames          last BEAN body-bus frames (?since=seq&limit=n)
     GET  /api/v1/roadsense[/...]      roadsense perception API front (see
                                       api.roadsense_proxy; only when wired)
 
@@ -70,6 +71,7 @@ def create_app(
     auth_token: Optional[str] = None,
     on_startup=None,
     roadsense_url: Optional[str] = None,
+    bean_frames=None,
 ) -> FastAPI:
     """Build the FastAPI app wired to the bridge and metrics database."""
     app = FastAPI(title="CyberPunk Prius Backend", version="1.0.0")
@@ -201,6 +203,17 @@ def create_app(
             raise HTTPException(status_code=503, detail=str(exc))
         return {"accepted": True, "command": name, "action": type(action).__name__}
 
+    # ── BEAN frames (ring kept out of the 1 Hz state publish) ───────────────
+
+    @app.get(API_PREFIX + "/bean/frames", dependencies=[Depends(require_auth)])
+    async def bean_frames_endpoint(
+        since: int = Query(0, ge=0, description="return frames with seq > since"),
+        limit: int = Query(200, ge=1, le=200),
+    ) -> Dict[str, Any]:
+        if bean_frames is None:
+            raise HTTPException(status_code=503, detail="BEAN monitor not wired")
+        return bean_frames(since, limit)
+
     # ── websocket stream ─────────────────────────────────────────────────────
 
     @app.websocket(API_PREFIX + "/stream")
@@ -233,6 +246,12 @@ def create_app(
             require_auth,
             lambda ws: (not auth_token) or _ws_authorized(ws, auth_token),
         )
+
+    # ── all-ECU diagnostics (scan reports, clear log, ECU registry) ─────────
+
+    from ..diag.api import register as register_diag
+
+    register_diag(app, API_PREFIX + "/diag", require_auth)
 
     # ── dashboard ────────────────────────────────────────────────────────────
 

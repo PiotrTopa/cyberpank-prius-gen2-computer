@@ -226,6 +226,45 @@ def _build_powerbox_acc_sim(params: Dict[str, Any]) -> Action:
     return PowerboxAccSimAction(on, source=ActionSource.UI)
 
 
+def _build_powerbox_bean_rx(params: Dict[str, Any]) -> Action:
+    from ..state.actions import PowerboxBeanRxAction
+    keys = [k for k in ("on", "op", "raw") if params.get(k) is not None]
+    if len(keys) != 1:
+        raise CommandError("give exactly one of 'on', 'op' or 'raw'")
+    if keys[0] == "on":
+        return PowerboxBeanRxAction(on=_as_bool(params["on"], "on"), source=ActionSource.UI)
+    if keys[0] == "op":
+        op = str(params["op"]).strip().lower()
+        if op != "stats":
+            raise CommandError("'op' must be 'stats'")
+        return PowerboxBeanRxAction(op=op, source=ActionSource.UI)
+    return PowerboxBeanRxAction(raw=_as_int(params["raw"], "raw", 1, 512), source=ActionSource.UI)
+
+
+def _build_powerbox_bean_tx_enable(params: Dict[str, Any]) -> Action:
+    from ..state.actions import PowerboxBeanTxEnableAction
+    return PowerboxBeanTxEnableAction(_as_bool(_require(params, "on"), "on"),
+                                      source=ActionSource.UI)
+
+
+def _build_bean_capture(params: Dict[str, Any]) -> Action:
+    import re
+    from ..state.actions import BeanCaptureAction
+    on = _as_bool(_require(params, "on"), "on")
+    name = str(params.get("name") or "").strip()
+    if len(name) > 40 or (name and not re.fullmatch(r"[A-Za-z0-9 _.-]+", name)):
+        raise CommandError("'name' must be up to 40 chars of letters, digits, space, _ . -")
+    return BeanCaptureAction(on, name, source=ActionSource.UI)
+
+
+def _build_bean_mark(params: Dict[str, Any]) -> Action:
+    from ..state.actions import BeanMarkAction
+    text = str(_require(params, "text")).strip()
+    if not text or len(text) > 200:
+        raise CommandError("'text' must be 1..200 characters")
+    return BeanMarkAction(text, source=ActionSource.UI)
+
+
 def _build_input_event(params: Dict[str, Any]) -> Action:
     from ..state.actions import InputEventAction
     device = str(_require(params, "device")).strip()
@@ -449,7 +488,8 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
             "tx = drive TX to v for ms, RX sampled driven/released; pulse = one "
             "dominant pulse, RX mid/after; loop = n round trips, TX->RX edge "
             "delays min/max/avg + timeouts; square = square wave, RX edges vs "
-            "expected. TX is always released afterwards. Result in powerbox.bean."
+            "expected. TX is always released afterwards. Result in powerbox.bean. "
+            "fw >= 2.3.0: TX-driving ops need powerbox_bean_tx_enable first."
         ),
         "params": {
             "op": "status | tx | pulse | loop | square",
@@ -459,6 +499,45 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
             "n": "loop: int 1..200 (default 20)",
             "hz": "square: int 100..20000 (default 5000)",
         },
+    },
+    "powerbox_bean_rx": {
+        "builder": _build_powerbox_bean_rx,
+        "description": (
+            "BEAN body-bus receiver on the powerbox (fw >= 2.3.0; GP6 only, never "
+            "drives or ACKs the bus; ON at boot). on = start/stop; op=stats = "
+            "counters now; raw = dump the next N raw run lengths (us, + dominant / "
+            "- recessive) into powerbox.bean_rx.raw for analogue-side debugging. "
+            "State: powerbox.bean_rx (counters, fps), bean (message table, known "
+            "values); frames: GET /api/v1/bean/frames."
+        ),
+        "params": {"on": "bool", "op": "stats", "raw": "int 1..512 (exactly one of the three)"},
+    },
+    "powerbox_bean_tx_enable": {
+        "builder": _build_powerbox_bean_tx_enable,
+        "description": (
+            "BENCH ONLY: arm (on=true) the powerbox BEAN TX guard for 60 s, or disarm "
+            "it. Every TX-driving powerbox_bean op (tx/pulse/loop/square) is refused "
+            "with BEAN_TX_DISABLED unless armed. Never arm it on the car's live bus."
+        ),
+        "params": {"on": "bool"},
+    },
+    "bean_capture": {
+        "builder": _build_bean_capture,
+        "description": (
+            "Start (on=true) or stop the BEAN capture log for reverse engineering: "
+            "one JSON line per frame (ok and failed) under the backend's logs/bean "
+            "directory, file bean_<date>_<name>.ndjson, rotated at 20 MB. Status in "
+            "bean.capture."
+        ),
+        "params": {"on": "bool", "name": "string up to 40 chars (optional)"},
+    },
+    "bean_mark": {
+        "builder": _build_bean_mark,
+        "description": (
+            "Write a timestamped event line (e.g. 'driver door opened') into the "
+            "running BEAN capture log, to mark actions of the capture plan."
+        ),
+        "params": {"text": "string 1..200 chars"},
     },
     "powerbox_acc_sim": {
         "builder": _build_powerbox_acc_sim,
@@ -683,6 +762,13 @@ COMMANDS["dtc"] = {
                    "across the engine, hybrid, HV battery and airbag ECUs through the gateway.",
     "params": {"op": "scan | scan_pending | clear (default scan)"},
 }
+
+
+# All-ECU diagnostics engine (diag_scan, diag_identify, diag_read, diag_clear,
+# diag_cancel, diag_autoclear_set) — builders live in cyberpunk_computer/diag.
+from ..diag.commands import register as _register_diag_commands  # noqa: E402
+
+_register_diag_commands(COMMANDS, CommandError)
 
 
 def build_command(name: str, params: Dict[str, Any]) -> Action:

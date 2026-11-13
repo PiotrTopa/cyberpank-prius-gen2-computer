@@ -129,6 +129,17 @@ class PowerSettings:
 
 
 @dataclass
+class DiagnosticsSettings:
+    """Persisted diagnostics options (cyberpunk_computer/diag).
+
+    ``autoclear`` is the auto-clear configuration as written by
+    ``diag.autoclear.AutoClearConfig.to_dict`` (master switch, whitelist of
+    {ecu, code, enabled}, trigger, speed policy, rate limits). Empty = off.
+    """
+    autoclear: dict = field(default_factory=dict)
+
+
+@dataclass
 class UserSettings:
     """All user-configurable settings."""
     ambient: AmbientSettings = field(default_factory=AmbientSettings)
@@ -139,6 +150,7 @@ class UserSettings:
     data_sources: DataSourceSettings = field(default_factory=DataSourceSettings)
     satellites: SatelliteSettings = field(default_factory=SatelliteSettings)
     power: PowerSettings = field(default_factory=PowerSettings)
+    diagnostics: DiagnosticsSettings = field(default_factory=DiagnosticsSettings)
 
 
 def _safe_load(cls, data: dict):
@@ -213,6 +225,8 @@ class SettingsManager:
                 self.settings.satellites = _safe_load(SatelliteSettings, data['satellites'])
             if 'power' in data:
                 self.settings.power = _safe_load(PowerSettings, data['power'])
+            if 'diagnostics' in data:
+                self.settings.diagnostics = _safe_load(DiagnosticsSettings, data['diagnostics'])
             
             logger.info(f"Loaded settings from {self.settings_file}")
             return True
@@ -239,6 +253,7 @@ class SettingsManager:
                 'data_sources': asdict(self.settings.data_sources),
                 'satellites': asdict(self.settings.satellites),
                 'power': asdict(self.settings.power),
+                'diagnostics': asdict(self.settings.diagnostics),
             }
             
             with open(self.settings_file, 'w') as f:

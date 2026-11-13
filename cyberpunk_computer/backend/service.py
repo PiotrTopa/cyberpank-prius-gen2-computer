@@ -333,6 +333,13 @@ class BackendConfig:
     # published as state.vision. None/empty = disabled (no thread, no ffmpeg).
     # Env: BACKEND_DASHCAM_URL, BACKEND_DASHCAM_INTERVAL_S, BACKEND_DASHCAM_SOURCE,
     # BACKEND_HOME_LATLON.
+    # ── BEAN body bus (powerbox fw >= 2.3.0 receiver, device 203) ──────────
+    # Capture logs for reverse engineering (REST bean_capture / bean_mark).
+    # Relative to the backend's working directory (the repo on the phone,
+    # next to logs/trips). Env BACKEND_BEAN_CAPTURE_DIR.
+    bean_capture_dir: str = "logs/bean"
+    bean_capture_rotate_mb: float = 20.0
+
     dashcam_url: Optional[str] = None
     dashcam_interval_s: float = 1.0
     dashcam_source: str = "stream"        # stream (one ffmpeg, 1 fps) | grab (session per frame)
@@ -366,6 +373,7 @@ class BackendService:
         self.satellite_registry: Optional[SatelliteRegistry] = None
         self._satellite_sup_last: float = 0.0
         self.recorder: Optional[TripRecorder] = None
+        self.diag = None            # diag.wiring.Diagnostics (all-ECU diagnostics engine)
         self._unsubscribe = None
         self._unsubscribe_powerbox = None
 
@@ -446,6 +454,11 @@ class BackendService:
 
         # Dashcam auto-light ingest (optional, io.dashcam_ingest).
         self.dashcam = None
+
+        # BEAN monitor (frame ring + capture log) and its status mirror cadence.
+        self.bean_monitor = None
+        self._bean_tick_last: float = 0.0
+        self._bean_status_last: Optional[dict] = None
 
         # comma.ai panda broadcast CAN source (io.panda_can) + status mirror.
         self.panda: Optional[PandaCanSource] = None
@@ -581,6 +594,20 @@ class BackendService:
         if cfg.recording.enabled:
             self._wire_recording(twin)
 
+        # All-ECU diagnostics engine (diag_* commands, state.diagnostics.ecus,
+        # scan reports next to the metrics database, auto-clear monitor).
+        try:
+            import os as _os
+            from ..diag.wiring import wire_diagnostics
+            self.diag = wire_diagnostics(
+                twin,
+                report_dir=_os.environ.get("PRIUS_DIAG_DIR")
+                or _os.path.join(_os.path.dirname(cfg.db_path) or ".", "diag"),
+                live=not cfg.replay_file,
+            )
+        except Exception:
+            logger.exception("Diagnostics engine could not be wired")
+
         # Dashcam vision: optional auto-light recommendation (state.vision).
         if cfg.dashcam_url:
             self._wire_dashcam(twin)
@@ -596,6 +623,8 @@ class BackendService:
             rollup_interval=cfg.rollup_interval,
             prune_interval=cfg.prune_interval,
         )
+
+        self._wire_bean(twin)
 
         bridge = StoreBridge(twin.store)
         # Push every state change to API clients (callback runs on the engine
@@ -620,6 +649,7 @@ class BackendService:
             auth_token=cfg.auth_token,
             log_level="debug" if cfg.verbose else "info",
             roadsense_url=roadsense_url,
+            bean_frames=self.bean_monitor.frames_since if self.bean_monitor else None,
         )
         
         zmq_srv = ZmqServer(
@@ -671,6 +701,45 @@ class BackendService:
         self.bridge = bridge
         self.api = api
         self.zmq = zmq_srv
+
+    def _wire_bean(self, twin: VirtualTwin) -> None:
+        """BEAN monitor: frame ring for GET /api/v1/bean/frames + capture log
+        (REST bean_capture / bean_mark), fed from SetBeanRxAction."""
+        from .bean_monitor import BeanMonitor
+        cfg = self.config
+        mon = BeanMonitor(cfg.bean_capture_dir,
+                          rotate_bytes=int(cfg.bean_capture_rotate_mb * 1024 * 1024))
+        self.bean_monitor = mon
+
+        def _bean_middleware(action, store) -> None:
+            name = type(action).__name__
+            if name == "SetBeanRxAction":
+                if action.frames or action.stats:
+                    mon.ingest(action.frames, action.stats)
+            elif name == "BeanCaptureAction":
+                if action.on:
+                    mon.start(action.name)
+                else:
+                    mon.stop()
+                self._bean_tick_last = 0.0          # mirror the status now
+            elif name == "BeanMarkAction":
+                mon.mark(action.text)
+
+        twin.store.add_middleware(_bean_middleware)
+
+    def _bean_tick(self) -> None:
+        """Mirror the capture-log status into bean.capture (1 Hz, on change)."""
+        if self.bean_monitor is None or self.twin is None:
+            return
+        now = time.monotonic()
+        if now - self._bean_tick_last < 1.0:
+            return
+        self._bean_tick_last = now
+        st = self.bean_monitor.status()
+        if st != self._bean_status_last:
+            self._bean_status_last = st
+            from ..state.actions import SetBeanCaptureAction
+            self.twin.store.dispatch(SetBeanCaptureAction(st))
 
     def _wire_dashcam(self, twin: VirtualTwin) -> None:
         """Dashcam light ingest: worker thread grabs + decides, engine tick
@@ -957,6 +1026,13 @@ class BackendService:
                     self.powerbox_commander.set_acc_sim(action.on)
                 elif type(action).__name__ == "PowerboxBeanAction":
                     self.powerbox_commander.send_bean(action.op, **action.params)
+                elif type(action).__name__ == "PowerboxBeanRxAction":
+                    self.powerbox_commander.bean_rx(on=action.on, op=action.op, raw=action.raw)
+                elif type(action).__name__ == "PowerboxBeanTxEnableAction":
+                    logger.warning("Powerbox BEAN TX guard %s requested (BENCH ONLY: "
+                                   "never on the car's live bus)",
+                                   "ARM" if action.on else "disarm")
+                    self.powerbox_commander.bean_tx_enable(action.on)
 
         twin.store.add_middleware(_powerbox_middleware)
 
@@ -1354,8 +1430,11 @@ class BackendService:
                     self._vfd_clock_tick()
                     self._satellite_tick()
                     self._avc_tick()
+                    self._bean_tick()
                     self._panda_tick()
                     self._dashcam_tick()
+                    if self.diag is not None:
+                        self.diag.tick()
                     if self.recorder is not None:
                         self.recorder.tick()
                 except Exception:

@@ -11,6 +11,7 @@ Device IDs (offset by DEVICE_POWERBOX_BASE=200 on the computer side):
     1  → 201  Telemetry: INA219 voltage / current / accumulated mAh, env
               sensors, fan duty + tach RPM
     2  → 202  Events: ignition (ACC) state
+    3  → 203  BEAN receiver: decoded body-bus frames + counters (bean_rx.py)
 
 The computer side remaps these via MultiInputPort id_offset=200.
 On the wire (this firmware) we use the LOCAL ids 0/1/2.
@@ -52,6 +53,18 @@ Inbound commands from the computer (device 0):
             Reply {"ack":"bean","op":..,<results>} plus a live PMEVENT echo
             ({"msg":"PMEVENT","ev":"bean",...}, not kept in the PMLOG ring);
             bad op/args -> ERROR BEAN_ARGS, TX released on every path.
+            Every TX-driving op (tx/pulse/loop/square) needs the guard
+            first (fw 2.3.0): {"a":"bean_tx_enable","v":1} arms it for
+            BEAN_TX_ENABLE_MS (60 s), "v":0 disarms; otherwise ERROR
+            BEAN_TX_DISABLED and the pin is never touched.
+    {"id": 0, "d": {"a": "bean_rx", "on": 0|1}}   BEAN receiver (fw 2.3.0,
+            bean_rx.py, GP6 only, never drives the bus; ON at boot)
+            -> {"ack":"bean_rx","on":..,"mode":"dma"|"irq"|"poll"}
+    {"id": 0, "d": {"a": "bean_rx", "op": "stats"}}  stats now on id 3
+    {"id": 0, "d": {"a": "bean_rx", "raw": 1-512}}   next N raw run lengths
+            (us, + dominant / - recessive) on id 3 as {"raw":[..],"ri","rn"}
+            Frames: id 3 {"t":ms,"bf":[[t_ms,pri,"DST","MES","DATA",rsp,code]
+            ..],"st":{counters, every 2 s}}; see README "BEAN receiver".
     Firmware update (no REPL needed; the firmware keeps running, the WDT fed
     and the buttons released throughout; host tool powerbox/pb_flash.py):
     {"id": 0, "d": {"a": "put_begin", "name": "main.py", "size": n, "sha": hex64}}
@@ -141,7 +154,7 @@ import pcf8574                      # PCF8574 driver + RelayBoard (pin map, NC, 
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-VERSION = "2.2.5"
+VERSION = "2.3.0"
 
 # Device role — reported in the unified identify ("whoami") response and the
 # ready banner so the computer can discover which USB-CDC port is the powerbox
@@ -152,6 +165,7 @@ ROLE = "powerbox"
 ID_SYSTEM = 0
 ID_TELEMETRY = 1
 ID_EVENTS = 2
+ID_BEAN = 3          # BEAN receiver frames/stats (bean_rx.py), backend 203
 
 # Default telemetry interval in milliseconds
 DEFAULT_INTERVAL_MS = 1000
@@ -487,6 +501,8 @@ def wdt_sleep_ms(total_ms):
         feed_wdt()
         if _pm is not None:
             _pm.relay_poll()
+        if _brx is not None:
+            _brx.poll()                   # BEAN receiver (bounded, never raises)
         left = time.ticks_diff(t_end, time.ticks_ms())
         if left <= 0:
             break
@@ -935,12 +951,72 @@ def bean_release():
         _bean.release()
 
 
+# TX guard (fw 2.3.0): the receiver runs on the car's live bus, so no op may
+# drive GP7 unless armed with {"a":"bean_tx_enable","v":1}; the arm expires
+# after BEAN_TX_ENABLE_MS. RAM only, off at boot.
+BEAN_TX_ENABLED = False
+BEAN_TX_ENABLE_MS = 60000
+_bean_tx_until = 0
+
+
+def bean_tx_allowed():
+    global BEAN_TX_ENABLED
+    if BEAN_TX_ENABLED and time.ticks_diff(time.ticks_ms(), _bean_tx_until) >= 0:
+        BEAN_TX_ENABLED = False
+    return BEAN_TX_ENABLED
+
+
+def bean_tx_enable(data):
+    global BEAN_TX_ENABLED, _bean_tx_until
+    on = _truthy(data.get("v", 0))
+    BEAN_TX_ENABLED = on
+    _bean_tx_until = time.ticks_add(time.ticks_ms(), BEAN_TX_ENABLE_MS)
+    bean_release()
+    log_event("bean_tx", v=1 if on else 0)
+    tx(ID_SYSTEM, {"ack": "bean_tx_enable", "v": 1 if on else 0,
+                   "s": BEAN_TX_ENABLE_MS // 1000 if on else 0})
+
+
+# BEAN receiver (bean_rx.py, GP6 only): started after the safe-boot window.
+_brx = None
+_brx_err = None
+
+
+def bean_rx_start():
+    global _brx, _brx_err
+    try:
+        import bean_rx
+        _brx = bean_rx.BeanRx(tx, ID_BEAN, BEAN_RX_PIN)
+        mode = _brx.enable(True)
+        _brx_err = _brx.err
+        log_event("bean_rx", mode=mode, err=_brx.err)
+    except Exception as e:            # missing file, MemoryError, no rp2 ...
+        _brx = None
+        _brx_err = repr(e)
+        log_event("bean_rx", mode=None, err=_brx_err)
+
+
+def bean_rx_command(data):
+    if _brx is None:
+        tx_error("BEAN_RX", _brx_err or "not started")
+        return
+    reply, err = _brx.command(data)
+    if err:
+        tx_error("BEAN_RX", err)
+    else:
+        tx(ID_SYSTEM, reply)
+
+
 def bean_command(data):
     """Run one {"a":"bean","op":...} bench op; reply ack + PMEVENT echo."""
     if _bean is None:
         tx_error("BEAN", "not initialised")
         return
     op = str(data.get("op", "status")).lower()
+    if op != "status" and not bean_tx_allowed():
+        _bean.release()
+        tx_error("BEAN_TX_DISABLED", "op=%s: send bean_tx_enable v=1 first" % op)
+        return
     try:
         if op == "status":
             args = ()
@@ -1398,7 +1474,8 @@ class Config:
 
 # ─── Firmware update over NDJSON ─────────────────────────────────────────────
 
-OTA_FILES = ("main.py", "boot.py", "pcf8574.py", "ina219.py", "bmp280.py", "ahtx0.py")
+OTA_FILES = ("main.py", "boot.py", "pcf8574.py", "ina219.py", "bmp280.py", "ahtx0.py",
+             "bean_rx.py")
 
 
 def _rm(path):
@@ -1624,6 +1701,12 @@ def process_command(line: str, config: Config):
     elif action == "bean":
         bean_command(data)
 
+    elif action == "bean_rx":
+        bean_rx_command(data)
+
+    elif action == "bean_tx_enable":
+        bean_tx_enable(data)
+
     elif action == "acc_sim":
         # BENCH ONLY: override the ACC input (null/absent clears).
         v = data.get("v")
@@ -1737,6 +1820,9 @@ def main():
     except Exception:
         pass
 
+    # BEAN receiver: after the safe-boot window (nothing drains it before).
+    bean_rx_start()
+
     # I2C setup
     i2c, devices = setup_i2c()
 
@@ -1767,7 +1853,7 @@ def main():
                 tx_ident()
             _fan.update_rpm()
             _pm.tick(None)
-            time.sleep_ms(500)
+            wdt_sleep_ms(500)             # BEAN receiver keeps draining
 
     ina = None
     bmp = None

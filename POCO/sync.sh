@@ -147,7 +147,7 @@ if [ "$DO_APP" = 1 ]; then
     # shellcheck disable=SC2086
     ssh -n $SSH_OPTS "$PHONE" "mkdir -p $APP_DEST/powerbox"
     rsync -rlpt -e "ssh $SSH_OPTS" \
-        "$REPO_ROOT"/powerbox/{main,boot,pcf8574,ina219,bmp280,ahtx0,pb_flash}.py \
+        "$REPO_ROOT"/powerbox/{main,boot,bean_rx,pcf8574,ina219,bmp280,ahtx0,pb_flash}.py \
         "$PHONE:$APP_DEST/powerbox/" </dev/null
     # Dashboard (built on the dev box: `cd dashboard && npm ci && npm run build`);
     # the backend serves $APP_DEST/dashboard/dist at / when it exists.

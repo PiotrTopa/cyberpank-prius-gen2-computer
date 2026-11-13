@@ -123,6 +123,12 @@ class ActionType(Enum):
     POWERBOX_BEAN = auto()            # BEAN transceiver bench op (fw >= 2.2.3)
     SET_POWERBOX_BEAN = auto()        # mirror of the last BEAN bench result
     POWERBOX_ACC_SIM = auto()         # bench ACC override (fw >= 2.2.5)
+    POWERBOX_BEAN_RX = auto()         # BEAN receiver control (fw >= 2.3.0)
+    POWERBOX_BEAN_TX_ENABLE = auto()  # arm/disarm the BEAN TX guard (60 s, bench)
+    SET_BEAN_RX = auto()              # decoded BEAN frames/stats/ack from the powerbox
+    BEAN_CAPTURE = auto()             # start/stop the BEAN capture log
+    BEAN_MARK = auto()                # event mark in the BEAN capture log
+    SET_BEAN_CAPTURE = auto()         # capture log status mirror
     SET_RELAY = auto()                # relay board load channel (PCF8574 ch 2-8)
     ROADSENSE_MODE = auto()           # roadsense stack operator mode (auto|on|off)
     ROADSENSE_RESTART = auto()        # restart roadsense.target
@@ -159,6 +165,8 @@ class ActionType(Enum):
     SET_PENDING_DTCS = auto()      # OBD-II Mode 07 pending DTCs
     SET_DTC_SCAN_STATE = auto()    # Scan in progress / complete
     CLEAR_DTCS = auto()            # Clear all DTCs (Mode 04)
+    DIAG_COMMAND = auto()          # all-ECU diagnostics request (diag.actions.DiagCommandAction)
+    SET_DIAG_STATE = auto()        # all-ECU diagnostics results (diag.actions.SetDiagStateAction)
     
     # Batch action
     BATCH = auto()
@@ -1503,6 +1511,67 @@ class SetPowerboxBeanAction(Action):
     def __init__(self, result: dict, source: ActionSource = ActionSource.GATEWAY):
         super().__init__(ActionType.SET_POWERBOX_BEAN, source)
         self.result = dict(result)
+
+
+class PowerboxBeanRxAction(Action):
+    """BEAN receiver control on the powerbox (fw >= 2.3.0): ``on`` True/False
+    starts/stops it, ``op`` "stats" asks for counters now, ``raw`` N dumps
+    the next N raw run lengths. Exactly one of them is set."""
+    def __init__(self, on: Optional[bool] = None, op: Optional[str] = None,
+                 raw: Optional[int] = None, source: ActionSource = ActionSource.UI):
+        super().__init__(ActionType.POWERBOX_BEAN_RX, source)
+        self.on = on
+        self.op = op
+        self.raw = raw
+
+
+class PowerboxBeanTxEnableAction(Action):
+    """BENCH ONLY: arm (60 s, firmware-side expiry) or disarm the powerbox
+    BEAN TX guard that every TX-driving ``bean`` op needs (fw >= 2.3.0)."""
+    def __init__(self, on: bool, source: ActionSource = ActionSource.UI):
+        super().__init__(ActionType.POWERBOX_BEAN_TX_ENABLE, source)
+        self.on = bool(on)
+
+
+class SetBeanRxAction(Action):
+    """One powerbox BEAN line (device 203) or a ``bean_rx`` ack: ``frames``
+    = frame dicts (comm.bean.frame_from_wire), ``stats`` = firmware counters,
+    ``ack`` = {"on":..,"mode":..} from a bean_rx command, ``error`` = an
+    ERROR BEAN_RX detail. ``recv_ts`` = time.time() of receipt."""
+    def __init__(self, frames=None, stats=None, ack=None, error=None,
+                 recv_ts: float = 0.0, raw=None,
+                 source: ActionSource = ActionSource.GATEWAY):
+        super().__init__(ActionType.SET_BEAN_RX, source)
+        self.frames = list(frames or [])
+        self.stats = stats
+        self.ack = ack
+        self.error = error
+        self.recv_ts = recv_ts
+        self.raw = raw
+
+
+class BeanCaptureAction(Action):
+    """Start (``on`` True, optional ``name``) or stop the BEAN capture log
+    (backend.bean_monitor: one JSON line per frame, rotated at 20 MB)."""
+    def __init__(self, on: bool, name: str = "", source: ActionSource = ActionSource.UI):
+        super().__init__(ActionType.BEAN_CAPTURE, source)
+        self.on = bool(on)
+        self.name = name
+
+
+class BeanMarkAction(Action):
+    """Write a timestamped event line ("driver door opened") into the BEAN
+    capture log (and the monitor's mark list)."""
+    def __init__(self, text: str, source: ActionSource = ActionSource.UI):
+        super().__init__(ActionType.BEAN_MARK, source)
+        self.text = text
+
+
+class SetBeanCaptureAction(Action):
+    """Mirror of the capture log status into ``bean.capture``."""
+    def __init__(self, status: dict, source: ActionSource = ActionSource.INTERNAL):
+        super().__init__(ActionType.SET_BEAN_CAPTURE, source)
+        self.status = dict(status)
 
 
 class InputEventAction(Action):

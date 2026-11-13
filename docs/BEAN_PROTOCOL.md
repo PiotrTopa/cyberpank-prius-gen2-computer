@@ -470,6 +470,20 @@ Simplest robust PIO design: **edge-to-edge run-length capture.**
 * Sampling point if you sample instead of measuring runs: 50 % of the bit after a resync edge (all references).
   Glitch filter: ignore pulses shorter than about 10 µs, because the trapezoidal edges are slow.
 
+**Implementation (powerbox fw 2.3.0, 2026-11-13).** This design is
+implemented in `powerbox/bean_rx.py`: PIO run-length capture at 1 µs
+resolution, a DMA ring and the decoder steps 1–6 above. It also adds an
+adaptive bit time, a dominant/recessive skew estimate and a 12 µs glitch
+filter.
+- The firmware protocol, counters and commands are documented in
+  `powerbox/README.md` under "BEAN receiver".
+- The backend keeps the frame table and capture logs (§7.3 equivalent, as
+  JSON lines in `logs/bean/`): REST `bean_capture` / `bean_mark`,
+  `GET /api/v1/bean/frames`.
+- `tests/test_bean_rx.py` re-encodes all 8,627 bean_tools NHW20 frames on
+  the wire and decodes them all.
+- The stuff bit before the EOM (§3.2) is accepted both present and absent.
+
 ### 7.2 Transmit timing (for later) [M]/[I]
 
 * Wait for idle, drive SOF, then send bits MSB first with stuffing, re-checking the bus at each recessive bit

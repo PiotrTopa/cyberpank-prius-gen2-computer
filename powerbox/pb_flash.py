@@ -136,10 +136,32 @@ def main():
     print("board: %s %s" % (ident.get("role"), ident.get("ver")))
     if ident.get("role") != "powerbox":
         sys.exit("not a powerbox")
-    for f in a.files:
-        put_file(link, f)
+    # main.py first: a new firmware file (e.g. bean_rx.py in 2.3.0) is only
+    # accepted once the main.py that lists it in OTA_FILES is running, so a
+    # name refusal after main.py went in triggers one reboot and a retry.
+    files = sorted(a.files, key=lambda f: os.path.basename(f) != "main.py")
+    sent_main = False
+    retried = False
+    i = 0
+    while i < len(files):
+        try:
+            put_file(link, files[i])
+        except RuntimeError as e:
+            if "PUT name" not in str(e) or not sent_main or retried:
+                raise
+            print("\n  %s refused by the running firmware; rebooting into the new "
+                  "main.py and retrying" % os.path.basename(files[i]))
+            reboot(link)
+            retried = True
+            continue
+        sent_main = sent_main or os.path.basename(files[i]) == "main.py"
+        i += 1
     if a.no_reboot:
         return
+    reboot(link)
+
+
+def reboot(link):
     link.send({"a": "reboot"})
     link.wait(lambda d: d.get("ack") == "reboot", 10)
     print("rebooting...")

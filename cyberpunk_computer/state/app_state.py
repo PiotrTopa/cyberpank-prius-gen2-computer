@@ -518,6 +518,14 @@ class DiagnosticsState:
     mil_on: bool = False           # Malfunction Indicator Lamp status
     last_scan_time: Optional[float] = None  # Timestamp of last DTC scan
     scan_in_progress: bool = False
+    # All-ECU diagnostics engine (cyberpunk_computer/diag, docs/TOYOTA_DIAGNOSTICS.md).
+    # JSON-friendly mappings published by DiagEngine.state():
+    ecus: Optional[Mapping[str, object]] = None       # per ECU: name, address, responded, dtcs[...], ...
+    scan: Optional[Mapping[str, object]] = None       # scan progress / last report file
+    vehicle: Optional[Mapping[str, object]] = None    # VIN etc. read from the ECUs
+    last_read: Optional[Mapping[str, object]] = None  # result of the last diag_read
+    autoclear: Optional[Mapping[str, object]] = None  # auto-clear whitelist, last action, counters
+    diag_stats: Optional[Mapping[str, object]] = None
 
 
 @dataclass(frozen=True)
@@ -692,7 +700,35 @@ class PowerboxState:
     # firmware reports a simulated ACC (STATUS "acc_sim":1); the simulated
     # value itself is what acc_on shows. None until the first STATUS/ack.
     acc_sim: Optional[bool] = None
+    # BEAN receiver (fw >= 2.3.0, device 203): {"enabled", "mode", firmware
+    # counters (ok, crc, stuff, len, frm, trunc, ovf, edges, tb, skew, cpu,
+    # ...), "fps" (frames/s over the last 5 s), "last_frame_ts", "ts",
+    # "error"}. None until the first BEAN line / ack.
+    bean_rx: Optional[Mapping] = None
 
+    last_update_time: float = 0.0
+
+
+@dataclass(frozen=True)
+class BeanState:
+    """Toyota BEAN body bus as seen by the powerbox receiver (fw >= 2.3.0).
+
+    ``messages``: "DST:MES" -> {dst, mes, pri, count, last_ts, data (hex),
+    changes, period_ms}, CRC-good frames only. ``decoded``: named values of
+    the few known IDs (comm.bean.decode_known, all UNVERIFIED on the Prius)
+    -> {value, ts, src}. The last frames themselves are NOT in the state
+    (kept small for the 1 Hz publish): GET /api/v1/bean/frames.
+    ``capture``: capture-log status {on, file, frames, bytes, name, dir}.
+    """
+    messages: Mapping[str, Mapping] = field(default_factory=dict)
+    decoded: Mapping[str, Mapping] = field(default_factory=dict)
+    frames_total: int = 0             # CRC-good frames received by the backend
+    errors_total: int = 0             # failed frames received (rate-limited at source)
+    last_frame_ts: float = 0.0
+    rate_sec: int = 0                 # fps window: current epoch second
+    rate_buckets: tuple = (0, 0, 0, 0, 0)   # frames per second, newest last
+    capture: Mapping = field(default_factory=dict)
+    last_mark: str = ""
     last_update_time: float = 0.0
 
 
@@ -827,6 +863,7 @@ class AppState:
     avc: AvcState = field(default_factory=AvcState)
     vision: VisionState = field(default_factory=VisionState)
     roadsense: RoadsenseState = field(default_factory=RoadsenseState)
+    bean: BeanState = field(default_factory=BeanState)
 
     # UI-only state (not from vehicle)
     screen_brightness: int = 100

@@ -62,6 +62,7 @@ class StateSlice(Enum):
     AVC = auto()  # AVC-LAN link/display state (screen, lights, touch, nav emulation)
     VISION = auto()  # dashcam vision: auto-light recommendation (io/dashcam_ingest.py)
     ROADSENSE = auto()  # roadsense perception stack on this computer (backend.roadsense_power)
+    BEAN = auto()  # BEAN body bus: message table, known values, capture status (device 203)
     ALL = auto()
 
 
@@ -880,6 +881,14 @@ class Store:
                 )
             )
             affected.add(StateSlice.DIAGNOSTICS)
+
+        elif action.type == ActionType.SET_DIAG_STATE:
+            # All-ECU diagnostics engine results (diag.actions.SetDiagStateAction).
+            self._state = replace(
+                self._state,
+                diagnostics=replace(self._state.diagnostics, **action.fields)
+            )
+            affected.add(StateSlice.DIAGNOSTICS)
         
         # Dynamics reducers
         elif action.type == ActionType.SET_STEERING_ANGLE:
@@ -1167,6 +1176,20 @@ class Store:
             )
             affected.add(StateSlice.POWERBOX)
 
+        elif action.type == ActionType.SET_BEAN_RX:
+            affected |= self._reduce_bean_rx(action)
+
+        elif action.type == ActionType.SET_BEAN_CAPTURE:
+            new_bean = replace(self._state.bean, capture=dict(action.status))
+            if new_bean != self._state.bean:
+                self._state = replace(self._state, bean=new_bean)
+                affected.add(StateSlice.BEAN)
+
+        elif action.type == ActionType.BEAN_MARK:
+            self._state = replace(self._state, bean=replace(
+                self._state.bean, last_mark=str(action.text)))
+            affected.add(StateSlice.BEAN)
+
         elif action.type == ActionType.SATELLITE_POWER_HOLD:
             import time as _t
             holders = set(self._state.satellites.power_holders)
@@ -1396,6 +1419,55 @@ class Store:
             change_str = ", ".join(changes)
             logger.info(f"[STATE] {action_name} ({source}): {change_str}")
     
+    def _reduce_bean_rx(self, a) -> Set[StateSlice]:
+        """BEAN frames/stats/ack (fw 2.3.0) -> bean table + powerbox.bean_rx."""
+        import time as _t
+        from ..comm.bean import update_decoded, update_messages
+        now = a.recv_ts or _t.time()
+        bean = self._state.bean
+        ok = [f for f in a.frames if f.get("ok")]
+        n_err = len(a.frames) - len(ok)
+        # fps over the last 5 s in 1 s buckets (also decays on stats lines)
+        sec = int(now)
+        buckets = list(bean.rate_buckets)
+        shift = sec - bean.rate_sec
+        if shift >= len(buckets) or shift < 0:
+            buckets = [0] * len(buckets)
+        elif shift > 0:
+            buckets = buckets[shift:] + [0] * shift
+        buckets[-1] += len(ok)
+        changes = {"rate_sec": sec, "rate_buckets": tuple(buckets),
+                   "last_update_time": now}
+        if ok:
+            changes["messages"] = update_messages(bean.messages, ok)
+            changes["decoded"] = update_decoded(bean.decoded, ok)
+            changes["frames_total"] = bean.frames_total + len(ok)
+            changes["last_frame_ts"] = max(f["ts"] for f in ok)
+        if n_err:
+            changes["errors_total"] = bean.errors_total + n_err
+        new_bean = replace(bean, **changes)
+        rx = dict(self._state.powerbox.bean_rx or {})
+        if a.stats:
+            rx.update(a.stats)
+            rx["enabled"] = bool(a.stats.get("on", 1))
+            rx.pop("on", None)
+            rx.pop("error", None)
+        if a.ack:
+            if "on" in a.ack:
+                rx["enabled"] = bool(a.ack["on"])
+            if a.ack.get("mode") is not None:
+                rx["mode"] = a.ack["mode"]
+        if a.error:
+            rx["error"] = str(a.error)
+        if a.raw is not None:
+            rx["raw"] = list(a.raw)
+        rx["fps"] = round(sum(buckets) / float(len(buckets)), 1)
+        rx["last_frame_ts"] = new_bean.last_frame_ts or None
+        rx["ts"] = now
+        self._state = replace(self._state, bean=new_bean,
+                              powerbox=replace(self._state.powerbox, bean_rx=rx))
+        return {StateSlice.BEAN, StateSlice.POWERBOX}
+
     def _notify(self, slices: Set[StateSlice]) -> None:
         """Notify subscribers of affected slices."""
         notified: Set[Subscriber] = set()

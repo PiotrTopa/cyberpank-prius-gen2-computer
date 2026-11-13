@@ -112,6 +112,45 @@ converge the rest. The MFD manager recovers through its ON-state watchdog.
 - Tests: `TestAccSim` in `tests/test_powerbox_firmware.py` and `tests/test_powerbox_io.py`.
 - Only `main.py` changed.
 
+**2.3.0 (2026-11-13), receive-only BEAN decoder + TX guard.**
+- New firmware file **`bean_rx.py`**. Each item below is covered in README
+  "BEAN receiver".
+  - Capture: a PIO run-length program (PIO1 SM0, 1 µs resolution, 10 ms
+    timeout words) feeds a 1024-word ring through rp2.DMA. The fallbacks are
+    a hard IRQ, then FIFO polling.
+  - Decoding is bounded and runs from every `wdt_sleep_ms` slice. It covers
+    adaptive bit time, skew compensation, glitch filter, destuffing, CRC,
+    a tolerant EOM search and raw RSP.
+  - Frames are batched on the new **id 3** (backend 203): at most every
+    200 ms, ≤ 16 frames per line, with stats every 2 s.
+- Commands:
+  - `{"a":"bean_rx","on":0|1}` (ON at boot), `{"a":"bean_rx","op":"stats"}`
+    and `{"a":"bean_rx","raw":N}`.
+  - `{"a":"bean_tx_enable","v":1|0}`. Without it, `bean` tx/pulse/loop/square
+    answer `ERROR BEAN_TX_DISABLED`. It expires after 60 s.
+- `main.py` changes: `ID_BEAN`, `OTA_FILES += bean_rx.py`, the receiver
+  start after safe boot, `_brx.poll()` in `wdt_sleep_ms`, and the no-sensor
+  idle loop sleeping through `wdt_sleep_ms`.
+- The 5 ms relay read-back and WDT feeding are unchanged; the receiver adds
+  one bounded poll per slice.
+- Backend:
+  - State: `powerbox.bean_rx`, plus the new top-level `bean` (message table,
+    known values, capture status).
+  - API: `GET /api/v1/bean/frames`.
+  - REST: `powerbox_bean_rx`, `bean_capture`, `bean_mark`,
+    `powerbox_bean_tx_enable`.
+- Tests:
+  - `tests/test_bean_rx.py`: PIO cycle simulation, decoder edge cases, all
+    8,627 real NHW20 frames of bean_tools, ring overflow, batching, commands,
+    capture modes.
+  - `tests/test_bean_backend.py`.
+  - `TestBeanTxGuard` / `TestBeanRxWiring` in
+    `tests/test_powerbox_firmware.py`.
+- Flash `main.py`, `boot.py` and `bean_rx.py`. The default
+  `prius-flash-powerbox` now sends all three. On a board below 2.3.0,
+  `pb_flash.py` reboots once mid-update, because the old firmware refuses
+  the new file name.
+
 ## Bench verification checklist (after flashing `pcf8574.py` + `main.py`)
 
 1. Banner: `POWERBOX_READY` with `ver 2.1.0` and `rc` arrives once the heartbeat daemon runs; STATUS shows `rc`, `up`, `rly: [null,0,0,0,0,0,0,0]`, `rly_fix 0`, `rly_err 0`.

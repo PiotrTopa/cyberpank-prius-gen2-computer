@@ -34,9 +34,11 @@ class ApiServer:
         auth_token: Optional[str] = None,
         log_level: str = "info",
         roadsense_url: Optional[str] = None,
+        bean_frames=None,
     ) -> None:
         self._app = create_app(bridge, db, auth_token=auth_token,
-                               roadsense_url=roadsense_url)
+                               roadsense_url=roadsense_url,
+                               bean_frames=bean_frames)
         config = uvicorn.Config(
             self._app,
             host=host,
