@@ -398,6 +398,16 @@ def parse_powerbox_system(data: dict) -> List[Action]:
 
 
 _bean_raw: list = []
+_bean_clock = None          # comm.bean.BeanClock, created on first use
+
+
+def bean_clock():
+    """The process-wide BEAN frame-clock estimator (see comm.bean.BeanClock)."""
+    global _bean_clock
+    if _bean_clock is None:
+        from ..comm.bean import BeanClock
+        _bean_clock = BeanClock()
+    return _bean_clock
 
 
 def parse_bean_message(data: dict, recv_ts: Optional[float] = None) -> List[Action]:
@@ -406,8 +416,12 @@ def parse_bean_message(data: dict, recv_ts: Optional[float] = None) -> List[Acti
     ``{"t":ms,"bf":[[t_ms,pri,"DST","MES","DATA",rsp,code],..],"st":{..}}``
     or a raw run-length dump chunk ``{"raw":[us..],"ri":k,"rn":N}`` (+ =
     dominant, - = recessive); the chunks are joined and published once
-    complete (powerbox.bean_rx.raw)."""
-    from ..comm.bean import frame_from_wire
+    complete (powerbox.bean_rx.raw).
+
+    Frame times: the firmware's frame clock is not on its ``t`` time base
+    (fw 2.4.0), so frames are timed by the lower-envelope estimator
+    :func:`bean_clock` unless the ``t`` based age is plausible."""
+    from ..comm.bean import frames_from_batch
     global _bean_raw
     now = time.time() if recv_ts is None else recv_ts
     if "raw" in data:
@@ -421,11 +435,7 @@ def parse_bean_message(data: dict, recv_ts: Optional[float] = None) -> List[Acti
             logger.info("Powerbox BEAN raw runs (%d): %s", len(raw), raw)
             return [SetBeanRxAction(raw=raw, recv_ts=now)]
         return []
-    frames = []
-    for rec in data.get("bf") or []:
-        f = frame_from_wire(rec, data.get("t"), now)
-        if f is not None:
-            frames.append(f)
+    frames = frames_from_batch(data.get("bf") or [], data.get("t"), now, clock=bean_clock())
     stats = data.get("st") if isinstance(data.get("st"), dict) else None
     if not frames and stats is None:
         return []

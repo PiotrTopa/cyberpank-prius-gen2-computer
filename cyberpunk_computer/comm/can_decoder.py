@@ -296,7 +296,7 @@ class CANDecoder:
             # Since Byte 2 is 0, just Byte3/2.
             # 
             # TODO: Real Delta SOC requires SOLICITED OBD2 query to ECU 0x7E2 with PID 21CF
-            #       See docs/TODO_SOLICITED_OBD2.md for implementation details
+            #       See docs/ARCHITECTURE.md §3 for implementation details
             #       Formula: delta_soc = 0.01 * Byte_G (range 0-60%)
             # 
             # Ignoring Byte 2 as "delta" to avoid confusion - it's NOT delta SOC.
@@ -453,15 +453,17 @@ class CANDecoder:
         
         # 0x540: Status flags (NOT inverter temperature)
         # Inverter temps require SOLICITED PID 21C3 to ECU 0x7E2
-        # See docs/TODO_SOLICITED_OBD2.md
+        # See docs/ARCHITECTURE.md §3
         
-        # 0x5CC: Outside / Ambient Temperature (broadcast, unsolicited)
-        # Observed: 3 bytes [24, xx, xx] where byte 0 = temp + 40 offset
-        # Formula: ambient_temp = byte0 - 40 (°C)
-        # Decoded for diagnostics only: climate.outside_temp is AVC-LAN only.
-        elif can_id == 0x5CC and len(data) >= 1:
-            msg.msg_type = CANMessageType.CLIMATE_DATA
-            msg.values["ambient_temp"] = data[0] - 40
+        # 0x5CC: NOT a temperature. It is the Toyota gateway's CAN copy of
+        # BEAN 98:CC: byte 0 is the BEAN header (0x24), bytes 1-2 the BEAN
+        # data verbatim (docs/BEAN_SIGNALS.md §5, survey 2026-11-14). The old
+        # "ambient = byte0 - 40" decoded the header and always gave -4 °C.
+        # 98:CC is a slow 10-bit value (0x1FA-0x203) that falls as the engine
+        # bay warms; its meaning is unknown, so only the raw value is kept.
+        elif can_id == 0x5CC and len(data) >= 3:
+            msg.msg_type = CANMessageType.SYSTEM_STATUS
+            msg.values["bean_98cc_raw"] = ((data[1] << 8) | data[2]) & 0x3FF
         
         # 0x5C8: Cruise Control Cancel Event (~1050ms period, sparse)
         # This message is event-based (only ~18 msgs in 37 min recording).
@@ -541,29 +543,25 @@ class CANDecoder:
         # HEADLIGHTS & EVENTS
         # ---------------------------------------------------
         
-        # 0x57F: Headlight Status (1050ms period)
-        # Byte B (data[1]) bits 3-5 encode light state:
-        #   0x00 = OFF, 0x10 = Parking lights, 0x30 = Low beam, 0x38 = High beam
-        # Byte D (data[3]) bit 7: DRL/auto headlight sensor active
-        # Byte A (data[0]): constant 0x68 (status/multiplexer)
-        # Byte C (data[2]): constant 0x10 (status flag)
+        # 0x57F: Lamps + door (1 s period). The Toyota gateway's CAN copy of
+        # BEAN FE:7F: data[0] = BEAN header (0x68), data[1..] = FE:7F bytes
+        # 0.. verbatim (docs/BEAN_SIGNALS.md §5, survey 2026-11-14).
+        #   data[1] (FE:7F b0): 0x10 tail/parking, 0x20 low beam, 0x01 front
+        #           fog (all confirmed); 0x08 high beam (public decode, never
+        #           seen set on this car yet)
+        #   data[2] (FE:7F b1): 0x08 instrument illumination (follows tail)
+        #   data[3] (FE:7F b2): 0x80 A DOOR IS OPEN (was mis-read as "DRL")
         elif can_id == 0x57F and len(data) >= 4:
             msg.msg_type = CANMessageType.HEADLIGHT_STATUS
             light_byte = data[1]
             msg.values["headlight_raw"] = light_byte
             msg.values["parking_lights"] = bool(light_byte & 0x10)
-            msg.values["low_beam"] = bool(light_byte & 0x20) and bool(light_byte & 0x10)
+            msg.values["low_beam"] = bool(light_byte & 0x20)
             msg.values["high_beam"] = bool(light_byte & 0x08)
-            msg.values["drl_active"] = bool(data[3] & 0x80)
-            # Derive state string
-            if light_byte == 0x38:
-                msg.values["headlight_state"] = "HIGH"
-            elif light_byte == 0x30:
-                msg.values["headlight_state"] = "LOW"
-            elif light_byte == 0x10:
-                msg.values["headlight_state"] = "PARK"
-            else:
-                msg.values["headlight_state"] = "OFF"
+            msg.values["fog_front"] = bool(light_byte & 0x01)
+            msg.values["illumination"] = bool(data[2] & 0x08)
+            msg.values["door_open"] = bool(data[3] & 0x80)
+            msg.values["headlight_state"] = headlight_state(light_byte)
         
         # 0x529: SOC Bars & Event Messages (1000ms period, immediate on event)
         # Byte A (data[0]) bit 7: event flag
@@ -1279,6 +1277,18 @@ class CANStateTracker:
 
 
 # Utility functions
+
+def headlight_state(lamp_byte: int) -> str:
+    """"HIGH" / "LOW" / "PARK" / "OFF" from the FE:7F lamp byte (= CAN
+    0x57F data[1]); the fog bit (0x01) does not change the state."""
+    if lamp_byte & 0x08:
+        return "HIGH"
+    if lamp_byte & 0x20:
+        return "LOW"
+    if lamp_byte & 0x10:
+        return "PARK"
+    return "OFF"
+
 
 def parse_can_id(can_id_str: str) -> tuple[int, bool]:
     """

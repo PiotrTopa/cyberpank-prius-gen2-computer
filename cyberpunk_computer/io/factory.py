@@ -114,6 +114,12 @@ class VirtualTwin:
         self._setup_count: int = 0
         self._resub_count: int = 0                  # consecutive watchdog re-setups
         self._last_resub_mono: float = 0.0
+        # Passive-source preference: solicited slots whose only signal is
+        # being heard passively (BEAN) are unsubscribed while that lasts
+        # (comm.source_priority.SlotSuspender).
+        from ..comm.source_priority import SlotSuspender
+        self._slot_suspender = SlotSuspender(
+            self.ingress.sources, self._send_unsub_slot, self._send_sub_slot)
     
     def start(self) -> bool:
         """Start all components."""
@@ -140,6 +146,35 @@ class VirtualTwin:
             if self._setup_pending is None:
                 self._setup_pending = reason
         logger.info("Solicited CAN setup requested (%s)", reason)
+
+    def _slot_payload(self, slot: int) -> Optional[dict]:
+        """The subscription payload of a core or ENABLED toggleable slot."""
+        from ..comm.subscription_groups import CORE_GROUP, TOGGLEABLE_GROUPS
+        from ..persistence import get_settings
+        for s in CORE_GROUP.slots:
+            if s.slot == slot:
+                return s.payload
+        ds = get_settings().data_sources
+        for g in TOGGLEABLE_GROUPS:
+            for s in g.slots:
+                if s.slot == slot:
+                    return s.payload if ds.is_group_enabled(g.key) else None
+        return None
+
+    def _send_unsub_slot(self, slot: int) -> bool:
+        from .ports import OutgoingCommand, DEVICE_CAN
+        if not self.output_port.is_connected():
+            return False
+        return self.output_port.send(OutgoingCommand(
+            device_id=DEVICE_CAN, command_type="unsub", payload={"a": "unsub", "slot": slot}))
+
+    def _send_sub_slot(self, slot: int) -> bool:
+        from .ports import OutgoingCommand, DEVICE_CAN
+        payload = self._slot_payload(slot)
+        if payload is None or not self.output_port.is_connected():
+            return False
+        return self.output_port.send(OutgoingCommand(
+            device_id=DEVICE_CAN, command_type="sub", payload=payload))
 
     def _init_solicited_subscriptions(self, clear_first: bool = False) -> int:
         """
@@ -168,9 +203,12 @@ class VirtualTwin:
         # Switch to normal (active) CAN mode
         sent += send("mode", {"a": "mode", "m": "normal"})
         
-        # Always subscribe core drivetrain
+        # Always subscribe core drivetrain (minus the slots a fresh passive
+        # source currently covers; the suspender re-adds them when it goes stale)
+        suspended = self._slot_suspender.suspended
         for slot_def in CORE_GROUP.slots:
-            sent += send("sub", slot_def.payload)
+            if slot_def.slot not in suspended:
+                sent += send("sub", slot_def.payload)
         
         # Subscribe toggleable groups based on user settings
         ds = get_settings().data_sources
@@ -178,7 +216,8 @@ class VirtualTwin:
         for group in TOGGLEABLE_GROUPS:
             if ds.is_group_enabled(group.key):
                 for slot_def in group.slots:
-                    sent += send("sub", slot_def.payload)
+                    if slot_def.slot not in suspended:
+                        sent += send("sub", slot_def.payload)
                 enabled_names.append(group.key)
             else:
                 logger.debug("Skipping disabled group: %s", group.key)
@@ -201,6 +240,12 @@ class VirtualTwin:
 
         with self._setup_lock:
             reason, self._setup_pending = self._setup_pending, None
+        if reason is None and self.output_port.is_connected():
+            # passive-source preference: suspend / resume single-signal slots
+            try:
+                self._slot_suspender.tick()
+            except Exception as e:
+                logger.error("Solicited slot suspender failed: %s", e)
         if reason is not None:
             n = self._init_solicited_subscriptions(clear_first=False)
             if n:
@@ -252,6 +297,8 @@ class VirtualTwin:
             "setups": self._setup_count,
             "watchdog_resubs": self._resub_count,
             "pending": self._setup_pending,
+            "suspended_slots": sorted(self._slot_suspender.suspended),
+            "sources": self.ingress.sources.status(),
         }
     
     def subscribe_group(self, group) -> None:
@@ -265,6 +312,8 @@ class VirtualTwin:
         from .ports import OutgoingCommand, DEVICE_CAN
         
         for slot_def in group.slots:
+            if slot_def.slot in self._slot_suspender.suspended:
+                continue        # covered by a passive source right now
             self.output_port.send(OutgoingCommand(
                 device_id=DEVICE_CAN,
                 command_type="sub",

@@ -118,7 +118,7 @@ class EnergyMonitorWidget(Widget):
         # Delta SOC (difference between min/max cell blocks) for diagnostics
         # This is the key diagnostic value for battery health
         # TODO: Delta SOC requires SOLICITED OBD2 query to ECU 0x7E2 with PID 21CF
-        #       See docs/TODO_SOLICITED_OBD2.md for implementation details
+        #       See docs/ARCHITECTURE.md §3 (subscription groups)
         #       Until implemented, this chart will show 0.0%
         self._delta_soc: float = 0.0
         self._delta_soc_history: List[float] = []

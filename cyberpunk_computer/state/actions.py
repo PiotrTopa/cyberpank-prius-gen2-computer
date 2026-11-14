@@ -129,6 +129,7 @@ class ActionType(Enum):
     SET_POWERBOX_BEAN_TX = auto()     # mirror of the last BEAN transmitter reply
     POWERBOX_BEAN_WAKE = auto()       # wake the sleeping body bus (safe FE:48)
     SET_BEAN_RX = auto()              # decoded BEAN frames/stats/ack from the powerbox
+    SET_PASSIVE_SIGNALS = auto()      # BEAN/CAN-copy values without a dedicated action
     BEAN_CAPTURE = auto()             # start/stop the BEAN capture log
     BEAN_MARK = auto()                # event mark in the BEAN capture log
     SET_BEAN_CAPTURE = auto()         # capture log status mirror
@@ -385,14 +386,17 @@ class SetICERunningAction(Action):
     """
     Set ICE (Internal Combustion Engine) running state.
     
-    Source: AVC-LAN energy monitor (``1C6->110 00 E4 5F B9`` engine flag)
-    while fresh, CAN engine RPM otherwise (io/ingress.py).
+    Written by the engine-running gate (comm.engine_gate) in io/ingress.py;
+    ``origin`` names the gate source (rpm / bean / bean_inj / can / avc).
     """
     running: bool = False
+    origin: Optional[str] = None
     
-    def __init__(self, running: bool, source: ActionSource = ActionSource.INTERNAL):
+    def __init__(self, running: bool, source: ActionSource = ActionSource.INTERNAL,
+                 origin: Optional[str] = None):
         super().__init__(ActionType.SET_ICE_RUNNING, source)
         self.running = running
+        self.origin = origin
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -502,24 +506,38 @@ class SetFuelFlowAction(Action):
 
 @dataclass
 class SetInstantConsumptionAction(Action):
-    """Set calculated instant consumption."""
+    """Set the displayed instant consumption (``origin``: "meter" /
+    "computed") and our own computed L/100 km."""
     value: float = 0.0
     unit: str = "L/h"
     
-    def __init__(self, value: float, unit: str = "L/h", source: ActionSource = ActionSource.INTERNAL):
+    def __init__(self, value: float, unit: str = "L/h", source: ActionSource = ActionSource.INTERNAL,
+                 origin: Optional[str] = None, computed_l100km: Optional[float] = None):
         super().__init__(ActionType.SET_INSTANT_CONSUMPTION, source)
         self.value = value
         self.unit = unit
+        self.origin = origin
+        self.computed_l100km = computed_l100km
+
+
+#: "leave this field as it is" for :class:`SetTripFuelConsumedAction`.
+KEEP = object()
 
 
 @dataclass
 class SetTripFuelConsumedAction(Action):
-    """Set cumulative trip fuel consumed (liters)."""
+    """Set our per-drive fuel (liters); optionally the drive distance, the
+    drive average and the meter cross-check litres (KEEP = unchanged)."""
     liters: float = 0.0
     
-    def __init__(self, liters: float, source: ActionSource = ActionSource.INTERNAL):
+    def __init__(self, liters: float, source: ActionSource = ActionSource.INTERNAL,
+                 drive_distance_km: Any = KEEP, drive_avg_l100km: Any = KEEP,
+                 meter_trip_fuel_l: Any = KEEP):
         super().__init__(ActionType.SET_TRIP_FUEL_CONSUMED, source)
         self.liters = liters
+        self.drive_distance_km = drive_distance_km
+        self.drive_avg_l100km = drive_avg_l100km
+        self.meter_trip_fuel_l = meter_trip_fuel_l
 
 
 @dataclass
@@ -915,25 +933,31 @@ class SetWheelSpeedAction(Action):
 
 @dataclass
 class SetHeadlightStatusAction(Action):
-    """Set headlight status from CAN 0x57F."""
+    """Set lamp + door-open status from CAN 0x57F or BEAN FE:7F (same bytes).
+
+    ``door_open`` replaced the mis-named ``drl_active`` (2026-11-14): the bit
+    is FE:7F byte 2 0x80, "a door is open"."""
     headlight_state: str = "OFF"  # "OFF", "PARK", "LOW", "HIGH"
     parking_lights: bool = False
     low_beam: bool = False
     high_beam: bool = False
-    drl_active: bool = False
-    
+    fog_front: bool = False
+    door_open: bool = False
+
     def __init__(self, headlight_state: str = "OFF",
                  parking_lights: bool = False,
                  low_beam: bool = False,
                  high_beam: bool = False,
-                 drl_active: bool = False,
+                 door_open: bool = False,
+                 fog_front: bool = False,
                  source: ActionSource = ActionSource.INTERNAL):
         super().__init__(ActionType.SET_HEADLIGHT_STATUS, source)
         self.headlight_state = headlight_state
         self.parking_lights = parking_lights
         self.low_beam = low_beam
         self.high_beam = high_beam
-        self.drl_active = drl_active
+        self.fog_front = fog_front
+        self.door_open = door_open
 
 
 @dataclass
@@ -1588,6 +1612,41 @@ class SetBeanRxAction(Action):
         self.raw = raw
 
 
+class SetPassiveSignalsAction(Action):
+    """Values heard passively (BEAN body bus, CAN gateway copies) that have
+    no dedicated action: ``vehicle`` / ``climate`` / ``dynamics`` /
+    ``provisional`` map field names to values (None is a value: "unknown").
+
+    Only the fields listed in :data:`PASSIVE_SIGNAL_FIELDS` are applied; the
+    ``provisional`` group lands in ``bean.provisional`` (PROBABLE decodes)."""
+    def __init__(self, vehicle: Optional[dict] = None, climate: Optional[dict] = None,
+                 dynamics: Optional[dict] = None, provisional: Optional[dict] = None,
+                 source: ActionSource = ActionSource.GATEWAY):
+        super().__init__(ActionType.SET_PASSIVE_SIGNALS, source)
+        self.vehicle = dict(vehicle or {})
+        self.climate = dict(climate or {})
+        self.dynamics = dict(dynamics or {})
+        self.provisional = dict(provisional or {})
+
+
+#: Fields :class:`SetPassiveSignalsAction` may write, per state group.
+PASSIVE_SIGNAL_FIELDS = {
+    "vehicle": frozenset({
+        "acc_on", "ig_on", "display_speed_kmh", "brake_switch", "ice_stopped",
+        "meter_trip_km", "meter_consumption_l100km", "meter_consumption_stopped",
+        "meter_avg_consumption_l100km", "key_out_warning", "key_out_beep", "cruise_raw_62c8", "cruise_raw_changes",
+    }),
+    "climate": frozenset({
+        "compressor_target_rpm", "compressor_rpm", "compressor_running", "ac_switch_on",
+    }),
+    "dynamics": frozenset({"soc_bars"}),
+    "provisional": frozenset({
+        "ac_engine_heat_request", "cabin_temp_raw", "avg_consumption_l100km", "hv_ready",
+        "p_locked", "out_of_p", "p_ecu_on", "power_off_handshake", "hv_bus_voltage_v",
+    }),
+}
+
+
 class BeanCaptureAction(Action):
     """Start (``on`` True, optional ``name``) or stop the BEAN capture log
     (backend.bean_monitor: one JSON line per frame, rotated at 20 MB)."""
@@ -1879,8 +1938,10 @@ class SetAvcClimateAction(Action):
                  fresh_air: Optional[bool] = None, defrost: Optional[bool] = None,
                  rear_defogger: Optional[bool] = None, air_direction: Optional[str] = None,
                  system_on: Optional[bool] = None,
+                 status_source: str = "avc",
                  source: ActionSource = ActionSource.GATEWAY):
         super().__init__(ActionType.SET_AVC_CLIMATE, source)
+        self.status_source = status_source
         self.target_temp = target_temp
         self.fan_speed = fan_speed
         self.ac_on = ac_on

@@ -101,27 +101,38 @@ def test_outside_temp_drive_home_through_ingress():
     assert near and set(near) == {22.0}
 
 
-def test_energy_and_engine_from_avc_override_can():
+def test_energy_from_avc_engine_flag_is_lowest_gate_source():
+    """AVC B9 energy flags override CAN; its engine arrow ("engine delivering
+    power") is only the last engine-gate source: rpm wins when fresh."""
     from cyberpunk_computer.comm.can_decoder import CANMessageType
     store, ing, clock, _ = make_ingress()
+    ing._sources._clock = clock
     feed_avc(ing, avc("1C6", "110", "00 E4 5F B9 00 AC 00"))   # regen
     e = store.state.energy
     assert (e.flow_wheels_to_mg, e.flow_mg_to_battery, e.regen_active, e.charging) == (True, True, True, True)
     assert e.flow_source == "avc" and not store.state.vehicle.ice_running
-    # CAN says ICE running (rpm) while AVC is fresh -> ignored
-    ing._dispatch_actions(ing._can_message_to_actions(
-        FakeCan(CANMessageType.SOLICITED_ENGINE, {"rpm": 1200})))
-    assert not store.state.vehicle.ice_running
     feed_avc(ing, avc("1C6", "110", "00 E4 5F B9 6C 0C 00"))
     e = store.state.energy
-    assert store.state.vehicle.ice_running
+    v = store.state.vehicle
+    assert v.ice_running and v.engine_running_source == "avc"   # no better source
     assert (e.flow_engine_to_wheels, e.flow_engine_to_mg, e.flow_mg_to_battery, e.flow_mg_to_wheels) == \
         (True, True, True, False)
     assert e.flow_engine_to_battery            # legacy flag: engine charging via MG
-    clock.t += 20.0
+    # rpm 0 (OBD) beats the AVC arrow
+    ing._dispatch_actions(ing._can_message_to_actions(
+        FakeCan(CANMessageType.SOLICITED_ENGINE, {"rpm": 0})))
+    v = store.state.vehicle
+    assert not v.ice_running and v.engine_running_source == "rpm"
+    # AVC regen frame (no engine arrow) while rpm says 1200: still running
+    ing._dispatch_actions(ing._can_message_to_actions(
+        FakeCan(CANMessageType.SOLICITED_ENGINE, {"rpm": 1200})))
+    feed_avc(ing, avc("1C6", "110", "00 E4 5F B9 00 AC 00"))
+    assert store.state.vehicle.ice_running
+    clock.t += 20.0                            # rpm and AVC stale
     ing._dispatch_actions(ing._can_message_to_actions(
         FakeCan(CANMessageType.ENGINE_STATUS, {"ice_running": False})))
-    assert not store.state.vehicle.ice_running  # CAN takes over when AVC is stale
+    v = store.state.vehicle
+    assert not v.ice_running and v.engine_running_source == "can"
 
 
 def test_climate_status_and_setpoint_into_state():

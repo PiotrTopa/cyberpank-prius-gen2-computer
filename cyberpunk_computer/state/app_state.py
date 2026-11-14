@@ -112,7 +112,13 @@ class ClimateState:
     fresh_air: bool = False        # F3 b1 0x40
     air_direction: Optional[str] = None  # face | face_foot | foot | windscreen_foot
     system_on: Optional[bool] = None     # False = climate OFF (fan 0); None = unknown
-    status_source: Optional[str] = None  # "avc" once the climate ECU status was seen
+    status_source: Optional[str] = None  # "avc" | "bean": who delivered the climate status
+    # A/C compressor (BEAN, CONFIRMED 2026-11-14): 52:ED is the A/C amp's
+    # request to the HV ECU, 98:EC the gateway's feedback to the A/C amp.
+    compressor_target_rpm: Optional[int] = None   # 52:ED b3-4
+    compressor_rpm: Optional[int] = None          # 98:EC b0-1 (actual)
+    compressor_running: Optional[bool] = None     # 52:ED b0 0x40
+    ac_switch_on: Optional[bool] = None           # 52:ED b0 0x20 (A/C switch on)
     
     def with_target_temp(self, temp: float) -> "ClimateState":
         """Return new state with updated target temperature."""
@@ -131,26 +137,67 @@ class VehicleState:
     Represents the hybrid system and drive state.
     """
     ready_mode: bool = False      # READY indicator on
-    acc_on: bool = False          # ACC power on
-    ig_on: bool = False           # IG-ON power on
-    ice_running: bool = False     # Internal combustion engine running
+    acc_on: bool = False          # ACC power on (BEAN FE:83 b0 0x20)
+    ig_on: bool = False           # IG-ON power on (BEAN FE:83 b0 0x40)
+    # Engine turning (comm.engine_gate): rpm > 400 (BEAN FE:26 / OBD 010C),
+    # else BEAN 98:27, 62:20 / CAN 0x520 presence, AVC B9; CAN 0x038 b1 alone
+    # is not used (0 for 32 % of the running time at low load).
+    ice_running: bool = False
+    engine_running_source: Optional[str] = None  # gate source behind ice_running
     ev_mode: bool = False         # EV mode active
     gear: GearPosition = GearPosition.PARK
+    # Speed. real_speed_kmh = true vehicle speed (CAN 0x0B4 / wheel speeds);
+    # use it for anything physical. display_speed_kmh = what the speedometer
+    # shows (BEAN FE:24, reads ~12 % above the real speed); None while BEAN
+    # is silent (never derived from the real speed).
+    # speed_kmh is kept for existing readers and always equals real_speed_kmh.
+    real_speed_kmh: float = 0.0
+    display_speed_kmh: Optional[float] = None
     speed_kmh: float = 0.0
-    rpm: Optional[int] = None    # ICE RPM (populated by solicited OBD-II PID 010C)
+    rpm: Optional[int] = None    # ICE RPM: BEAN FE:26, OBD 010C fallback (comm.source_priority)
+    brake_switch: Optional[bool] = None  # brake pedal switch (BEAN FE:29 b2 0x08)
+    ice_stopped: Optional[bool] = None   # ICE stopped while READY (BEAN 98:27 b0 0x08)
     
     # Pedals & Fuel
     throttle_position: int = 0    # 0-100% (approx) or raw 0-255
     brake_pressed: int = 0        # 0-127 (measure of pressure)
     fuel_level: int = 30          # Petrol liters (approx 0-45) - default for testing
+    # PLACEHOLDER: no input writes lpg_level (the 45 is a test default) and
+    # active_fuel can only be OFF/PETROL: no input tells the backend which
+    # fuel the engine burns (state.fuel_model).
     lpg_level: int = 45           # LPG liters (approx 0-60) - default for testing
-    active_fuel: FuelType = FuelType.OFF  # Currently active fuel type
-    fuel_flow_rate: float = 0.0   # L/h
-    
-    # Consumption
+    active_fuel: FuelType = FuelType.OFF  # OFF / PETROL (assumed while running)
+    active_fuel_detected: bool = False    # False: PETROL is assumed, not detected
+
+    # ── Fuel. Sources: meter_* = the combination meter's own trip computer
+    # (BEAN, passively heard); everything else = our own computation from
+    # CAN 0x520 x rpm (state.fuel_model). All litres are petrol-equivalent.
+    fuel_basis: str = "petrol_equivalent"
+    fuel_flow_rate: float = 0.0   # OURS, L/h = K x 0x520 word x rpm; 0 when ICE off
+
+    # Instantaneous consumption as displayed: the meter's 52:90 while fresh
+    # (FFFE -> our L/h, 0000 -> 0), our computed value when BEAN is stale.
     instant_consumption: float = 0.0
     consumption_unit: str = "L/h" # "L/h" or "L/100km"
-    trip_fuel_consumed: float = 0.0  # Cumulative fuel consumed since app start (L)
+    instant_consumption_source: Optional[str] = None  # "meter" / "computed"
+    computed_consumption_l100km: Optional[float] = None  # OURS over true speed; None <= 5 km/h
+
+    # Our per-drive totals (reset at IG-ON, BEAN FE:83; since start without
+    # BEAN). Fuel includes standstill idling; distance = true distance.
+    trip_fuel_consumed: float = 0.0  # OURS, litres this drive
+    drive_distance_km: float = 0.0   # OURS, from real_speed_kmh
+    drive_avg_consumption_l100km: Optional[float] = None  # OURS, None below 0.2 km
+
+    # Combination meter's trip computer (BEAN, CONFIRMED 2026-11-14)
+    meter_trip_km: Optional[float] = None            # 52:76, 0.1 km TRUE distance; not reset at IG
+    meter_consumption_l100km: Optional[float] = None # 52:90 instantaneous (true speed); None when stopped/stale
+    meter_consumption_stopped: Optional[bool] = None # 52:90 = FFFE (stopped, ICE running); None = stale
+    meter_avg_consumption_l100km: Optional[float] = None  # 52:A2, since the meter's trip reset
+    meter_trip_fuel_l: Optional[float] = None        # cross-check: 52:A2 x 52:76 / 100
+
+    # Key-not-in-vehicle warning to the meter (BEAN 62:6E, CONFIRMED)
+    key_out_warning: Optional[bool] = None    # b0 0x80
+    key_out_beep: Optional[bool] = None       # b1 0x80 (the ~1.2 s beep)
     
     # Temperatures
     ice_coolant_temp: Optional[float] = None  # Engine coolant temp (C)
@@ -211,6 +258,11 @@ class VehicleState:
     cruise_res_acc_switch: Optional[bool] = None  # RES/ACC switch pressed (D:3)
     cruise_set_coast_switch: Optional[bool] = None  # SET/COAST switch pressed (D:4)
     cruise_5c8_debug: Optional[str] = None    # Raw 0x5C8 debug: hex bytes + data[2] bits
+    # PLACEHOLDER (no bit meanings known yet): raw BEAN 62:C8 and CAN 0x5C8
+    # (its gateway copy) and their last changes, so a drive with cruise in
+    # use yields data. Each change: {"ts", "src": "bean:62C8"|"can:5C8", "data"}.
+    cruise_raw_62c8: Optional[str] = None
+    cruise_raw_changes: tuple = ()
     
     @property
     def is_parked(self) -> bool:
@@ -311,8 +363,11 @@ class DynamicsState:
     headlight_state: str = "OFF"   # "OFF", "PARK", "LOW", "HIGH"
     parking_lights: bool = False
     low_beam: bool = False
-    high_beam: bool = False
-    drl_active: bool = False
+    high_beam: bool = False        # bit 0x08 (never seen set on this car yet)
+    fog_front: bool = False        # front fog lamp (FE:7F b0 0x01)
+    # A door is open (CAN 0x57F data[3] 0x80 = BEAN FE:7F b2 0x80). This was
+    # mis-named ``drl_active`` until 2026-11-14.
+    door_open: bool = False
     
     # SOC Bars & Events (0x529)
     soc_bars: int = 0              # 0-8 bars on MFD
@@ -591,7 +646,7 @@ class VFDSatelliteState:
 
 
 # Relay board channels (8-channel PCF8574 board, firmware >= 2.1: board relay N
-# = firmware channel N; see powerbox/RELAY-CHANGE-PLAN.md). Relay 1 is wired NC
+# = firmware channel N; see powerbox/README.md ("Relay board")). Relay 1 is wired NC
 # on the powerbox's OWN supply: energising it hard-restarts the powerbox (and
 # drops every NO relay with it). It is not a load — the firmware refuses it in
 # "relay" and only exposes it as the "hard_restart" command.
@@ -720,16 +775,33 @@ class PowerboxState:
 
 
 @dataclass(frozen=True)
+class ProvisionalBeanSignals:
+    """PROVISIONAL BEAN decodes (docs/BEAN_SIGNALS.md §4, confidence "P").
+
+    One strong correlation each, not yet confirmed by a second piece of
+    evidence. Shown for the owner, never used by rules or other state.
+    """
+    ac_engine_heat_request: Optional[bool] = None   # 52:ED b1 0x80: A/C asks for ICE run (heat)
+    cabin_temp_raw: Optional[int] = None            # 52:6D b0, scale unknown (~0.3-0.5 °C/count)
+    avg_consumption_l100km: Optional[float] = None  # 52:A2 (CONFIRMED: vehicle.meter_avg_consumption_l100km; kept for readers)
+    hv_ready: Optional[bool] = None                 # FE:29 b2 0x80
+    p_locked: Optional[bool] = None                 # FE:50 0x80
+    out_of_p: Optional[bool] = None                 # FE:50 0x08
+    p_ecu_on: Optional[bool] = None                 # FE:50 0x04
+    power_off_handshake: Optional[bool] = None      # FE:50 0x02
+    hv_bus_voltage_v: Optional[float] = None        # 98:EC b5: V ~ 1.9 x + 102
+
+
+@dataclass(frozen=True)
 class BeanState:
     """Toyota BEAN body bus as seen by the powerbox receiver (fw >= 2.3.0).
 
     ``messages``: "DST:MES" -> {dst, mes, pri, count, last_ts, data (hex),
     changes, period_ms}, CRC-good frames only. ``decoded``: named values from
-    comm.bean.decode_known -> {value, ts, src}. The door/lock/lamp/key-window
-    group (FE:B6 lock + door-open, FE:E1 lock/unlock event, FE:7F door, FE:83
-    dome lamp, FE:D8 key window, odometer) is CONFIRMED on this car; the IG-ON
-    group (coolant, ambient, speed, rpm, shift, P-lock, power mode) is still
-    UNVERIFIED. The last frames themselves are NOT in the state
+    comm.bean.decode_known -> {value, ts, src} (docs/BEAN_SIGNALS.md §4;
+    ``prov_*`` names are PROBABLE). The confirmed IG-ON signals are also
+    written into vehicle/climate/dynamics by io.bean_ingest; the probable
+    ones only into ``provisional``. The last frames themselves are NOT in the state
     (kept small for the 1 Hz publish): GET /api/v1/bean/frames.
     ``capture``: capture-log status {on, file, frames, bytes, name, dir}.
     """
@@ -742,6 +814,9 @@ class BeanState:
     rate_buckets: tuple = (0, 0, 0, 0, 0)   # frames per second, newest last
     capture: Mapping = field(default_factory=dict)
     last_mark: str = ""
+    # PROBABLE decodes only (survey confidence "P"): for display and logging;
+    # nothing in the backend may read these.
+    provisional: ProvisionalBeanSignals = field(default_factory=ProvisionalBeanSignals)
     last_update_time: float = 0.0
 
 

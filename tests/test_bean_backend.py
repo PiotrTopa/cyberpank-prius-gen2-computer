@@ -85,18 +85,21 @@ class TestParser:
 
 
 class TestKnownIds:
-    """IG-ON group UNVERIFIED (other models); car-OFF door/lock group CONFIRMED."""
+    """Survey 2026-11-14 decodes (CONFIRMED unless prov_*); door/lock group
+    confirmed car-OFF. Real-frame tests: tests/test_bean_signals.py."""
 
     def test_values(self):
-        assert decode_known("2C", "64") == {"coolant_c": 50.0}
+        assert decode_known("2C", "64") == {"coolant_c": 50.0, "coolant_at_floor": False}
+        assert decode_known("2C", "20") == {"coolant_at_floor": True}   # 16 °C clamp
         assert decode_known("40", "800000") == {"shift": "P", "shift_raw": 0x80}
         assert decode_known("40", "100000")["shift"] == "D"
-        assert decode_known("24", "23") == {"speed_kmh": 35}
-        assert decode_known("CD", "47") == {"ambient_c": 23}
-        assert decode_known("7F", "001080000000") == {"lamp_tail": False, "lamp_head": False,
-                                                      "lamp_high_beam": False, "door_open": True}
+        assert decode_known("24", "23") == {"display_speed_kmh": 35}
+        assert decode_known("CD", "47") == {"outside_temp_c": 23}
+        assert decode_known("7F", "001080000000") == {
+            "lamp_tail": False, "lamp_head": False, "lamp_fog_front": False,
+            "lamp_high_beam": False, "illumination": False, "door_open": True}
         assert decode_known("7F", "18") == {"lamp_tail": True, "lamp_head": False,
-                                            "lamp_high_beam": True}
+                                            "lamp_fog_front": False, "lamp_high_beam": True}
         assert decode_known("3F", "0287E980") == {"odometer_km": 165865}
         assert decode_known("AB", "4080") == {} and decode_known("2C", "") == {}
 
@@ -152,7 +155,7 @@ class TestStore:
         assert e["period_ms"] == pytest.approx(2000.0) and e["pri"] == 6
         assert b.messages["FE:24"]["count"] == 1
         assert b.decoded["coolant_c"] == {"value": 49.5, "ts": T0 + 2.0, "src": "FE:2C"}
-        assert b.decoded["speed_kmh"]["value"] == 0
+        assert b.decoded["display_speed_kmh"]["value"] == 0
         assert b.frames_total == 3 and b.errors_total == 1 and b.last_frame_ts == T0 + 2.0
         rx = s.state.powerbox.bean_rx
         assert rx["enabled"] is True and rx["mode"] == "dma" and rx["crc"] == 1

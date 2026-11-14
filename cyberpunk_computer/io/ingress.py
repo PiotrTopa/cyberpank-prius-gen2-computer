@@ -42,11 +42,15 @@ from ..state.actions import (
     SetGearAction,
     SetSteeringAngleAction, SetAccelerationAction, SetYawRateAction,
     SetWheelSpeedAction, SetHeadlightStatusAction, SetSOCBarsEventAction,
-    SetCruiseControlAction,
+    SetCruiseControlAction, SetPassiveSignalsAction,
     AVCButtonPressAction, AVCTouchEventAction,
     SetStoredDTCsAction, SetPendingDTCsAction, SetDTCScanStateAction,
 )
 from .avc_ingest import AvcIngest
+from .bean_ingest import BeanIngest
+from ..comm.source_priority import default_arbiter
+from ..comm.engine_gate import EngineRunningGate
+from ..state.fuel_model import FLOW_STALE_S, FUEL_FLOW_K, fuel_flow_lh
 from ..comm.can_decoder import CANDecoder, CANMessageType
 from ..comm.solicited_can import parse_dtc_response, ECU_NAMES
 from ..state.app_state import GearPosition
@@ -121,6 +125,27 @@ class IngressController:
         self._avc = AvcIngest()
         self._can_decoder = CANDecoder()
 
+        # Per-signal source priority (comm.source_priority): passive sources
+        # (BEAN, broadcast CAN, AVC) before solicited OBD replies, with
+        # staleness fallback. AVC freshness is delegated to the AVC ingest
+        # (looked up at call time: tests swap ``_avc``).
+        self._sources = default_arbiter()
+        _avc_signal = {"outside_temp": "outside_temp", "climate": "climate",
+                       "soc_bars": "battery", "engine_running": "energy"}
+        self._sources.set_probe(
+            "avc", lambda sig: sig in _avc_signal and self._avc.fresh(_avc_signal[sig]))
+        # Engine-running gate (comm.engine_gate): rpm / BEAN 98:27 / 62:20 /
+        # 0x520 presence / AVC, best fresh source wins. It is the only writer
+        # of vehicle.ice_running.
+        self._engine_gate = EngineRunningGate(self._sources)
+        # Fuel flow = K x (0x520 / 62:20 per-injection word) x rpm
+        # (state.fuel_model); K configurable per ingress.
+        self.fuel_flow_k: float = FUEL_FLOW_K
+        self._fuel_word_t: Optional[float] = None
+        # BEAN body bus (powerbox device 203) -> vehicle state
+        self._bean = BeanIngest(self._sources, engine_gate=self._engine_gate,
+                                fuel_word_sink=lambda w: self._fuel_word_actions(w, "bean"))
+
         # Broadcast fast path (comma.ai panda, io.panda_can). Runs on the panda
         # reader thread, so it gets its own decoder instance and its own
         # per-id caches; the Store serialises the dispatches.
@@ -181,6 +206,19 @@ class IngressController:
     def avc(self) -> AvcIngest:
         """AVC-LAN ingest (decoder, freshness, touch/button event sink)."""
         return self._avc
+
+    @property
+    def sources(self):
+        """The per-signal source arbiter (comm.source_priority.SourceArbiter)."""
+        return self._sources
+
+    @property
+    def bean(self) -> BeanIngest:
+        return self._bean
+
+    @property
+    def engine_gate(self) -> EngineRunningGate:
+        return self._engine_gate
 
     @property
     def stats(self) -> IngressStats:
@@ -338,7 +376,10 @@ class IngressController:
 
         # AVC-only values (outside temperature) read N/A once stale, also
         # when the bus has gone silent and no frame arrives to notice it.
-        expired = self._avc.expire()
+        expired = self._avc.expire() + self._bean.expire()
+        # Engine gate and fuel flow age out when their sources go silent
+        # (0x520 is not sent while the engine is stopped).
+        expired += self._fuel_flow_expiry() + self._engine_gate_actions()
         if expired:
             self._dispatch_actions(expired)
         
@@ -639,8 +680,18 @@ class IngressController:
         """Handle AVC-LAN frames (gateway fw 3.x; comm.avc tables)."""
         self._stats.avc_messages += 1
         actions = self._avc.process(msg.data)
+        # The AVC B9 engine arrow is one input of the engine gate (lowest
+        # priority: it means "engine delivering power", not "turning").
+        kept: List[Action] = []
+        for a in actions or ():
+            if isinstance(a, SetICERunningAction):
+                self._engine_gate.observe_avc(a.running)
+            else:
+                kept.append(a)
         if actions:
-            self._dispatch_actions(actions)
+            kept.extend(self._engine_gate_actions())
+        if kept:
+            self._dispatch_actions(kept)
     
     def _handle_satellite_message(self, msg: RawMessage) -> None:
         """Handle RS485 satellite messages."""
@@ -672,12 +723,62 @@ class IngressController:
             try:
                 actions = handler(msg.data)
                 if actions:
+                    actions = list(actions) + self._bean_actions(actions)
                     self._dispatch_actions(actions)
             except Exception as e:
                 logger.error(f"Satellite handler error for device {device_id}: {e}")
         else:
             logger.debug(f"No handler for satellite device {device_id}")
     
+    def _bean_actions(self, actions: List[Action]) -> List[Action]:
+        """Vehicle-state actions from the frames of any SetBeanRxAction."""
+        out: List[Action] = []
+        for a in actions:
+            if type(a).__name__ == "SetBeanRxAction" and getattr(a, "frames", None):
+                out.extend(self._bean.process(a.frames))
+        if out:
+            out.extend(self._engine_gate_actions())
+        return out
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Engine running + fuel flow
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _engine_gate_actions(self) -> List[Action]:
+        """SetICERunningAction when the gate's decision (or its source)
+        differs from the state; nothing while no gate source is fresh."""
+        running, src = self._engine_gate.decide()
+        if running is None:
+            return []
+        v = self._store.state.vehicle
+        if running == v.ice_running and src == v.engine_running_source:
+            return []
+        return [SetICERunningAction(running, ActionSource.GATEWAY, origin=src)]
+
+    def _fuel_word_actions(self, word: int, src: str) -> List[Action]:
+        """Fuel flow from the per-injection word (CAN 0x520 b1-2 or BEAN
+        62:20): flow L/h = K x word x rpm, 0 while the engine is not running
+        or no rpm source is fresh."""
+        now = self._sources._clock()
+        if not self._sources.offer("fuel_word", src, now):
+            return []
+        self._fuel_word_t = now
+        running, _ = self._engine_gate.decide(now)
+        rpm = self._engine_gate.rpm if self._sources.active("rpm", now) else None
+        flow = fuel_flow_lh(word, rpm, self.fuel_flow_k) if running else 0.0
+        return [SetFuelFlowAction(round(flow, 4), ActionSource.GATEWAY)]
+
+    def _fuel_flow_expiry(self) -> List[Action]:
+        """Flow -> 0 once the word source is silent or the engine stopped."""
+        if not self._store.state.vehicle.fuel_flow_rate:
+            return []
+        now = self._sources._clock()
+        running, _ = self._engine_gate.decide(now)
+        stale = self._fuel_word_t is None or (now - self._fuel_word_t) > FLOW_STALE_S
+        if stale or running is False:
+            return [SetFuelFlowAction(0.0, ActionSource.GATEWAY)]
+        return []
+
     def _dispatch_actions(self, actions: List[Action]) -> None:
         """Dispatch a list of actions to the store."""
         if len(actions) == 1:
@@ -760,29 +861,14 @@ class IngressController:
                     origin="can",
                 ))
         
-        # Fuel Consumption (0x520)
+        # Fuel quantity per injection (0x520 b1-2, = BEAN 62:20). The frame
+        # is sent only while the engine runs (engine gate: presence). Flow
+        # = K x word x rpm (state.fuel_model, docs/prius_can.md).
         elif msg.msg_type == CANMessageType.FUEL_CONSUMPTION:
-            injector_time = msg.values.get("injector_time", 0)
-            # Prius Gen 2 1.5L 1NZ-FXE Engine Fuel Flow
-            # Based on observed data: 0x520 bytes 1-2 as 16-bit Big Endian
-            # - ICE off: 0
-            # - Idle (1000 RPM): ~200-400 → ~0.6-1.2 L/h
-            # - Light load: ~500-700 → ~2-3 L/h
-            # - Moderate: ~800-1000 → ~4-6 L/h
-            # - High load: ~1100-1200 → ~7-9 L/h
-            # - WOT: Can reach 20-30 L/h (off-scale for normal driving)
-            #
-            # IMPORTANT: 0x520 can report non-zero injector_time even when
-            # the ICE is off (stale value in ECU). Gate on ice_running.
-            ice_running = self._store.state.vehicle.ice_running
-            if ice_running and injector_time > 50:  # Filter noise + engine must be running
-                # Linear scaling with offset adjustment
-                # Typical: 200-1200 maps to ~0.6-9 L/h
-                flow_rate = injector_time * 0.008  # 1000 * 0.008 = 8 L/h
-                flow_rate = max(0.0, min(30.0, flow_rate))  # Clamp 0-30 L/h
-            else:
-                flow_rate = 0.0
-            actions.append(SetFuelFlowAction(flow_rate, ActionSource.GATEWAY))
+            self._engine_gate.observe_can_520()
+            word = msg.values.get("injector_time")
+            if word is not None:
+                actions.extend(self._fuel_word_actions(int(word), "can"))
         
         # Vehicle Speed
         elif msg.msg_type == CANMessageType.VEHICLE_SPEED:
@@ -799,17 +885,17 @@ class IngressController:
         # Values 254/255 are ECU sentinel/not-ready values (seen first ~20s after ACC on).
         elif msg.msg_type == CANMessageType.ENGINE_RPM:
             coolant_temp = msg.values.get("coolant_temp")
-            if coolant_temp is not None and 0 <= coolant_temp <= 130:
+            if coolant_temp is not None and 0 <= coolant_temp <= 130 \
+                    and self._sources.offer("coolant", "can"):
                 actions.append(SetICECoolantTempAction(coolant_temp, ActionSource.GATEWAY))
         
-        # Engine Status (0x038 - ICE running state only, no RPM)
-        # RPM removed: CAN 0x038 byte1*64 formula was entirely wrong (r=0.49 correlation).
-        # Accurate RPM comes from solicited OBD-II PID 010C (SetRPMAction).
+        # Engine Status (0x038). b1 > 0 is NOT an engine-running flag (0 for
+        # 32 % of the running time at low load); it feeds the engine gate as
+        # the CAN source together with 0x520 presence.
         elif msg.msg_type == CANMessageType.ENGINE_STATUS:
             ice_running = msg.values.get("ice_running")
             if ice_running is not None:
-                if not self._avc.fresh("energy"):   # AVC B9 engine flag wins when fresh
-                    actions.append(SetICERunningAction(ice_running, ActionSource.GATEWAY))
+                self._engine_gate.observe_can_038(bool(ice_running))
                 actions.append(SetReadyModeAction(True, ActionSource.GATEWAY))
         
         # Pedals
@@ -839,7 +925,8 @@ class IngressController:
                     "P": GearPosition.PARK,
                 }
                 gear = gear_map.get(gear_str, GearPosition.PARK)
-                actions.append(SetGearAction(gear, ActionSource.GATEWAY))
+                if self._sources.offer("gear", "can"):
+                    actions.append(SetGearAction(gear, ActionSource.GATEWAY))
         
         # ─────────────────────────────────────────────────────────────────────
         # VEHICLE DYNAMICS (PAGE 2 DATA)
@@ -892,18 +979,20 @@ class IngressController:
         
         # Headlight Status (0x57F)
         elif msg.msg_type == CANMessageType.HEADLIGHT_STATUS:
-            actions.append(SetHeadlightStatusAction(
-                headlight_state=msg.values.get("headlight_state", "OFF"),
-                parking_lights=msg.values.get("parking_lights", False),
-                low_beam=msg.values.get("low_beam", False),
-                high_beam=msg.values.get("high_beam", False),
-                drl_active=msg.values.get("drl_active", False),
-                source=ActionSource.GATEWAY
-            ))
+            if self._sources.offer("lights", "can"):
+                actions.append(SetHeadlightStatusAction(
+                    headlight_state=msg.values.get("headlight_state", "OFF"),
+                    parking_lights=msg.values.get("parking_lights", False),
+                    low_beam=msg.values.get("low_beam", False),
+                    high_beam=msg.values.get("high_beam", False),
+                    fog_front=msg.values.get("fog_front", False),
+                    door_open=msg.values.get("door_open", False),
+                    source=ActionSource.GATEWAY
+                ))
         
         # SOC Bars & Events (0x529)
         elif msg.msg_type == CANMessageType.SOC_BARS_EVENT:
-            if not self._avc.fresh("battery"):   # AVC E4 5F B8 wins when fresh
+            if self._sources.offer("soc_bars", "can"):   # AVC E4 5F B8 wins when fresh
                 actions.append(SetSOCBarsEventAction(
                     soc_bars=msg.values.get("soc_bars", 0),
                     ev_mode_active=msg.values.get("ev_mode_active", False),
@@ -921,6 +1010,12 @@ class IngressController:
             # Format raw bytes as hex
             raw_data = msg.data
             debug_str = " ".join(f"{b:02X}" for b in raw_data)
+            # PLACEHOLDER: record every raw change (no bit meanings known;
+            # 0x5C8 = [BEAN header][62:C8 data]). See io.bean_ingest.CruiseRawLog.
+            cruise_log = self._bean.cruise
+            if cruise_log.observe("can:5C8", debug_str, time.time()):
+                actions.append(SetPassiveSignalsAction(
+                    vehicle={"cruise_raw_changes": cruise_log.changes}))
             
             action_kwargs = {
                 "cruise_5c8_debug": debug_str,
@@ -959,6 +1054,9 @@ class IngressController:
                 print(f"[SOL] 0x788 Airbag: {msg.values}")
             actions.extend(self._handle_solicited_airbag(msg))
         
+        if msg.msg_type in (CANMessageType.FUEL_CONSUMPTION, CANMessageType.ENGINE_STATUS,
+                            CANMessageType.SOLICITED_ENGINE):
+            actions.extend(self._engine_gate_actions())
         return actions
     
     def _handle_solicited_engine(self, msg) -> List[Action]:
@@ -972,16 +1070,16 @@ class IngressController:
         
         # Coolant temperature (PID 0x05)
         coolant_temp = values.get("coolant_temp")
-        if coolant_temp is not None and -40 <= coolant_temp <= 215:
+        if coolant_temp is not None and -40 <= coolant_temp <= 215 \
+                and self._sources.offer("coolant", "obd"):
             actions.append(SetICECoolantTempAction(coolant_temp, ActionSource.GATEWAY))
         
-        # Engine RPM (PID 0x0C)
+        # Engine RPM (PID 0x0C): fallback behind BEAN FE:26 (source priority);
+        # its subscription is suspended while BEAN is fresh (io.factory).
         rpm = values.get("rpm")
-        if rpm is not None and 0 <= rpm <= 8000:
+        if rpm is not None and 0 <= rpm <= 8000 and self._sources.offer("rpm", "obd"):
             actions.append(SetRPMAction(int(rpm), ActionSource.GATEWAY))
-            # If RPM > 0, engine is running (AVC B9 engine flag wins when fresh)
-            if rpm > 0 and not self._avc.fresh("energy"):
-                actions.append(SetICERunningAction(True, ActionSource.GATEWAY))
+            self._engine_gate.observe_rpm(rpm)
         
         # Vehicle speed (PID 0x0D)
         speed = values.get("speed_kph")

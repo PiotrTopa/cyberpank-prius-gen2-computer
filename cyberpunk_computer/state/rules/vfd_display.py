@@ -96,7 +96,7 @@ class VFDDisplayRule(StateRule):
         mg_power = self._normalize_mg_power(battery_power)
         fuel_flow = self._normalize_fuel_flow(vehicle.fuel_flow_rate)
         brake = self._normalize_brake(vehicle.brake_pressed)
-        speed = self._normalize_speed(vehicle.speed_kmh)
+        speed = self._normalize_speed(vehicle.real_speed_kmh)
         
         # State flags
         active_fuel = self._map_fuel_type(vehicle.active_fuel)

@@ -2,7 +2,7 @@
 powerbox/main.py, MicroPython) — run on CPython with ``machine``/``neopixel``/
 ``ina219`` stubbed and ``time.ticks_*`` shimmed.
 
-Covers the 2026-11-03 rework (RELAY-CHANGE-PLAN.md): pin map, NC inversion,
+Covers the 2026-11-03 rework (powerbox/README.md "Relay board"): pin map, NC inversion,
 restart relay unreachable through "relay", read-back + re-assert with a fake
 bus, non-inverted fan duty, secondary POCO rejection, reset cause reporting.
 """

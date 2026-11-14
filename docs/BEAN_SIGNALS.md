@@ -127,16 +127,16 @@ IDs with several fields follow in §4.1–§4.5. Counts and periods are from the
 | `40:59` | ? (to body) | 2/10 | 2 | 1 s | OFF | — | constant `00 C0` in every state (JP the same) | ? |
 | `52:3F` | meter | 1/9 | 4 | 10 s + wake | OFF | 0x53F | odometer, b0–b2 km (24-bit); b3 `80` | C (owner read the meter) |
 | `52:6D` | A/C amp | 2/10 | 3 | 1 s | IG | 0x56D | b0 cabin (room) temperature raw; b1 flags; b2 = `FF` − b1 (§4.2) | P |
-| `52:76` | meter | 9 | 3 | on change + ~15 s | IG | — | trip distance, b1 0.1 km/count (not reset at IG); b2 `80` = km | C |
-| `52:90` | meter | 1/9 | 3 | 0.5 s | IG | — | instantaneous consumption b0–b1 0.1 L/100 km; `00 00` ICE off; `FF FE` stopped with ICE on; b2 `40` unit | C |
+| `52:76` | meter | 9 | 3 | on change + ~15 s | IG | — | trip distance, b1 0.1 km/count, TRUE distance (= integrated 0x0B4, not the speedometer's); not reset at IG; b2 `80` = km | C |
+| `52:90` | meter | 1/9 | 3 | 0.5 s | IG | — | instantaneous consumption b0–b1 0.1 L/100 km over TRUE speed (§4.6); `00 00` no fuel (ICE off / EV, or fuel cut); `FF FE` stopped with ICE on; b2 `40` unit | C |
 | `52:99` | A/C amp | 2 | 3 | 5 s | IG | — | constant `00 00 00` | ? |
-| `52:A2` | meter | 1/9 | 3 | 10 s | IG | — | average consumption b0–b1 0.1 L/100 km; b2 `40` unit | P |
+| `52:A2` | meter | 1/9 | 3 | 10 s | IG | — | average consumption b0–b1 0.1 L/100 km since the meter's own trip reset; frozen while parked; b2 `40` unit (§4.6) | C |
 | `52:A4` | meter | 2 | 1 | 3.2 s | IG | 0x5A4 | fuel gauge level (`00` in the first frame) | C |
 | `52:CA` | A/C amp | 2 | 2 | 5 s | IG | — | constant `00 71` (configuration?) | ? |
 | `52:D0` | meter | 1/9 | 5 | 1 s | IG | — | constant zeros | ? |
 | `52:ED` | A/C amp | 2/10 | 5 | 1 s | IG | 0x5ED | compressor request to the HV ECU (§4.2) | C/P |
 | `52:FD` | A/C amp | 2/10 | 2 | 5 s | IG | — | b0 target temperature, +1 per 0.5 °C, `05` = 18.0 °C; b1 `38` unused second zone | C |
-| `62:20` | gateway | 14 | 2 | 0.92 s, ICE running only | IG | 0x520 | ECM injection quantity for the trip computer, 16-bit, unscaled (§4.3) | P |
+| `62:20` | gateway | 14 | 2 | 0.92 s, ICE running only | IG | 0x520 | ECM fuel quantity PER INJECTION for the trip computer, 16-bit; flow = K × word × rpm (§4.3) | C |
 | `62:21` | gateway | 6 | 1 | 0.3 s | IG | 0x521 | constant `00`; warning demands to the meter? | G |
 | `62:6E` | ? | 2/10 | 2 | 1 s | OFF | — | key-not-in-vehicle warning: b0 `80` warning active, b1 `80` the ~1.2 s beep | C |
 | `62:C8` | gateway | 6 | 2 | 1 s | IG | 0x5C8 | cruise control (§1); constant `00 00`, cruise not used | ? |
@@ -305,9 +305,12 @@ or the project's own sensor.
 * `98:27` (0x527): b0 `08` = ICE stopped while READY (C: all 16 edges at ICE spin-down/start, exact
   complement of when `62:20` is sent). b0 `01` + b1 `FF` set at the same moment `FE:91` goes `A0 1F 06
   → 00 00 00` and `FE:AB[52]` b2 gains `80`: the best READY candidate (P; CAN not yet logged then).
-* `62:20` (0x520, gateway → meter): sent only while the ICE runs; 16-bit value 196–2196, r = 0.84
-  against OBD 0104 load, frozen at the last value when the ICE stops. Injection quantity for the
-  meter's fuel figures (RM: "ECM → meter: injection volume") (P; scale unknown).
+* `62:20` (0x520 b1–b2, gateway → meter): sent only while the ICE runs (no frame with rpm < 400 on
+  the drive; presence agrees with OBD rpm > 400 98.8 % of the time); 16-bit value 196–2196, r = 0.84
+  against OBD 0104 load. It is the fuel quantity PER INJECTION (RM: "ECM → meter: injection volume"),
+  so the fuel flow scales with engine speed: flow L/h = K × word × rpm, K = 2.69 × 10⁻⁶ (fitted to the
+  meter's own total; 2.82 × 10⁻⁶ fitted to the instantaneous `52:90`; ±5 %). A free fit of the meter's
+  L/h gives word^1.0 × rpm^1.0 (C; scale per [`prius_can.md`](prius_can.md) §8).
 * `FE:26` rpm = word/5.12 (C: r = 0.991 against OBD 010C, maximum `4230` = 3309 rpm = the OBD maximum).
 * `FE:2C` coolant = x/2 °C (C: r = 0.995 against 0x039, within 1 °C; holds `20` = 16 °C when colder).
 * `FE:91` (0x591): `A0 1F 06` from IG to the READY moment, then `00 00 00`; CAN 0x591 `25 00 00 00`
@@ -345,10 +348,24 @@ control) and `display_speed` = BEAN `FE:24` (what the driver sees on the speedom
 
 ### 4.6 Meter trip computer
 
-`52:76`, `52:90`, `52:A2` go meter → gateway → MFD, PRI 9 on change. `52:90` instantaneous: r = 0.90
-against a MAF-based L/100 km estimate (scale within 11 %); `FF FE` in 947 of 987 frames stopped with
-the ICE on. `52:A2` average: `00 BC` = 18.8 → `00 B8` = 18.4 while coasting on EV. b2 `40` in both =
+`52:76`, `52:90`, `52:A2` go meter → gateway → MFD, PRI 9 on change. b2 `40` in `52:90`/`52:A2` =
 unit flag (RX300 uses `80` for km/L; this EU car shows L/100 km) (G).
+
+* The meter works on TRUE speed and TRUE distance: `52:90` × 0x0B4 speed integrates to the
+  K × word × rpm fuel within 0–4 % in every speed band (× the speedometer speed `FE:24` it would be
+  12–17 % high), and `52:76` steps with integrated 0x0B4 distance (§4.4) (C).
+* `52:90` = the meter's instantaneous L/100 km from the `62:20` flow and true speed, lagging the
+  flow by 0–1.5 s; median ratio K × word × rpm / speed ÷ `52:90` = 1.00. `FF FE` = stopped with the
+  ICE running (987 frames, 96 % at speed 0, 3 with rpm < 400): the meter has no L/100 km then.
+  `00 00` = no fuel: ICE off / EV (450 frames, 420 with rpm < 400) or fuel cut while the ICE turns.
+  Maximum seen 196.1 at walking pace (C).
+* `52:A2` = the meter's average L/100 km since its own trip reset (not reset at IG; frozen while
+  parked). `52:A2` × `52:76` / 100 follows the integrated K × word × rpm fuel within 0.03 L over the
+  drive (C).
+
+The backend shows `52:90` as the instantaneous figure while it is fresh (FFFE → our L/h, 0000 → 0)
+and keeps both averages: the meter's (`52:A2`) and its own per-drive litres / true distance
+(`cyberpunk_computer/state/rules/fuel_consumption.py`, `trip_fuel.py`).
 
 ---
 

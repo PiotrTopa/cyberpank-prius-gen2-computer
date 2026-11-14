@@ -55,7 +55,8 @@ SIGNALS: List[Signal] = [
     Signal("ice_power", "kW", lambda s: s.energy.ice_power_kw, "Engine power"),
     Signal("delta_v", "V", _delta_v, "HV block voltage spread"),
     # Vehicle / drivetrain
-    Signal("speed", "km/h", lambda s: s.vehicle.speed_kmh, "Vehicle speed"),
+    Signal("speed", "km/h", lambda s: s.vehicle.real_speed_kmh, "Vehicle speed (real, CAN 0x0B4 / wheels)"),
+    Signal("display_speed", "km/h", lambda s: s.vehicle.display_speed_kmh, "Speedometer speed (BEAN FE:24, ~12 % over real)"),
     Signal("rpm", "rpm", lambda s: s.vehicle.rpm, "Engine RPM"),
     Signal("ice_coolant_temp", "°C", lambda s: s.vehicle.ice_coolant_temp, "Engine coolant temperature"),
     Signal("inverter_temp", "°C", lambda s: s.vehicle.inverter_temp, "Inverter temperature"),
@@ -72,7 +73,9 @@ SIGNALS: List[Signal] = [
     Signal("ambient_temp", "°C", lambda s: s.vehicle.ambient_air_temp, "Ambient air temperature (OBD 0146, diagnostic)"),
     Signal("intake_air_temp", "°C", lambda s: s.vehicle.intake_air_temp, "Intake air temperature"),
     Signal("cabin_temp", "°C", lambda s: s.climate.inside_temp, "Cabin inside temperature"),
-    Signal("outside_temp", "°C", lambda s: s.climate.outside_temp, "Outside temperature (AVC-LAN)"),
+    Signal("outside_temp", "°C", lambda s: s.climate.outside_temp, "Outside temperature (AVC-LAN, BEAN FE:CD fallback)"),
+    Signal("compressor_rpm", "rpm", lambda s: s.climate.compressor_rpm, "A/C compressor speed (BEAN 98:EC)"),
+    Signal("meter_consumption", "L/100km", lambda s: s.vehicle.meter_consumption_l100km, "Meter instantaneous consumption (BEAN 52:90)"),
     # Powerbox / POCO computer supply (INA219 on the Prius 12 V feed)
     Signal("powerbox_voltage", "V", lambda s: s.powerbox.system_voltage, "Computer 12V supply voltage (INA219)"),
     Signal("powerbox_current", "A", lambda s: s.powerbox.current_draw_a, "Computer current draw (INA219)"),

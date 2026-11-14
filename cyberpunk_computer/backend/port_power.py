@@ -3,7 +3,7 @@ USB hub port power control — one abstraction over the two very different ways
 this car powers a hub socket on and off.
 
 Topology (ActionStar 2101:8500 hub ``1-1``; relay numbers per the 2026-11-03
-board, powerbox/RELAY-CHANGE-PLAN.md: board relay N = firmware channel N):
+board, powerbox/README.md ("Relay board"): board relay N = firmware channel N):
 
     socket 1 -> internal port 5 : POWERBOX   — the only socket with real
                 native per-port VBUS switching (uhubctl PPPS)

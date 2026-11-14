@@ -143,7 +143,7 @@ def wire_diagnostics(twin: Any, report_dir: Optional[str] = None, live: bool = T
             return None
         if age > 5.0:
             return None
-        return float(store.state.vehicle.speed_kmh)
+        return float(store.state.vehicle.real_speed_kmh)
 
     def on_scan_done(rep: Dict[str, Any]) -> Optional[str]:
         name = reportmod.write_report(report_dir, rep)
@@ -165,7 +165,7 @@ def wire_diagnostics(twin: Any, report_dir: Optional[str] = None, live: bool = T
         s = store.state
         v = s.vehicle
         return {
-            "speed_kmh": v.speed_kmh, "ready": v.ready_mode, "ice_running": v.ice_running,
+            "speed_kmh": v.real_speed_kmh, "display_speed_kmh": v.display_speed_kmh, "ready": v.ready_mode, "ice_running": v.ice_running,
             "gear": getattr(v.gear, "name", str(v.gear)), "rpm": v.rpm,
             "km_since_previous_clear": getattr(v, "odometer_dtc_clear", None),
             "ice_coolant_temp": getattr(v, "ice_coolant_temp", None),

@@ -23,7 +23,7 @@ class ParkSpeedRule(StateRule):
     
     def evaluate(self, old_state: Optional[AppState], new_state: AppState, store: Store) -> None:
         # If in PARK and speed is not 0, force it to 0
-        if new_state.vehicle.gear == GearPosition.PARK and new_state.vehicle.speed_kmh != 0:
+        if new_state.vehicle.gear == GearPosition.PARK and new_state.vehicle.real_speed_kmh != 0:
             # Important: Use ActionSource.INTERNAL to avoid sending this back to the vehicle/gateway
             # and to ensure the reducer processes it correctly locally.
             store.dispatch(SetSpeedAction(

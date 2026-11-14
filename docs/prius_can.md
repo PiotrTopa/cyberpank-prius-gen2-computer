@@ -24,7 +24,7 @@ CAN 0x5xx: [`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §5.
 | 0x023 | 13 | longitudinal acceleration | (256A + B) − 0x200, uncalibrated | G |
 | 0x025 | 13 | steering angle | 256A + B, 12-bit signed; straight-ahead offset vehicle-specific | G |
 | 0x030 | 6 | brake pedal | E, 0–127; may read 0x7F at start-up with the brake held | Car: E > 8 edges match BEAN `FE:29` brake bit (74/79 within 1 s) |
-| 0x038 | 8 | ICE running | B > 0 = ICE running (not an rpm) | P (`can_decoder.py` comment, own logs) |
+| 0x038 | 8 | engine status | B > 0 seen only with the ICE turning (not an rpm), but B = 0 for 32 % of the time the ICE turns at low load (e.g. 1300 rpm warm-up): NOT an engine-running flag | Car (2026-11-13 drive against OBD 010C) |
 | 0x039 | 8 | ICE coolant | A °C, no offset; 254/255 = sensor not ready | Car: within 1 °C of BEAN `FE:2C` (r = 0.995) |
 | 0x03B | 8 | HV battery current, voltage | current = low 12 bits of A,B signed × 0.1 A (> 0 discharge); voltage = 256C + D V | Car: voltage is 16-bit (byte D alone wraps at 256 V; the pack reaches ~260 V under hard regen) |
 | 0x0B1 / 0x0B3 | 13 | front / rear wheels (right A,B; left C,D) | list: wheel pulses (~185 per revolution); code: speed × 0.01 km/h | contradiction, see §8 |
@@ -37,7 +37,7 @@ CAN 0x5xx: [`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §5.
 | 0x3CB | 108 | battery ECU | A discharge limit A; B charge limit A (nominal ~100 / 105 A below 51 °C); SOC = (256C + D)/2 %; E, F battery temperatures, signed °C | Car: SOC tracks the MFD SOC bars (`FE:29`); temperatures correlate with `98:EC` b4 |
 | 0x3CD | 108 | battery fault code, voltage | AB fault code; voltage field unresolved | G |
 | 0x4CE | — | battery-compartment intake air temperature (not outside air) | — | P (`can_decoder.py` comment) |
-| 0x520 | 2231 | ECM injection quantity (gateway CAN → BEAN `62:20`) | header + 16-bit value | Car (BEAN copy) |
+| 0x520 | 2231 | ECM fuel quantity per injection (gateway CAN → BEAN `62:20`); measured every 0.92 s, only while the ICE runs | header + 16-bit word 256B + C; fuel flow L/h = K × word × rpm, K = 2.69 × 10⁻⁶ (see below) | Car (BEAN copy; flow fitted to the meter) |
 | 0x526 | 530 | engine rpm (gateway CAN → BEAN `FE:26`) | header + word / 5.12 | Car (the list's "ignition timing B,C" is this rpm word) |
 | 0x528 | 522 | energy-monitor arrows | `25 xx yy 00`, see [`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §5 | P |
 | 0x529 | 1000, immediate on event | HV status to the meter (gateway CAN → BEAN `FE:29`) | see below | Car for `{D:3}`, `{D:0-2}` |
@@ -47,6 +47,19 @@ CAN 0x5xx: [`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §5.
 | 0x5B6 | 1050 | doors (BEAN `FE:B6` → CAN) | `{C:7}` driver door, `{C:6}` front passenger door, `{C:2}` rear or back door | Car (the list's "0x40 = other doors" is the passenger door only) |
 | 0x5C8 | 1050 | cruise control (gateway CAN → BEAN `62:C8`) | list: `{C:4}` cruise on and active | ?, see §8 and [`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §1 |
 | 0x5CC | 272 | BEAN `98:CC` copy (not a temperature) | header `24` + 10-bit value | Car |
+
+**Fuel flow (0x520).** The word is the fuel quantity per injection, not a flow; the flow scales with
+engine speed:
+
+    flow [L/h] = K × (256B + C) × rpm,   K = 2.69 × 10⁻⁶
+
+K makes the integrated flow equal the meter's own trip computer (BEAN `52:90` × true speed and
+`52:A2` × `52:76`) on the 2026-11-13 drive; fitted on the instantaneous `52:90` it is 2.82 × 10⁻⁶
+(±5 %). rpm = BEAN `FE:26` or OBD 010C. 0x520 is sent only while the ICE runs (no frame with rpm < 400
+on that drive): its presence is an engine-running indicator, and the last word must not be held
+after the frames stop. A flow of 0.008 L/h per count without rpm reads 2.1× the meter per sample and
++64 % on a trip. Code: `cyberpunk_computer/state/fuel_model.py`; engine-running gate (rpm > 400 →
+BEAN `98:27` → `62:20`/0x520 presence → AVC) in `cyberpunk_computer/comm/engine_gate.py`.
 
 0x529 bits (list; byte A bit 7 = event flag, an event causes an immediate frame):
 
@@ -210,3 +223,14 @@ Battery power = current × sum of block voltages.
   steady pack temperature.
 * **0x120 B position** and **0x3B6 bits**: not observed / unvalidated.
 * **0x3CA, 0x3C8, 0x244, 0x022/0x023/0x025 scalings**: third-party, unchecked.
+* **Fuel figures:**
+  * Absolute scale unverified: K is fitted to the combination meter, and the meter reads 14 % above
+    the fuel derived from MAF and lambda (0.55 L against 0.48 L on the 2026-11-13 drive). Resolves
+    with a brim-to-brim petrol fill over ≥ 100 km on petrol only.
+  * The fit rests on one drive of 2.4 km / 18 min, mostly near 1300 rpm: K at high rpm and highway
+    load is not verified.
+  * LPG: no input reports which fuel the engine burns or the LPG tank level, so every litre figure is
+    petrol-equivalent and no LPG volume factor is applied (`LPG_VOLUME_FACTOR` = None in
+    `state/fuel_model.py`). Detection needs an input from the LPG installation (changeover-switch /
+    fuel-select LED line or LPG solenoid-valve supply on a powerbox input, or the LPG ECU's
+    diagnostic link) and a level sender reading.

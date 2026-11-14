@@ -356,7 +356,7 @@ class Store:
             elif sys_on:
                 changes["mode"] = (ClimateMode.AUTO if auto else
                                    ClimateMode.DEFROST if defrost else ClimateMode.MANUAL)
-            changes["status_source"] = "avc"
+            changes["status_source"] = getattr(a, "status_source", "avc") or "avc"
             new_c = replace(c, **changes)
             if new_c != c:
                 self._state = replace(self._state, climate=new_c)
@@ -415,12 +415,36 @@ class Store:
             affected.add(StateSlice.VEHICLE)
         
         elif action.type == ActionType.SET_SPEED:
+            # Real (physical) speed; speed_kmh is its legacy mirror.
             speed = action.speed_kmh
             self._state = replace(
                 self._state,
-                vehicle=replace(self._state.vehicle, speed_kmh=speed)
+                vehicle=replace(self._state.vehicle, real_speed_kmh=speed, speed_kmh=speed)
             )
             affected.add(StateSlice.VEHICLE)
+
+        elif action.type == ActionType.SET_PASSIVE_SIGNALS:
+            from .actions import PASSIVE_SIGNAL_FIELDS
+            groups = (("vehicle", "vehicle", StateSlice.VEHICLE),
+                      ("climate", "climate", StateSlice.CLIMATE),
+                      ("dynamics", "dynamics", StateSlice.DYNAMICS))
+            for attr, slice_name, sl in groups:
+                upd = {k: v for k, v in getattr(action, attr).items()
+                       if k in PASSIVE_SIGNAL_FIELDS[attr]}
+                if upd:
+                    old = getattr(self._state, slice_name)
+                    new = replace(old, **upd)
+                    if new != old:
+                        self._state = replace(self._state, **{slice_name: new})
+                        affected.add(sl)
+            upd = {k: v for k, v in action.provisional.items()
+                   if k in PASSIVE_SIGNAL_FIELDS["provisional"]}
+            if upd:
+                bean = self._state.bean
+                prov = replace(bean.provisional, **upd)
+                if prov != bean.provisional:
+                    self._state = replace(self._state, bean=replace(bean, provisional=prov))
+                    affected.add(StateSlice.BEAN)
         
         elif action.type == ActionType.SET_RPM:
             self._state = replace(
@@ -432,7 +456,8 @@ class Store:
         elif action.type == ActionType.SET_ICE_RUNNING:
             self._state = replace(
                 self._state,
-                vehicle=replace(self._state.vehicle, ice_running=action.running)
+                vehicle=replace(self._state.vehicle, ice_running=action.running,
+                                engine_running_source=getattr(action, "origin", None))
             )
             affected.add(StateSlice.VEHICLE)
         
@@ -618,15 +643,25 @@ class Store:
                 vehicle=replace(
                     self._state.vehicle, 
                     instant_consumption=action.value,
-                    consumption_unit=action.unit
+                    consumption_unit=action.unit,
+                    instant_consumption_source=getattr(action, "origin", None),
+                    computed_consumption_l100km=getattr(action, "computed_l100km", None),
                 )
             )
             affected.add(StateSlice.VEHICLE)
 
         elif action.type == ActionType.SET_TRIP_FUEL_CONSUMED:
+            from .actions import KEEP
+            upd = {"trip_fuel_consumed": action.liters}
+            for attr, fld in (("drive_distance_km", "drive_distance_km"),
+                              ("drive_avg_l100km", "drive_avg_consumption_l100km"),
+                              ("meter_trip_fuel_l", "meter_trip_fuel_l")):
+                val = getattr(action, attr, KEEP)
+                if val is not KEEP:
+                    upd[fld] = val
             self._state = replace(
                 self._state,
-                vehicle=replace(self._state.vehicle, trip_fuel_consumed=action.liters)
+                vehicle=replace(self._state.vehicle, **upd)
             )
             affected.add(StateSlice.VEHICLE)
             
@@ -951,7 +986,8 @@ class Store:
                     parking_lights=action.parking_lights,
                     low_beam=action.low_beam,
                     high_beam=action.high_beam,
-                    drl_active=action.drl_active
+                    fog_front=action.fog_front,
+                    door_open=action.door_open
                 )
             )
             affected.add(StateSlice.DYNAMICS)

@@ -14,7 +14,7 @@ Key Prius Gen2 PIDs that require solicited queries:
 References:
 - docs/PROTOCOL.md - Gateway communication protocol
 - docs/prius_can.md - Prius-specific CAN/OBD-II codes
-- docs/TODO_SOLICITED_OBD2.md - Implementation notes
+- docs/ARCHITECTURE.md §3 - Implementation notes
 """
 
 import logging

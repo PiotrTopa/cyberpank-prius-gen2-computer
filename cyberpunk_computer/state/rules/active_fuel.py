@@ -3,10 +3,16 @@ Rule: Active Fuel Type determination.
 
 Logic:
 - Engine OFF: active_fuel = OFF
-- Engine ON (ice_running): active_fuel = PETROL (default when engine starts)
-- LPG system ON message received: active_fuel = LPG
+- Engine ON (ice_running): active_fuel = PETROL (ASSUMED)
+- LPG system ON signal: active_fuel = LPG
 
-When engine starts, we always assume PETROL until we get an LPG message.
+No input reports the LPG system's state: nothing calls
+:meth:`ActiveFuelRule.set_lpg_active`, so PETROL is an assumption, not a
+detection (``vehicle.active_fuel_detected`` stays False) and every fuel
+figure is petrol-equivalent (state.fuel_model). Detecting LPG needs an input
+from the LPG installation, e.g. its changeover switch / fuel-select LED line
+or the LPG solenoid-valve supply on a powerbox input, or the LPG ECU's
+diagnostic link.
 """
 
 from typing import Set, Optional
