@@ -68,6 +68,27 @@ mode (three 74 x 44 tiles), BiLED (three 74 x 40 tiles, brightness keys 44 x 36 
 PWM), DRL (236 x 40). One tap per setting; the encoder path is unchanged. The settings are persisted
 values only (no command exists for them), and each control panel says `STORED ONLY`.
 
+CLIMATE screen (`ui/screens/climate_screen.py`, opened by a tap on the CLIMATE box; data and
+commands through `state/climate_model.py::ClimateController`, AVC-LAN only): a cabin view.
+
+| Area | Content | Touch target |
+|---|---|---|
+| header | `< BACK` key, title, `NO AVC` / `STALE` flag in amber, outside temperature (inside temperature only if a value exists; it is not on the bus) | BACK 62 x 21 (hit zone 74 x 27) |
+| left | set temperature in Terminus 32 (0.5 degree steps; `OFF` / `--` as the model says) between a `+` and a `-` key; fan level text and seven growing segments over a `-` and a `+` key | temperature keys 116 x 44, fan keys 56 x 46 |
+| centre | the NHW20 in side view as an X-ray (nose left, cropped to the cabin): seat, occupant, dashboard. Air streams as moving chevrons for exactly the outlets of the reported direction (`face`, `face_foot`, `foot`, `windscreen_foot`, `defrost`), more and faster with the fan level, bright cyan with A/C on and warm without; the intake as an arrow entering at the cowl (`FRESH`) or an amber loop in the cabin (`RECIRC`); amber heat marks on the windscreen (front defrost) and at the rear glass (rear defogger). `SYSTEM OFF` / `NO CLIMATE DATA` instead of streams | (picture only) |
+| under the cabin | the four outlets as tiles: FACE, FACE FEET, FEET, FEET SCRN | 55 x 46 each |
+| right | AUTO, A/C, intake (FRESH / RECIRC), OFF, FRONT (defrost), REAR (defogger) as single-tap tiles with an amber LED dash when on | 56 x 66 each |
+
+Behaviour: everything is drawn from `ClimateController.view()` each frame. AUTO tapped while in AUTO
+leaves it through the controller's "manual" mode (the car has no AUTO-off key); OFF tapped while off
+switches back on in AUTO. Without a climate status no state is drawn and the tiles carry no LED dash;
+FRONT and REAR are disabled (dim) while the status is missing or stale, because they are blind
+toggles. The encoder walks the eight controls (temperature, fan, mode, A/C, intake, direction, front
+defrost, rear defogger; the read-outs are not stops) and its focus is a double outline (amber while
+editing) that appears with the first encoder event and disappears with a touch. The cabin picture
+is rendered once; per frame the screen draws the streams (at most about 20 chevrons) and the tiles
+with cached text: 0.25 ms on the desktop, about 17 ms on the Pi Zero.
+
 Side panels: original width, purple background and type sizes. Two tunables touch them: `side_ticks`
 (5 px bright corner ticks at rest, the motif of the lead's target brackets; focus and edit accents
 unchanged) and `ambient_panel` (`plain` = empty as originally; `level` = the mode in Terminus 14 and

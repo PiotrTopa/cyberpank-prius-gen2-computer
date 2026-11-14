@@ -136,12 +136,89 @@ def test_defrost_and_defogger_rows_send_buttons():
         cs._editing = False
 
 
-def test_inside_temp_row_reachable_by_scrolling():
+def test_encoder_reaches_every_control_and_skips_the_readouts():
     _, cs = open_from_main(live_store())
-    surf = pygame.Surface(SIZE)
-    for _ in range(len(cs.items) - 1):
+    seen = []
+    for _ in range(len(cs.items)):
+        seen.append(cs.items[cs._selected_index].label)
         cs.handle_input(IE.ROTATE_RIGHT)
-    assert cs.items[cs._selected_index].label == "INSIDE TEMP"
+    assert seen[:8] == ["TARGET TEMP", "FAN SPEED", "MODE", "A/C", "AIR INTAKE", "AIR DIRECTION",
+                        "FRONT DEFROST", "REAR DEFOGGER"]
+    assert "OUTSIDE TEMP" not in seen and "INSIDE TEMP" not in seen     # read-outs, not stops
+    assert seen[8] == "TARGET TEMP"                                      # wraps
+    assert set(cs.FOCUS) == set(seen)                                    # each has a focus box
+    cs.render(pygame.Surface(SIZE))
+
+
+def _tap(cs, rect):
+    from cyberpunk_computer.ui.pointer import PointerController
+    clock = [50.0]
+    pc = PointerController(lambda: cs, clock=lambda: clock[0])
+    x, y = rect[0] + rect[2] // 2, rect[1] + rect[3] // 2
+    pc.down(x, y)
+    clock[0] += 0.1
+    pc.update()
+    pc.up(x, y)
+
+
+def test_cabin_view_one_tap_per_function():
+    st = live_store()
+    _, cs = open_from_main(st)
+    cs.controller._stale = lambda state: False          # a fresh link (toggles allowed)
+    _tap(cs, cs.TEMP_UP)
+    assert st.sent[-1].temp == 22.0
+    _tap(cs, cs.TEMP_DOWN)
+    _tap(cs, cs.TEMP_DOWN)
+    assert st.sent[-1].temp == 21.0
+    n = len(st.sent)
+    _tap(cs, cs.FAN_UP)
+    assert len(st.sent) == n + 1
+    _tap(cs, cs.VENT_TILES[0])                           # FACE
+    assert texts(cs)["AIR DIRECTION"] == "FACE"
+    _tap(cs, cs.TILES["FRONT"])
+    assert st.sent[-1].button == "front_defrost"
+    _tap(cs, cs.TILES["REAR"])
+    assert st.sent[-1].button == "rear_defogger"
+    _tap(cs, cs.TILES["OFF"])
+    assert st.sent[-1].button == "off" and texts(cs)["MODE"] == "OFF"
+    _tap(cs, cs.TILES["AUTO"])
+    assert texts(cs)["MODE"] == "AUTO"
+    # every target is at least 44 px high and 55 px wide
+    rects = [cs.TEMP_UP, cs.TEMP_DOWN, cs.FAN_UP, cs.FAN_DOWN] + list(cs.VENT_TILES) + list(cs.TILES.values())
+    assert all(r[3] >= 44 and r[2] >= 55 for r in rects)
+
+
+def test_cabin_picture_follows_the_reported_state():
+    surf = pygame.Surface(SIZE)
+
+    def pic(**kw):
+        st = SpyStore()
+        base = dict(fan_speed=4, ac_on=True, auto_mode=False, recirculation=False, fresh_air=True,
+                    defrost=False, rear_defogger=False, air_direction="face", system_on=True,
+                    target_temp=21.5)
+        base.update(kw)
+        st.dispatch(SetAvcClimateAction(**base))
+        cs = __import__("cyberpunk_computer.ui.screens.climate_screen", fromlist=["x"]).ClimateScreen(
+            SIZE, None, store=st)
+        cs.controller._stale = lambda state: False
+        cs.update(0.05)
+        cs.render(surf)
+        return pygame.image.tobytes(surf, "RGB")
+
+    variants = [pic(), pic(air_direction="face_foot"), pic(air_direction="foot"),
+                pic(air_direction="windscreen_foot"), pic(defrost=True), pic(rear_defogger=True),
+                pic(recirculation=True, fresh_air=False), pic(ac_on=False),
+                pic(system_on=False, fan_speed=0)]
+    assert len(set(variants)) == len(variants)
+    # no AVC status: no streams, no tile state, a NO AVC flag; still renders
+    from cyberpunk_computer.ui.screens.climate_screen import ClimateScreen
+    cs = ClimateScreen(SIZE, None, store=SpyStore())
+    cs.update(0.05)
     cs.render(surf)
-    top = cs._list_top + cs._selected_index * cs._stride - cs._scroll_px()
-    assert top + cs.ITEM_HEIGHT <= SIZE[1] - cs.FOOTER_HEIGHT
+    snap = cs._snapshot()
+    assert snap["known"] is False and snap["toggles_ok"] is False
+    # no store at all (the legacy path) renders and takes taps
+    legacy = ClimateScreen(SIZE, None, temp_target=21.5)
+    legacy.render(surf)
+    _tap(legacy, legacy.TEMP_UP)
+    assert legacy.target_temp == 22.0
