@@ -1,15 +1,14 @@
 # RS485 Satellite Power Management & Twin Model
 
-> **See [SATELLITES.md](SATELLITES.md)** for the multi-transport satellite
-> design (RS485 + BLE + Wi-Fi, keychain, auth, `SatelliteRegistry`, REST
-> commands). This document stays the reference for the RS485 rail, its
-> wake-locks and the RS485 job queue, which the registry keeps unchanged.
+Multi-transport satellites (RS485 + BLE + Wi-Fi, keychain, auth,
+`SatelliteRegistry`, REST commands): [SATELLITES.md](SATELLITES.md). This document
+covers the RS485 rail, its wake-locks and the RS485 job queue.
 
 How the backend manages the **RS485 satellite rail** (powerbox relay channel 5) and models each RS485
 satellite in the virtual twin. Code: `state/rules/satellite_power.py`,
 `backend/satellites.py`, `SatellitesState` in `state/app_state.py`.
 
-## Hardware recap
+## Hardware
 
 ```
 Prius 12V ──► powerbox relay board ──relay ch5 (PCF8574)──► RS485 satellites
@@ -23,15 +22,15 @@ POCO ◄─USB─► gateway RP2040 ◄────RS485 half-duplex────
   The relay board's PCF8574 wakes with every coil released, so after any
   powerbox restart (including the firmware's `hard_restart` self-power-cut,
   which drops every NO relay) the rail is **OFF** until the rule re-asserts it
-  through the mirror-disagreement retry below. Relay 5 is the board's untested
-  channel (fw 2.1 bench 2026-11-03: relays 1-4 verified, 5-8 not yet).
+  through the mirror-disagreement retry below. Relay 5 is **untested** on this
+  board (relays 1–4 verified on the bench; [powerbox/README.md](../powerbox/README.md#relay-board)).
 * Satellites talk NDJSON through the **gateway** (device ids 100–199).
 * The rail state is mirrored back in the powerbox `STATUS` heartbeat
   (`powerbox.rs485_power`, derived from the STATUS `rly` array, ~1 Hz).
 
 ## Power model: wake-locks
 
-`SatellitesState.power_holders` is a set of named wake-locks. **the rail is on iff
+`SatellitesState.power_holders` is a set of named wake-locks. **The rail is on iff
 the set is non-empty.** Holders:
 
 | Holder      | Held by | Meaning |
@@ -56,9 +55,8 @@ same logical requirement as the rail: needed when ACC is on (CAN/AVC traffic) an
 whenever satellite jobs run (RS485). So `SatellitePowerRule` also drives the
 gateway's power (via `SetGatewayUsbPowerAction` → `backend.port_power`
 `RelayPortPower`, powerbox relay **ch3** = the USB hub that carries the gateway
-**and** the comma.ai panda, so both switch together) on the same ON/OFF edges —
-there is **no separate manual gateway power control** (the old `gateway_power`
-API command was removed). Convergence/retry for the gateway port is owned by
+**and** the comma.ai panda, so both switch together) on the same ON/OFF edges;
+there is **no separate manual gateway power control**. Convergence/retry for the gateway port is owned by
 the backend's `_port_power_enforce_tick` (desired vs the powerbox `rly`
 read-back, ~15 s) plus an unconditional re-assert ~6 s after a
 `POWERBOX_READY` boot banner.
@@ -148,5 +146,12 @@ their `BACKEND_SATELLITE_*` env vars: see SATELLITES.md §8.
   (powers the rail if needed, serialized).
 * `satellite_power_hold {name, on}` — manual `manual:<name>` wake-lock.
 
-Note: the UI `set_out` command with `channel=2` is translated into the
-`manual:ui` wake-lock so the operator and the rule never fight over the rail.
+A manual `set_relay` ch5 (UI rail toggle) is translated into the `manual:ui`
+wake-lock (`BackendService`), so the operator and the rule never fight over the rail.
+
+## Open gaps
+
+| Gap | What would resolve it |
+|---|---|
+| Relay ch5 (the rail) never switched on the real board. | Bench: `satellite_power_hold` on/off, check `powerbox.rs485_power` and the rail voltage. |
+| Where the firmware of the RS485 nodes (DRL 106, rain/light 107, VFD 110) lives, and which nodes are fitted on the car, is not documented here (`vfd_satellite/` is a pygame simulator). | Inventory the RS485 bus (`satellite_discover`); link the firmware sources. |

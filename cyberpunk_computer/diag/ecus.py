@@ -194,7 +194,7 @@ _BATT_DECODERS = {
 }
 
 _KLINE = ("Diagnosed over SIL (DLC3 pin 7, K-line) on the NHW20 — not on the DLC3 CAN. "
-          "Needs a K-line interface; see docs/TOYOTA_DIAGNOSTICS.md section 7.")
+          "Needs a K-line interface; see docs/TOYOTA_DIAGNOSTICS.md section 8.")
 _BEAN = ("BEAN body ECU: a tester reaches it through the gateway ECU's SIL port "
          "(DLC3 pin 7). Not reachable over CAN on the NHW20.")
 _PROBE = (" The CAN id is the one later Toyotas use; no NHW20 answer has been reported. "

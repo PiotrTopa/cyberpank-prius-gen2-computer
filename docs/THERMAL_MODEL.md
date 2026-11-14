@@ -1,18 +1,16 @@
 # POCO F1 heat model and chassis-fan policy
 
 Bench campaign 2026-11-04/05, phone on its heatpipe, outside-box ambient (BMP2)
-24–27 °C, ACC off for most of it. Everything below comes from one ambient and a
-bench camera scene: see section 7 before trusting it for summer.
+24–27 °C, ACC off for most of it. All data comes from one ambient and a bench camera
+scene: see section 7 before trusting it for summer.
 
-**Result in one paragraph.** The hot CPU readings are not a cooling problem the
-fan can solve: CPU zones peak at 95–97 °C at every fan speed, 100 % included. The
-limiting zone is the GPU, which follows the sink and throttles at 85 °C. Airflow
-has steep diminishing returns, so the old controller's 100 % bought nothing over
-about 30 %. The new policy controls a filtered GPU-led temperature and ran the
-production load at 31 % (2050 RPM) with the same road rate as 100 % (4780 RPM).
-A hysteresis controller with measured thresholds does this; no lumped physical
-model runs in the controller, because none fitted well enough to be worth it
-(section 4).
+**Summary.** CPU zones peak at 95–97 °C at every fan speed, 100 % included: the fan
+cannot fix them. The limiting zone is the GPU, which follows the sink and throttles at
+85 °C. Airflow has steep diminishing returns: 100 % buys nothing over about 30 % in
+road rate. The policy controls a filtered GPU-led temperature and ran the production
+load at 31 % (2050 RPM) with the same road rate as 100 % (4780 RPM). It is a
+hysteresis controller with measured thresholds; no lumped physical model runs in the
+controller, because none fitted well enough (section 4).
 
 Raw data: `docs/data/thermal/2026-11-04/` (`<run>/samples.csv.gz`, 1 Hz: all zones,
 clocks, supply power, fan, ambient; `<run>/phases.jsonl`; fit outputs). Scripts:
@@ -26,7 +24,7 @@ phone, so paths inside them are not repo-relative.
 | computer | POCO F1 (SDM845, postmarketOS), no screen, no battery: 4.1 V fed to the battery terminals, so `qcom-battery` V·I is the total phone power `P`. The `qcom-battery` zone is meaningless and is ignored |
 | box power | powerbox `power_draw_w` on the 12 V side (phone + hub + fan + whatever else is on), recorded as `box_power_w` |
 | heat path | phone on a laptop heatpipe, ADDA AB07505HX110B00 fan; RPM measured per level below |
-| sensors | 23 thermal zones; BMP2 outside the box. **BMP1 and AHT20 read None on the bench: no box-air sensor** |
+| sensors | 23 thermal zones; BMP2 outside the box. **No box-air sensor** (BMP1 and AHT20 not fitted, read None) |
 | kernel trips | CPU passive 90/95 °C, GPU passive **85 °C**, hot 90 °C |
 | not usable | `cpuinfo_cur_freq` returns 2995200 kHz on both clusters, so the true hardware clock is unknown. The `dcvsh` (LMh) counter steps only in the first seconds after cores come online, even at a 31 °C die, and never during sustained load, so it is not a throttle indicator here |
 
@@ -45,20 +43,19 @@ is unexplained; the plateau may be a hardware limit the kernel does not report.
 | **L** passive reference | run7 (02:28–03:26); run6 was cut off | same as P but in the real `low` profile, fan 0, 45 min pulse, 8.5 min tail | passive time constant, worst-case `low` temperatures |
 | **V** live verification | v1, w1 | see section 6 | policy on real hardware, fan automatic |
 
-Why protocol P replaced A (the user's correction): "saturated" means the mass
-behind the die is charged, read from the cooling curve after load-off. A die
-plateau only shows the SoC limiting itself. Sink temperature is read from the die
-15–20 s after load-off, once the fast internal relaxation is over.
+Saturation means the mass behind the die is charged, read from the cooling curve
+after load-off; a die plateau only shows the SoC limiting itself (hence P instead of
+A). Sink temperature is read from the die 15–20 s after load-off, once the fast
+internal relaxation is over.
 
 Load comparability: the `benchncnn` load is not constant. In `full` it holds
 3.9–4.5 W, but in the `low` profile it swings 1.0–3.9 W (p5–p95, mean 2.5 W). Energy
 is therefore integrated from measured power rather than assumed.
 
-Run interruptions: ACC was off from 20:43 on, so `acc_off`/`power_mode_low` tags
+Reading the raw data: ACC was off from 20:43 on, so `acc_off`/`power_mode_low` tags
 in `phases.jsonl` are expected from then on. In run3 the backend state says `low`
-while the real profile was the forced `full` (all cores online throughout).
-run6 ended at 02:10 because `prius-netwatch` rebooted the phone after a sustained
-SIM/VPN outage, not for a thermal reason; its data is not included.
+while the real profile was the forced `full` (all cores online throughout). run6 ended
+at 02:10 on a non-thermal reboot (`prius-netwatch`, SIM/VPN outage) and is excluded.
 
 ## 3. Raw results
 
@@ -123,8 +120,7 @@ so. At 100 % the 900 s value falling below the 480 s one shows the size of the n
 | 100 | 4731 | 7.08 | 94.7 | 68.5 | 67.9 | 25.2 K/4.0 s, 12.1 K/48 s |
 | 80 | 4136 | 7.85 | 94.6 | 80.3 | 72.6 | 21.4 K/5.5 s, 12.7 K/49 s (first 213 s, before ACC off) |
 
-The die falls from about 95 to about 40 °C in 20 s. The SoC-to-pipe contact works:
-the early hypothesis of poor contact is **retracted**.
+The die falls from about 95 to about 40 °C in 20 s: the SoC-to-pipe contact works.
 
 ### 3.4 Passive reference (protocol L, `low` profile, fan 0, ambient 24.1 °C)
 
@@ -200,10 +196,9 @@ Shared numbers:
 | slew up / down | 5 / 0.5 %/s, 4 % deadband | steady sound instead of following the 1–2 K jitter |
 | box purge | unchanged | no sensor on the bench, so nothing to justify a change. Untested |
 
-**Replaced because the data says it is wrong:** the old override at raw 80 °C. Raw CPU
-reaches 95–97 °C at any fan speed, so it kept the fan at 100 % whenever roadsense ran,
-with no benefit. The old CLI flags (`--fan-full-start-delta` and others) were not set
-in `backend.env`; the new `--fan-*` flags override single policy numbers.
+There is no override at raw 80 °C: raw CPU reaches 95–97 °C at any fan speed, so such
+an override holds the fan at 100 % whenever roadsense runs, with no benefit. The
+`--fan-*` backend flags (`backend/__main__.py`) override single policy numbers.
 
 Expected fan-off limit under roadsense, extrapolated from about 10 K/W total: the fan
 stays off below an ambient of roughly 12 °C (78 °C on-point), so a cold car stays silent.
@@ -216,7 +211,7 @@ stays off below an ambient of roughly 12 °C (78 °C on-point), so a cold car st
 | `full` cool-down (v1) | stack off: fan stopped 27 s later, GPU 41 °C at 30 s, 33.5 °C at 480 s, no restart |
 | `low`, worst-case load, 20 min (v1) | fan stayed 0 % throughout, GPU max 69.9 °C raw, P 2.74 W in the last 10 min |
 | `low` cool-down (v1) | fan stayed 0 %, GPU 33.5 °C at 480 s |
-| `low`, repeat of the above (w1) | fan 0 %, GPU max 69.3 °C raw. Intended as the lowered-threshold test, but the unquoted flags never reached the backend, so it ran the real thresholds |
+| `low`, repeat of the above (w1) | fan 0 %, GPU max 69.3 °C raw (real thresholds) |
 | `low` engage/release, **thresholds lowered for this run only** (`--fan-low-on 46 --fan-low-off 40 --fan-low-full 58`, confirmed on the process command line; w2, 10 min) | engaged after 49 s at 25 %, stayed within the 40 % ceiling, released 27 s after load-off, no restart. 3 on/off edges during the load, because this load swings 1–4 W and the lowered band is 6 K, half the real 12 K |
 
 The real `low` on-point (70 °C) was **not reached on hardware**: at this ambient the
@@ -228,7 +223,7 @@ GPU 3.5 K warmer and still 6 K below the trip on average. Duty wanders slowly wi
 23–39 %, because the GPU reading follows the scene. Whether that is audible has not
 been judged by ear.
 
-## 7. Unmeasured / open
+## 7. Open gaps
 
 * **Ambient range.** All data is from 24–27 °C. Hot-cabin behaviour (up to 45 °C) and
   cold (−10 °C) are extrapolated with an assumed 1:1 shift, and exercised only in the
@@ -245,5 +240,3 @@ been judged by ear.
 * **Passive steady state at production load** was not reached (abort at 98 °C).
 * **`low` worst case** uses a synthetic GPU load that the real key-off state does not
   have; real key-off load is expected near the 0.62 W idle.
-* **Network watchdog.** `prius-netwatch` rebooted the phone during key-off when the
-  SIM/VPN link dropped. Not thermal, but a key-off reboot may matter elsewhere.

@@ -288,7 +288,7 @@ POCO2_ALIVE_TIMEOUT_MS = 90000
 # PWM on GP29 straight to the fan's PWM wire at 25 kHz (the standard 4-wire
 # fan frequency), NOT inverted: GPIO duty = fan duty. 0 % stops this fan
 # completely, 5 % already turns it (~255 RPM), 100 % = ~4680 RPM (bench map
-# 2026-11-03 in RELAY-CHANGE-PLAN.md / README). While GP29 is not driven
+# in powerbox/README.md "Chassis fan"). While GP29 is not driven
 # (bootloader, the 3 s safe-boot window) the fan runs at full speed, so the
 # PWM is set up as early as possible in main(). Tach on GP28: open collector,
 # 2 pulses per revolution, internal pull-up, counted on falling edges.

@@ -1,250 +1,124 @@
 # CyberPunk Prius Gen 2 - Onboard Computer
 
-Custom onboard computer system for the **Cybersecurity Field Unit** - a retro-modded Toyota Prius Gen 2.
+Car computer for a Toyota Prius Gen 2 (NHW20): a headless backend on a POCO F1 phone, a pygame
+UI on the car's own MFD (480×240), and RP2040 boards that bridge the car buses.
 
-## 🎯 Overview
-
-A pygame-based HMI (Human-Machine Interface) application designed to run on a **Raspberry Pi Zero v1.3**, displaying on the native MFD (Multi-Function Display) of the Prius.
-
-### Key Features
-
-- **Native Resolution:** 480×240 pixels
-- **Aesthetic:** Cyberpunk / Synthwave / VFD-inspired visuals
-- **Input:** Rotary encoder with haptic feedback, MFD touch panel (keyboard + mouse for development)
-- **Communication:** NDJSON protocol over USB UART Gateway
-
-## 🏗️ Architecture
+## System
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                   Raspberry Pi Zero v1.3                    │
-│  ┌─────────────────────────────────────────────────────────┐│
-│  │              CyberPunk Computer (This App)              ││
-│  │  ┌──────────┐  ┌──────────┐  ┌────────────────────────┐││
-│  │  │   UI     │  │  Core    │  │    Communication       │││
-│  │  │ (Pygame) │◄─┤  Engine  │◄─┤  (NDJSON over Serial)  │││
-│  │  └──────────┘  └──────────┘  └───────────┬────────────┘││
-│  └──────────────────────────────────────────┼──────────────┘│
-│                                              │ USB           │
-└──────────────────────────────────────────────┼───────────────┘
-                                               │
-┌──────────────────────────────────────────────┼───────────────┐
-│                    Gateway (RP2040)          │               │
-│  ┌───────────────────────────────────────────┴─────────────┐ │
-│  │                    NDJSON Router                        │ │
-│  └────┬──────────────────┬─────────────────────┬───────────┘ │
-│       │                  │                     │             │
-│  ┌────┴────┐       ┌─────┴─────┐        ┌──────┴──────┐      │
-│  │   CAN   │       │  AVC-LAN  │        │    RS485    │      │
-│  │  (id:1) │       │   (id:2)  │        │  (id:6-255) │      │
-│  └────┬────┘       └─────┬─────┘        └──────┬──────┘      │
-└───────┼──────────────────┼─────────────────────┼─────────────┘
-        │                  │                     │
-   ┌────┴────┐       ┌─────┴─────┐        ┌──────┴──────┐
-   │ Vehicle │       │   Audio   │        │  Satellites │
-   │   ECUs  │       │  System   │        │  (Custom)   │
-   └─────────┘       └───────────┘        └─────────────┘
-
-┌──────────────────────────────────────────────────────────────┐
-│                    Powerbox (RP2040)                         │
-│  Direct USB-CDC NDJSON connection to POCO                    │
-│  Monitors INA219 (V/A) and controls ignition state.          │
-└──────────────────────────────────────────────────────────────┘
+POCO F1 (postmarketOS, always on)
+  prius-backend   python -m cyberpunk_computer.backend
+                  virtual twin (store + rules), metrics SQLite, diagnostics engine
+                  REST + WebSocket :8080 (serves dashboard/dist at /), ZMQ PUB :8081 / REP :8082
+  roadsense       separate repos, systemd roadsense.target, ACC only; API :8090
+   │
+   ├─ USB hub ─ Gateway (RP2040, NDJSON over CDC): AVC-LAN, solicited CAN (OBD/UDS),
+   │            RS485 satellites (ids 100-199)
+   ├─ USB hub ─ Powerbox (RP2040, NDJSON over CDC): relays, INA219, ignition, BEAN RX (ids 200-203)
+   ├─ USB hub ─ comma.ai panda: broadcast CAN listener, SAFETY_SILENT
+   ├─ USB gadget usb0 ─ MFD Pi Zero v1.3: python -m cyberpunk_computer.frontend → DPI/VGA666 → MFD
+   └─ BLE / Wi-Fi AP ─ satellites (BLE ids 300-399, Wi-Fi ids 400-499)
 ```
 
-## 📡 Communication Protocol
+| Part | Where it is documented |
+|---|---|
+| POCO F1: OS, networking, power profiles, provisioning | [POCO/README.md](POCO/README.md) |
+| Powerbox firmware (relays, INA219, ignition, BEAN RX) | [powerbox/README.md](powerbox/README.md) |
+| Backend / frontend processes, transports, input model | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| State store, actions, rules, IO ports, device ids | [docs/VIRTUAL_TWIN_ARCHITECTURE.md](docs/VIRTUAL_TWIN_ARCHITECTURE.md) |
+| Gateway NDJSON protocol as used by the backend | [docs/PROTOCOL.md](docs/PROTOCOL.md) |
+| Deployment (backend to the POCO, frontend to the Pi) | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
+| Satellites (RS485 / BLE / Wi-Fi, keychain) | [docs/SATELLITES.md](docs/SATELLITES.md), [docs/SATELLITE_POWER.md](docs/SATELLITE_POWER.md), [docs/VFD_SATELLITE_PROTOCOL.md](docs/VFD_SATELLITE_PROTOCOL.md) |
+| Thermal model and fan policy of the POCO | [docs/THERMAL_MODEL.md](docs/THERMAL_MODEL.md) |
 
-This application communicates with the vehicle through the **Gateway** using the NDJSON protocol.
+The gateway firmware, the Pi image files and the per-day capture logs live in the sibling
+repository `cyberpunk-prius-gateway` (`gateway-rp2350/`, `raspberry_pi_config/`,
+`captures/<date>/CAPTURES.md`).
 
-See: [PROTOCOL.md](./docs/PROTOCOL.md) for full specification.
+## Car buses and peripherals
 
-### Car peripherals (facts measured on the car, for future integration work)
+| Document | Content |
+|---|---|
+| [docs/prius_can.md](docs/prius_can.md) | CAN broadcast IDs and diagnostic PIDs with scaling |
+| [docs/BEAN_PROTOCOL.md](docs/BEAN_PROTOCOL.md), [docs/BEAN_SIGNALS.md](docs/BEAN_SIGNALS.md) | BEAN body bus: protocol and tap points; this car's signal map, CAN mirror, actuation, open gaps |
+| [docs/AVC_BACKEND.md](docs/AVC_BACKEND.md) | AVC-LAN decoding, nav emulation, climate remote |
+| [docs/TOYOTA_DIAGNOSTICS.md](docs/TOYOTA_DIAGNOSTICS.md) | All-ECU diagnostics engine, DTC dictionary, safety rules |
+| [docs/MFD_VIDEO_TIMINGS.md](docs/MFD_VIDEO_TIMINGS.md) | MFD RGBS input: DPI timings, VGA666, sync wiring |
+| [docs/HEADUNIT_INTEGRATION.md](docs/HEADUNIT_INTEGRATION.md) | Android head unit (AC8227L): access, MCU protocol, wheel keys, volume chain |
+| [docs/DASHCAM_70MAI.md](docs/DASHCAM_70MAI.md) | 70mai dashcam stream, first-drive light data, auto-light rule |
+| [docs/VISION_ROADMAP.md](docs/VISION_ROADMAP.md) | In-repo vision package: lights, environment, detector slot, map speed limit |
+| [docs/VISION_ENVIRONMENT_MODEL_2026-10-19.md](docs/VISION_ENVIRONMENT_MODEL_2026-10-19.md), [docs/VISION_DETECTOR_EXPERIMENT_2026-10-19.md](docs/VISION_DETECTOR_EXPERIMENT_2026-10-19.md) | Experiment reports with their data in `docs/data/` and `docs/img/` |
 
-- [HEADUNIT_INTEGRATION.md](./docs/HEADUNIT_INTEGRATION.md) — Android head unit (AC8227L): ADB/root access, MCU serial protocol, steering wheel key map, vendor control broadcasts, volume chain, design and plan (parked 2026-10-19).
-- [DASHCAM_70MAI.md](./docs/DASHCAM_70MAI.md) — 70mai dashcam over its hotspot: RTSP live stream, frame grabbing, scene brightness helper `tools/dashcam_brightness.py`.
-- [MFD_VIDEO_TIMINGS.md](./docs/MFD_VIDEO_TIMINGS.md) — Toyota MFD RGB input: DPI timings, VGA666 wiring, 74HC86 composite-sync combiner.
-- Per-day bench and car logs with the user's words: `cyberpunk-prius-gateway/captures/<date>/CAPTURES.md`.
+## Running
 
-### Quick Reference
-
-```json
-{"id": 0, "d": {...}}  // SYSTEM - Gateway control
-{"id": 1, "d": {...}}  // CAN - Vehicle bus
-{"id": 2, "d": {...}}  // AVC-LAN - Multimedia bus
-{"id": 6+, "d": {...}} // SATELLITES - RS485 modules
-{"id": 200+, "d": {...}} // POWERBOX - Local power telemetry
-```
-
-## 🚀 Quick Start
-
-### Requirements
-
-- Python 3.11+
-- Pygame 2.5+
-
-### Installation
+Python 3.11+; `pip install -r requirements.txt` (pygame, pyserial, fastapi/uvicorn, pyzmq,
+websocket-client). The backend on the POCO uses `cyberpunk_computer/backend/requirements-backend.txt`.
 
 ```bash
-# Create virtual environment
-python -m venv .venv
-source .venv/bin/activate  # Linux/Mac
-# or
-.venv\Scripts\activate     # Windows
+# headless backend (on the POCO it runs as prius-backend.service)
+python -m cyberpunk_computer.backend --gateway-port /dev/ttyACM0
+python -m cyberpunk_computer.backend --replay FILE          # replay a recording, no hardware
 
-# Install dependencies
-pip install -r requirements.txt
-```
+# UI against a running backend (on the MFD Pi it runs as mfd.service)
+python -m cyberpunk_computer.frontend --host <backend-ip> --dev --scale 2
 
-### Running
-
-```bash
-# Development mode (2x upscale, keyboard input)
-python -m cyberpunk_computer --dev --scale 2
-
-# Production mode (native resolution, serial connection with auto-reconnect)
-python -m cyberpunk_computer --production
-
-# Replay recorded data for testing
+# standalone UI with a local virtual twin (no backend): file replay or a directly attached gateway
 python -m cyberpunk_computer --replay assets/data/full.ndjson --dev --scale 2
+python -m cyberpunk_computer --dev --port /dev/ttyACM0
 ```
 
-### Deployment to Raspberry Pi
+Tests: `SDL_VIDEODRIVER=dummy python -m pytest tests/`. Dashboard (React/Vite web UI served by the
+backend): [dashboard/README.md](dashboard/README.md).
 
-For production deployment to Raspberry Pi Zero v1.3:
+### Controls
 
-```bash
-# First-time setup (installs service and enables auto-start)
-python deploy.py --install --restart --logs
+| Key (dev) | Event |
+|---|---|
+| ← / → , mouse wheel | rotate left / right |
+| Enter | light press |
+| Space | strong press |
+| Escape | back |
 
-# Regular updates (sync code and restart service)
-python deploy.py --restart
-```
-
-See [DEPLOYMENT.md](./docs/DEPLOYMENT.md) for complete deployment guide and [Quick Reference](./deployment/QUICK_REFERENCE.md) for common commands.
-
-**Production mode features:**
-- ✓ Auto-reconnect to USB UART (handles disconnect/reconnect)
-- ✓ Proper logging (INFO level, file rotation)
-- ✓ Fullscreen display (native resolution)
-- ✓ systemd service (auto-start, restart on failure)
-
-### Controls (Development)
-
-| Key | Action |
-|-----|--------|
-| ← / → | Rotate encoder (navigate) |
-| Enter | Light press (select/enter) |
-| Space | Strong press (context action) |
-| Escape | Back / Exit |
-| Mouse wheel | Rotate encoder |
-
-### Touch & mouse
-
-The UI is fully usable by pointer. In dev mode the mouse drives it (window
-coordinates are scaled back to the native 480×240, so `--scale 2/4` works); in
-production the MFD touch panel drives it through the backend's `touch` events.
-Both feed the same gesture recogniser (`cyberpunk_computer/ui/pointer.py`), so
-they behave identically, and every gesture maps onto the encoder events:
+Mouse (dev) and the MFD touch panel (production) drive one gesture recogniser
+(`cyberpunk_computer/ui/pointer.py`) that maps onto the same events:
 
 | Gesture | Effect |
-|---------|--------|
-| Tap a panel / button / list row | focus + light press (select, edit, open) |
+|---|---|
+| Tap a panel / button / list row | focus + light press |
 | Long press (≥ 600 ms) | strong press (detail screen; DTC clear confirm) |
 | Drag the volume bar | set volume directly |
 | While editing: tap `+` / `−` side, or drag sideways | rotate right / left |
 | Swipe left / right (dashboard centre, paged screens) | next / previous page |
 | `< BACK` chip / footer `BACK` button | back |
-| Tap on empty space | nothing |
 
-Production touch arrives as `touch` events (`{"x","y","pressed",...}`, already
-calibrated, streamed at 10–15 Hz while pressed) and the MFD hardware buttons as
-`button` events. The button → screen table lives in
-`cyberpunk_computer/ui/hw_buttons.py`: `menu` → home, `map` → dynamics page,
-`dest` → engine/diagnostics menu, `maintenance` → error codes (DTC),
-`calendar`/`language` → logged no-op. See
-[ARCHITECTURE.md](./docs/ARCHITECTURE.md#2-input-abstraction).
+MFD hardware buttons: `menu` → home, `map` → dynamics page, `dest` → engine/diagnostics menu,
+`maintenance` → DTC screen, `calendar`/`language` → no-op (`cyberpunk_computer/ui/hw_buttons.py`).
+Touch contract and pointer rules: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#2-input-abstraction).
 
-Tests (headless): `SDL_VIDEODRIVER=dummy python -m pytest tests/test_pointer_ui.py`.
-
-## 📁 Project Structure
+## Repository layout
 
 ```
-cyberpunk-prius-gen2-computer/
-├── cyberpunk_computer/          # Main package
-│   ├── __init__.py
-│   ├── __main__.py              # Entry point
-│   ├── config.py                # Configuration
-│   ├── core/                    # Core engine
-│   │   ├── app.py               # Main application loop
-│   │   └── renderer.py          # Rendering with scaling
-│   ├── ui/                      # UI framework
-│   │   ├── colors.py            # Cyberpunk color palette
-│   │   ├── fonts.py             # Font management
-│   │   ├── widgets/             # Reusable UI widgets
-│   │   └── screens/             # Screen definitions
-│   ├── input/                   # Input handling
-│   │   ├── manager.py           # Input abstraction
-│   │   └── touch.py             # Touch event handling
-│   ├── io/                      # Virtual Twin IO layer
-│   │   ├── ports.py             # InputPort/OutputPort interfaces
-│   │   ├── ingress.py           # Data input → State
-│   │   ├── avc_ingest.py        # AVC-LAN updates → actions (AVC priority, outside temp)
-│   │   ├── egress.py            # State → Hardware output
-│   │   ├── file_io.py           # File replay (development)
-│   │   ├── serial_io.py         # Serial UART (production)
-│   │   ├── powerbox.py          # Powerbox state translation
-│   │   └── factory.py           # VirtualTwin factory
-│   ├── state/                   # State management
-│   │   ├── store.py             # Central state store
-│   │   ├── app_state.py         # State dataclasses
-│   │   ├── actions.py           # Action definitions
-│   │   └── rules.py             # Rules engine
-│   └── comm/                    # Protocol decoders
-│       ├── avc/                 # AVC-LAN (fw 3.x): decoder, touch calibration, nav emulator, climate remote — see docs/AVC_BACKEND.md
-│       ├── can_decoder.py       # CAN bus decoder
-│       ├── solicited_can.py     # Solicited OBD-II / CAN PIDs
-│       └── subscription_groups.py # Gateway CAN subscription slots
-├── powerbox/                    # RP2040 Powerbox firmware
-│   ├── main.py                  # NDJSON firmware
-│   ├── ina219.py                # I2C driver
-│   ├── rescue.sh                # Bootloop recovery
-│   └── README.md                # Powerbox docs
-├── assets/                      # Static assets
-│   ├── fonts/
-│   └── data/                    # Sample recordings
-├── docs/                        # Documentation
-│   ├── ARCHITECTURE.md
-│   ├── VIRTUAL_TWIN_ARCHITECTURE.md
-│   ├── AVC_BACKEND.md           # AVC-LAN decoding, nav emulation, climate remote
-│   └── PROTOCOL.md
-├── examples/                    # Usage examples
-├── requirements.txt
-└── README.md
+cyberpunk_computer/
+  backend/     headless service: engine loop, ZMQ server, MFD/roadsense/port power, satellites, fan policy
+  frontend/    remote UI client (RemoteTwin over ZMQ)
+  api/         FastAPI REST + WebSocket, camera preview, roadsense proxy
+  io/          virtual-twin IO: ports, ingress/egress, serial, panda, powerbox, satellite transports, dashcam ingest
+  state/       store, AppState, actions, rules
+  comm/        protocol decoders: avc/, CAN, BEAN, solicited PIDs, subscription groups
+  diag/        all-ECU diagnostics engine + DTC dictionary
+  vision/      dashcam lights / environment model, detector slot, map speed limit
+  metrics/     SQLite metrics sink
+  core/ ui/ input/   pygame application, screens, widgets, input
+dashboard/     web dashboard (React, Vite)
+POCO/          phone OS overlay, provisioning, docs
+powerbox/      powerbox MicroPython firmware
+satellites/, vfd_satellite/   satellite firmware / apps
+deployment/    MFD Pi units and helper scripts (see docs/DEPLOYMENT.md)
+tools/, scripts/   analysis and bench tools
+assets/        fonts, sample recordings
+docs/          reference documentation, experiment data (docs/data/, docs/img/)
 ```
 
-## 🎨 Design Guidelines
+## License
 
-### Visual Style
-
-- **Theme:** Cyberpunk / Blade Runner / VFD displays
-- **Colors:** Cyan, magenta, orange accents on dark backgrounds
-- **Typography:** Monospace/technical fonts
-- **Effects:** Scanlines, glow, subtle animations
-
-### UI Principles
-
-1. **High contrast** - Must be readable in all lighting conditions
-2. **Minimal latency** - Instant response to input
-3. **Clear focus** - Always obvious which element is selected
-4. **Haptic correlation** - UI feedback matches encoder mode
-
-## 📜 License
-
-MIT License - See [LICENSE](./LICENSE) for details.
-
-## 🔗 Related Projects
-
-- [Gateway](../Gateway/) - RP2040-based communication bridge
-- [Satellites](../Gateway/satellites/) - Distributed RS485 modules
-- [Powerbox](./powerbox/) - POCO F1 companion RP2040 power manager
-
+MIT, see [LICENSE](LICENSE).

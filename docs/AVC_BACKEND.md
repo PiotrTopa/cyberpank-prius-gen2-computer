@@ -1,18 +1,14 @@
 # AVC-LAN in the backend (gateway firmware 3.x)
 
-**Source of truth:** `cyberpunk-prius-gateway/captures/2026-10-07/AVC_MAP.md` (signal map,
-touch calibration, remote climate procedure) and
-`cyberpunk-prius-gateway/captures/2026-10-07/NAV_EMULATION_SPEC.md` (sections *Resolved on-car
-2026-10-14* and *Real nav observed again*). The nav emulation is a port of
-`gateway-rp2350/tools/nav_emu.py` as accepted by the real display on 2026-10-14 (`--fw-auto --fw-ack`).
-Gateway JSON: `cyberpunk-prius-gateway/PROTOCOL.md` + `gateway-rp2350/README.md` ("Protocol: what changed").
+Sources: `cyberpunk-prius-gateway/captures/2026-10-07/AVC_MAP.md` (signal map, touch
+calibration, remote climate procedure) and `cyberpunk-prius-gateway/captures/2026-10-07/NAV_EMULATION_SPEC.md`
+(sections *Resolved on-car 2026-10-14* and *Real nav observed again*). The nav emulation is a port of
+`gateway-rp2350/tools/nav_emu.py` in the form the real display accepted on 2026-10-14
+(`--fw-auto --fw-ack`). Gateway wire format: [PROTOCOL.md](PROTOCOL.md) §4.
 
-History: the gateway fw 2.x era decoder, analysis scripts and notes (a bit-misaligned
-re-reading of the bus: `040->200` buttons, `10C->310` climate, `A00->258` / `110->490` energy) were
-removed on 2026-10-15 and live only in the repository history before the commit "remove legacy
-fw-2.x AVC-LAN code" and the docs commit that followed it. The fw 2.x recordings themselves remain
-in `logs/` and `assets/data/`. The verified capture history is the gateway repo's `captures/`
-(AVC_MAP.md and the per-day notes).
+The decoders apply to gateway firmware 3.x output only. The fw 2.x recordings in `logs/` and
+`assets/data/` (`avc_lan_messages.ndjson`) were decoded bit-misaligned by that firmware and do not
+match these tables.
 
 Units: **110** display (EMV), **1C6** climate / info ECU (logicals E0 climate, E4/E5 info),
 **178** nav (logical 58). Frames below are `master->slave data…` (hex).
@@ -164,7 +160,7 @@ capture format (one `{"hm","raw","obj","ht"}` record per gateway line, plus `{"t
 header lines, which are skipped). `obj` is used, or `raw` when `obj` is missing (2026-10-07
 captures), and playback is paced by `ht`. Nav emulation is off in replay.
 
-## Unverified / open
+## Open gaps
 
 * Gap between remote presses (0.35 s) and the 1.2 s setpoint confirmation timeout are choices.
 * The recirculation button is assumed to toggle back to fresh air (only fresh → recirc is captured).
@@ -172,5 +168,6 @@ captures), and playback is paced by `ht`. Nav emulation is off in replay.
   tried with the emulator in the car.
 * Time reply uses the phone's local clock (`00 01 01 HH MM SS FF`, as nav_emu.py does).
 * `pol` is never sent: the gateway detects the RX polarity at boot (`avc_pol` in `GATEWAY_READY`).
-  The 2026-10-14 car sessions forced `pol hi` from nav_emu.py; if boot detection disagrees on this
-  PHY, the polarity has to be fixed on the gateway side.
+  The 2026-10-14 car sessions forced `pol hi` from nav_emu.py; whether boot detection picks the same
+  on this PHY is unconfirmed (check `avc_pol` in the banner on the car). If it disagrees, the
+  polarity has to be fixed on the gateway side.

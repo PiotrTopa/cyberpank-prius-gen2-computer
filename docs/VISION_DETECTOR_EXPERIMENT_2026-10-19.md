@@ -1,13 +1,12 @@
-# Nano object detector on the 70mai dashcam: experiment 2026-10-19
+# Nano object detector on the 70mai dashcam (experiment, 2026-10-19)
 
-This is the first measurement for the detector slot (VISION_ROADMAP.md §4.2). Two pretrained nano
-YOLO models ran over the 174 frames of the drive home through Gdańsk on 2026-10-19. The drive
-was a sunny afternoon, often with the sun in the picture. The frames are 640×360 JPEGs from the
-live RTSP stream, sampled every 10 s from 15:22 to 15:57 CEST.
-Source: `cyberpunk-prius-gateway/captures/2026-10-19/70mai/drive_home/`.
+Measurement for the detector slot ([VISION_ROADMAP.md](VISION_ROADMAP.md) §4.2). Two pretrained nano
+YOLO models ran over the 174 frames of the drive home through Gdańsk on 2026-10-19 (sunny afternoon,
+often with the sun in the picture). Frames: 640×360 JPEGs from the live RTSP stream, every 10 s from
+15:22 to 15:57 CEST, in `cyberpunk-prius-gateway/captures/2026-10-19/70mai/drive_home/`.
 
-Nothing here ran on the phone, which was not connected. The timings were measured on the
-laptop. The phone figures in §4 are estimates scaled from published benchmarks, and §4 says how.
+Timings were measured on the laptop, not on the phone. The phone figures in §4 are estimates scaled
+from published benchmarks; §4 says how.
 
 ## 1. Setup
 
@@ -63,7 +62,7 @@ underground garage, where the whole frame is taken for a "car 0.35" and a "truck
    bottom edge (15:41:41, 15:42:21, 15:42:31).
 
 **Misses.** Distant cars smaller than about 12 px are dropped at 416, and occasionally at 640.
-I found no missed car closer than about 20 m on the sheets. At 416, 12 % of the
+No missed car closer than about 20 m was found on the sheets. At 416, 12 % of the
 cars and traffic lights that score ≥ 0.5 at 640 are lost, and traffic lights fall from 66 to 35.
 **Small objects need the 640 input.**
 
@@ -83,8 +82,8 @@ bollards become "no overtaking", and haze on a pole becomes "40" or "70". Those 
 speed-limit outputs in the whole drive, and both are wrong.
 
 The correct detections come from about **five distinct sign installations**. The model detected
-no speed-limit sign. The sampled frames contain none seen from the front, as far as I could tell
-from the overview sheets: 15:43:51 shows a round sign from behind. So **reading speed limits is
+no speed-limit sign. The sampled frames contain none seen from the front (checked on the overview
+sheets; 15:43:51 shows a round sign from behind). So **reading speed limits is
 not tested by this drive.** The model also has no class for the large blue lane-direction signs
 (15:27:01, 15:48:21) or for built-up-area signs. It misses them, as expected.
 
@@ -164,8 +163,7 @@ throttling, so treat the estimate as ±2×. It has to be measured on the Poco.
 
 ## 5. Export
 
-All exports are of `yolo11n.pt`. Export ran with `YOLO_AUTOINSTALL=false` after the incident in
-the note below the table.
+All exports are of `yolo11n.pt`, run with `YOLO_AUTOINSTALL=false` (see the rule below the table).
 
 | Format | Input | Result | Size | Agreement with the exported fp32 model |
 |---|---|---|---:|---|
@@ -175,11 +173,10 @@ the note below the table.
 | TFLite / LiteRT **int8** (calibrated on the 174 frames) | 416×416 | success | 3.1 MB | cars and lights ≥ 0.5 vs `.pt`@416: 339/340 (fp32: 340/340); **traffic lights at ≥ 0.25: 33 → 20** |
 | ncnn (pnnx) | 416 and 640 | success | 10.1 / 10.2 MB (fp32 file; fp16 storage at runtime) | Vulkan output = fp32 TFLite |
 
-Note: the first LiteRT export let Ultralytics auto-install `litert-torch`. That package pins
-torch < 2.14, so pip replaced the CPU torch with the **CUDA 13 torch from PyPI plus its nvidia-*
-wheels**. This was an unplanned download of about 2.5–3 GB over the phone tether (the pip cache
-is now 2.6 GB). The scripts now set `YOLO_AUTOINSTALL=false`, and the requirements file says to
-use the CPU index. The venv still holds the CUDA build (6.6 GB on disk), which works on the CPU.
+Rule: export with `YOLO_AUTOINSTALL=false` and install from the CPU index. Ultralytics otherwise
+auto-installs `litert-torch`, which pins torch < 2.14, and pip then replaces the CPU torch with the
+CUDA 13 torch plus its nvidia-* wheels (about 2.5–3 GB of downloads). The experiment venv holds that
+CUDA build (6.6 GB on disk); it works on the CPU.
 
 Also note that int8 cost the small objects most (traffic lights −40 %). On the phone, fp16 on the
 GPU delegate (LiteRT converts fp32 weights to fp16 itself) or ncnn Vulkan with fp16 storage is the
@@ -217,17 +214,17 @@ better first try. Use int8 only on the CPU path, and only after checking small-o
   roughly 10 px inner field, which leaves 3–4 px per digit. The model never produced a speed-limit
   class that was correct. A guess at distance, assuming the usual 70mai wide lens (about 120–130°
   horizontal, roughly 170–250 px focal length): a 60 cm sign is 20 px at only **about 5–8 m**, and
-  10 px at 10–15 m. VISION_ROADMAP §4.2 says a 60 cm sign is readable from 15–20 m at 640×360.
-  That is optimistic by about 2–3× for this lens and stream. The 1080p recording, or a narrower
-  camera, would roughly double the range.
+  10 px at 10–15 m. An earlier planning estimate of 15–20 m readable range at 640×360 is
+  optimistic by about 2–3× for this lens and stream. The 1080p recording, or a narrower camera,
+  would roughly double the range.
 - **The 10 s sampling misses most signs.** A sign is in the readable zone for well under a second
   at 50 km/h. Only the red-light stop at 15:32–15:33 gave the same sign in six frames. Phase B needs
   the 2–5 fps grabber feed, plus tracking across frames.
 - **The sign model is a usable placeholder, not the answer.** Its classes cover the Polish signs
   that matter (speed limits 5–130, no entry, give way, stop, priority road). It confuses the
   blue mandatory-direction discs with each other and has no class for built-up-area or
-  lane-direction signs. Fine-tuning on Polish data (Mapillary, then our own frames) remains the
-  plan in the roadmap.
+  lane-direction signs. Fine-tuning on Polish data (Mapillary, then own frames) is the plan in the
+  roadmap.
 - **The COCO nano model is good enough today** for cars, traffic lights and larger road users at
   640 input. It needs the mount mask and the large-box filter. Run at the 2–5 fps the slot needs, it should
   take only a fraction of the phone's CPU or GPU (estimate from §4).

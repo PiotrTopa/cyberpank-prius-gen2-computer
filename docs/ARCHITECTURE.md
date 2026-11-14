@@ -1,59 +1,70 @@
-# Application Architecture
+# Architecture
 
-## Overview
+System topology, processes, transports and the UI input model. The state store, actions, rules
+and IO ports are in [VIRTUAL_TWIN_ARCHITECTURE.md](VIRTUAL_TWIN_ARCHITECTURE.md); the POCO's OS
+side in [POCO/ARCHITECTURE.md](../POCO/ARCHITECTURE.md).
 
-The CyberPunk Computer is a pygame-based HMI application designed for embedded deployment on Raspberry Pi Zero v1.3, with development support on desktop systems.
+## 1. Processes and transports
 
-**See also:** [VIRTUAL_TWIN_ARCHITECTURE.md](./VIRTUAL_TWIN_ARCHITECTURE.md) for the detailed Virtual Twin pattern documentation, including:
-- IO abstraction layers (InputPort/OutputPort)
-- Ingress/Egress controllers
-- State Rules Engine for reactive business logic
-- How to implement new features like DRL lights, RS485 satellites, etc.
+| Process | Runs on | Entry point | Role |
+|---|---|---|---|
+| backend | POCO F1 (`prius-backend.service`) | `python -m cyberpunk_computer.backend` | owns the hardware links and the virtual twin; no pygame |
+| frontend | MFD Pi Zero v1.3 (`mfd.service`) | `python -m cyberpunk_computer.frontend --host 192.168.100.1` | pygame UI; `RemoteTwin` stands in for the local twin |
+| standalone app | any desktop | `python -m cyberpunk_computer` | same UI with a local `VirtualTwin` (file replay, mock, or a gateway on a local serial port) |
+| dashboard | browser | `dashboard/dist`, served by the backend at `/` | web UI over REST + WebSocket ([dashboard/README.md](../dashboard/README.md)) |
 
-## Core Design Principles
+The UI code is identical in the frontend and the standalone app; only the data source differs.
 
-### 1. Resolution Independence
+### Backend threads (`backend/service.py`)
 
-The application always renders at **480×240** internally. Display scaling is handled as post-processing:
+| Thread | Work |
+|---|---|
+| main (engine) | `vt.update()` + `bridge.drain_commands()` at `BACKEND_TICK_HZ` (default 50); the only thread that dispatches UI/API commands |
+| metrics | `MetricsSink`: samples store snapshots into SQLite (`BACKEND_DB`) |
+| api-server | uvicorn/FastAPI: REST + WebSocket |
+| zmq | `ZmqServer` socket IO |
+| panda reader | broadcast CAN frames → `IngressController.ingest_broadcast_can` → `Store.dispatch` (the store holds a re-entrant lock for this path) |
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│                    Rendering Pipeline                        │
-│                                                              │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────────┐  │
-│  │   Game      │    │   Native    │    │   Scaled        │  │
-│  │   Logic     │───►│   Surface   │───►│   Window        │  │
-│  │             │    │   480×240   │    │   (960×480 etc) │  │
-│  └─────────────┘    └─────────────┘    └─────────────────┘  │
-└──────────────────────────────────────────────────────────────┘
-```
+`api/bridge.py::StoreBridge` is the boundary: API/ZMQ commands are queued and dispatched on the
+engine thread; snapshots go out latest-only so a slow client never blocks the engine.
 
-### 2. Input Abstraction
+### Network interfaces of the backend
 
-The input system abstracts physical controls through an event-based interface:
+| Interface | Port | Content |
+|---|---|---|
+| REST | 8080 | `GET /health`; under `/api/v1`: `state`, `metrics/catalog`, `metrics`, `events`, `commands` (list), `POST commands/{name}`, `bean/frames`, `diag/*`, `camera/preview*`, roadsense proxy. Auth: `BACKEND_AUTH_TOKEN` when set |
+| WebSocket | 8080 `/api/v1/stream` | state snapshots (dashboard) |
+| ZMQ PUB | 8081 | `{"type":"state","ts","state"}` (latest-only, throttled) and `{"type":"event","ts","name","data"}` (FIFO, never displaced by state) |
+| ZMQ REP | 8082 | `{"command": name, "params": {...}}` → `{"status":"ok"}` on acceptance (execution is asynchronous) or `{"status":"error","reason"}` |
 
-```python
-class InputEvent:
-    ROTATE_LEFT = "rotate_left"
-    ROTATE_RIGHT = "rotate_right"
-    PRESS_LIGHT = "press_light"   # Short/light press
-    PRESS_STRONG = "press_strong" # Long/strong press
-    BACK = "back"
-```
+The frontend (`frontend/client.py`) subscribes to PUB, sends commands over REQ (socket rebuilt after a
+lost reply) and treats the link as up only while envelopes arrive within 5 s (state is published at
+about 1 Hz).
 
-**Development mapping (keyboard):**
-- `←` → ROTATE_LEFT
-- `→` → ROTATE_RIGHT
-- `Enter` → PRESS_LIGHT
-- `Space` → PRESS_STRONG
-- `Escape` → BACK
+### Hardware links of the backend
 
-**Production mapping (encoder):**
-- Encoder rotation → ROTATE_LEFT/RIGHT
-- Light click → PRESS_LIGHT
-- Strong click → PRESS_STRONG
+| Device | Link | Code | Notes |
+|---|---|---|---|
+| Gateway (RP2040) | USB CDC NDJSON, 1 Mbaud | `io/serial_io.py` | AVC-LAN, solicited CAN, RS485; [PROTOCOL.md](PROTOCOL.md) |
+| Powerbox (RP2040) | USB CDC NDJSON | `io/powerbox.py`, `io/multi_input.py` | device ids offset into 200-203; [powerbox/README.md](../powerbox/README.md) |
+| comma.ai panda | libusb-1.0 via ctypes (`bbaa:ddcc`) | `io/panda_can.py` | broadcast CAN only, see §3 |
+| MFD Pi | USB gadget `usb0`, ZMQ | `backend/mfd_power.py` | the backend powers the Pi via the hub port (uhubctl) and manages its boot/shutdown (`BACKEND_MFD_*`) |
+| roadsense | systemd + HTTP :8090 | `backend/roadsense_power.py`, `api/roadsense_proxy.py` | started/stopped on ACC |
+| satellites | RS485 (gateway), BLE (`prius-bled`), Wi-Fi | `backend/satellite_registry.py`, `io/*_transport.py` | [SATELLITES.md](SATELLITES.md) |
 
-#### Pointer model (mouse and touch)
+Gateway and powerbox are told apart by `{"id":0,"d":{"a":"whoami"}}` → `IDENT` with `role`
+(`io/discovery.py`), because both use ids 1 and 2 for different buses.
+
+All ages in the backend use `time.monotonic()`; wall-clock stamps in the state are for display only
+(the POCO's RTC is not persisted and NTP can step the clock by hours at boot).
+
+## 2. Input abstraction
+
+The UI responds to five logical events (`input/manager.py::InputEvent`): `ROTATE_LEFT`,
+`ROTATE_RIGHT`, `PRESS_LIGHT`, `PRESS_STRONG`, `BACK`. Dev keyboard: ← / → (and mouse wheel) rotate,
+Enter light press, Space strong press, Escape back.
+
+### Pointer model (mouse and touch)
 
 Mouse (dev) and the MFD touch panel (production) drive one gesture recogniser,
 `ui/pointer.py::PointerController`, in native 480×240 coordinates. It only knows
@@ -78,9 +89,9 @@ Targets:
   widgets; `Screen.setup_pointer()` registers them lazily on first use.
 - **`Screen`** (`ui/screens/base.py`): `pointer_target_at`, `pointer_click`,
   `pointer_long_press`; the defaults focus the widget and call
-  `handle_input(PRESS_LIGHT/STRONG)`, i.e. the *same* code path as the encoder,
+  `handle_input(PRESS_LIGHT/STRONG)`, i.e. the same code path as the keyboard/encoder,
   so edit modes, timeouts and activity tracking behave identically.
-  `pointer_helpers.MenuListZone` maps rows onto `_selected_index` + encoder
+  `pointer_helpers.MenuListZone` maps rows onto `_selected_index` + input
   events (tap row = select + PRESS_LIGHT; on the row being edited: `>` end =
   ROTATE_RIGHT, value area = ROTATE_LEFT, label = done; sideways drag = one
   rotate per 16 px). A `< BACK` chip is added only where a screen had no
@@ -90,18 +101,18 @@ Pressed feedback is a 1 px outline in `COLORS["active"]` drawn by the app on a
 single pre-allocated `pygame.Rect`; the idle per-frame cost is a few
 comparisons (the Pi budget is ~21 fps on one core).
 
-**Sources:**
+Sources:
 
 - *Dev mouse* — `core/app.py::_process_events` maps left-button
   `MOUSEBUTTONDOWN/MOTION/UP` from window to native coordinates (scale-aware:
-  `--scale 2/4`, fullscreen). The mouse wheel is encoder rotation.
+  `--scale 2/4`, fullscreen).
 - *Production touch* — the backend publishes on the ZMQ event channel
   (`frontend/client.py` → `RemoteTwin.add_event_callback`). The callback only
   appends to `TouchEventQueue` (a deque) on the client thread; the main loop
   drains it once per frame and feeds the same controller. Nothing depends on
   SDL mouse (`SDL_VIDEODRIVER=dummy`, `SDL_NOMOUSE=1`).
 
-Touch contract (backend → frontend):
+Touch contract (backend → frontend; origin and calibration in [AVC_BACKEND.md](AVC_BACKEND.md)):
 
 ```text
 "touch"  {"x": 0..479, "y": 0..239, "pressed": bool, "raw_x": int, "raw_y": int, "t": float}
@@ -125,368 +136,85 @@ dashboard):
 | `maintenance` | DIAGNOSTICS / DTC |
 | `calendar`, `language` | logged, no-op |
 
-### 3. Encoder Configuration Protocol
+### Encoder configuration (not wired)
 
-When focus changes between widgets, the application sends configuration to the encoder:
+`input/manager.py::EncoderConfig` (`mode` smooth/stepped, `min`, `max`, `step`, `detents`, `current`)
+and presets per widget kind (`volume`, `menu`, `mode_selector`, `temperature`) are kept by the
+`InputManager`, but nothing sends them to a device: no rotary encoder is connected.
 
-```python
-class EncoderMode:
-    SMOOTH = "smooth"      # Continuous, for volume/brightness
-    STEPPED = "stepped"    # Discrete positions
-    BOUNDED = "bounded"    # With min/max limits
+## 3. CAN ingress: two flows
 
-encoder_config = {
-    "mode": EncoderMode.SMOOTH,
-    "min": 0,
-    "max": 100,
-    "step": 1,
-    "detents": False,      # Haptic detent feedback
-    "current": 50
-}
-```
-
----
-
-## UI Framework
-
-### Widget Hierarchy
-
-```
-Widget (base)
-├── Frame
-│   ├── AudioFrame
-│   ├── AmbientFrame
-│   ├── ClimateFrame
-│   └── LightsFrame
-├── Control
-│   ├── VolumeSlider
-│   ├── ToggleSwitch
-│   └── ValueDisplay
-└── Container
-    ├── Screen
-    └── Panel
-```
-
-### Screen Management
-
-```python
-class ScreenManager:
-    """Manages screen stack and transitions."""
-    
-    def push(self, screen: Screen) -> None:
-        """Push a new screen onto the stack."""
-        
-    def pop(self) -> Screen:
-        """Return to previous screen."""
-        
-    def replace(self, screen: Screen) -> None:
-        """Replace current screen."""
-```
-
-### Focus System
-
-The focus system manages which widget receives input:
-
-```python
-class FocusManager:
-    """Manages focus navigation between focusable widgets."""
-    
-    def __init__(self, widgets: list[Widget]):
-        self.widgets = widgets
-        self.focus_index = 0
-    
-    def next(self) -> None:
-        """Move focus to next widget."""
-        
-    def prev(self) -> None:
-        """Move focus to previous widget."""
-        
-    @property
-    def focused(self) -> Widget:
-        """Get currently focused widget."""
-```
-
----
-
-## Main Screen Layout
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        480 × 240                             │
-├───────────┬─────────────────────────────┬───────────────────┤
-│           │                             │                   │
-│  AUDIO    │                             │   CLIMATE         │
-│  120×80   │                             │   120×80          │
-│           │                             │                   │
-├───────────┤        MAIN AREA            ├───────────────────┤
-│           │         240×240             │                   │
-│  AMBIENT  │                             │   LIGHTS          │
-│  120×80   │       (reserved)            │   120×80          │
-│           │                             │                   │
-├───────────┤                             ├───────────────────┤
-│           │                             │                   │
-│  (spare)  │                             │   (spare)         │
-│  120×80   │                             │   120×80          │
-│           │                             │                   │
-└───────────┴─────────────────────────────┴───────────────────┘
-```
-
-### Frame Details
-
-| Frame | Location | Content (Main Screen) | Sub-screen |
-|-------|----------|----------------------|------------|
-| AUDIO | Top-Left | Volume indicator | Full audio control |
-| AMBIENT | Mid-Left | ON/OFF status | Ambient lighting settings |
-| CLIMATE | Top-Right | Temps (in/out/target) | Climate control |
-| LIGHTS | Mid-Right | DRL/BiLED status | Light controls |
-
----
-
-## Communication Layer
-
-### Virtual Twin IO Architecture
-
-The application uses a **Virtual Twin** pattern with abstracted IO:
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                          IO ABSTRACTION LAYER                            │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                          │
-│  INPUT PORTS                            OUTPUT PORTS                     │
-│  ┌─────────────────┐                   ┌─────────────────┐              │
-│  │ SerialInputPort │ (production)      │SerialOutputPort │ (production) │
-│  │ FileInputPort   │ (development)     │ LogOutputPort   │ (development)│
-│  │ MockInputPort   │ (testing)         │ MockOutputPort  │ (testing)    │
-│  └────────┬────────┘                   └────────▲────────┘              │
-│           │                                      │                       │
-│           ▼                                      │                       │
-│  ┌─────────────────┐                   ┌─────────────────┐              │
-│  │IngressController│                   │EgressController │              │
-│  │ - Decode AVC    │                   │ - Encode AVC    │              │
-│  │ - Decode CAN    │                   │ - Encode RS485  │              │
-│  │ - Decode RS485  │                   │ - Send commands │              │
-│  └────────┬────────┘                   └────────▲────────┘              │
-│           │ dispatch()                          │ subscribe()           │
-│           ▼                                      │                       │
-│  ┌──────────────────────────────────────────────┴───────────────────┐   │
-│  │                     VIRTUAL TWIN (Store)                          │   │
-│  │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐    │   │
-│  │  │ Audio   │ │ Climate │ │ Vehicle │ │ Energy  │ │ Lights  │    │   │
-│  │  └─────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘    │   │
-│  │                     ┌─────────────────┐                          │   │
-│  │                     │  Rules Engine   │ (computed state)         │   │
-│  │                     └─────────────────┘                          │   │
-│  └───────────────────────────────▲──────────────────────────────────┘   │
-│                                   │ subscribe()                          │
-│                                   │                                      │
-│  ┌──────────────────────────────────────────────────────────────────┐   │
-│  │                         UI LAYER                                   │   │
-│  │  Screens → Widgets → Render from state only                       │   │
-│  │                       Dispatch actions on user input               │   │
-│  └──────────────────────────────────────────────────────────────────┘   │
-│                                                                          │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-See [VIRTUAL_TWIN_ARCHITECTURE.md](./VIRTUAL_TWIN_ARCHITECTURE.md) for complete details.
-
-### CAN ingress: two flows (2026-11-05)
-
-The vehicle bus reaches the backend through two independent devices on the
-CAN hub (powerbox relay ch3):
+The vehicle CAN reaches the backend through two devices on the CAN hub (powerbox relay ch3):
 
 | Flow | Device | Traffic | Path into the state |
 |---|---|---|---|
-| **Unsolicited / broadcast** | comma.ai panda (`bbaa:ddcc`, `io/panda_can.py`, libusb-1.0 via ctypes) | every broadcast frame: 0x03B battery, 0x3CB SOC, 0x0B4 speed, 0x120 gear, steering, wheel speeds, ... | panda reader thread → `IngressController.ingest_broadcast_can` → `CANDecoder` → `Store.dispatch` (the Store has a re-entrant lock). No input-port queue, no engine tick: ~0.15 ms decode+dispatch on a desktop, ≈0.5 ms on the POCO. |
-| **Solicited** | RP2040 gateway (`io/serial_io.py`, `comm/subscription_groups.py`) | periodic OBD/UDS subscriptions, one-shot requests, DTC scans | serial reader → `RawMessage` queue → engine tick → `IngressController._handle_can_message` (unchanged) |
+| Broadcast | comma.ai panda (`io/panda_can.py`) | every broadcast frame (0x03B battery, 0x3CB SOC, 0x0B4 speed, 0x120 gear, steering, wheel speeds, …; ids and scaling in [prius_can.md](prius_can.md)) | panda reader thread → `IngressController.ingest_broadcast_can` → `CANDecoder` → `Store.dispatch`; no input queue, no engine tick (≈0.5 ms decode+dispatch on the POCO) |
+| Solicited | RP2040 gateway (`io/serial_io.py`) | periodic OBD/Toyota subscriptions, one-shot requests, DTC scans | serial reader → `RawMessage` queue → engine tick → `IngressController._handle_can_message` |
 
-Why two devices: gateway firmware 3.x forwards no passive frames unless its
-`sniff` mode is on, and `sniff` disables `req`/`sub`/`tx`, so one device
-cannot do both. The panda is always put in **SAFETY_SILENT** (bus monitor:
-no ACK, no TX; the backend never writes to its CAN TX endpoint) and
-heartbeated every second (the firmware power-saves its transceivers 2 s after
-the heartbeat stops). Without the panda the backend behaves as before: no
-broadcast values, solicited data unaffected; `connection.panda_*` in the state
-shows link, firmware, frame rate, per-bus counts.
+Gateway firmware 3.x forwards no passive frames unless `sniff` is on, and `sniff` disables
+`req`/`sub`/`tx` ([PROTOCOL.md](PROTOCOL.md)), so one device cannot do both. Rules for the panda:
 
-Solicited setup lifecycle (`io/factory.py::VirtualTwin`): the CAN mode +
-subscriptions are (re)sent on every gateway serial (re)connect, on the
-`GATEWAY_READY` banner, on a `GW_HB` uptime regression (reboot with the
-banner missed), and by a watchdog while the gateway heartbeats but no
-subscription answers (15 s, 30 s → 300 s backoff). All ages in the backend
-use `time.monotonic()`; the wall-clock stamps in the state are for display
-only (the phone has no RTC and NTP steps the clock by hours at boot).
+- always **SAFETY_SILENT** (bus monitor: no ACK, no TX); the backend never writes to its CAN TX endpoint;
+- heartbeat every second (the panda firmware power-saves its transceivers 2 s after the heartbeat stops);
+- without the panda: no broadcast values, solicited data unaffected; `connection.panda_*` in the state
+  shows link, firmware, frame rate and per-bus counts. `--no-panda` / `BACKEND_PANDA_ENABLED=0` disables it.
 
-### Data Flow
+Solicited setup lifecycle (`io/factory.py::VirtualTwin`): the CAN mode and subscriptions are
+(re)sent on every gateway serial (re)connect, on the `GATEWAY_READY` banner, on a `GW_HB` uptime
+regression (reboot with the banner missed), and by a watchdog while the gateway heartbeats but no
+subscription answers (15 s, 30 s → 300 s backoff).
 
-```
-┌─────────────┐         ┌─────────────┐         ┌─────────────┐
-│   Widget    │◄───────►│   State     │◄───────►│   Gateway   │
-│   (View)    │         │   Store     │         │   Client    │
-└─────────────┘         └─────────────┘         └─────────────┘
-      │                       │                       │
-      │ render()              │ update()              │ parse()
-      ▼                       ▼                       ▼
-    Display              Local State            Serial Port
-```
+### Solicited subscriptions (`comm/subscription_groups.py`)
 
----
+Single source of the backend's periodic PIDs. All groups are enabled by default; all except `core`
+can be switched off on the MFD Data Sources screen. Requests go to physical ECU ids (response id =
+request + 8).
 
-## Visual Style Guide
+| Group | Slot | Item | ECU | Request | Interval ms | Timeout ms / ISO-TP |
+|---|---|---|---|---|---|---|
+| core | 0 | engine RPM | 0x7E0 | `01 0C` | 500 | 200 |
+| core | 1 | engine load | 0x7E0 | `01 04` | 2000 | 200 |
+| core | 2 | hybrid comprehensive | 0x7E2 | `21 C3` | 1000 | 500 / yes |
+| core | 6 | cruise control | 0x7E2 | `21 D3` | 1000 | 200 |
+| battery_cells | 3 | block voltages | 0x7E3 | `21 CE` | 2000 | 500 / yes |
+| battery_cells | 4 | battery temps / fan / delta SOC | 0x7E3 | `21 CF` | 2000 | 200 |
+| battery_cells | 5 | block resistances | 0x7E3 | `21 D0` | 5000 | 500 / yes |
+| hybrid_extended | 8 | hybrid additional | 0x7E2 | `21 C4` | 2000 | 500 / yes |
+| engine_sensors | 9 / 10 / 11 | intake air temp / MAF / lambda | 0x7E0 | `01 0F` / `01 10` / `01 24` | 5000 / 2000 / 2000 | 200 |
+| aux_battery | 7 | aux voltage | 0x7E0 | `01 42` | 5000 | 200 |
+| environment | 13 / 14 | barometric pressure / ambient air temp | 0x7E0 | `01 33` / `01 46` | 10000 | 200 |
+| odometer | 12 | distance since DTC clear | 0x7E0 | `01 31` | 10000 | 200 |
 
-### Color Palette
+Responses are decoded by `comm/can_decoder.py` (21C3 → `mg1/mg2_inverter_temp`, `mg1/mg2_motor_temp`,
+`inverter_temp` = MG2; 21CE → `battery_soc_21ce`, `battery_current_21ce`, 14 `block_voltages` with
+min/max/delta; 21CF → `delta_soc`, `battery_air_intake_temp`, charge/discharge limits, fan speed).
+PID scaling: [prius_can.md](prius_can.md) sections 5–7. `comm/solicited_can.py` holds the
+`PIDDefinition`s and `ECUAddress` table; its `PROFILE_*` lists are not used by the backend.
 
-```python
-# Primary colors (VFD-inspired)
-COLORS = {
-    # Backgrounds
-    "bg_dark": (8, 10, 15),        # Near-black with blue tint
-    "bg_panel": (15, 20, 30),      # Panel background
-    "bg_frame": (20, 25, 35),      # Frame background
-    
-    # Accents
-    "cyan": (0, 255, 255),         # Primary accent
-    "cyan_dim": (0, 128, 128),     # Dimmed cyan
-    "magenta": (255, 0, 128),      # Secondary accent
-    "orange": (255, 128, 0),       # Warning/highlight
-    
-    # Text
-    "text_primary": (200, 220, 255),   # Main text
-    "text_secondary": (100, 120, 150), # Dimmed text
-    "text_highlight": (255, 255, 255), # Highlighted text
-    
-    # State
-    "focus_glow": (0, 200, 255, 100),  # Focus indicator (with alpha)
-    "active": (0, 255, 128),           # Active/enabled
-    "inactive": (80, 80, 80),          # Inactive/disabled
-}
-```
+## 4. UI
 
-### Typography
+- Renders at 480×240 into one surface; `--scale 2/4` upscales for the desktop window
+  (`core/renderer.py`). On the Pi the surface is written to the firmware framebuffer `/dev/fb0`
+  (`core/framebuffer.py`, SDL dummy driver).
+- Screen stack in `core/app.py` (`push_screen` / `pop_screen`); focus in `ui/focus.py::FocusManager`.
+  Screens in `ui/screens/`, widgets in `ui/widgets/`; the home dashboard layout is documented in
+  `ui/screens/main_screen.py`.
+- Colours: themes in `ui/colors.py` (VFD, amber, synthwave palettes). Fonts and the 1-bit rendering
+  rule for the analog MFD link: `ui/fonts.py`, [assets/fonts/README.md](../assets/fonts/README.md).
 
-- **Headers:** Monospace, uppercase, letter-spacing
-- **Values:** Large, high-contrast
-- **Labels:** Small, dimmed
+## 5. VFD satellite (device 110)
 
-### Effects
+The VFD (Noritake, 256×48) is a separate application (`vfd_satellite/`) fed by `VFDDisplayRule`
+(normalises vehicle state into `VFDSatelliteState`) and the VFD output handlers (`io/vfd_output.py`).
+Messages: `E` energy (20 Hz), `S` state (on change), `C` config (on change), `R` reset; values
+normalised to 0..1 (or −1..+1). Output goes over UDP :5110 in development
+(`python -m vfd_satellite --udp`) and over RS485 through the gateway in the car.
+Protocol: [VFD_SATELLITE_PROTOCOL.md](VFD_SATELLITE_PROTOCOL.md).
 
-1. **Scanlines** - Subtle horizontal lines (optional)
-2. **Glow** - Bloom effect on bright elements
-3. **Flicker** - Subtle animation on focused elements
-4. **Transitions** - Smooth fade/slide between screens
+## Open gaps
 
----
-
-## File Structure Rationale
-
-```
-cyberpunk_computer/
-├── core/           # Engine fundamentals (app loop, rendering)
-├── ui/             # All visual components
-│   ├── widgets/    # Reusable components
-│   ├── screens/    # Full-screen layouts
-│   ├── colors.py   # Color definitions
-│   └── fonts.py    # Font management
-├── input/          # Input abstraction layer (keyboard/encoder)
-├── io/             # Virtual Twin IO layer
-│   ├── ports.py    # InputPort/OutputPort interfaces
-│   ├── ingress.py  # Ingress controller (input → state)
-│   ├── egress.py   # Egress controller (state → output)
-│   ├── file_io.py  # File replay for development
-│   ├── serial_io.py# Serial/UART for production
-│   ├── mock_io.py  # Mock for testing
-│   └── factory.py  # VirtualTwin factory
-├── comm/           # Protocol decoders/encoders (AVC-LAN, CAN)
-├── state/          # Application state management
-│   ├── store.py    # Central state store
-│   ├── app_state.py# State dataclasses
-│   ├── actions.py  # Action definitions
-│   ├── rules.py    # Rules engine
-│   └── rules_examples/ # Example rules
-└── config.py       # All configuration in one place
-```
-
-This separation allows:
-- Easy testing of individual components
-- Clear dependency graph
-- Simple mocking for development
-- **Pluggable IO** for different environments
-- **Reactive rules** for business logic
-
----
-
-## Satellite Architecture
-
-### VFD Display Satellite (Device 110)
-
-The VFD (Vacuum Fluorescent Display) has been separated into a standalone satellite application that runs independently and communicates via NDJSON protocol.
-
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                       VFD SATELLITE ARCHITECTURE                        │
-├────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  ┌─────────────────────────────────┐     ┌────────────────────────────┐│
-│  │       MAIN APPLICATION          │     │    VFD SATELLITE APP       ││
-│  │                                 │     │                            ││
-│  │  Vehicle State                  │     │   ┌──────────────────┐    ││
-│  │  ┌─────────┐ ┌─────────┐       │     │   │   UDPReceiver    │    ││
-│  │  │ Energy  │ │ Vehicle │       │     │   │ or SerialReceiver│    ││
-│  │  └────┬────┘ └────┬────┘       │     │   └────────┬─────────┘    ││
-│  │       │           │            │     │            │               ││
-│  │       ▼           ▼            │     │            ▼               ││
-│  │  ┌────────────────────────┐    │     │   ┌──────────────────┐    ││
-│  │  │    VFDDisplayRule      │    │     │   │    VFDState      │    ││
-│  │  │ (normalize & compute)  │    │     │   │  (receive msg)   │    ││
-│  │  └────────────┬───────────┘    │     │   └────────┬─────────┘    ││
-│  │               │                │     │            │               ││
-│  │               ▼                │     │            ▼               ││
-│  │  ┌────────────────────────┐    │     │   ┌──────────────────┐    ││
-│  │  │  VFDSatelliteState     │    │     │   │   VFDRenderer    │    ││
-│  │  │ (in Store)             │    │     │   │ (pygame display) │    ││
-│  │  └────────────┬───────────┘    │     │   └────────┬─────────┘    ││
-│  │               │                │     │            │               ││
-│  │               ▼                │     │            ▼               ││
-│  │  ┌────────────────────────┐    │     │   ┌──────────────────┐    ││
-│  │  │  VFD Output Handlers   │    │     │   │   256×48 VFD     │    ││
-│  │  │ (energy, state, config)│    │     │   │   Framebuffer    │    ││
-│  │  └────────────┬───────────┘    │     │   └──────────────────┘    ││
-│  │               │                │     │                            ││
-│  │               ▼                │     │                            ││
-│  │  ┌────────────────────────┐    │     │                            ││
-│  │  │   UDPOutputPort (dev)  │────┼─────┼────► UDP :5110             ││
-│  │  │  SerialPort (prod)     │    │     │     RS485 @115200          ││
-│  │  └────────────────────────┘    │     └────────────────────────────┘│
-│  └─────────────────────────────────┘                                  │
-└────────────────────────────────────────────────────────────────────────┘
-```
-
-#### Message Protocol
-
-See [VFD_SATELLITE_PROTOCOL.md](./VFD_SATELLITE_PROTOCOL.md) for full details.
-
-| Type | Name | Rate | Purpose |
-|------|------|------|---------|
-| `E` | Energy | 20Hz | MG power, fuel flow, brake, speed, levels |
-| `S` | State | On-change | ICE running, gear, fuel type, ready mode |
-| `C` | Config | On-change | Brightness |
-| `R` | Reset | Once | Initialize display |
-
-Values are normalized to 0.0-1.0 (or -1.0 to +1.0 for bidirectional values).
-
-#### Development Setup
-
-```bash
-# Terminal 1: Main app with file replay
-python -m cyberpunk_computer --dev --replay assets/data/full.ndjson
-
-# Terminal 2: VFD satellite
-python -m vfd_satellite --udp
-```
-
-#### Production Setup
-
-Both applications connect to the same RS485 bus via the Gateway:
-- Main app: `/dev/ttyACM0` (Gateway USB)
-- VFD satellite: Direct RS485 connection to Noritake VFD
+- `battery_cells` slot 4 (`21 CF`) is subscribed with a 200 ms timeout and without ISO-TP, while the
+  21CF answer is longer than one frame (`PIDDefinition.byte_count` 12); the gateway then returns only
+  the first frame (probable, from the firmware's ISO-TP rules in [PROTOCOL.md](PROTOCOL.md)). Whether
+  `delta_soc` ever reaches the state on the car is unverified; check a trip recording for slot-4
+  responses and their length.

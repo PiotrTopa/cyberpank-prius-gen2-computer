@@ -137,6 +137,12 @@ GATT client as the car: Device1.Connect + Pair, StartNotify on `…0001`,
 WriteValue on `…0002`. Stop bled afterwards; on SIGTERM it unregisters
 everything and restores the adapter.
 
-Bench note: a bond made in one role (mode A) does not work after switching the
-same pair of devices to the other role (mode B). BlueZ aborts the connection. Run
+A bond made in one role (mode A) does not work after switching the same pair of
+devices to the other role (mode B): BlueZ aborts the connection. Run
 `bluetoothctl remove <sat addr>` on the car side when switching modes.
+
+## Open gaps
+
+- No over-the-air update path; flashing is USB only.
+- Only the ESP32-C6 board is recorded as tested; the ESP32-S3 FQBN and LED pin are
+  configured but no S3 run is documented.

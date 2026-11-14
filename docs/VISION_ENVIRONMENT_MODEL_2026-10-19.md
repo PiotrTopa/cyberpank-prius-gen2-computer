@@ -1,8 +1,8 @@
-# Dashcam environment model (2026-10-19)
+# Dashcam environment model (experiment, 2026-10-19)
 
 Goal: classify the 70mai stream (1 fps, 640×360) as **day / dusk-dawn / night / enclosed**
 plus a weather hint, from image statistics only, with an ML-free runtime (pure Python +
-ffprobe). Fitted and checked on public dashcam data and on our own drive. Code:
+ffprobe). Fitted and checked on public dashcam data and on one own drive. Code:
 `cyberpunk_computer/vision/scene_features.py`, `environment.py`, the environment mode
 of `auto_lights.py`; fitting tools in `tools/vision/` (experiment venv only).
 
@@ -10,19 +10,16 @@ of `auto_lights.py`; fitting tools in `tools/vision/` (experiment venv only).
 
 | Set | What was downloaded | Labels used | Licence | Where |
 |---|---|---|---|---|
-| **BDD100K val** (Berkeley DeepDrive) | all 10 000 val images (1280×720 dashcam frames, US cities), 642 MB | `timeofday` (daytime 5258, night 3929, dawn/dusk 778, undefined 35), `weather` (clear 5346, overcast 1239, undefined 1157, snowy 769, rainy 738, partly cloudy 738, foggy 13), `scene` (tunnel 27, parking lot 49, gas station 7, …) | BDD100K licence (BSD-style; educational, research and not-for-profit use; the mirror tags it "bsd"). Downloading means agreeing to it. | `/home/piotr/datasets/dashcam/bdd100k_val_fo/` (`data/*.jpg`, `samples.json`, `labels.csv`) |
-| **DAWN** (Kenk & Hassaballah, Mendeley 10.17632/766ygrbt8y.3) | Fog 300, Rain 200, Snow 204 images (web images of mixed size), 104 MB zipped | folder = weather | CC BY-NC 3.0 | `/home/piotr/datasets/dashcam/dawn/` |
+| **BDD100K val** (Berkeley DeepDrive) | all 10 000 val images (1280×720 dashcam frames, US cities), 642 MB | `timeofday` (daytime 5258, night 3929, dawn/dusk 778, undefined 35), `weather` (clear 5346, overcast 1239, undefined 1157, snowy 769, rainy 738, partly cloudy 738, foggy 13), `scene` (tunnel 27, parking lot 49, gas station 7, …) | BDD100K licence (BSD-style; educational, research and not-for-profit use; the mirror tags it "bsd"). Downloading means agreeing to it. | `~/datasets/dashcam/bdd100k_val_fo/` (`data/*.jpg`, `samples.json`, `labels.csv`) |
+| **DAWN** (Kenk & Hassaballah, Mendeley 10.17632/766ygrbt8y.3) | Fog 300, Rain 200, Snow 204 images (web images of mixed size), 104 MB zipped | folder = weather | CC BY-NC 3.0 | `~/datasets/dashcam/dawn/` |
 | **Our drive** 2026-10-19 | 174 frames, 10 s apart (`cyberpunk-prius-gateway/captures/2026-10-19/70mai/drive_home/`) | `annotations.txt`: garage before 15:25:08 CEST, then sunny / into the sun / sun in frame / after wipers / shade | own | — |
 
-How the BDD data was obtained without an account: the labels and images come from the
-public FiftyOne export **`dgural/bdd100k`** on Hugging Face (val split, labels in
-`samples.json`). After ~4 750 single-file downloads Hugging Face rate-limited the IP
-(HTTP 429, no token on this machine); the remaining 3 927 images were taken from the
-public zip **`hirundo-io/bdd100k-val`** (same val images; 200 overlapping files checked
-byte-identical by MD5). The DAWN zips come from the public mirror `qninhdt/dawn` (the
-Mendeley page itself lists no downloadable files without a login). Nothing larger was
-needed: total on disk 866 MB. Other sets considered: ACDC and the full BDD100K need
-an account; Waymo / nuScenes are far too large for this question.
+Provenance (no account needed): BDD labels and ~4 750 images from the public FiftyOne export
+**`dgural/bdd100k`** on Hugging Face (val split, labels in `samples.json`; anonymous single-file
+downloads are rate-limited, HTTP 429); the remaining 3 927 images from the public zip
+**`hirundo-io/bdd100k-val`** (same val images; 200 overlapping files byte-identical by MD5). DAWN
+from the public mirror `qninhdt/dawn` (the Mendeley page lists no files without a login). Total on
+disk 866 MB. ACDC and the full BDD100K need an account; Waymo / nuScenes are far larger than needed.
 
 Hand labels: BDD's `scene=tunnel` also tags tunnel *entrances seen from outside* and
 streets near tunnels, and covered car parks hide under `parking lot`. All 27 tunnel, 49
@@ -50,7 +47,7 @@ road = bottom half, b0…b4 = five horizontal fifths, left / right halves of the
 Cost: ≈ 90 ms per 640×360 frame on the laptop (one ffprobe process; ~40 ms of it is
 process start). Pruning to the 9 branches the model reads saves only ~15 ms, so the
 full set stays (it is what the fits and future refits use). Cached features:
-`/home/piotr/datasets/dashcam/features/{bdd_val,dawn,drive_home_2026-10-19}.csv`
+`~/datasets/dashcam/features/{bdd_val,dawn,drive_home_2026-10-19}.csv`
 (`tools/vision/env_features.py`).
 
 ## 3. Fitting
@@ -83,9 +80,9 @@ In the car the **sun elevation** is a prior on this split (§4), which BDD canno
 ### 3.2 Enclosed: one conjunction (grid search)
 
 A tree on 27 positives overfits (5-fold CV recall 0.07–0.48 in the trials, the higher
-values only with 2–8 % false positives), and BDD tunnels (sodium-lit, orange) look different from our LED-lit garage, so
-a 4-threshold conjunction was grid-searched on BDD enclosed + our 11 garage-interior
-frames against BDD outdoor frames and our sunny drive:
+values only with 2–8 % false positives), and BDD tunnels (sodium-lit, orange) look different from the LED-lit home garage, so
+a 4-threshold conjunction was grid-searched on BDD enclosed + the 11 own garage-interior
+frames against BDD outdoor frames and the own sunny drive:
 
 **enclosed = `sky_y > 60` and `top_drop ≤ 10` and `sky_high ≤ 200` and `sky_blue ≤ 2`**
 (lit, no bright sky above the horizon, no blue).
@@ -93,8 +90,8 @@ frames against BDD outdoor frames and our sunny drive:
 | group (per frame) | flagged enclosed |
 |---|---|
 | BDD enclosed (27) | 0.56 (15) |
-| our garage, inside (11) | 0.82 (9) |
-| our outdoor (161) | 0 |
+| own garage, inside (11) | 0.82 (9) |
+| own outdoor (161) | 0 |
 | BDD daytime / dusk / night, not enclosed | 0.028 / 0.022 / 0.026 |
 
 For the *lights* decision the misses mostly do not matter: of the 27 enclosed BDD
@@ -163,9 +160,9 @@ The 14 % of BDD daytime frames that would get lights are mostly the day → dusk
 confusion; in the car the +10° sun prior removes most of those and the 30 s median /
 5 s persistence removes single frames. Night and enclosed: 99 % / 96 %.
 
-**Old thresholds (task 3a).** Swept `sky_y_on/off` with chroma 8/12 fixed: 100/130 →
+**Old thresholds.** Swept `sky_y_on/off` with chroma 8/12 fixed: 100/130 →
 BDD 0.818, 110/140 → 0.801, 120/150 → 0.786, 130/160 → 0.777; lowering them helps BDD
-a little but loses garage frames on our drive (garage ON 0.69 at 100/130 vs 0.77). BDD's
+a little but loses garage frames on the own drive (garage ON 0.69 at 100/130 vs 0.77). BDD's
 exposure is not the 70mai's (BDD daytime sky median Y 130 and chroma 8; 70mai 183 and
 27), so **the thresholds were left at 120/150, 8/12**; they are now only the fallback
 when no environment is available.
@@ -195,7 +192,7 @@ Enclosed: caught = lit garages and sodium tunnels; missed = dark tunnels / car p
 (they become night or dusk, so lights are still on); false "enclosed" in daylight =
 streets in deep building shade with a grey sky band and nothing bright above.
 
-![our drive and DAWN](img/env_drive_dawn.jpg)
+![own drive and DAWN](img/env_drive_dawn.jpg)
 
 Our drive: garage frames with bright ceiling lights read as day / dusk; the exit ramp
 correctly flips to day. DAWN: dense fog is grey, flat and lit, i.e. it matches the
@@ -207,7 +204,7 @@ snow or tunnel frames yet; the 70mai's burned-in clock and phone holder sit in t
 (they do not touch the sky band); `edge_full` depends on lens sharpness and JPEG
 quality, which differ per camera.
 
-## 7. Runtime integration (2026-10-19)
+## 7. Runtime integration
 
 * `scene_features.extract` replaces `light_features.extract` in `DashcamLightIngest`;
   `EnvironmentModel.update` → `AutoLightModel.update(..., environment=env)`.
@@ -224,7 +221,7 @@ quality, which differ per camera.
 * Refit: `tools/vision/env_features.py` → `env_fit.py fit` → paste `TOD_TREE` into
   `environment.py` → `env_fit.py runtime` / `fixture` → `env_sheets.py --out docs/img`.
 
-## 8. Own-drive samples that would help most
+## 8. Open gaps: own-drive samples that would help most
 
 1. **Dusk and dawn with the sun between +10° and −6°** (several drives, both
    directions): the weakest class, and the sun prior's thresholds are guesses.

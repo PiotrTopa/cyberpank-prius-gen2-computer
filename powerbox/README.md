@@ -1,365 +1,266 @@
-# Prius Powerbox
+# Powerbox (RP2040-Zero power controller)
 
-This directory contains the MicroPython code to manage and monitor power via an INA219 sensor connected to an RP2040 (Raspberry Pi Pico). The RP2040 is connected via USB to the `prius` computer (a POCO F1 running postmarketOS) and communicates via an NDJSON protocol.
+MicroPython firmware for the Waveshare RP2040-Zero in the power box. It starts and
+wakes the POCO F1 through the phone's power button, switches the loads on an
+8-channel relay board, measures the 12 V system (INA219), drives the chassis fan,
+senses ACC, and hosts the BEAN body-bus receiver and the guarded BEAN
+transmitter. It talks NDJSON over USB-CDC to the backend on the POCO.
 
-## Architecture & Protocol
+Firmware in this directory: **2.4.0** (`VERSION` in `main.py`), flashed to the car
+2026-11-13. Confirm with `ver` from `POWERBOX_READY` / IDENT.
 
-The powerbox speaks NDJSON over USB-CDC directly to the POCO. It uses the same envelope structure as the `cyberpunk-prius-gateway`:
-`{"id": <device_id>, "d": <payload>}`
+| File | Role |
+|---|---|
+| `main.py` | firmware (autostarts; WDT, 3 s Ctrl-C safe-boot window) |
+| `boot.py` | runs first on every reset: releases GP27 (POCO button), holds GP7 (BEAN TX) LOW, restores `main.py.bak` after an interrupted swap |
+| `pcf8574.py` | PCF8574 driver + relay-board logic (pin map, NC channel, read-back/re-assert) |
+| `ina219.py`, `bmp280.py`, `ahtx0.py` | sensor drivers |
+| `bean_rx.py` | BEAN receiver (fw ≥ 2.3.0) |
+| `bean_tx.py` | BEAN transmitter (fw ≥ 2.4.0) |
+| `pb_flash.py` | firmware update over the NDJSON link (the only supported update path) |
+| `rescue.py`, `rescue.sh` | break a boot loop and delete a bad `main.py` (see *Rescue*) |
+| `relay_bringup_test.py` | bench tool; sends host heartbeats itself |
+| `fast_flash.sh`, `watch_and_flash.sh` | bench helpers |
 
-Device IDs (locally):
-* **0 (System)**: ready banner, IDENT, command acks, errors, and the periodic
-  `STATUS` heartbeat (relay read-back + POCO liveness + rolling counter +
-  reset cause / uptime)
-* **1 (Telemetry)**: INA219 voltage, current, and accumulated mAh
-* **2 (Events)**: Ignition (ACC) and battery connection status
+## Safety rules
 
-*Note: On the POCO side, the `MultiInputPort` offsets these IDs by `DEVICE_POWERBOX_BASE` (200), so the computer sees them as IDs 200, 201, and 202 respectively.*
+- **Flash only with `pb_flash.py` or `prius-flash-powerbox`, never through the
+  REPL.** Every RP2040 pad resets with its pull-down on; on GP27 (POCO button,
+  active LOW) that is a held button whenever `main.py` is not running, and the
+  phone boot-loops. The NDJSON update keeps the firmware running, so the button
+  stays released and the WDT fed. Details: *Flashing firmware*.
+- **Disconnect the POCO button wire before entering the REPL** (Ctrl-C inside the
+  3 s safe-boot window) **and before any BOOTSEL / UF2 reflash**: no code of ours
+  runs then, so GP27 sits LOW.
+- **BEAN bench ops (`bean` `tx`/`pulse`/`loop`/`square`) never on the car**: they
+  hold GP7 high for up to 500 ms, which is a +B short on the body bus. They need the
+  TX guard and the per-boot bench override.
+- **GP7 (BEAN TX) is never held high for long**: R5 220 Ω is a short-circuit limit
+  only.
+- **GP14 and GP15 are dead pads** (blown inside the RP2040: diode mode to GND
+  0.045 V instead of ~0.5 V, 11 Ω between the two; carrier wiring verified clean).
+  Never assign them.
+- **A button pin must never share a fan pin**: a fan PWM on a button line presses
+  the phone.
+- **Any MCU reset releases every NO relay** (relay opto VCC is the RP2040's 5 V):
+  MFD Pi hard cut, CAN hub and camera hub drop. Prefer a clean MFD shutdown before a
+  deliberate reset.
+- Identify a pin by blinking it before soldering: every earlier "the pin holds the
+  button" failure was a wire on a GND header position, not a pad property.
 
-### Ignition (ACC)
+## Link and protocol
 
-The accessory line is sensed on **GP11** with **inverted (active-low) logic**:
-`ACC ON => GP11 reads LOW (0)`, `ACC OFF => GP11 reads HIGH (1)`. The firmware
-enables the internal pull-up and reports `acc_on = (GP11 == 0)` on the Events
-channel (`{"acc": true|false, "batt": true}`) at startup, on every change, and
-as a periodic heartbeat (~5 s).
+NDJSON over USB-CDC, envelope `{"id": <device_id>, "d": <payload>}` (same as the
+gateway). The backend's `MultiInputPort` adds `DEVICE_POWERBOX_BASE` (200).
 
-To check the current pin level over the REPL on `prius`:
-```bash
-~/.local/bin/mpremote connect /dev/ttyACM0 exec \
-  "from machine import Pin; print(Pin(11, Pin.IN, Pin.PULL_UP).value())"
-# prints 0 when ACC is ON (inverted logic), 1 when ACC is OFF
-```
-
-Current firmware: **2.3.0** (2.2.3: BEAN transceiver bench on GP6/GP7 and
-5 ms relay read-back; 2.2.4: I2C at 100 kHz; 2.2.5: bench ACC override
-`acc_sim`; 2.3.0: receive-only BEAN decoder `bean_rx.py` + TX guard).
-
-## Power Management (POCO button + relay board + heartbeat + sleep) — firmware 2.1
-
-There are **no power rails** since 2.0. The powerbox, its hub and both POCO
-bucks sit on the permanent 12 V feed; everything switchable is on the
-8-channel relay board (next section). The box's job is to **start and wake the
-main POCO through its power button**, switch the relays on command, and tell
-the host what it sees.
-
-| Pin | Function | Idle | Notes |
-|---|---|---|---|
-| GP27 | main POCO button | input, pulls off | LOW = press. 6 s boots an off phone (3 s does not; verified 2026-11-03), 35 s force-resets a frozen SoC. Never driven high. |
-| — | "poco 2" slot | **not connected** (`POCO2_BTN_PIN = None`) | No second POCO exists (single-computer layout, 2026-11-04). `{"a":"button","poco":2}` / `{"a":"wake","poco":2}` reply `ERROR POCO2_NC` and press nothing. |
-
-### Main POCO wake ladder
-
-The host (POCO backend) heartbeats `{"a":"hb","n":N}`; if the counter stops
-changing for 15 s the POCO is dead. After the boot grace (20 s) the firmware
-presses GP27 for 6 s, waits 5 min (cooldown ≥ boot-to-first-heartbeat), presses
-again, and after two unanswered presses holds 35 s (frozen-SoC reset), then
-restarts the ladder.
-
-### Shutdown and sleep
-
-`{"a":"off","reason":..,"grace_s":30}` means **the host is halting itself**
-(the box cannot cut power). The firmware enters `shutdown`, waits for the
-heartbeat to stop (≥ 25 s) or the grace, then `sleep`: no wake presses until
-**ACC rises** or `{"a":"wake"}`. The under-voltage backstop (< 10 V for 20 s)
-does the same from the firmware side and sends `SHUTDOWN` to the host, which
-must `systemctl poweroff` itself (backend default since 2.0).
-
-### roadsense on the same POCO
-
-Since 2026-11-04 there is **one** POCO: it runs the backend and the roadsense
-perception stack (camerad-dvr / modeld / envd / api + the signd provider) as
-systemd units under `roadsense.target`. The backend's `RoadsenseManager`
-(`backend/roadsense_power.py`, `BACKEND_ROADSENSE_*`) follows ACC: key-on →
-relay ch4 (camera hub) on, 8 s settle, `systemctl start roadsense.target`;
-key-off → 30 s grace → `systemctl stop`, wait for the units, relay ch4 off. The
-powerbox is not involved beyond relay ch4; the legacy `p2`/`poco 2` fields stay
-in the protocol but mean nothing.
-
-### Main POCO power button (GP27)
-
-The pin is wired straight across the phone's power button (the line idles at
-~1.8 V from the PMIC pull-up and triggers when pulled to GND). The firmware
-"presses" by driving the pin **LOW**; at all other times it is an **input with
-pulls off** and is **never driven HIGH**. GP27 is an ADC pad (GP26-29), which
-resets with input disabled and no pulls, so the button is untouched through
-the bootloader and WDT resets. Bench 2026-11-03: a 6 s LOW from the REPL
-booted the phone from off (kernel start → Wi-Fi + ssh ~35 s later);
-`{"a":"button","poco":1,"ms":N}` presses on command.
-
-### Relay board (PCF8574 @0x20, 8 × 12 V coils, active-low inputs)
-
-IN1..IN8 sit on PCF P0..P7, so **board relay N = firmware channel N**
-(`RELAY_PIN_MAP = {n: n-1}` in `pcf8574.py`). JD-VCC = 12 V always on (JD
-jumper removed); the opto/input VCC comes from the **RP2040-Zero 5 V pin**, so
-whenever the RP2040 is unpowered or resetting **every NO relay releases**. The
-PCF powers up at 0xFF (all coils released).
-
-| Ch | Contact | Load | Notes |
-|---|---|---|---|
-| 1 | **NC** | the powerbox's **own** supply | Energised = hard restart of the box (USB gone 0.4 s, back 1.0 s, STATUS 4.9 s). Only via `{"a":"hard_restart"}`; `relay ch=1` is refused; reported as `null` in `rly`. |
-| 2 | NO | MFD Raspberry Pi Zero v1.3 (~100–115 mA @ 12 V) | USB gadget link up ~50 s after power. Hard cuts risk the SD card: the backend does `ssh poweroff` + wait before cutting. |
-| 3 | NO | USB 2.0 hub (`1a40:0101`): **CAN gateway + comma.ai panda** | One switch for both. Hub enumerates ~6 s, gateway ~7 s, panda ~9 s after power; 50 → 155 mA @ 12 V. |
-| 4 | NO | USB 2.0 hub (VIA `2109:2817`): fvision dashcam (`1902:3241`, USB storage, frames via `VSFILE`) / aux | +84 mA @ 12 V, enumerates ~6 s. |
-| 5 | NO | RS485 satellite power | Semantics kept from fw 2.0; **not yet tested** on this board. |
-| 6–8 | NO | unassigned | Generic `relay` channels. |
-
-`on` always means **load powered** (`rly` 1): for NO channels the pin goes LOW
-(coil energised), for the NC channel HIGH (coil released) — the NC flag is
-generic (`RELAY_NC` in `pcf8574.py`). The firmware updates its wanted byte
-**only after a successful I2C write**, reports `rly` from a **chip read-back**
-every STATUS and **every 5 ms in between** (fw 2.2.3, `RELAY_VERIFY_MS`; see
-below), re-writes the wanted byte whenever the read-back disagrees
-(lost write, PCF reset to 0xFF) and counts those repairs in `rly_fix`
-(`rly_err` = I2C errors; `rly` is omitted when the read-back itself failed).
-The first mismatch of a streak is logged as a `rly_fix` PMEVENT.
-
-**5 ms read-back (fw 2.2.3, 2026-11-11).** The PCF8574 keeps power-up
-resetting to 0xFF in the field. The read-back now runs every 5 ms so the
-re-assert lands inside the relays' ~5 ms release time and the loads should not
-actually drop. It runs inside `wdt_sleep_ms()` — the main loop's
-inter-telemetry wait and every button hold — deadline-paced (the sleep length
-is unchanged). Before 2.2.3 the check ran only once per main-loop pass, i.e.
-~1 s, despite the old 100 ms constant. Cost: one 1-byte I2C read per check
-(~100 µs on the wire at 100 kHz, ~0.2 ms with interpreter overhead, ~4 %). The bus runs at 100 kHz since fw 2.2.4: the PCF8574 is a standard-mode-only part.
-The 5 ms bound does not hold while the loop body itself runs (sensor reads,
-STATUS, inbound commands, a running `bean` `loop`/`square`/`pulse` op); those
-gaps are a few ms each, up to ~1 s for a bench `square`. `RELAY_IO` errors are
-still counted one by one in `rly_err` but reported at most once a second.
-
-**Restart scope.** After `hard_restart` (or any other reset) the MFD Pi, CAN
-hub and camera hub drop and come back **OFF**; the backend re-asserts its
-wanted states ~6 s after the `POWERBOX_READY` banner and the periodic
-read-back/enforce sweep converges the rest. If the box is still alive 3 s
-after energising relay 1 (relay not wired?), the coil is released and
-`ERROR RESTART_FAILED` is sent.
-
-#### Cold-boot event log (`getlog`, fw ≥ 1.15.0)
-
-The prius-backend that logs powerbox messages runs **on the POCO**, which is off
-during a cold boot — so nothing records what the firmware did until the phone is
-already up. To close that blind spot the firmware keeps an **in-RAM ring buffer**
-of power events (boot, every button press with reason + voltage + wake-tries +
-boot-age, shutdown, sleep). The RP2040 stays powered across the whole cold
-boot, so the timeline survives. Send `{"a":"getlog"}` (System id 0) to dump it as
-a `PMLOG` message; the backend auto-fetches it once the link comes up, so a cold
-boot's wake sequence lands in the journal automatically. Each event is also echoed
-live as a `PMEVENT` message.
-
-#### Status LED (RP2040-Zero onboard WS2812, GP16)
-
-The board's onboard WS2812 RGB LED (GP16) is driven as a live diagnostic — the
-**only** observable firmware output during a cold boot, when the POCO (USB host)
-is off and nothing can be logged. Point a camera at it. Colour key (all dim):
-
-| LED | Meaning |
-|-----|---------|
-| white→blue flash | power-on / reset signature. **Repeating every few seconds = reset loop** (e.g. WDT). |
-| green blink | `normal`, POCO **alive** (healthy heartbeat, loop running). |
-| amber solid | `normal`, POCO **not** alive — armed to press the wake button. |
-| **red solid** | a power-button press is happening **right now** (GP27 driven low). |
-| magenta | shutdown in progress. |
-| **bright magenta** | `hard_restart`: relay 1 being energised, power about to drop. |
-| cyan solid | `sleep` — host shut itself down; no wake presses until ACC rises or `wake`. |
-
-A cold-boot recording therefore shows exactly what the firmware does: a single
-boot flash then amber→red(press)→green means it woke the phone; a **dark** LED
-means the RP2040 has no power; a **repeating** boot flash means it is reset-looping.
-The boot event in `getlog`, the `POWERBOX_READY` banner and every `STATUS`
-carry `rc` (`machine.reset_cause()`): `1` = power-on (also brown-out and
-`hard_restart`), `3` = watchdog (WDT timeout, `machine.reset()`, `mpremote
-reset`); STATUS also carries `up` (uptime, s). The backend mirrors them
-(`powerbox.reset_cause`, `powerbox.uptime_s`) and counts banners in
-`powerbox.boot_count` — the way to attribute the spontaneous resets seen on
-the bench 2026-11-03 (rc 1 → power/wiring, rc 3 → firmware stall). The banner
-is parked until the first host heartbeat opens the TX gate, so the backend
-sees exactly one banner per firmware boot.
-
-### Bidirectional heartbeat
-
-A rolling "automotive" counter lets each side detect if the other died:
-
-* **powerbox → POCO**: a `STATUS` message every `HEARTBEAT_TX_MS` (2 s) on the
-  System channel:
-  `{"msg":"STATUS","hb":n,"acc":1,"poco":1,"p2":0,"pm":"normal","rc":1,"up":123,"fan":40,"rpm":2100,"rly":[null,1,1,0,1,0,0,0],"rly_fix":0,"rly_err":0}`
-  where `hb` is the rolling counter, `pm` the state (`normal`/`shutdown`/`sleep`),
-  `rc`/`up` the reset cause and uptime, and `rly` the relay read-back
-  (`[ch1..ch8]`, 1 = load powered, ch1 always `null`).
-* **POCO → powerbox**: the backend sends `{"a":"hb","n":n}` every
-  `powerbox_heartbeat_s` (2 s). The powerbox treats the POCO as **dead** if this
-  counter stops *advancing* for `POCO_HB_TIMEOUT_MS` (15 s) — a stuck/repeating
-  counter also reads as dead.
-
-### Inbound commands (POCO → powerbox, on System id 0)
-
-| Command | Payload | Effect |
-|---------|---------|--------|
-| Shutdown | `{"a":"off","grace_s":30}` | Host is halting itself: stop waking it (`shutdown` → `sleep`). |
-| Heartbeat | `{"a":"hb","n":0-255}` | Keep "POCO alive" fresh. |
-| Wake | `{"a":"wake","poco":1}` | Leave `sleep` and re-arm the ladder. `poco:2` → `ERROR POCO2_NC` (not connected). |
-| p2 alive | `{"a":"p2","alive":true}` | Legacy: host-reported liveness of a second POCO (echoed as `p2` in STATUS); unused since the single-computer layout. |
-| Fan | `{"a":"fan","pct":0-100}` | 4-wire fan speed (GP29, not inverted); `duty` 0-65535 accepted for the old form. |
-| Power button | `{"a":"button","poco":1,"ms":6000}` | Hold GP27 low (6000 = power on, 35000 = force reset). `poco:2` → `ERROR POCO2_NC`. |
-| Relay | `{"a":"relay","ch":2-8,"on":true}` | Power a load channel (ack `relay_<ch>_on`). `ch:1` → `ERROR RELAY` (restart relay). |
-| Hard restart | `{"a":"hard_restart"}` | Ack, then energise relay 1 on the next tick: the box cuts its own supply and is back in ~5 s; every NO relay drops. |
-| I2C scan | `{"a":"i2c_scan"}` | `I2C_SCAN` reply with the ACKing addresses. |
-| Interval | `{"a":"set_interval","ms":1000}` | Telemetry cadence. |
-| Identify | `{"a":"whoami"}` | IDENT reply. |
-| Ping | `{"a":"ping"}` | PONG. |
-| Get event log | `{"a":"getlog"}` | Dump the power-event ring buffer as `PMLOG` (cold-boot timeline). |
-| Reset mAh | `{"a":"reset_mah"}` | Zero the coulomb counter. |
-| BEAN bench (**bench only**) | `{"a":"bean","op":...}` | fw ≥ 2.2.3, see *BEAN transceiver bench* below. TX-driving ops need the TX guard (fw 2.3.0) **and** the bench override `{"a":"bean_tx","op":"bench","v":1}` (fw 2.4.0). Never on the car: they hold the bus dominant for up to 500 ms. |
-| BEAN TX guard | `{"a":"bean_tx_enable","v":1\|0}` | fw ≥ 2.3.0. Arms everything that can drive GP7 for 60 s (`BEAN_TX_ENABLE_MS`): the `bean_tx` ops and the `bean` bench ops. `v:0` disarms. Ack `{"ack":"bean_tx_enable","v":..,"s":60}`, logged as a `bean_tx` PMEVENT. |
-| BEAN transmitter | `{"a":"bean_tx","op":"status"\|"edge"\|"allow"\|"bench"\|"sp"\|"send",...}` | fw ≥ 2.4.0, see *BEAN transmitter* below. |
-| BEAN receiver | `{"a":"bean_rx","on":0\|1}` / `{"a":"bean_rx","op":"stats"}` / `{"a":"bean_rx","raw":N}` | fw ≥ 2.3.0, see *BEAN receiver* below. |
-| ACC override (**bench only**) | `{"a":"acc_sim","v":0\|1\|null}` | fw ≥ 2.2.5. Simulates key-on (1) or key-off (0) without touching the ACC wire; `null` or no `v` clears it. The override is applied in `read_acc()`, the single place the pin enters the logic, so it reaches the Events `{"acc":..}` messages (sent on the next main-loop pass when the effective state changes), STATUS `acc` and the wake/sleep logic. STATUS carries `"acc_sim":1` while it is active. Ack: `{"ack":"acc_sim","v":0\|1\|null,"pin":<real ACC, 1 = on>}`; any other `v` → `ERROR ACC_SIM`. **RAM only:** a firmware boot clears it. It also **auto-expires 30 min** (`ACC_SIM_MAX_MS`) after the last set, then the real pin takes over again (`acc_sim` PMEVENT with `why: expired`). Re-sending restarts the 30 min. Set and clear are logged as `acc_sim` PMEVENTs. Backend: REST `powerbox_acc_sim {"on": true\|false\|null}`, mirrored in `powerbox.acc_sim`. |
-
-### BEAN transceiver bench (fw 2.2.3, 2026-11-11)
-
-**Bench only since fw 2.4.0.** These ops hold GP7 high for far longer than a
-frame may (up to 500 ms), which on the car is a +B short on the body bus.
-They need the TX guard and the per-boot bench override
-(`{"a":"bean_tx","op":"bench","v":1}`); without it they answer
-`ERROR BEAN_TX_DISABLED`. For the car there is `bean_tx` `op:"edge"` (one
-pulse of one bit time).
-
-Logic verification of the discrete BEAN transceiver on GP7 (TX) / GP6 (RX,
-inverted); BEAN itself is 10 kbit/s (100 µs bits), dominant = +B, recessive =
-0 V. Not a protocol stack. Every op is synchronous, capped, and leaves TX LOW
-(also on errors). Reply: `{"ack":"bean","op":<op>,...}` on id 0, plus a live
-`{"msg":"PMEVENT","ev":"bean","t_ms":..,...}` echo for the journal (not kept in
-the `getlog` ring). Bad op / out-of-range or non-integer field →
-`ERROR BEAN_ARGS` (nothing driven); an exception during an op → `ERROR BEAN`.
-
-| op | fields (default, range) | reply fields |
+| id | backend id | Content |
 |---|---|---|
-| `status` | — | `tx` (0/1), `rx` (GP6 level), `bus` (1 = dominant, i.e. `rx` low) |
-| `tx` | `v` (1, 0–1), `ms` (1, 1–500) | `v`, `ms`, `rx_on` (sampled at the end of the hold), `rx_off` (50 µs after release) |
-| `pulse` | `us` (100, 1–2000) | `us`, `rx_mid`, `rx_after` (50 µs after release), `us_real` (measured width) |
-| `loop` | `n` (20, 1–200) | n × {TX high → µs to RX low (timeout 2000), hold 300 µs, TX low → µs to RX high, 300 µs gap}: `dom_min/max/avg`, `rec_min/max/avg` (µs; `null` if no edge seen), `to_dom`, `to_rec`, `timeouts`, `rx_idle` (RX before the first round) |
-| `square` | `hz` (5000, 100–20000), `ms` (200, 1–1000) | `edges` (RX level changes counted), `expected` (= 2 × `cycles`), `cycles`, `hz_real` |
+| 0 System | 200 | ready banner, IDENT, acks, errors, `STATUS` heartbeat, `PMEVENT`/`PMLOG` |
+| 1 Telemetry | 201 | INA219 `v`, `ma`, `mah`; fan RPM; environment sensors |
+| 2 Events | 202 | `{"acc": true\|false, "batt": true}` at startup, on change, and every 5 s |
+| 3 BEAN | 203 | BEAN frames and receiver stats (fw ≥ 2.3.0) |
 
-`square` toggles TX and polls RX in one Python loop; each half period is at
-least 500000/`hz` µs counted from the actual toggle, so a loop that cannot keep
-up lowers `hz_real` instead of starving the transceiver — `edges == expected`
-means RX followed every TX edge at `hz_real`. Interrupts stay enabled (USB,
-tach); the longest op (~1 s) is far inside the 8 s WDT, which is fed per round.
-Timing caveat: all µs figures come from `time.ticks_us()` in interpreted loops
-(resolution = one loop pass, a few µs at 96 MHz, plus jitter from USB/IRQ
-service); good for "does RX follow TX and roughly how fast", not for bit
-timing. A real BEAN implementation needs PIO for TX/RX.
+**Heartbeats.**
 
-Backend: REST `powerbox_bean` (`op` + the same optional fields, same caps,
-HTTP 400 outside them); the reply is mirrored into `/api/v1/state` →
-`powerbox.bean` (the ack fields + `ts`; a BEAN error appears there as
-`{"error": "BEAN_ARGS", "detail": ...}`).
+- powerbox → POCO: `STATUS` on id 0 every 2 s (`HEARTBEAT_TX_MS`):
+  `{"msg":"STATUS","hb":n,"acc":1,"poco":1,"p2":0,"pm":"normal","rc":1,"up":123,"fan":40,"rpm":2100,"rly":[null,1,1,0,1,0,0,0],"rly_fix":0,"rly_err":0}`.
+  `hb` rolling counter; `pm` = `normal`/`shutdown`/`sleep`; `rc` reset cause, `up`
+  uptime s; `rly` relay read-back `[ch1..ch8]` (1 = load powered, ch1 always `null`,
+  whole key omitted when the read-back failed); `acc_sim:1` while the ACC override
+  is active.
+- POCO → powerbox: `{"a":"hb","n":N}` every 2 s (`powerbox_heartbeat_s`). The POCO
+  counts as **dead** when `n` stops advancing for 15 s (`POCO_HB_TIMEOUT_MS`); a
+  repeating counter also reads as dead.
 
-## Reliability — USB-CDC write model
+**TX gate.** `tx()` writes only while the host is present (recent POCO heartbeat).
+A MicroPython write to USB-CDC blocks when nobody drains the port; ungated, the
+firmware stalled until the 8 s WDT reset it and then re-pressed the button on a
+booting phone. With the gate, frames are dropped while the host is absent, a TX
+failure only increments a counter and never resets the MCU, and the first host
+heartbeat reopens the gate. Bench tools must send heartbeats or the port stays
+silent. The `POWERBOX_READY` banner is parked until the gate first opens, so the
+backend sees exactly one banner per boot. `WDT_TIMEOUT_MS = 8000` remains a
+backstop for a real hang.
 
-A MicroPython `sys.stdout.write` to USB-CDC is **blocking**: when no host has the
-port open / is actively draining it, the small (~64–256 B) CDC TX FIFO fills and the
-next write blocks forever, deadlocking the firmware. A no-drainer gap can occur when
-the backend restarts or when something opens → writes → closes the CDC port.
+Backend state: `state.powerbox` (`relays`, `rs485_power`, `poco_alive`, `pm_state`,
+`powerbox_hb`, `reset_cause`, `uptime_s`, `boot_count`, `relay_fix_count`,
+`relay_err_count`, plus telemetry), shown on the dashboard.
 
-The firmware guards every `tx()` with a **host-presence gate** (`_host_present`):
-outbound frames are written only once the POCO host has proven it is present and
-draining the port — i.e. a recent POCO heartbeat (`poco_alive`). While the host is
-absent, frames are **dropped** instead of blocking. This matters most on a **cold
-boot**: the POCO is off while the firmware powers it on, and during the phone's own
-boot its USB attaches *before* Linux opens the ACM — a connected-but-not-drained
-window where a blocking write would stall until the 8 s WDT reset the MCU. That reset
-made the firmware re-press the power button ~20 s later, killing the still-booting
-phone: a press→reset→re-press loop (observed on-bench 2026-08-10, LED reset loop).
-Gating TX on host presence removes that stall entirely. Inbound reads are unaffected,
-so the first heartbeat re-opens the gate and telemetry resumes; a TX failure now only
-increments a diagnostic counter and **never** resets the MCU. Discovery is
-topology/port-based and the backend heartbeats unconditionally, so gating TX can't
-deadlock the link. See the `tx()` / `set_host_present()` helpers in `main.py`. A
-`WDT_TIMEOUT_MS = 8000` watchdog remains a last-resort backstop for a genuine hang.
+**Host side.** The backend resolves the powerbox from its hub port and never probes
+it. `/etc/udev/rules.d/99-prius-rp2040-nomm.rules` makes ModemManager ignore VID
+`2e8a` (its AT probes would open/close the port) and sets `MODE="0666"`. A silent
+link (board alive, nothing received) is detected by the backend staleness watchdog:
+[POCO/POWER.md](../POCO/POWER.md#usb-link-to-the-powerbox).
 
-Host-side, two measures keep the link clean:
-* **Port-based discovery** — the backend resolves roles from the physical hub port
-  (`{1: powerbox, 2: gateway}`) and never opens/probes the device.
-* **ModemManager-ignore udev rule** (`99-prius-rp2040-nomm.rules`, VID `2e8a`) stops
-  MM's AT probes from opening/closing the port; `MODE="0666"` lets the backend open
-  the tty without a `chmod` race.
+## Hardware
 
-The board runs **`main.py`** (autostarts; has the WDT + a 3 s Ctrl-C safe-boot
-window) plus a two-line **`boot.py`** that releases the POCO button (GP27) before
-anything else: the RP2040's reset-default pull-down would otherwise hold the
-button pressed whenever `main.py` is not running and boot-loop the phone. The powerbox MCU is **bus-powered** (runs off USB VBUS; no direct 12 V
-line); since 2026-10-26 the hub's 5 V buck hangs on the **permanent 12 V feed**,
-so cutting hub-port VBUS is a true cold reset (`prius-usb-power cycle`, ≥ 4 s off
-→ `energy_mah` resets to ~0) and **any MCU reset (reflash, DTR pulse, WDT, soft
-reboot) is electrically harmless** — there is no rail to lose. (The old OUT1
-latch/hold-up story is gone with firmware 2.0.) See `POCO/POWER.md` for the full
-power model + the host-side staleness watchdog that detects a silent USB-CDC link stall.
+- RP2040-Zero, **bus-powered** from the USB hub (no direct 12 V line). The hub's
+  5 V buck and the POCO buck sit on the permanent 12 V feed through relay 1 (NC):
+  `12 V → relay 1 (released = closed) → hub 5 V buck → VBUS → powerbox`. There are
+  no switched power rails (since fw 2.0; the `out` command returns `OUT_REMOVED`).
+- The box cannot cut the POCO's power: the POCO is only started through its
+  button, and shut down by itself.
+- USB: hub `1-1`, port 1 (`/dev/serial/by-id/usb-MicroPython_Board_in_FS_mode_503359277a7c699f-if00`),
+  per the backend.env seed in `POCO/provision.sh`. See *Open gaps* on the hub model.
 
-> **Firmware vs link:** the non-blocking `tx()` guard above stops the *firmware*
-> from blocking on a full TX FIFO; it does not stop the *link* from going silent at
-> the USB/host layer. A silent stall (board alive, host receiving nothing) is
-> handled on the backend by `BackendService._powerbox_watchdog_tick()`, which flips
-> `powerbox.connected → False` after ~6 s of no frames and auto-clears on resume.
-
-## Hardware Setup
-* **Host System:** POCO F1 (`prius`) running postmarketOS.
-* **USB Hub:** labeled D-Link DUB-H4 **rev D1**, but internally an **ActionStar `2101:8500`** (same guts as the unsupported rev C1 — uhubctl issue #88; a truly per-port rev D enumerates as Genesys `05E3:0608`). Bench-tested 2026-07-21: **only the socket on internal port 5 has switchable VBUS** — put the **gateway** there; all other sockets are hardwired 5 V (off/cycle = data-only), and even an all-ports gang off doesn't cut them. The built-in HID `2101:8501` is the LED controller, not a power interface. (Previous hub: DUB-H4 rev F1, Terminus FE1.1s `1a40:0101`, fully ganged — there `hubcycle` really cut all VBUS.)
-* **Microcontroller:** Waveshare RP2040-Zero connected to **Port 1** of the USB Hub.
-* **Power (since 2026-10-26):** the RP2040 is **bus-powered** from the hub, and the hub's 5 V buck and the POCO's buck hang on the **permanent 12 V feed**. There is no master rail and no suicide path any more: the box is always on, the main POCO is only ever started through its power button, and the backend puts the box to "sleep" (no wake presses) when it shuts the phone down, until ACC rises again. The INA219 *senses* the 12 V system.
-
-### Pinout (RP2040 / Raspberry Pi Pico)
+### Pinout
 
 | GP | Function | Direction | Notes |
-|----|----------|-----------|-------|
-| GP0 | I2C0 SDA | — | INA219 @0x40, BMP280 @0x76 (outside box), PCF8574 @0x20 (relays). BMP280 @0x77 and AHT20 @0x38 are not fitted (auto-detected if they ever answer). Falls back to `SDA=GP1/SCL=GP0` SoftI2C if swapped. |
-| GP1 | I2C0 SCL | — | |
-| GP11 | ACC / ignition sense | IN (PULL_UP) | Inverted: ACC ON = LOW (0), ACC OFF = HIGH (1). |
-| GP27 | Main POCO power button | IN (pulls off) / OUT-LOW pulse | Wired straight across the phone's button (line idles ~1.8 V). 6 s hold powers on (bench 2026-11-03); 35 s forces a reset of a frozen SoC. Never driven HIGH. |
-| GP28 | Chassis fan tach | IN (PULL_UP), falling-edge IRQ | Fan's open-collector tach, 2 pulses/rev → `fan_rpm` in telemetry. |
-| GP29 | Chassis fan PWM | PWM 25 kHz, **not inverted** | Straight to the fan's PWM wire, no transistor: GPIO duty = fan duty. Undriven (bootloader, safe-boot) = fan at full speed; the firmware takes it over first thing in `main()`. |
-| — | "poco 2" slot | not connected | `POCO2_BTN_PIN = None`; no second POCO exists. Must never share a fan pin (a fan PWM on a button line presses the phone). |
-| GP6 | BEAN transceiver RX (fw 2.2.3) | IN, **no internal pull** | Q3 collector with R8 10k pull-up to 3V3 on the board. **Inverted**: bus idle (0 V, recessive) → 1, bus at +B (dominant) → 0. |
-| GP7 | BEAN transceiver TX (fw 2.2.3) | OUT, **LOW at boot** | R2 5.1k → Q1 BC547 → Q2 BC327 high side → D1 → R5 220R → bus. HIGH = bus driven to ~+B (dominant), LOW = released. Set LOW in `boot.py` and again first thing in `main()` (the reset-default pad pull-down keeps Q1 off before that); every `bean` / `bean_tx` op releases it in a `finally`, the main loop forces it low each pass and (fw 2.4.0) every `wdt_sleep_ms` slice checks it. During a `bean_tx` op the pin belongs to PIO0 (see *BEAN transmitter*); otherwise it is a plain output. R5 is a short-circuit limit only: never hold TX high for long. |
-| GP14, GP15 | unused, **dead** | — | Both pads are blown inside the RP2040 (2026-10-27: diode mode to GND 0.045 V instead of ~0.5 V, 11 Ω between the two pins, carrier wiring verified clean). Never assign them. |
+|---|---|---|---|
+| GP0 / GP1 | I2C0 SDA / SCL, 100 kHz (`I2C_FREQ`) | — | PCF8574 is standard-mode only. Falls back to SoftI2C with SDA/SCL swapped if the hardware bus finds nothing. |
+| GP6 | BEAN RX | IN, no internal pull | Q3 collector, R8 10k pull-up to 3V3. **Inverted**: bus recessive (0 V) → 1, dominant (+B) → 0. |
+| GP7 | BEAN TX | OUT, LOW at boot | R2 5.1k → Q1 BC547 → Q2 BC327 high side → D1 → R5 220R → bus. HIGH = dominant. Held LOW in `boot.py` and first thing in `main()`; every op releases it in a `finally`; the main loop and every `wdt_sleep_ms` slice check it. Owned by PIO0 only during a `bean_tx` op. |
+| GP11 | ACC sense | IN, pull-up | **Inverted**: ACC ON = 0, OFF = 1. Gated through a 2N7000; carries no load. |
+| GP14, GP15 | dead | — | never assign |
+| GP16 | onboard WS2812 status LED | OUT | see *Status LED* |
+| GP27 | POCO power button | IN pulls off / OUT LOW pulse | see *POCO power button* |
+| GP28 | fan tach | IN pull-up, falling-edge IRQ | 2 pulses/rev |
+| GP29 | fan PWM 25 kHz, not inverted | PWM | GPIO duty = fan duty, no transistor. Undriven (bootloader, safe-boot) = full speed; set first thing in `main()`. |
+| — | "poco 2" button | not connected | `POCO2_BTN_PIN = None`; there is one POCO. |
 
-**Button wiring, verified on the bench** (2026-10-26 with the phone's
-input-event log, 2026-11-03 on GP27 from the REPL): as a plain input with pulls
-off the line sits at ~1.8 V and the phone sees nothing; a 300 ms LOW gives
-exactly one press/release; a 3 s hold does not boot the phone from off, a 6 s
-hold does. Every earlier "the pin holds the button" failure was the wire
-sitting on a **GND header position**, not a pad property — identify the pin by
-blinking it before soldering.
+The ACC level is in STATUS `acc` and the Events messages; with fw ≥ 2.2.0 there is
+no REPL to read the pin directly (see *Safety rules*).
 
-**No power rails since firmware 2.0.** The powerbox, its hub and both POCO
-bucks sit on the permanent 12 V feed; the main POCO is only ever started
-through its button, and everything switchable is on the 8-channel relay board
-(see *Relay board* above). The `out` command returns `OUT_REMOVED`.
+### I2C devices
 
-### Environmental sensors (I2C0)
+| Addr | Device | Fields |
+|---|---|---|
+| `0x20` | PCF8574 relay expander | `rly`, `rly_fix`, `rly_err` |
+| `0x40` | INA219 on the 12 V supply | `v`, `ma`, `mah` |
+| `0x76` | BMP280 #2, outside the box (cabin ambient) | `bmp2_t`, `bmp2_p` |
+| `0x77` | BMP280 #1, inside the box — **not fitted** | (`bmp_t`, `bmp_p` omitted) |
+| `0x38` | AHT20, inside the box — **not fitted** | (`aht_t`, `aht_h` omitted) |
 
-| Sensor | Addr | Placement | Telemetry keys |
-|--------|------|-----------|----------------|
-| BMP280 #2 | `0x76` (SDO low) | **Outside** the box — cabin ambient reference | `bmp2_t`, `bmp2_p` |
-| BMP280 #1 | `0x77` (SDO high) | inside the box — **not fitted** | (`bmp_t`, `bmp_p` omitted) |
-| AHT20 | `0x38` | inside the box — **not fitted** | (`aht_t`, `aht_h` omitted) |
+Only chips that answer the boot scan are bound (no error for absent ones). A bound
+sensor that stops answering is dropped after one `*_READ` error. The backend's fan
+controller uses `bmp2_t` as ambient; its box-purge loop on `bmp_t − bmp2_t` is inert
+while `bmp_t` is missing.
 
-Absent sensors are simply not bound at boot (no error); a fitted sensor that
-stops answering is dropped after one `*_READ` ERROR instead of stalling the
-telemetry loop. The backend's chassis-fan controller uses `bmp2_t` as the
-ambient reference for the POCO delta; its box-purge loop on `bmp_t − bmp2_t`
-stays inert while `bmp_t` is missing.
+### Relay board
 
-The chassis fan is a **4-wire BLDC** (ADDA AB07505HX110B00 / Dell 00G700, 5 V,
-0.40 A: red 5 V, black GND, blue PWM, yellow tach) on a 5 V buck. The firmware
-drives its PWM input at 25 kHz **directly from GP29, not inverted** (GPIO duty =
-fan duty; the former 2N7000 stage is gone) and reports the tach RPM from GP28,
-so the backend only sends `{"a":"fan","pct":0-100}` (the old
-`duty`/`pin`/`freq` form is accepted, `duty` as 0-65535). Boot default 0 %,
-which **stops this fan completely** (no minimum-speed floor). While GP29 is
-undriven (bootloader, safe-boot window) the fan runs at full speed.
+8-channel opto board, 12 V coils (HW-281 type), active-low inputs. IN1..IN8 on PCF
+P0..P7, so **board relay N = firmware channel N** (`RELAY_PIN_MAP = {n: n-1}` in
+`pcf8574.py`). JD-VCC = 12 V always on (JD jumper removed); opto VCC = RP2040-Zero
+5 V pin, so **every NO relay releases whenever the RP2040 is unpowered or
+resetting**. The PCF8574 powers up at 0xFF (all coils released).
 
-Duty → RPM, bench sweep 2026-11-03 (5 % steps, 4 s settle + 3 s count, no
-hysteresis, ±20 RPM):
+| Ch | Contact | Load | Measured | Backend owner |
+|---|---|---|---|---|
+| 1 | **NC** | the powerbox's own supply, nothing else | energised: USB gone 0.4 s, re-enumerated 1.0 s, first STATUS 4.9 s (incl. 3 s safe-boot) | `powerbox_hard_restart` → `{"a":"hard_restart"}` only; refused by `relay` / `set_relay`; `rly[0]` = `null` |
+| 2 | NO | MFD Raspberry Pi Zero v1.3, ~100–115 mA @ 12 V | USB gadget + ping at 49–50 s | `backend/mfd_power.py`: `ssh poweroff` + wait, then cut (hard cuts risk the SD card) |
+| 3 | NO | USB 2.0 hub `1a40:0101`: CAN gateway (`2e8a:000a`) + comma.ai panda (`bbaa:ddcc`) | 50 → 155 mA; hub ~6 s, gateway ~7 s, panda ~9 s | gateway power path (`SetGatewayUsbPowerAction`, satellite wake-locks); one switch for both |
+| 4 | NO | USB 2.0 hub VIA `2109:2817`: fvision dashcam (`1902:3241`, USB storage, frames via `VSFILE`) / aux | +84 mA, enumerates ~6 s, no VBUS back-feed | `backend/roadsense_power.py` (roadsense stack or camera preview); `set_relay` ch4 otherwise |
+| 5 | NO | RS485 satellite rail | **untested on this board** | `state/rules/satellite_power.py` wake-locks ([docs/SATELLITE_POWER.md](../docs/SATELLITE_POWER.md)) |
+| 6–8 | NO | unassigned | untested | generic `set_relay` |
+
+Relays 1–4 were verified on the bench (three hard MFD cycles, clean enumeration
+each).
+
+**Channel semantics.** `on` always means **load powered** (`rly` 1): NO channel pin
+LOW (coil energised), NC channel pin HIGH (coil released); the NC flag is generic
+(`RELAY_NC = (1,)`). Constants: `RELAY_CH_MFD = 2`, `RELAY_CH_CAN_HUB = 3`,
+`RELAY_CH_CAM_HUB = 4`, `RELAY_CH_RS485 = 5` (`main.py`, `state/app_state.py`).
+
+**Read-back and re-assert** (`pcf8574.RelayBoard`):
+
+- the wanted byte changes only after a successful I2C write;
+- `rly` comes from a chip read-back, every STATUS and every 5 ms in between
+  (`RELAY_VERIFY_MS`, fw ≥ 2.2.3), run from `wdt_sleep_ms()` (main-loop wait and
+  every button hold), deadline-paced. The 5 ms period targets the relays' ~5 ms
+  release time, so a re-assert should land before a load drops. Cost: one 1-byte
+  read, ~0.2 ms with interpreter overhead (~4 %). The bound does not hold while the
+  loop body runs (sensor reads, STATUS, commands, a bench `bean` op: a few ms each,
+  up to ~1 s for `square`);
+- a mismatch (lost write, PCF reset to 0xFF) is re-written and counted in `rly_fix`;
+  the first mismatch of a streak emits a `rly_fix` PMEVENT, with `pcf_reset=1` when
+  the chip read 0xFF;
+- I2C errors → `ERROR RELAY_IO`, counted one by one in `rly_err`, reported at most
+  once a second (`IO_REPORT_MS`).
+
+**Restart scope.** After `hard_restart` or any other reset, the MFD Pi, CAN hub and
+camera hub come back **OFF**. The backend re-asserts its wanted states ~6 s after
+the `POWERBOX_READY` banner (`BackendService.PP_REASSERT_DELAY_S`,
+`HubPortPower.reassert_all`); the ~15 s `rly` enforce sweep and the satellite rule's
+mirror retry converge the rest. `hard_restart`: ack first, coil energised on the
+next tick (`RESTART_ACK_DELAY_MS` 300); if the box is still alive 3 s later the coil
+is released and `ERROR RESTART_FAILED` sent.
+
+## POCO power button and wake ladder
+
+GP27 is wired straight across the phone's power button (line idles ~1.8 V from the
+PMIC pull-up). Press = drive LOW; otherwise input with pulls off; **never driven
+HIGH**. GP27 is an ADC pad (resets with input disabled, no pulls), but the RP2040
+reset-default pull-down still reads as a press until `boot.py` releases it, which is
+why the REPL and BOOTSEL rules above exist.
+
+| Hold | Effect (POCO F1, bench-verified with the phone's input-event log) |
+|---|---|
+| 300 ms | exactly one press/release |
+| 3 s | does not boot an off phone |
+| 6 s (`POCO_BTN_PRESS_MS`) | boots an off phone (kernel → Wi-Fi + ssh ~35 s later) |
+| 12 s (`POCO_BTN_FORCE_MS`) | one clean forced restart of a frozen SoC; longer holds reboot it every ~8–10 s (35 s rebooted it ~4 times) |
+| 15 s | maximum accepted hold (`POCO_BTN_MAX_MS`) |
+
+`Button.press` releases in a `finally`; Ctrl-C handlers release before exiting.
+
+**Wake ladder** (`PowerManager`, `main.py`):
+
+1. Cold start (no heartbeat seen since the RP2040 booted): wait 20 s
+   (`POCO_BOOT_GRACE_MS`), then press.
+2. A POCO that was heartbeating and went quiet is treated as rebooting: wait 180 s
+   after its last heartbeat (`POCO_LOST_GRACE_MS`; `systemctl reboot` brings the
+   backend back after ~75 s).
+3. Press 6 s; at most once per 5 min (`POCO_WAKE_COOLDOWN_MS`, must exceed boot →
+   first heartbeat, ~3–5 min).
+4. After 2 unanswered presses (`POCO_WAKE_SHORT_TRIES`) one 12 s force press, then
+   the ladder starts over. A heartbeat resets the count.
+
+**Shutdown and sleep.** `{"a":"off","grace_s":30}` means the host is halting itself.
+The firmware enters `shutdown`, waits for the heartbeat to stop (≥ 25 s,
+`SHUTDOWN_MIN_HOLD_MS`) or the grace, then `sleep`: no wake presses until **ACC
+rises** or `{"a":"wake"}`. Last-resort under-voltage backstop (for a dead backend):
+below 10.0 V for 20 s (`SUICIDE_VOLTAGE`, `SUICIDE_CONFIRM_MS`) the firmware sends
+`SHUTDOWN` to the host (which must `systemctl poweroff` itself) and enters
+`shutdown` → `sleep`. The backend's own rule acts first (10.5 V / 5 s).
+
+## Status LED, event log, reset cause
+
+**LED** (GP16 WS2812, dim) — the only firmware output observable during a cold boot,
+when the POCO is off and nothing is logged. Point a camera at it.
+
+| LED | Meaning |
+|---|---|
+| white → blue flash | power-on / reset. **Repeating every few seconds = reset loop.** |
+| green blink | `normal`, POCO alive |
+| amber solid | `normal`, POCO not alive, armed to press |
+| red solid | button press in progress (GP27 LOW) |
+| magenta | shutdown in progress |
+| bright magenta | `hard_restart`: relay 1 being energised |
+| cyan solid | `sleep` |
+| dark | RP2040 unpowered |
+
+**Event log** (fw ≥ 1.15.0). An in-RAM ring of power events (boot, every press with
+reason + voltage + wake tries + boot age, shutdown, sleep); the RP2040 stays powered
+through a POCO cold boot, so the timeline survives. `{"a":"getlog"}` dumps it as
+`PMLOG`; the backend fetches it when the link comes up, so a cold boot's wake
+sequence lands in the journal. Events are also echoed live as `PMEVENT` (as are
+`rly_fix`, `acc_sim`, `bean`, `bean_tx`, `bean_rx`).
+
+**Reset cause.** `rc` = `machine.reset_cause()` in the banner, every STATUS and the
+`boot` event: `1` = power-on (also brown-out and `hard_restart`), `3` = watchdog
+(WDT timeout, `machine.reset()`, `mpremote reset`). STATUS also carries `up`. The
+backend mirrors `powerbox.reset_cause`, `powerbox.uptime_s` and counts banners in
+`powerbox.boot_count`.
+
+## Chassis fan
+
+4-wire BLDC blower, ADDA AB07505HX110B00 / Dell 00G700, 5 V 0.40 A (red 5 V, black
+GND, blue PWM, yellow tach) on a 5 V buck. Command `{"a":"fan","pct":0-100}` (old
+`duty` 0–65535 form accepted). Boot default 0 %, which **stops the fan completely**
+(no minimum-speed floor). Policy: `backend/fan_policy.py`,
+[docs/THERMAL_MODEL.md](../docs/THERMAL_MODEL.md).
+
+Duty → RPM (bench sweep, 5 % steps, 4 s settle + 3 s count, no hysteresis, ±20 RPM):
 
 | duty % | 0 | 5 | 10 | 15 | 20 | 25 | 30 | 35 | 40 | 45 | 50 |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -371,198 +272,293 @@ hysteresis, ±20 RPM):
 
 Near-linear up to ~50 %, flattening above.
 
-## Infrastructure Configuration (`prius`)
+## Inbound commands (POCO → powerbox, id 0)
 
-The `prius` host has been configured to remotely manage and program the RP2040 without needing physical access:
+| Command | Payload | Effect |
+|---|---|---|
+| Heartbeat | `{"a":"hb","n":0-255}` | keeps "POCO alive" fresh; opens the TX gate |
+| Shutdown | `{"a":"off","grace_s":30}` | host is halting: `shutdown` → `sleep` |
+| Wake | `{"a":"wake","poco":1}` | leave `sleep`, re-arm the ladder |
+| Power button | `{"a":"button","poco":1,"ms":6000}` | hold GP27 LOW (max 15000) |
+| Relay | `{"a":"relay","ch":2-8,"on":true}` | ack `relay_<ch>_on`; `ch:1` → `ERROR RELAY` |
+| Hard restart | `{"a":"hard_restart"}` | `{"ack":"hard_restart"}`, `{"msg":"HARD_RESTART","up":s}`, then relay 1 cuts the box's supply; back in ~5 s |
+| Fan | `{"a":"fan","pct":0-100}` | fan duty |
+| ACC override (**bench**) | `{"a":"acc_sim","v":0\|1\|null}` | fw ≥ 2.2.5; see below |
+| Get event log | `{"a":"getlog"}` | `PMLOG` |
+| I2C scan | `{"a":"i2c_scan"}` | `I2C_SCAN` with the ACKing addresses |
+| Interval | `{"a":"set_interval","ms":1000}` | telemetry cadence |
+| Reset mAh | `{"a":"reset_mah"}` | zero the coulomb counter |
+| Identify / ping | `{"a":"whoami"}` / `{"a":"ping"}` | IDENT / PONG |
+| p2 alive (legacy) | `{"a":"p2","alive":true}` | echoed as `p2` in STATUS; unused |
+| Firmware update | `put_begin` / `put` / `put_end` / `reboot` | fw ≥ 2.2.0; used by `pb_flash.py` (protocol block in `main.py`) |
+| BEAN bench (**bench**) | `{"a":"bean","op":...}` | fw ≥ 2.2.3; see *BEAN transceiver bench* |
+| BEAN TX guard | `{"a":"bean_tx_enable","v":1\|0}` | fw ≥ 2.3.0; arms GP7-driving ops for 60 s (`BEAN_TX_ENABLE_MS`); ack `{"ack":"bean_tx_enable","v":..,"s":60}`, `bean_tx` PMEVENT |
+| BEAN receiver | `{"a":"bean_rx",...}` | fw ≥ 2.3.0; see *BEAN receiver* |
+| BEAN transmitter | `{"a":"bean_tx","op":...}` | fw ≥ 2.4.0; see *BEAN transmitter* |
 
-1. **`mpremote` Installation**: The official MicroPython tool `mpremote` is installed on `prius` (`~/.local/bin/mpremote`). This allows accessing the REPL and file system of the RP2040 over SSH.
-2. **`uhubctl` Installation**: The `uhubctl` package is installed on `prius` to allow programmatic power cycling of the USB hub ports.
-3. **Power Cycling the RP2040**:
-   On this hub only the internal-port-5 socket really switches VBUS (see Hardware Setup above); keep the force flag (`-f`) — the descriptor claims "ganged" and blocks port commands without it.
+`poco:2` on `button` / `wake` → `ERROR POCO2_NC`, nothing pressed.
 
-   To power cycle the RP2040 on Port 1 (use **≥ 4 s off** for a true cold reset —
-   the MCU is bus-powered, so cutting VBUS fully resets it):
-   ```bash
-   sudo uhubctl -f -l 1-1 -p 1 -a off
-   sleep 4
-   sudo uhubctl -f -l 1-1 -p 1 -a on
-   ```
+Error codes besides the above: `RELAY_IO`, `RESTART_FAILED`, `POCO1_NC`,
+`BMP280_READ` / `AHT20_READ` (sensor dropped), `OUT_REMOVED`, `ACC_SIM`, `BEAN_ARGS`,
+`BEAN`, `BEAN_TX_DISABLED`, `BEAN_RX <detail>`. `SENSOR_OK` for the PCF8574 includes
+the adopted `port` byte.
 
-### BEAN receiver (fw 2.3.0, `bean_rx.py`)
+**ACC override** (`acc_sim`). Simulates key-on (1) / key-off (0) without the ACC
+wire; `null` or no `v` clears it. Applied in `read_acc()`, the single entry point of
+the pin, so it reaches the Events messages, STATUS `acc` and the wake/sleep logic.
+Ack `{"ack":"acc_sim","v":..,"pin":<real ACC, 1 = on>}`; other `v` → `ERROR ACC_SIM`.
+RAM only (cleared on boot); auto-expires 30 min after the last set
+(`ACC_SIM_MAX_MS`, `acc_sim` PMEVENT `why: expired`). Backend: REST
+`powerbox_acc_sim {"on": true|false|null}`, state `powerbox.acc_sim`.
 
-Receive-only decoder for the Toyota BEAN body bus (protocol:
-`docs/BEAN_PROTOCOL.md`). It only reads GP6; it never drives GP7 and never
-ACKs. It starts after the safe-boot window and is ON at boot. If
-`bean_rx.py` is missing or fails to import or start, the firmware runs as
-before: the `bean_rx` PMEVENT carries the error, and `bean_rx` commands answer
+## Flashing firmware
+
+Requires fw ≥ 2.2.0 on the board. Files go over the normal link
+(`put_begin` / `put` / `put_end`, then `reboot`) while the firmware keeps running, so
+GP27 stays released and the WDT fed. Each file is checked on the board (size +
+sha256) before it replaces the old one (kept as `<name>.bak`; `boot.py` restores
+`main.py.bak` if a swap was interrupted). `pb_flash.py` sends the host heartbeat
+itself, so the wake ladder never presses during an update.
+
+On the POCO (files synced by `POCO/sync.sh --app` to `/home/user/cyberpunk/powerbox`):
+
+```bash
+sudo prius-flash-powerbox                         # main.py + boot.py + bean_rx.py + bean_tx.py; stops/starts prius-backend
+sudo prius-flash-powerbox /home/user/cyberpunk/powerbox/pcf8574.py   # any other file explicitly
+```
+
+From a bench host with the board on USB (nothing else may hold the port):
+
+```bash
+python3 powerbox/pb_flash.py powerbox/main.py powerbox/boot.py powerbox/bean_rx.py powerbox/bean_tx.py
+```
+
+- `pb_flash.py` always sends `main.py` first. A running firmware refuses file names
+  not in its `OTA_FILES` (2.3.0 refuses `bean_tx.py`, older also `bean_rx.py`); then
+  `pb_flash.py` reboots into the new `main.py` (which runs without the missing
+  module, reporting why) and retries the file once. The first update to 2.4.0 from
+  below 2.3.0 therefore reboots twice.
+- Keep `bean_rx.py` before `bean_tx.py`: 2.4.0's transmitter needs 2.4.0's receiver
+  (with an older `bean_rx.py` every `bean_tx` op answers `err:"exc"`).
+- `pcf8574.py` and the sensor drivers are not in the default set; send them when they
+  changed (a board below 2.2.3 needs the new `pcf8574.py` too).
+- A full `main.py` + `boot.py` update takes ~40 s including the reboot.
+
+**Why there is no REPL path.** With the pad pull-down holding GP27 LOW whenever
+`main.py` is not running:
+
+- `boot.py` releases GP27 first thing on every reset; the line is LOW only for the
+  MicroPython start-up time;
+- after the 3 s safe-boot window Ctrl-C is disabled (`micropython.kbd_intr(-1)`), so
+  a stray 0x03 cannot drop the board into a REPL with the WDT armed;
+- the REPL is reachable only by Ctrl-C inside the safe-boot window (no WDT yet):
+  disconnect the POCO button wire first.
+- `POCO_BTN_ACTIVE_HIGH` (`main.py`) / `ACTIVE_HIGH` (`boot.py`) switch to driving
+  the button through an N-MOSFET (GP27 → ~100 Ω → gate, ~100 kΩ gate → GND, drain →
+  button line, source → GND), with which reset and bootloader leave the button
+  released by hardware. Set both to `True` only once the MOSFET is fitted (it is
+  not).
+
+### Rescue (boot loop)
+
+If the board boot-loops (e.g. an exception during I2C init), disconnect the POCO
+button wire, then use `rescue.py` (USB cycling + Ctrl-C spam into the safe-boot
+window) or `rescue.sh` (`mpremote` wrapper) to reach the REPL and delete the
+offending `main.py`.
+
+A hub-port power cycle (`prius-usb-power cycle`, ≥ 4 s off) is a cold reset of the
+bus-powered MCU only on a socket with real switchable VBUS (see *Open gaps*);
+`{"a":"hard_restart"}` is the in-band cold reset.
+
+### Failsafe: BOOTSEL + flash_nuke (corrupt filesystem)
+
+Only when the on-board filesystem is bad (the board never streams, even after a
+power cycle). **Disconnect the POCO button wire first.** Hold BOOTSEL while plugging
+or resetting. A plain UF2 flash does not erase the littlefs filesystem; only
+`flash_nuke.uf2` does.
+
+```bash
+# BOOTSEL → 2e8a:0003, mass storage labelled RPI-RP2 (partitioned)
+RP=$(sudo blkid | grep RPI-RP2 | cut -d: -f1)      # e.g. /dev/sdg1
+sudo mount -t vfat "$RP" /mnt/rp2
+sudo cp flash_nuke.uf2 /mnt/rp2/ && sync           # erases littlefs + firmware
+sleep 8                                             # re-enters BOOTSEL
+RP=$(sudo blkid | grep RPI-RP2 | cut -d: -f1)      # node changes after each UF2
+sudo mount -t vfat "$RP" /mnt/rp2
+sudo cp RPI_PICO-vX.Y.Z.uf2 /mnt/rp2/ && sync      # clean MicroPython
+sleep 8                                             # boots as 2e8a:0005, empty FS
+mpremote connect /dev/ttyACM0 fs cp boot.py ina219.py ahtx0.py bmp280.py pcf8574.py bean_rx.py bean_tx.py main.py :
+```
+
+Re-detect the block node after each UF2; use generous sleeps and do not unmount
+before the board consumes the UF2. `flash_nuke.uf2` is from
+datasheets.raspberrypi.com, MicroPython from micropython.org (last used:
+`RPI_PICO-20250911-v1.26.1.uf2`; DMA capture needs ≥ 1.21). Power cycling the RP2040
+by hub port (keep `-f`, the hub descriptor claims "ganged"):
+
+```bash
+sudo uhubctl -f -l 1-1 -p 1 -a off; sleep 4; sudo uhubctl -f -l 1-1 -p 1 -a on
+```
+
+## BEAN transceiver bench
+
+fw ≥ 2.2.3.
+
+**Bench only** (since fw 2.4.0 enforced): needs the TX guard and the per-boot bench
+override `{"a":"bean_tx","op":"bench","v":1}`, else `ERROR BEAN_TX_DISABLED`. For the
+car there is `bean_tx` `op:"edge"`.
+
+Logic check of the discrete BEAN transceiver on GP7 (TX) / GP6 (RX, inverted). BEAN
+is 10 kbit/s (100 µs bits), dominant = +B, recessive = 0 V. Not a protocol stack.
+Every op is synchronous, capped, and leaves TX LOW (also on errors). Reply
+`{"ack":"bean","op":<op>,...}` on id 0 plus a live `{"msg":"PMEVENT","ev":"bean",...}`
+(not kept in the `getlog` ring). Bad op / out-of-range or non-integer field →
+`ERROR BEAN_ARGS` (nothing driven); an exception → `ERROR BEAN`.
+
+| op | fields (default, range) | reply fields |
+|---|---|---|
+| `status` | — | `tx` (0/1), `rx` (GP6 level), `bus` (1 = dominant, i.e. `rx` low) |
+| `tx` | `v` (1, 0–1), `ms` (1, 1–500) | `v`, `ms`, `rx_on` (end of hold), `rx_off` (50 µs after release) |
+| `pulse` | `us` (100, 1–2000) | `us`, `rx_mid`, `rx_after` (50 µs after release), `us_real` |
+| `loop` | `n` (20, 1–200) | n × {TX high → µs to RX low (timeout 2000), hold 300 µs, TX low → µs to RX high, 300 µs gap}: `dom_min/max/avg`, `rec_min/max/avg` (µs; `null` if no edge), `to_dom`, `to_rec`, `timeouts`, `rx_idle` |
+| `square` | `hz` (5000, 100–20000), `ms` (200, 1–1000) | `edges` (RX level changes), `expected` (= 2 × `cycles`), `cycles`, `hz_real` |
+
+`square` toggles TX and polls RX in one Python loop; each half period is at least
+500000/`hz` µs from the actual toggle, so a slow loop lowers `hz_real` instead of
+starving the transceiver; `edges == expected` means RX followed every edge.
+Interrupts stay enabled; the longest op (~1 s) is far inside the 8 s WDT (fed per
+round). All µs figures come from `time.ticks_us()` in interpreted loops (resolution a
+few µs at 96 MHz plus USB/IRQ jitter): good for "does RX follow TX and roughly how
+fast", not for bit timing.
+
+Backend: REST `powerbox_bean` (same fields and caps, HTTP 400 outside them); reply
+mirrored to `/api/v1/state` → `powerbox.bean` (ack fields + `ts`; errors as
+`{"error": "BEAN_ARGS", "detail": ...}`).
+
+## BEAN receiver
+
+fw ≥ 2.3.0, `bean_rx.py`.
+
+Receive-only decoder for the BEAN body bus (protocol: `docs/BEAN_PROTOCOL.md`). Reads
+GP6 only; never drives GP7, never ACKs. Starts after the safe-boot window, ON at
+boot. If `bean_rx.py` is missing or fails, the firmware runs without it: the
+`bean_rx` PMEVENT carries the error and `bean_rx` commands answer
 `ERROR BEAN_RX <detail>`.
 
-**Capture.** A PIO program on PIO1 SM0 at 2 MHz measures every GP6 level run:
-a 2-cycle count loop gives 1 µs resolution. It pushes one word per edge, with
-bit 16 = the GP6 level of the run that ended and bits 15..0 = the count left,
-so run = `10000 − x + 3` µs. A run longer than 10 ms pushes a timeout word
-(`x = 0xFFFF`) and keeps counting, so idle and stuck-bus periods are seen in
-real time (~100 words/s while the bus sleeps; fw 2.4.0 consumes these without
-the decoder, see *Cost*). The program is 27
-instructions. The words go to a 1024-word RAM ring through **rp2.DMA**
-(MicroPython ≥ 1.21; the write address wraps on the 4 KB-aligned ring, and
-the producer index comes from the DMA transfer count). Without `rp2.DMA` the
-firmware falls back to a hard IRQ handler that drains the 4-word RX FIFO into
-the ring (mode `irq`). If that also fails it polls the FIFO (mode `poll`,
-which loses data whenever the loop blocks for more than ~1 ms). The mode is
-in the ack, the stats and the `bean_rx` PMEVENT. PIO RX stalls are counted
-(`stall`).
+**Capture.** PIO1 SM0 at 2 MHz measures every GP6 level run (2-cycle count loop,
+1 µs resolution), one word per edge: bit 16 = level of the run that ended, bits
+15..0 = count left, run = `10000 − x + 3` µs. A run longer than 10 ms pushes a
+timeout word (`x = 0xFFFF`) and keeps counting (~100 words/s while the bus sleeps).
+27 instructions. Words go to a 1024-word RAM ring through `rp2.DMA` (MicroPython
+≥ 1.21; write address wraps on the 4 KB-aligned ring, producer index from the DMA
+transfer count). Fallbacks: hard IRQ draining the 4-word FIFO (mode `irq`), then FIFO
+polling (mode `poll`, loses data whenever the loop blocks > ~1 ms). Mode is in the
+ack, the stats and the PMEVENT. PIO RX stalls are counted (`stall`).
 
-*Ring capacity:* busy traffic is 45 frames/s × ~40 runs = ~1800 words/s, so
-1024 words cover **~550 ms** of a blocked main loop with no loss (more at
-normal rates). A 100 ms I2C/USB stall uses ~20 % of the ring. A blocked loop
-longer than that drops the backlog: `ovf` +1, `lost` += words, and the frame
-in progress is reported as `ovf`. The decoder then resyncs on the next idle
-gap.
+Ring capacity: busy traffic (45 frames/s × ~40 runs ≈ 1800 words/s) → 1024 words
+cover ~550 ms of blocked main loop. Beyond that the backlog is dropped: `ovf` +1,
+`lost` += words, the frame in progress reported as `ovf`, resync on the next idle gap.
 
-**Decode** runs in `poll()`, called from every `wdt_sleep_ms` slice (~5 ms)
-and never more than 256 words per call. The steps:
-- Each run is rounded to whole bit times. The bit time adapts (fast for the
-  first ~250 runs after start, slow afterwards), and a dominant/recessive
-  skew estimate compensates an asymmetric comparator.
-- Pulses shorter than 12 µs are merged into their neighbours (glitch filter).
-- Destuffing is done per run, followed by the frame state machine and the
-  CRC-8 check.
-- The EOM `0111111` is searched for after the CRC, tolerating a stuff bit
-  before it or its absence.
-- The two RSP bits are reported raw.
+**Decode** runs in `poll()` from every `wdt_sleep_ms` slice (~5 ms), ≤ 256 words per
+call: runs rounded to bit times with an adaptive bit time (fast for ~250 runs after
+start, slow afterwards) and a dominant/recessive skew estimate; pulses < 12 µs merged
+(glitch filter); per-run destuffing, frame state machine, CRC-8; EOM `0111111`
+searched after the CRC tolerating a stuff bit before it or its absence; the two RSP
+bits reported raw. Tested tolerance (CPython): ±20 µs jitter per edge without loss,
+±30 µs skew, bit clock 80–120 µs (from cold, ±8 % loses at most the first frame).
 
-Tested tolerance (CPython, see tests): ±20 µs jitter on every edge with no
-loss, ±30 µs comparator skew, and a bit clock of 80–120 µs (from cold, ±8 %
-loses at most the first frame).
-
-**Frames** go out on **id 3** (backend 203), batched at most every 200 ms,
-up to 16 frames per line, with a 64-frame queue:
+**Frames** on id 3 (backend 203), batched at most every 200 ms, ≤ 16 frames per line,
+64-frame queue:
 
 ```json
 {"t":123456,"bf":[[123290,6,"FE","2C","64",1,0],[123301,2,"FE","7F","001000000000",1,0]],
  "st":{...every 2 s...}}
 ```
 
-- Record: `[t_ms, pri, "DST", "MES", "DATAHEX", rsp, code]`. fw 2.4.0: an
-  8th element `1` marks what our own transmitter put on the bus (a frame, an
-  aborted attempt, the edge-test pulse, which shows as a `trunc` record
-  without bytes). The backend keeps such frames in the frame ring and the
-  capture log (`"own":1`) but out of the message table and the error count.
-- `t_ms` is the firmware `ticks_ms` of the SOF (±~1 ms). `t` is `ticks_ms`
-  at send time, so the backend gets the frame age from `t − t_ms`.
-- `rsp` is the 2 raw RSP bits (`1` = `01` = ACK, `0` = no ACK, `2` = NAK,
-  `3` = both). It is `null` when the frame broke before RSP.
-- `code`: 0 ok, 1 crc, 2 stuff, 3 len (ML outside 3..13), 4 frm (EOM, RSP or
-  EOF shape wrong, or bus stuck dominant), 5 trunc (idle inside the frame),
-  6 ovf.
-- For failed frames DATAHEX holds every byte after MES that arrived, which
-  may include the CRC.
-- At most 5 failed frames are reported per second. All of them are counted;
-  the ones not reported go to `esup`.
-- `qdrop` counts frames dropped because the queue was full. `txdrop` counts
-  frames lost because the host was absent (the TX gate was closed).
+- Record `[t_ms, pri, "DST", "MES", "DATAHEX", rsp, code]`; an 8th element `1` (fw
+  2.4.0) marks what our own transmitter put on the bus (frame, aborted attempt, or the
+  edge-test pulse as a `trunc` record without bytes). The backend keeps own frames in
+  the frame ring and capture log (`"own":1`) but out of the message table and the
+  error count.
+- `t_ms` = firmware `ticks_ms` of the SOF (±~1 ms); `t` = `ticks_ms` at send time
+  (frame age = `t − t_ms`).
+- `rsp`: 2 raw RSP bits (`1` = `01` = ACK, `0` = none, `2` = NAK, `3` = both), `null`
+  if the frame broke before RSP.
+- `code`: 0 ok, 1 crc, 2 stuff, 3 len (ML outside 3..13), 4 frm (EOM/RSP/EOF shape,
+  or bus stuck dominant), 5 trunc (idle inside the frame), 6 ovf. Failed frames carry
+  every byte after MES that arrived (may include the CRC).
+- At most 5 failed frames reported per second (rest counted in `esup`); `qdrop` =
+  queue full; `txdrop` = host absent (TX gate closed).
 
-`st` counters:
-- Frame results: `ok`, `crc`, `stuff`, `len`, `frm`, `trunc`, `ovf`.
-- Capture: `edges`, `glitch`, `lost`, `stall`, `lag` (largest backlog in
-  words since the last stats).
-- Reporting: `qdrop`, `txdrop`, `esup`.
-- Timing: `tb` (bit time in 0.1 µs), `skew` (µs, dominant longer = +),
-  `idle_ms` (time since the last edge; fw 2.4.0: correct for sleeps longer
-  than 9 min, saturating at ~1,073,000), `age_ms` (time since the last good
-  frame, −1 = none).
-- Load: `cpu` (decoder time in per mille of wall time).
-- State: `on`, `mode`, plus `err` / `exc` when something failed.
+`st` counters: results `ok crc stuff len frm trunc ovf`; capture `edges glitch lost
+stall lag`; reporting `qdrop txdrop esup`; timing `tb` (bit time, 0.1 µs), `skew`
+(µs, dominant longer = +), `idle_ms` (since last edge; correct beyond 9 min,
+saturating at ~1,073,000), `age_ms` (since last good frame, −1 = none); load `cpu`
+(decoder time, ‰ of wall time); state `on`, `mode`, `err` / `exc`.
 
 | command | reply |
 |---|---|
 | `{"a":"bean_rx","on":0\|1}` | `{"ack":"bean_rx","on":..,"mode":"dma"\|"irq"\|"poll"\|null}`; start failure → `ERROR BEAN_RX` |
 | `{"a":"bean_rx","op":"stats"}` | ack on id 0 + an immediate `{"t":..,"st":{..}}` on id 3 |
-| `{"a":"bean_rx","raw":N}` (1–512) | ack; then the next N raw runs on id 3: `{"raw":[-2000,100,-300,..],"ri":0,"rn":N}` in chunks of 64 (µs, + = dominant, − = recessive) for checking the analogue side |
+| `{"a":"bean_rx","raw":N}` (1–512) | ack; then the next N raw runs on id 3: `{"raw":[-2000,100,-300,..],"ri":0,"rn":N}` in chunks of 64 (µs, + dominant, − recessive) |
 
-**Robustness.** `poll()` never raises. After 10 consecutive internal errors
-it stops itself (`err` in the stats). It uses preallocated buffers: no
-allocation per edge. Allocation happens only per decoded frame (the record)
-and per line.
+**Robustness.** `poll()` never raises; after 10 consecutive internal errors it stops
+(`err` in the stats). Preallocated buffers: allocation only per decoded frame and per
+line.
 
-**Cost (estimate, verify with `cpu`).** About 40–80 µs of interpreted or
-native Python per run, plus ~0.1 ms per poll:
-- ~2–4 % CPU at 15 frames/s;
-- ~8–14 % during the 45 frames/s IG-ON burst.
+**Cost** (estimate; verify with `cpu`): 40–80 µs per run plus ~0.1 ms per poll →
+~2–4 % CPU at 15 frames/s, ~8–14 % during the 45 frames/s IG-ON burst. Idle (fw
+2.4.0): with the decoder idle and nothing queued, a native fast path (`_quick`) only
+adds timeout words to the idle time; a full pass runs every 40 polls (200 ms) and,
+after 1 s recessive, the capture is looked at every 4th poll. Wake latency ≤ 20 ms
+(ring then holds ≤ ~40 words; `TestReceiverIdle`). fw 2.3.0 measured 87–94 ‰ asleep;
+the 2.4.0 value on the car is not yet read. The run-length counter saturates at
+2^30 µs. RAM: ~8 KB DMA ring (allocated at 2× for alignment), ~10 KB compiled module,
+up to 64 queued records.
 
-*Idle (fw 2.4.0).* 2.3.0 measured `cpu` 87–94 ‰ with the bus asleep: every
-5 ms poll ran the whole path, and every second one decoded a timeout word.
-Now a quiet bus (decoder idle, nothing queued) takes a fast path
-(`_quick`, native): timeout words are only added to the idle time, without
-the decoder, the time anchor or the report code. A full pass still runs
-every 40 polls (200 ms; stats keep their 2 s rhythm). Once the bus has been
-recessive for 1 s the capture is looked at only every 4th poll. Wake
-detection is not affected: an edge word ends the fast path at the next look,
-at most 20 ms later, when the ring holds at most ~40 words of a possible
-1024 (test: `TestReceiverIdle`). Expected `cpu` asleep: a few ‰ (to be read
-off the car). The run-length counter now saturates at 2^30 µs instead of
-growing into heap integers after 18 min of sleep.
+**TX guard.** Every TX-driving bench op answers `ERROR BEAN_TX_DISABLED` without
+touching GP7 unless `{"a":"bean_tx_enable","v":1}` was sent < 60 s ago (`status`
+always works; `BEAN_TX_ENABLED = False` at boot, RAM only). The same guard arms the
+transmitter; bench ops additionally need its bench override.
 
-RAM: ~8 KB for the DMA ring (allocated at twice the size for alignment), a
-compiled module of ~10 KB, and up to 64 queued frame records. MicroPython
-≥ 1.21 is needed for DMA; any rp2 port works with the `irq`/`poll`
-fallbacks.
+Backend: `powerbox.bean_rx` (counters, `fps` over 5 s, `last_frame_ts`, `mode`,
+`error`, `raw`); `bean.messages` (table keyed `DST:MES`: count, last data, changes,
+period, pri); `bean.decoded` (coolant 0x2C, shift 0x40, speed 0x24, ambient 0xCD,
+lamps 0x7F, odometer 0x3F — all **unverified** on this Prius);
+`GET /api/v1/bean/frames?since=<seq>&limit=<n>` (last 200 frames); REST
+`powerbox_bean_rx`, `bean_capture {"on":true,"name":".."}` (log in `logs/bean/`,
+rotated at 20 MB; env `BACKEND_BEAN_CAPTURE_DIR`), `bean_mark {"text":".."}`,
+`powerbox_bean_tx_enable {"on":bool}`.
 
-**TX guard.** The receiver runs on the car's live bus, so every TX-driving
-bench op (`bean` `tx` / `pulse` / `loop` / `square`) answers
-`ERROR BEAN_TX_DISABLED` without touching GP7 unless
-`{"a":"bean_tx_enable","v":1}` was sent less than 60 s ago. `status` always
-works. `BEAN_TX_ENABLED = False` at boot (RAM only). fw 2.4.0: the same
-guard arms the transmitter (next section), and the bench ops additionally
-need its bench override.
+## BEAN transmitter
 
-Backend:
-- `powerbox.bean_rx`: counters, `fps` over 5 s, `last_frame_ts`, `mode`,
-  `error`, `raw`.
-- `bean.messages`: the table keyed by "DST:MES" (count, last data, changes,
-  period, pri).
-- `bean.decoded`: known IDs, all *unverified* on the Prius (coolant 0x2C,
-  shift 0x40, speed 0x24, ambient 0xCD, lamps 0x7F, odometer 0x3F).
-- `GET /api/v1/bean/frames?since=<seq>&limit=<n>`: the last 200 frames
-  (kept out of the 1 Hz state).
-- REST commands: `powerbox_bean_rx`, `bean_capture {"on":true,"name":".."}`
-  (log in `logs/bean/`, rotated at 20 MB; env `BACKEND_BEAN_CAPTURE_DIR`),
-  `bean_mark {"text":".."}`, `powerbox_bean_tx_enable {"on":bool}`.
+fw ≥ 2.4.0, `bean_tx.py`.
 
-### BEAN transmitter (fw 2.4.0, `bean_tx.py`)
+Sends single frames on command only: no periodic or automatic transmission, never
+ACKs other nodes. Protocol background and assumptions: `docs/BEAN_PROTOCOL.md` §3,
+§5, §7.2. If `bean_tx.py` is missing or fails, `bean_txm` PMEVENT carries the error,
+`bean_tx` answers `{"ok":0,"err":"off"}` and the bench ops are refused. **Status:
+every number below comes from the CPython simulation of the PIO programs; nothing has
+run on hardware yet** (see *Open gaps*).
 
-Sends single frames on the car's BEAN body bus, on command only. There is
-no periodic or automatic transmission of any kind and the node never ACKs
-other nodes' frames. Protocol background and the assumptions made:
-`docs/BEAN_PROTOCOL.md` §3, §5, §7.2. If `bean_tx.py` is missing or fails to
-start, the firmware runs as 2.3.0 did (`bean_txm` PMEVENT with the error;
-`bean_tx` commands answer `{"ok":0,"err":"off"}`; the bench ops are refused).
+### Hardware side: PIO0
 
-#### Hardware side: PIO0
+PIO1 is full with the receiver (27 of 32), so the transmitter uses **PIO0**: SM0 runs
+the frame program *or* the edge-test program (25 instructions each, one loaded at a
+time), SM1 a 6-instruction watchdog. GP7 is handed to PIO0 only for the duration of
+an operation; otherwise it is a plain output held LOW.
 
-The receiver's program fills PIO1 (27 of 32 instructions), so the
-transmitter lives on **PIO0**: SM0 runs the frame program *or* the edge-test
-program (25 instructions each, one loaded at a time), SM1 a 6-instruction
-watchdog. GP7 is handed to PIO0 only for the duration of an operation;
-between operations it is a plain output held LOW, so no state machine can
-reach the pin.
+**Frame program (SM0).** 32 cycles per bit, from the bit time the receiver measured
+(3.2 µs per cycle at 103.3 µs). The firmware builds the whole wire bit stream (SOF,
+stuffed PRI/ML … CRC, EOM `01111110`, MSB first) and loads it into the joined 8-word
+TX FIFO before the SM starts (2 count words + up to 5 data words, padded to 8), so
+the program cannot stall mid-frame.
 
-**Frame program (SM0).** Clock = 32 cycles per bit, derived from the bit
-time the receiver measured on the live bus (3.2 µs per cycle at 103.3 µs).
-The firmware builds the complete wire bit stream first (SOF, stuffed
-PRI/ML … CRC, EOM `01111110`, MSB first) and loads it into the joined
-8-word TX FIFO before the state machine starts: 2 count words + up to 5 data
-words, always padded to 8. After that the program needs nothing from the
-firmware, so it cannot stall half way through a frame.
-
-1. *Idle check.* 11 bit times (`IFS_BITS`) of continuously recessive bus,
-   GP6 sampled every 2 cycles (6.5 µs). Any dominant sample ends the attempt
-   before anything was driven ("busy"; the firmware waits and starts again).
-   From the last idle sample to our SOF edge there are 8 cycles (26 µs).
-   Other nodes start 7 bit times after the last edge, so after a frame they
-   go first; after a frame that was not ACKed our SOF comes 2 bit times
-   after its EOF.
+1. *Idle check.* 11 bit times (`IFS_BITS`) of continuously recessive bus, GP6 sampled
+   every 2 cycles (6.5 µs). Any dominant sample ends the attempt before anything was
+   driven ("busy"; the firmware retries). Last idle sample → our SOF edge: 8 cycles
+   (26 µs). Other nodes start 7 bit times after the last edge, so after a frame they
+   go first; after an un-ACKed frame our SOF comes 2 bit times after its EOF.
 2. *Per bit:* drive GP7 (`set pins`), wait to the sample point, read GP6.
 
    ```
@@ -575,234 +571,178 @@ firmware, so it cannot stall half way through a frame.
    GP6     ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\___ (inverted)         sample: d1 cycles after the edge
    ```
 
-   - sent **recessive**, read **dominant** → the program stops on the spot
-     (flag 4). GP7 was already released for this bit, so nothing of ours is
-     on the bus from the lost bit on. Lost within SOF…MES = arbitration
-     lost (`lost_arb`); later = `bit_err`.
-   - sent **dominant**, read **recessive** → line fault (flag 5): GP7 is
-     released 4 cycles (13 µs) after the sample. Never retried; TX latches
-     off.
-3. *Dominant-run limit inside the program.* X counts the dominant bits in a
-   row and is reloaded with 6 by every recessive bit. If the data asked for
-   a 7th (the firmware never builds such a stream: stuffing allows 5, the
-   EOM has 6), the program sends a recessive bit instead. Whatever is in
-   the FIFO, GP7 is never high for more than 6 bit times (+ 2 cycles in
-   that forced case).
-4. *RSP.* After the EOM the program samples GP6 in the next two bit slots
-   (RSP1, RSP2) and stops with GP7 low (flag 7). The answering node times
-   its bits from the bus edge of the EOM, which follows our release by the
-   fall time, so the samples are placed in the middle of its RSP1 and RSP2
-   slots, 1.5 and 2.5 bit times after *that* edge: 1.5 / 2.5 bit times +
-   the measured fall time after our release (at most 1.8 / 2.8).
-5. The firmware then reads the result: flags, how many FIFO words were
-   consumed, and — by executing `push` / `mov isr, y` / `push` on the
-   stopped state machine — the two RSP samples and the bit counter, i.e.
-   the exact wire bit an attempt was lost in (`pos`). If that readout does
-   not work on the board, the RSP comes from the receiver's decode of our
-   own frame (`rx_rsp`) and the position from the FIFO level (first 32 wire
-   bits = arbitration).
+   - sent **recessive**, read **dominant** → stop on the spot (flag 4); GP7 is already
+     released for this bit. Within SOF…MES = `lost_arb`; later = `bit_err`.
+   - sent **dominant**, read **recessive** → line fault (flag 5): GP7 released 4 cycles
+     (13 µs) after the sample. Never retried; TX latches off.
+3. *Dominant-run limit.* X counts dominant bits in a row, reloaded with 6 by every
+   recessive bit; a 7th is sent recessive instead. GP7 is never high for more than 6
+   bit times (+ 2 cycles in that forced case), whatever is in the FIFO.
+4. *RSP.* After the EOM the program samples GP6 in the next two bit slots and stops
+   with GP7 low (flag 7). Samples sit 1.5 and 2.5 bit times after the EOM's bus edge
+   (our release + measured fall time; at most 1.8 / 2.8).
+5. The firmware reads flags, consumed FIFO words and — by executing `push` /
+   `mov isr, y` / `push` on the stopped SM — the two RSP samples and the bit counter
+   (`pos`, the wire bit an attempt was lost in). If that readout does not work on the
+   board, RSP comes from the receiver's decode of our frame (`rx_rsp`) and the
+   position from the FIFO level.
 
-**Watchdog (SM1).** Watches GP7 itself. 64 cycles of 12.5 µs continuously
-high (0.80–0.83 ms; the longest legal run is 0.65 ms at 108 µs bits) turn
-the pin into an **input** (`set pindirs, 0`): released, and SM0 cannot take
-it back because it only writes pin values. Independent of SM0's program
-counter, FIFO and clock, and of the firmware.
+**Watchdog (SM1).** 64 cycles of 12.5 µs continuously high (0.80–0.83 ms; longest
+legal run 0.65 ms at 108 µs bits) turn GP7 into an **input** (`set pindirs, 0`); SM0
+cannot take it back (it only writes pin values). Independent of SM0, its FIFO and the
+firmware.
 
 **Timing budget.**
 
 | quantity | value (Tb = 103.3 µs) | depends on |
 |---|---|---|
 | bit time | measured by the receiver, must be 95–108 µs | else refused |
-| sample point `S` | 25–75 % of the bit (`op:"sp"`), default 50 % = 51.6 µs | — |
-| rise (GP7↑ → GP6↓) | ≤ 40 µs and ≤ `S` − 10 µs | **edge test**; bench: < 2 µs |
-| fall (GP7↓ → GP6↑) | ≤ 40 µs and ≤ `S` − 10 µs | **edge test, not yet measured on the car**; open bench bus: ~340 µs |
+| sample point `S` | 25–75 % (`op:"sp"`), default 50 % = 51.6 µs | — |
+| rise (GP7↑ → GP6↓) | ≤ 40 µs and ≤ `S` − 10 µs | edge test; bench: < 2 µs |
+| fall (GP7↓ → GP6↑) | ≤ 40 µs and ≤ `S` − 10 µs | edge test, **not measured on the car**; open bench bus: ~340 µs |
 | loss → off the bus | 0 (the lost bit is a released bit) | — |
 | fault → released | 13 µs after the sample | — |
-| RSP samples | 1.5 and 2.5 bit times after the EOM's falling edge *on the bus* (= our release + measured fall) | measured fall, bit time |
+| RSP samples | 1.5 / 2.5 bit times after the EOM falling edge on the bus | measured fall, bit time |
 | idle before SOF | 11 bit times = 1.14 ms | — |
 | longest dominant | 6 bit times = 0.62 ms (EOM) | — |
 | watchdog SM | 0.80–0.83 ms | — |
 | firmware timer | 0.8–1.8 ms | — |
 
-The fall time is the open number. With the ECUs' pull-downs it should be a
-few µs. The limit of 40 µs does not come from our readback (a later sample
-point would cope with more) but from the other nodes: a slow release makes
-every recessive bit after a dominant one shorter on the bus (bit time −
-fall), and a receiver that resyncs on the edge and samples half a bit later
-must still land inside it. Above 40 µs no frame is sent at any sample
-point; the fix is in the hardware (a pull-down on the transceiver side).
-The sample point setting only matters downwards: at less than 50 % the
-limit is `S` − 10 µs.
+The 40 µs fall limit protects the other nodes: a slow release shortens every
+recessive bit after a dominant one (bit time − fall), and a receiver resyncing on the
+edge and sampling half a bit later must still land inside it. Above 40 µs no frame is
+sent at any sample point; the fix is hardware (pull-down on the transceiver side).
+The sample point only matters downwards (below 50 % the limit is `S` − 10 µs).
 
-**Edge-test program (SM0).** One dominant pulse of exactly one bit time
-(206 cycles of Tb/206 ≈ 0.5 µs; all counts are constants built inside the
-program, no data from the firmware). It first requires 7.8 bit times of idle
-bus, then drives GP7 and counts loop passes until GP6 goes low (rise, 1 µs
-steps), holds the rest of the bit time, releases and counts until GP6 is
-high again (fall, 1 µs steps, gives up after 800 µs). The receiver's raw
-run lengths around the pulse come back with it (`runs`, `rx_dom_us` ≈ width
-− rise + fall), and the pulse shows in the frame stream as an own `trunc`
-record. **To the ECUs one 100 µs pulse is a noise glitch, but it is an edge
-on the line: it wakes a sleeping bus** (hence `wake`).
+**Edge-test program (SM0).** One dominant pulse of exactly one bit time (206 cycles of
+Tb/206 ≈ 0.5 µs; counts built inside the program). Requires 7.8 bit times idle, drives
+GP7, counts until GP6 goes low (rise, 1 µs steps), holds the rest of the bit,
+releases and counts until GP6 is high (fall, gives up after 800 µs). The receiver's
+raw runs around the pulse come back (`runs`, `rx_dom_us` ≈ width − rise + fall); the
+pulse shows as an own `trunc` record. To the ECUs a 100 µs pulse is a noise glitch,
+**but it is an edge: it wakes a sleeping bus** (hence `wake`).
 
-#### Firmware side: guards (all in the firmware, the host cannot bypass them)
+### Firmware guards (the host cannot bypass them)
 
 | # | layer | behaviour |
 |---|---|---|
-| a1 | arming | every op that can drive GP7 needs `bean_tx_enable` (60 s). Checked again before every retry. |
-| a2 | frames flag | a frame also needs the per-boot flag `op:"allow","v":1` (RAM, off at boot, cleared by any fault). `allow` itself needs arming and a measured edge test. |
-| a3 | edge test first | no frame until an edge test in this boot measured rise and fall, both are ≤ 40 µs and they fit the sample point (table above). |
-| b1 | program run limit | at most 6 dominant bits in a row, in the PIO program itself. |
-| b2 | watchdog SM | GP7 high for 0.8 ms → pin becomes an input. |
-| b3 | firmware timer | 1 kHz `machine.Timer` during every op: GP7 still high 0.8 ms after a tick → GP7 back to a plain LOW output, both state machines off, fault latched (`gp7 high > 1 ms`). |
-| b4 | outside ops | `guard()` in every `wdt_sleep_ms` slice (5 ms) and `bean_release()` in every main-loop pass: GP7 high with no op running → released, fault latched. Every op ends in a `finally` that releases; `boot.py` holds GP7 LOW on any reset, soft reset or OTA reboot. |
-| c | budget | 5 wire events per second and 50 per 10 minutes (`RATE_*`), counted per attempt on the wire (retries count, edge pulses count). Beyond → `err:"rate"`. |
-| d | block list | without the bench override only **`FE:48`** (the test frame) is accepted. Refused: every destination of a real node (`19 40 52 62 98 B5 C1 E9`, other-model `45 46 D1 D2 E0`, `FF`), every broadcast ID seen in the NHW20 captures or on this car or known from other models (status/alive `AB`, wake `C2`, meter lamps `7F`, odometer `3F`, speed `24`, shift `40`, READY/HV `91`, power/key `62`, lock event `E1`, …; `DENY_FE_MES`), everything else as "not on the allow list", and — whatever the lists say — any DST:MES pair the receiver has seen from another node since boot. `op:"bench","v":1` (armed, per boot, logged) lifts this. |
-| e1 | receiver health | no TX while the receiver is off, failed, in lossy `poll` mode, or reported an overflow, PIO stall, exception or a bad frame (crc/stuff/len/frm) in the last 5 s, or the bus is stuck dominant. |
-| e2 | bit time | measured bit time outside 95–108 µs → refused; not measured since boot (no traffic seen) → refused (the bench override allows the nominal 100 µs). |
-| e3 | no ACK | the node never drives the RSP slot of other nodes' frames (there is no code path for it). |
-| f | sleeping bus | bus recessive for ≥ 1 s = asleep: `edge` and `send` are refused unless `"wake":1` is given. The frame (or pulse) itself is the wake-up, as with the real nodes. On the car the first frame after a wake is not ACKed and is repeated (this car, 19 of 19 wakes: the waker's `FE C2` again at +42 ms, the other nodes answer from +7 ms on; `docs/BEAN_ANALYSIS.md`). Our retries come about 35 ms and 85 ms after the first SOF. |
-| g | unresolved stuffing | a frame whose CRC ends in 5 equal bits is refused (nobody knows whether a stuff bit belongs before the EOM); the bench override sends it without one. |
-| h | latched faults | line fault, watchdog trip, timeout, GP7 high outside an op: TX is off (`fault` in `status`) until an edge test passes (`ok:1`); `allow` must be given again. |
+| a1 | arming | every op that can drive GP7 needs `bean_tx_enable` (60 s); rechecked before every retry |
+| a2 | frames flag | frames also need the per-boot flag `op:"allow","v":1` (RAM, off at boot, cleared by any fault); `allow` needs arming and a measured edge test |
+| a3 | edge test first | no frame until an edge test this boot measured rise and fall ≤ 40 µs that fit the sample point |
+| b1 | program run limit | ≤ 6 dominant bits in a row, in the PIO program |
+| b2 | watchdog SM | GP7 high 0.8 ms → pin becomes an input |
+| b3 | firmware timer | 1 kHz `machine.Timer` during every op: GP7 still high 0.8 ms after a tick → plain LOW output, both SMs off, fault latched (`gp7 high > 1 ms`) |
+| b4 | outside ops | `guard()` every `wdt_sleep_ms` slice and `bean_release()` every main-loop pass: GP7 high with no op → released, fault latched; every op ends in a releasing `finally`; `boot.py` holds GP7 LOW on any reset |
+| c | budget | 5 wire events/s and 50 per 10 min (`RATE_*`), per attempt on the wire (retries and edge pulses count); beyond → `err:"rate"` |
+| d | block list | without the bench override only **`FE:48`** (test frame) is accepted. Refused: every real node destination (`19 40 52 62 98 B5 C1 E9`, other-model `45 46 D1 D2 E0`, `FF`), every broadcast ID seen in the NHW20 captures, on this car or known from other models (`AB`, `C2`, `7F`, `3F`, `24`, `40`, `91`, `62`, `E1`, …; `DENY_FE_MES`), everything not on the allow list, and any DST:MES the receiver has seen from another node since boot. `op:"bench","v":1` (armed, per boot, logged) lifts this |
+| e1 | receiver health | no TX while the receiver is off, failed, in `poll` mode, or reported an overflow, PIO stall, exception or bad frame (crc/stuff/len/frm) in the last 5 s, or the bus is stuck dominant |
+| e2 | bit time | measured bit time outside 95–108 µs, or none measured since boot → refused (bench override allows nominal 100 µs) |
+| e3 | no ACK | there is no code path that drives the RSP slot of other nodes' frames |
+| f | sleeping bus | recessive ≥ 1 s = asleep: `edge` / `send` refused unless `"wake":1`. On this car the first frame after a wake is not ACKed and is repeated (19 of 19 wakes: the waker's `FE C2` again at +42 ms, nodes answer from +7 ms; `docs/BEAN_SIGNALS.md` §3). Our retries come ~35 and ~85 ms after the first SOF |
+| g | unresolved stuffing | a frame whose CRC ends in 5 equal bits is refused (unknown whether a stuff bit belongs before the EOM); the bench override sends it without one |
+| h | latched faults | line fault, watchdog trip, timeout, GP7 high outside an op: TX off (`fault` in `status`) until an edge test passes; `allow` must be given again |
 
-**Retries.** A frame is resent when it was not ACKed (`RSP` ≠ `01`), lost
-arbitration or hit a bit error: default 2 retries (3 attempts), `retries`
-0–3. Before a retry the firmware waits for the receiver to report our frame
-(≈ 10 ms after an ACKed frame, ≈ 20 ms after an un-ACKed one, 40 ms at
-most) plus 10 ms per attempt made, and the PIO idle check then waits for
-the bus. One `send` takes at most 400 ms (`err:"busy"` if the bus never
-frees up). Never retried: line fault, watchdog, budget exhausted, disarmed.
+**Retries.** On no ACK (`RSP` ≠ `01`), lost arbitration or bit error: default 2
+retries (`retries` 0–3). Before a retry the firmware waits for the receiver to report
+our frame (≈ 10 ms after an ACKed frame, ≈ 20 ms after an un-ACKed one, ≤ 40 ms) plus
+10 ms per attempt made; the PIO idle check then waits for the bus. One `send` takes
+≤ 400 ms (`err:"busy"` if the bus never frees). Never retried: line fault, watchdog,
+budget exhausted, disarmed.
 
-#### Commands
+### Commands
 
-Everything answers `{"ack":"bean_tx","op":<op>,"ok":0|1,...}` on id 0; a
-refusal has `err` and `detail`.
+Replies `{"ack":"bean_tx","op":<op>,"ok":0|1,...}` on id 0; a refusal has `err` and
+`detail`.
 
 | command | reply |
 |---|---|
-| `{"a":"bean_tx","op":"status"}` | `armed`, `allow`, `bench`, `sp`, `fault`, `edge` (last test), `budget` (events left in the 10 min window), `frames`, `edges`, `test` (`"FE:48"`), `bus` (0 active, 1 asleep, 2 stuck), `rx` (null = healthy), `tb`, `tb_meas` |
-| `{"a":"bean_tx","op":"edge"[,"wake":1]}` | `ok` (rise and fall ≤ 40 µs), `rise_us`, `fall_us` (null = not seen / > 800 µs), `w_us` (pulse width = bit time), `rx_dom_us` (the pulse as the receiver measured it), `runs` (raw run lengths around it, + dominant), `ok_meas`. On a busy bus it waits up to 150 ms for 7.8 idle bit times (`err:"busy"` after that, nothing sent). |
+| `{"a":"bean_tx","op":"status"}` | `armed`, `allow`, `bench`, `sp`, `fault`, `edge` (last test), `budget` (events left in 10 min), `frames`, `edges`, `test` (`"FE:48"`), `bus` (0 active, 1 asleep, 2 stuck), `rx` (null = healthy), `tb`, `tb_meas` |
+| `{"a":"bean_tx","op":"edge"[,"wake":1]}` | `ok` (rise and fall ≤ 40 µs), `rise_us`, `fall_us` (null = not seen / > 800 µs), `w_us`, `rx_dom_us`, `runs`, `ok_meas`. On a busy bus waits ≤ 150 ms for 7.8 idle bit times (`err:"busy"`, nothing sent) |
 | `{"a":"bean_tx","op":"allow","v":1\|0}` | `allow` |
-| `{"a":"bean_tx","op":"bench","v":1\|0}` | `bench` (also logged as `bean_tx_bench` PMEVENT) |
+| `{"a":"bean_tx","op":"bench","v":1\|0}` | `bench` (also `bean_tx_bench` PMEVENT) |
 | `{"a":"bean_tx","op":"sp","pct":25-75}` | `sp` |
-| `{"a":"bean_tx","op":"send","pri":0-15,"dst":"FE","mes":"48","data":"00"[,"retries":0-3][,"wake":1]}` | `ok` (ACKed), `acked` (raw RSP bits as sampled: 1 = `01` ACK, 0 none, 2 = `10` NAK, 3 both; null if no attempt completed), `rx_rsp` (the receiver's view of the same frame), `attempts`, `lost_arb`, `bit_err`, `fault`, `busy` (starts that found the bus busy), `pos` (wire bit of the last loss), `t_ms`, the frame, and `err` when not ok |
+| `{"a":"bean_tx","op":"send","pri":0-15,"dst":"FE","mes":"48","data":"00"[,"retries":0-3][,"wake":1]}` | `ok` (ACKed), `acked` (raw RSP: 1 ACK, 0 none, 2 NAK, 3 both; null if no attempt completed), `rx_rsp`, `attempts`, `lost_arb`, `bit_err`, `fault`, `busy`, `pos`, `t_ms`, the frame, `err` when not ok |
 
-`err` codes: `disarmed`, `frames_off`, `edge`, `rx`, `tb`, `asleep`,
-`blocked`, `crc_stuff`, `rate`, `fault`, `busy`, `args`, `exc`, `off`; after
-attempts: `no_ack`, `nak`, `rsp`, `lost_arb`, `bit_err`.
+`err` codes: `disarmed`, `frames_off`, `edge`, `rx`, `tb`, `asleep`, `blocked`,
+`crc_stuff`, `rate`, `fault`, `busy`, `args`, `exc`, `off`; after attempts: `no_ack`,
+`nak`, `rsp`, `lost_arb`, `bit_err`.
 
-Backend: REST `powerbox_bean_tx` (`op` + the same fields, same argument
-checks, HTTP 400 outside them); the reply is mirrored into
-`/api/v1/state` → `powerbox.bean_tx`. Every `edge` / `send` / `allow` /
-`bench`, request and reply, is appended to `logs/bean/bean_tx_audit.ndjson`
-(always; 1 MB, one `.1` generation) and to the running BEAN capture log
-(`{"type":"tx_req",...}` / `{"type":"tx",...}`). There is no dashboard
-control.
+Backend: REST `powerbox_bean_tx` (same checks, HTTP 400 outside them), state
+`powerbox.bean_tx`. Every `edge` / `send` / `allow` / `bench` request and reply goes to
+`logs/bean/bean_tx_audit.ndjson` (always; 1 MB, one `.1` generation) and to a running
+capture (`{"type":"tx_req",...}` / `{"type":"tx",...}`). No dashboard control.
 
-#### First transmission on the car
+### First transmission on the car (procedure)
 
 Preconditions: fw 2.4.0 flashed (`status` answers), receiver healthy
 (`powerbox.bean_rx`: `mode` dma, no errors), a capture running
-(`bean_capture {"on":true,"name":"tx1"}`), diagnostics tool at hand. Arm
-with `powerbox_bean_tx_enable {"on":true}` before each step (60 s).
+(`bean_capture {"on":true,"name":"tx1"}`), diagnostics tool at hand. Arm with
+`powerbox_bean_tx_enable {"on":true}` before each step (60 s).
 
-1. **Edge test, bus awake** (door open, so there is traffic and the bit
-   time is measured): `powerbox_bean_tx {"op":"edge"}`.
+1. **Edge test, bus awake** (door open, so the bit time is measured):
+   `powerbox_bean_tx {"op":"edge"}`.
    - Expect `ok:1`, `rise_us` 0–3, `fall_us` a few µs, `w_us` ≈ 103,
-     `rx_dom_us` ≈ `w_us − rise + fall`, and no change in the receiver's
-     error counters besides one own `trunc` record.
-   - `fall_us` ≤ 40 (and ideally ≤ 15): go on. Above 40 or `null`: stop;
-     frames are refused anyway (`ok:0`, `err:"edge"`). The bus is not being
-     pulled down fast enough with our node attached: fix the hardware
-     (pull-down on the transceiver side) and measure again.
+     `rx_dom_us` ≈ `w_us − rise + fall`, no change in receiver error counters besides
+     one own `trunc` record.
+   - `fall_us` ≤ 40 (ideally ≤ 15): go on. Above 40 or `null`: stop (frames are refused
+     anyway); fix the hardware (pull-down on the transceiver side) and measure again.
    - `rise_us` `null`: the driver did not move the bus (wiring, +B feed).
-   - Repeat 3–5 times a few seconds apart; the values should agree within
-     2 µs. Watch that the periodic frames keep coming without `crc`/`frm`.
+   - Repeat 3–5 times a few seconds apart; values should agree within 2 µs; periodic
+     frames must keep coming without `crc`/`frm`.
 2. **First frame, bus awake:** `{"op":"allow","v":true}`, then
    `{"op":"send","pri":0,"dst":"FE","mes":"48","data":"00","retries":0}`.
-   - Expect `ok:1`, `acked:1`, `rx_rsp:1`, `attempts:1`, `t_ms` ≈ 20–30,
-     and in the capture one own frame `FE 48 00` with rsp 1 in sequence
-     with the car's frames. Broadcast frames were ACKed in every capture,
-     so `acked:0` here means nobody accepted it (check `rx_rsp`, the edge
-     numbers and the bit time before trying again).
-   - `lost_arb` with a retry is normal on a busy bus. `bit_err` is not:
-     stop and look at `pos` and the raw runs.
-   - Then the same with default retries, a few times, at most 5 per second.
-3. **Wake-up, bus asleep** (car locked, wait until `status` shows `bus:1`):
-   `{"op":"send",...,"wake":true}`.
-   - Expect the first attempt un-ACKed and the second ACKed (`attempts:2`,
-     possibly with a `lost_arb` against the nodes' own `FE C2` frames, which
-     have PRI 8), and the nodes' wake burst (`FE C2`, `52:3F`, `FE:B6`, …)
-     in the capture. With nothing else going on the bus should sleep again
-     about 4.6 s later, as after the car's own "nothing changed" wakes
-     (`docs/BEAN_ANALYSIS.md` §2.3).
+   - Expect `ok:1`, `acked:1`, `rx_rsp:1`, `attempts:1`, `t_ms` ≈ 20–30, and one own
+     frame `FE 48 00` with rsp 1 in the capture. Broadcasts were ACKed in every
+     capture, so `acked:0` means nobody accepted it (check `rx_rsp`, edge numbers,
+     bit time before retrying).
+   - `lost_arb` with a retry is normal on a busy bus; `bit_err` is not: stop, look at
+     `pos` and the raw runs.
+   - Then with default retries, a few times, ≤ 5 per second.
+3. **Wake-up, bus asleep** (car locked, `status` shows `bus:1`):
+   `{"op":"send",...,"wake":true}`. Expect the first attempt un-ACKed and the second
+   ACKed (`attempts:2`, possibly a `lost_arb` against the nodes' `FE C2` at PRI 8),
+   and the nodes' wake burst (`FE C2`, `52:3F`, `FE:B6`, …). The bus should sleep
+   again ~4.6 s later (`docs/BEAN_SIGNALS.md` §3).
 4. **Afterwards.**
-   - Read the DTCs of all ECUs with the diagnostics tool: no new B12xx
-     (B1214 = +B short on the BEAN, B1215 = GND short, B1200…B1294 =
-     communication stop).
-   - The bus must go back to sleep by itself (`status` `bus:1`, receiver
-     `idle_ms` growing) as it did before; an edge or frame every few
-     minutes would keep it awake.
-   - 12 V current (`ma` in the telemetry) back at the parked level once
-     the bus sleeps.
-   - `status`: `fault` null, `frames`/`edges` equal to what was sent; the
-     audit log lists every request and reply.
+   - Read the DTCs of all ECUs: no new B12xx (B1214 = +B short on BEAN, B1215 = GND
+     short, B1200…B1294 = communication stop).
+   - The bus must go back to sleep by itself (`status` `bus:1`, receiver `idle_ms`
+     growing); an edge or frame every few minutes would keep it awake.
+   - 12 V current (`ma`) back at the parked level once the bus sleeps.
+   - `status`: `fault` null, `frames`/`edges` equal to what was sent; the audit log
+     lists every request and reply.
 
-## Flashing firmware (over the NDJSON link, firmware >= 2.2.0)
+## Firmware versions that matter
 
-Updates never use the REPL. The firmware receives files over its normal link
-(`put_begin` / `put` / `put_end`, then `reboot`; see the protocol block in
-`main.py`) while it keeps running, so the POCO button stays released and the
-WDT fed. Each file is checked on the board (size + sha256) before it replaces
-the old one (kept as `<name>.bak`; `boot.py` puts `main.py.bak` back if a swap
-was interrupted).
+| fw | Behaviour that still matters |
+|---|---|
+| 1.15.0 | `getlog` event ring |
+| 2.0 | no power rails (`out` → `OUT_REMOVED`) |
+| 2.1 | relay board, `hard_restart`, `rly` read-back, `rc`/`up`, `POCO2_NC` |
+| 2.1.1 | force press 12 s (was 35 s) |
+| 2.2.0 | NDJSON firmware update, `boot.py` releases GP27, Ctrl-C off after safe-boot, max hold 15 s. **Below 2.2.0 there is no `pb_flash.py` path.** |
+| 2.2.3 | 5 ms relay read-back, `RELAY_IO` rate limit (needs new `pcf8574.py`), BEAN bench GP6/GP7 |
+| 2.2.4 | I2C 100 kHz |
+| 2.2.5 | `acc_sim` |
+| 2.3.0 | `bean_rx.py`, id 3, TX guard; new OTA file name (one extra reboot) |
+| 2.4.0 | `bean_tx.py`; bench ops need the bench override; receiver idle fast path |
 
-On the POCO (files synced by `POCO/sync.sh --app` to `/home/user/cyberpunk/powerbox`):
+Tests: `tests/test_powerbox_firmware.py` (firmware on CPython with stubs),
+`tests/test_powerbox_io.py`, `tests/test_port_power.py`, `tests/test_bean_rx.py`
+(PIO cycle simulation, all 8,627 NHW20 frames of bean_tools), `tests/test_bean_tx.py`
+(PIO programs assembled with MicroPython's assembler, `tests/fixtures/micropython_rp2_v1_21.py`,
+run against `tests/bean_pio_sim.py`), `tests/test_bean_backend.py`.
 
-```bash
-sudo prius-flash-powerbox                    # main.py + boot.py + bean_rx.py + bean_tx.py; stops/starts prius-backend
-```
+## Open gaps
 
-From a bench host with the board on USB (nothing else may hold the port):
-
-```bash
-python3 powerbox/pb_flash.py powerbox/main.py powerbox/boot.py powerbox/bean_rx.py powerbox/bean_tx.py
-```
-
-`pb_flash.py` always sends `main.py` first. A running firmware refuses file
-names it does not know (`OTA_FILES`): 2.3.0 refuses `bean_tx.py`, anything
-older also `bean_rx.py`. In that case `pb_flash.py` reboots into the new
-`main.py`, which runs without the missing module until the file arrives
-(receiver and transmitter report why they are off), and then retries the
-file once. The first update to 2.4.0 therefore reboots twice. Keep
-`bean_rx.py` before `bean_tx.py` on the command line: 2.4.0's transmitter
-needs 2.4.0's receiver (with an older `bean_rx.py` every `bean_tx` op is
-refused with `err:"exc"`).
-
-`pb_flash.py` sends the host heartbeat itself, so the wake ladder never presses
-the POCO button during an update. A full update of `main.py` + `boot.py` takes
-~40 s including the reboot.
-
-### Why there is no REPL path any more
-
-Every RP2040 pad resets with its pull-down on. On GP27 (POCO button, active LOW)
-that reads as a held button whenever `main.py` is not running, and the phone
-boot-loops (2026-11-04). Hence:
-
-- `boot.py` releases GP27 first thing on every reset (and restores an interrupted
-  swap); the line is LOW only for the MicroPython start-up time after a reset.
-- `Button.press` releases in a `finally`; Ctrl-C handlers release before exiting.
-- After the 3 s safe-boot window Ctrl-C is disabled (`micropython.kbd_intr(-1)`):
-  a stray 0x03 cannot drop the board into a REPL with the WDT armed.
-- The REPL is reachable only by Ctrl-C inside the safe-boot window (no WDT yet).
-  **Disconnect the POCO button wire before doing that**, and before any BOOTSEL /
-  UF2 reflash of MicroPython itself: no code of ours runs then, so GP27 sits LOW.
-- `POCO_BTN_ACTIVE_HIGH` (main.py) / `ACTIVE_HIGH` (boot.py) switch to driving the
-  button through an N-MOSFET (GP27 → ~100 Ω → gate, ~100 kΩ gate→GND, drain →
-  button line, source → GND). With it, reset and bootloader leave the button
-  released by hardware. Set both to `True` only once the MOSFET is fitted.
-
-## Rescue Scripts
-If the microcontroller hits a fast bootloop (e.g., due to an I2C initialization exception), use the provided rescue scripts to drop to REPL and delete the offending `main.py` before it crashes. Disconnect the POCO button wire first (see above).
-* `rescue.py`: Python-based fast-interrupt via USB cycling and Ctrl-C spam.
-* `rescue.sh`: Shell script wrapper around `mpremote`.
+| Gap | What would resolve it |
+|---|---|
+| **PCF8574 spontaneous reset to 0xFF** (MCU keeps running, every coil releases). Seen at a key-off (MFD Pi browned out, all hubs re-enumerated) and later in the field; cause unknown. Not the ACC line (gate-only input, shares nothing with the expander). | Scope expander VCC (RP2040 5 V) and SDA/SCL around an event; correlate PMLOG `rly_fix` time stamps with 12 V and load switching. Whether the 5 ms re-assert keeps loads up on the car is not yet confirmed. |
+| Relays 5–8 never tested on this board (ch5 = RS485 rail). | Bench: switch each, confirm load and `rly`. |
+| Cause of spontaneous bench resets (during rewiring) unknown. | Watch `rc` / `boot_count` over a long run: rc 1 → power/wiring, rc 3 → firmware stall. |
+| BEAN TX on the car: the wake frame wakes the bus, but the send reports `ok:0 err:"rx"` (own frame not read back). PIO load, `fifo_join=JOIN_TX`, 1 kHz `machine.Timer` and real rise/fall are not measured. | Scope TX/RX on the parked car during a wake send; compare with the receiver's own-TX marking. |
+| Receiver `cpu` asleep with fw 2.4.0 (expected a few ‰). | Read `st.cpu` on the parked car. |
+| Main hub model and which sockets switch VBUS. `POCO/provision.sh` (backend.env seed) says main hub `1-1` = Terminus `1a40:0101`, 4 ports, powerbox on port 1; `backend/port_power.py`, `io/discovery.py` (`DEFAULT_PORT_ROLES = {5: powerbox, 2: gateway}`) and `prius-usb-power` describe an ActionStar `2101:8500` with real VBUS switching on internal port 5 only. Until settled, a hub-port cycle of the powerbox may be data-only. | `lsusb -t` + `uhubctl` on the car; cut port power and check whether `energy_mah` resets (true cold boot). |
+| POCO button MOSFET not fitted. | Fit it, then set `POCO_BTN_ACTIVE_HIGH` / `ACTIVE_HIGH`. |
+| No box-air sensor (BMP280 #1, AHT20 not fitted): box purge untested. | Fit one. |
+| Second POCO slot is a placeholder (`poco 2`, `p2`). | — (single-computer layout) |

@@ -1,493 +1,85 @@
-# Deployment Guide
+# Deployment
 
-This guide explains how to deploy the CyberPunk Prius Gen 2 Computer to your Raspberry Pi Zero v1.3.
+Two targets: the **backend** on the POCO F1 and the **frontend** on the MFD Raspberry Pi Zero v1.3.
+The Pi is only the display driver; it reaches the backend over the USB Ethernet gadget link
+(`usb0`, Pi 192.168.100.2, POCO 192.168.100.1).
 
-## Table of Contents
+| Target | Unit | Code location | How code gets there |
+|---|---|---|---|
+| POCO F1 | `prius-backend.service` (`/usr/local/sbin/prius-backend run`) | `/home/user/cyberpunk` (`BACKEND_REPO`) | `POCO/sync.sh --app` from the workstation |
+| MFD Pi | `mfd.service` (`python -m cyberpunk_computer.frontend --host 192.168.100.1 --fullscreen --scale 1 --production`) | `/home/piotr/cyberpunk_computer`, venv `.venv` | `sudo prius-deploy-mfd` on the POCO |
 
-- [Prerequisites](#prerequisites)
-- [Initial Setup](#initial-setup)
-- [Deployment Process](#deployment-process)
-- [Service Management](#service-management)
-- [Monitoring and Debugging](#monitoring-and-debugging)
-- [Troubleshooting](#troubleshooting)
+## Backend on the POCO
 
-## Prerequisites
+`POCO/sync.sh --app` rsyncs `cyberpunk_computer/`, `requirements.txt`, the powerbox firmware files
+(for `prius-flash-powerbox`) and `dashboard/dist/` (if built: `cd dashboard && npm ci && npm run build`)
+to the phone, then runs `prius-backend ensure-venv` and restarts `prius-backend.service`. The rest of
+the phone overlay (units, `/etc/prius/backend.env`, power and network scripts) is described in
+[POCO/PROVISIONING.md](../POCO/PROVISIONING.md) and [POCO/SCRIPTS_AND_FILES.md](../POCO/SCRIPTS_AND_FILES.md).
 
-### Hardware
+- Configuration: `/etc/prius/backend.env` (`BACKEND_*` variables; seeded by `POCO/provision.sh`).
+- Python deps: `cyberpunk_computer/backend/requirements-backend.txt`, venv with
+  `--system-site-packages` (apk-provided pyserial).
+- Logs: `journalctl -u prius-backend`.
 
-- Raspberry Pi Zero v1.3 with Raspberry Pi OS installed
-- USB UART device (RP2040 Gateway) connected to the RPI
-- Display connected to RPI (framebuffer `/dev/fb0`)
-- USB Ethernet gadget link (no Wi-Fi on the Zero v1.3); board setup and image: `cyberpunk-prius-gateway/raspberry_pi_config/README.md`
+## Frontend on the MFD Pi
 
-### Software
+`prius-deploy-mfd` (on the POCO, as root) rsyncs the POCO's staging copy
+`$BACKEND_REPO/cyberpunk_computer/` to the Pi and restarts `mfd.service`; `--dry-run` shows the diff.
+The Pi must be powered (backend MFD manager, `BACKEND_MFD_ENABLED=1`, or relay ch3 by hand) and its
+gadget link up. New Python dependencies go into the Pi's `.venv` (apt-provided
+`python3-pygame python3-zmq python3-serial`, `--system-site-packages`; no pip builds on ARMv6).
 
-Your development machine needs:
-- Python 3.8 or later
-- `rsync` command-line tool
-- SSH access configured to the RPI
+Proof of life: `journalctl -u mfd.service -n 20 --no-pager` on the Pi.
 
-Your Raspberry Pi needs:
-- Python 3.8 or later
-- `systemd` (included in Raspberry Pi OS)
-- Required system packages (will be installed during setup)
+The Pi image (config.txt with the DPI timings, cmdline.txt, gadget units, `mfd.service`,
+framebuffer udev rule, zram) is maintained in `cyberpunk-prius-gateway/raspberry_pi_config/zero13-image/`;
+its README is the reference for the board. Video timings: [MFD_VIDEO_TIMINGS.md](MFD_VIDEO_TIMINGS.md).
 
-## Initial Setup
+## Files in `deployment/`
 
-### 1. Configure SSH Access
+| File | Purpose |
+|---|---|
+| `mfd.service` | frontend unit (copy; see Open gaps for the difference to the image's unit) |
+| `cyberpunk-computer.service` + `run-on-console.sh` | alternative frontend unit for the `deploy.py --install` path: runs as root, venv `venv`, `--host 192.168.100.1 --port 8080 --production` |
+| `99-framebuffer.rules` | udev: `/dev/fb*` group `video`, mode 0660 |
+| `setup-rpi-display.sh` | adds the user to `video,tty`, installs the udev rule |
+| `disable-getty-tty1.sh` | masks `getty@tty1` so nothing else draws on fb0 |
+| `verify-vga666.sh` | prints fb0 device, driver name, mode |
+| `rpi-helper.sh` | ssh shortcuts for the `cyberpunk-computer` unit: `status logs recent restart start stop deploy deploy-full setup shell test serial usb` |
 
-Ensure you can SSH into your Raspberry Pi:
+`deploy.py` (repo root) is the workstation → Pi path that predates `prius-deploy-mfd`: it syncs the
+repo to `/home/<user>/cyberpunk_computer` (rsync, scp fallback), creates the venv, installs
+`requirements.txt` and, with `--install`, installs `cyberpunk-computer.service`. Options:
+`--host` / `--user` (defaults from `.env`: `DEPLOY_HOST`, `DEPLOY_USER`; see `.env.example`),
+`--setup-os`, `--install`, `--restart`, `--logs`, `--dry-run`.
 
-```bash
-# Test SSH connection
-ssh prius
+## Production-mode behaviour
 
-# If this doesn't work, add to ~/.ssh/config:
-Host prius
-    HostName <RPI_IP_ADDRESS>
-    User pi
-    IdentityFile ~/.ssh/id_rsa
-```
+`--production` (frontend and standalone app): fullscreen, scale 1, INFO logging to the journal and to
+`/var/log/cyberpunk_computer/app.log` (10 MB × 5 rotation). The standalone app's serial port
+reconnects automatically every 2 s (`VirtualTwinConfig.serial_auto_reconnect`,
+`serial_reconnect_delay`); the frontend's ZMQ link reconnects by itself.
 
-### 2. Prepare Raspberry Pi
-
-On your Raspberry Pi, install required system packages:
-
-```bash
-ssh prius
-
-# Update package list
-sudo apt update
-
-# Install Python and development tools
-sudo apt install -y python3 python3-pip python3-venv
-
-# Install SDL2 for pygame (display/input)
-sudo apt install -y libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev
-
-# Install framebuffer support
-sudo apt install -y libfreetype6-dev libportmidi-dev
-
-# For serial communication
-sudo apt install -y python3-serial
-
-# Add user to dialout group (for serial port access)
-sudo usermod -a -G dialout pi
-
-# Reboot to apply group changes
-sudo reboot
-```
-
-## Deployment Process
-
-### Quick Deployment
-
-For a quick deployment (updates code and dependencies):
+## Checks
 
 ```bash
-# From your development machine
-cd d:/Projects/CyberPunk/cyberpank-prius-gen2-computer
-python deploy.py --restart
+# Pi
+systemctl status mfd.service
+ls -l /dev/fb0; cat /sys/class/graphics/fb0/mode
+# fb0 changes between two reads = the UI is rendering
+python3 -c "import hashlib,time;r=lambda:hashlib.md5(open('/dev/fb0','rb').read(480*240*4)).hexdigest();a=r();time.sleep(1);print('rendering:',a!=r())"
+# POCO
+systemctl status prius-backend; journalctl -u prius-backend -f
 ```
 
-This will:
-1. Sync code to the RPI
-2. Install/update Python dependencies
-3. Restart the service (if already installed)
-
-### First-Time Deployment
-
-For the first deployment, you need to install the systemd service:
-
-```bash
-# Install service and restart
-python deploy.py --install --restart
-
-# Or dry-run to see what will happen
-python deploy.py --install --restart --dry-run
-```
-
-This will:
-1. Sync code to `/home/pi/cyberpunk_computer`
-2. Create Python virtual environment
-3. Install dependencies from `requirements.txt`
-4. Create log directory at `/var/log/cyberpunk_computer`
-5. Install systemd service
-6. Enable auto-start on boot
-7. Start the service
-
-### Deployment Options
-
-```bash
-# Basic deployment (no service restart)
-python deploy.py
-
-# Deployment with custom host/user
-python deploy.py --host my-rpi --user myuser
-
-# Install service
-python deploy.py --install
-
-# Restart service after deployment
-python deploy.py --restart
-
-# Show logs after deployment
-python deploy.py --logs
-
-# Dry-run (show what would be done)
-python deploy.py --dry-run
-
-# Full deployment with all options
-python deploy.py --install --restart --logs
-```
-
-## Production Mode Features
-
-When running with `--production` flag, the application:
-
-### Logging
-- **Level**: INFO (reduced verbosity)
-- **Console**: Yes (viewable via journalctl)
-- **File**: `/var/log/cyberpunk_computer/app.log`
-  - Max size: 10 MB per file
-  - 5 rotating backup files
-  - Total max: 50 MB
-
-### USB UART Resilience
-- **Auto-reconnect**: Enabled
-- **Reconnect delay**: 2 seconds
-- Gracefully handles USB device disconnect/reconnect
-- Continues running even when Gateway is disconnected
-
-### Display
-- **Scale**: 1 (native 480x240 resolution)
-- **Fullscreen**: Yes
-- **Effects**: Enabled (scanlines, glow)
-
-### Output
-- **Primary**: USB UART to RP2040 Gateway
-- **Secondary**: UDP to VFD satellite (localhost:5110)
-
-## Service Management
-
-### Start/Stop/Restart
-
-```bash
-# Start service
-ssh prius 'sudo systemctl start cyberpunk-computer'
-
-# Stop service
-ssh prius 'sudo systemctl stop cyberpunk-computer'
-
-# Restart service
-ssh prius 'sudo systemctl restart cyberpunk-computer'
-
-# Check status
-ssh prius 'sudo systemctl status cyberpunk-computer'
-```
-
-### Enable/Disable Auto-Start
-
-```bash
-# Enable auto-start on boot
-ssh prius 'sudo systemctl enable cyberpunk-computer'
-
-# Disable auto-start
-ssh prius 'sudo systemctl disable cyberpunk-computer'
-```
-
-### View Service Configuration
-
-```bash
-# View service file
-ssh prius 'cat /etc/systemd/system/cyberpunk-computer.service'
-```
-
-## Monitoring and Debugging
-
-### View Logs
-
-#### Live Log Streaming
-
-```bash
-# Follow logs in real-time
-ssh prius 'sudo journalctl -u cyberpunk-computer -f'
-
-# Show last 50 lines
-ssh prius 'sudo journalctl -u cyberpunk-computer -n 50'
-
-# Show logs since boot
-ssh prius 'sudo journalctl -u cyberpunk-computer -b'
-```
-
-#### View Log Files
-
-```bash
-# View application log
-ssh prius 'tail -f /var/log/cyberpunk_computer/app.log'
-
-# List all log files
-ssh prius 'ls -lh /var/log/cyberpunk_computer/'
-```
-
-### Check Service Status
-
-```bash
-# Detailed service status
-ssh prius 'sudo systemctl status cyberpunk-computer'
-
-# Check if service is running
-ssh prius 'systemctl is-active cyberpunk-computer'
-
-# Check if auto-start is enabled
-ssh prius 'systemctl is-enabled cyberpunk-computer'
-```
-
-### Monitor System Resources
-
-```bash
-# CPU and memory usage
-ssh prius 'top -bn1 | grep python'
-
-# Full process info
-ssh prius 'ps aux | grep cyberpunk'
-
-# Disk usage
-ssh prius 'df -h /var/log/cyberpunk_computer'
-```
-
-## Troubleshooting
-
-### Service Won't Start
-
-**Check logs for errors:**
-```bash
-ssh prius 'sudo journalctl -u cyberpunk-computer -n 100 --no-pager'
-```
-
-**Common issues:**
-
-1. **Missing dependencies**
-   ```bash
-   ssh prius 'cd /home/pi/cyberpunk_computer && ./venv/bin/pip install -r requirements.txt'
-   ```
-
-2. **Permission issues**
-   ```bash
-   # Check serial port permissions
-   ssh prius 'ls -l /dev/ttyACM0'
-   
-   # Verify user is in dialout group
-   ssh prius 'groups pi'
-   ```
-
-3. **Display issues**
-   ```bash
-   # Check framebuffer access
-   ssh prius 'ls -l /dev/fb0'
-   
-   # Test display environment
-   ssh prius 'echo $DISPLAY'
-   ```
-
-### USB UART Not Detected
-
-```bash
-# List USB devices
-ssh prius 'lsusb'
-
-# Check serial ports
-ssh prius 'ls -l /dev/tty*'
-
-# View kernel messages
-ssh prius 'dmesg | tail -n 50'
-
-# Check if device appears when connected
-ssh prius 'sudo tail -f /var/log/syslog | grep tty'
-```
-
-### Auto-Reconnect Not Working
-
-The application should automatically reconnect when USB UART is plugged back in. Check logs:
-
-```bash
-ssh prius 'sudo journalctl -u cyberpunk-computer -f | grep -i "reconnect\|serial"'
-```
-
-You should see messages like:
-- `Serial connection lost: ...`
-- `Attempting to reconnect to /dev/ttyACM0...`
-- `Serial port reconnected successfully (attempt #N)`
-
-### High CPU/Memory Usage
-
-```bash
-# Monitor resources
-ssh prius 'top -d 1'
-
-# Check for memory leaks
-ssh prius 'watch -n 1 "ps aux | grep python | grep -v grep"'
-```
-
-### Service Crashes on Start
-
-```bash
-# Check for Python errors
-ssh prius 'sudo journalctl -u cyberpunk-computer -n 200 | grep -i "error\|exception\|traceback"'
-
-# Test manual start (for detailed output)
-ssh prius
-cd /home/pi/cyberpunk_computer
-./venv/bin/python -m cyberpunk_computer --production
-```
-
-### Deployment Fails
-
-1. **Check SSH connection**
-   ```bash
-   ssh prius 'echo "Connection OK"'
-   ```
-
-2. **Check disk space on RPI**
-   ```bash
-   ssh prius 'df -h'
-   ```
-
-3. **Verify rsync is installed**
-   ```bash
-   which rsync
-   ```
-
-4. **Test deployment with dry-run**
-   ```bash
-   python deploy.py --dry-run
-   ```
-
-## Manual Deployment
-
-If the deployment script fails, you can deploy manually:
-
-```bash
-# 1. Sync code
-rsync -avz --delete \
-  --exclude '__pycache__' \
-  --exclude '*.pyc' \
-  --exclude '.git' \
-  d:/Projects/CyberPunk/cyberpank-prius-gen2-computer/ \
-  pi@prius:/home/pi/cyberpunk_computer/
-
-# 2. SSH into RPI
-ssh prius
-
-# 3. Create virtual environment
-cd /home/pi/cyberpunk_computer
-python3 -m venv venv
-
-# 4. Install dependencies
-./venv/bin/pip install -r requirements.txt
-
-# 5. Create log directory
-sudo mkdir -p /var/log/cyberpunk_computer
-sudo chown pi:pi /var/log/cyberpunk_computer
-
-# 6. Install service
-sudo cp deployment/cyberpunk-computer.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable cyberpunk-computer
-sudo systemctl start cyberpunk-computer
-```
-
-## Testing
-
-### Test Without Service
-
-Run directly to see output:
-
-```bash
-ssh prius
-cd /home/pi/cyberpunk_computer
-./venv/bin/python -m cyberpunk_computer --production
-```
-
-Press `Ctrl+C` to stop.
-
-### Test Serial Connection
-
-```bash
-# Check if Gateway is responding
-ssh prius 'python3 -c "
-import serial
-ser = serial.Serial(\"/dev/ttyACM0\", 1000000, timeout=1)
-print(\"Serial port opened:\", ser.name)
-ser.close()
-"'
-```
-
-### Test Display
-
-```bash
-# Test framebuffer access
-ssh prius 'sudo cat /dev/urandom | sudo tee /dev/fb0 > /dev/null &'
-# Kill after a few seconds
-ssh prius 'sudo killall cat'
-```
-
-## Performance Tuning
-
-### Optimize for Raspberry Pi Zero v1.3
-
-Edit service file if needed:
-
-```bash
-ssh prius 'sudo nano /etc/systemd/system/cyberpunk-computer.service'
-```
-
-Add environment variables:
-```ini
-Environment=SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS=0
-Environment=SDL_RENDER_DRIVER=software
-```
-
-Reload and restart:
-```bash
-ssh prius 'sudo systemctl daemon-reload && sudo systemctl restart cyberpunk-computer'
-```
-
-## Updating
-
-To update after making code changes:
-
-```bash
-# Quick update and restart
-python deploy.py --restart --logs
-
-# Or step by step
-python deploy.py           # Sync code
-ssh prius 'sudo systemctl restart cyberpunk-computer'  # Restart
-ssh prius 'sudo journalctl -u cyberpunk-computer -f'  # Watch logs
-```
-
-## Uninstallation
-
-To remove the service:
-
-```bash
-# Stop and disable service
-ssh prius 'sudo systemctl stop cyberpunk-computer'
-ssh prius 'sudo systemctl disable cyberpunk-computer'
-
-# Remove service file
-ssh prius 'sudo rm /etc/systemd/system/cyberpunk-computer.service'
-ssh prius 'sudo systemctl daemon-reload'
-
-# Optionally remove code and logs
-ssh prius 'rm -rf /home/pi/cyberpunk_computer'
-ssh prius 'sudo rm -rf /var/log/cyberpunk_computer'
-```
-
-## Additional Resources
-
-- [Raspberry Pi Documentation](https://www.raspberrypi.org/documentation/)
-- [systemd Service Documentation](https://www.freedesktop.org/software/systemd/man/systemd.service.html)
-- [Pygame Documentation](https://www.pygame.org/docs/)
-- [PySerial Documentation](https://pythonhosted.org/pyserial/)
+## Open gaps
+
+- Two frontend units exist (`mfd.service` and `cyberpunk-computer.service`); both draw on `/dev/fb0`.
+  `prius-deploy-mfd` restarts `mfd.service`, and the image installs `mfd.service`; whether
+  `cyberpunk-computer.service` is still installed on the Pi is not recorded here. Check with
+  `systemctl list-unit-files 'mfd*' 'cyberpunk*'` on the Pi.
+- `deployment/mfd.service` differs from the image's `zero13-image/mfd.service` (image: `After=systemd-remount-fs.service`,
+  `Nice=-10`; this copy: `After=network-online.target`). The image copy is what runs on the card.
+  `deploy/mfd.service` (another copy, `--host 10.42.0.1`, the Poco Wi-Fi AP used by the earlier Zero 2 W)
+  is obsolete for the Zero v1.3, which has no Wi-Fi.

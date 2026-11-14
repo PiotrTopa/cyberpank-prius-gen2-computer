@@ -2,7 +2,7 @@
 Diagnostic services: request builders, response parsers and the safety
 allow-list. Pure functions over byte strings — no I/O, no state.
 
-Two service families are used (docs/TOYOTA_DIAGNOSTICS.md, section 3):
+Two service families are used (docs/TOYOTA_DIAGNOSTICS.md, section 2):
 
 * **OBD** (ISO 15031-5 / SAE J1979 over ISO 15765-4): modes 01, 02, 03, 07, 09
   read; 04 clears. Answered by the emission-related ECUs (ECM, HV control ECU,

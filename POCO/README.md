@@ -1,42 +1,76 @@
-# POCO F1 — Prius Board Computer (postmarketOS)
+# POCO F1 — car computer (postmarketOS)
 
-This directory documents the **Xiaomi POCO F1 (`beryllium`, SD845)** that runs the
-Prius gen-2 board computer on **postmarketOS**. It exists so we never have to reverse
-engineer `systemd`, hunt for flag files, or rediscover the networking layout by hand.
+The Xiaomi POCO F1 (`beryllium`, SD845) is the car's only computer: headless,
+always on, phone battery removed and 4.1 V fed to the battery terminals. Remote
+access is LTE + WireGuard. It runs the backend (`prius-backend.service`, API on
+8080) and, while ACC is on, the roadsense perception stack (`roadsense.target`,
+repos `roadsense` (MIT) and `roadsense-signs` (AGPL), API on 8090), which the backend
+starts and stops (`backend/roadsense_power.py`). There is no second POCO.
 
-> The phone is the actual on-car computer. It is headless, always-on, powered from the
-> AUX battery (the phone battery is amputated; a constant 4.1 V is fed to the battery
-> terminals). Access is over a cellular SIM + WireGuard overlay.
->
-> **Single computer (decision 2026-11-04):** the same POCO also runs the roadsense
-> road-perception stack (repos `roadsense`, MIT, and `roadsense-signs`, AGPL) as
-> systemd units under `roadsense.target`, only while ACC is on. The backend starts
-> and stops it (`backend/roadsense_power.py`, `BACKEND_ROADSENSE_*`), powers its
-> camera hub (powerbox relay ch4) and mirrors its health and the phone's thermal
-> zones in the API (`roadsense` slice of `/api/v1/state`). The roadsense API itself
-> serves port **8090** on this machine (8080 is the backend). There is no second POCO.
+| File | Covers |
+|---|---|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | hardware, OS, design constraints, USB host + VBUS, GPU firmware |
+| [NETWORKING.md](NETWORKING.md) | SIM WAN, SIM unlock, WireGuard, Wi-Fi modes, netwatch, clock fallback, firewall |
+| [POWER.md](POWER.md) | CPU profiles, display blanking, freeze recovery, key-off/key-on sequence, roadsense + camera preview power, USB port power, MFD power |
+| [GPU_COMPUTE.md](GPU_COMPUTE.md) | Adreno 630 OpenCL/Vulkan, device caps, libraries |
+| [SCRIPTS_AND_FILES.md](SCRIPTS_AND_FILES.md) | every custom script, unit, flag and config on the phone |
+| [PROVISIONING.md](PROVISIONING.md) | `rootfs/` overlay, `sync.sh` / `provision.sh` |
 
-## Documents
+Powerbox firmware, relays and flashing: [powerbox/README.md](../powerbox/README.md).
 
-| File | What it covers |
-|------|----------------|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | System overview, hardware, OS, design constraints |
-| [NETWORKING.md](NETWORKING.md) | SIM WAN, WireGuard peers, access paths, USB lifeline |
-| [POWER.md](POWER.md) | `prius-power` low/full profiles, the mode flag, systemd units |
-| [GPU_COMPUTE.md](GPU_COMPUTE.md) | Adreno 630 compute (OpenCL/Vulkan), device caps, math libraries |
-| [SCRIPTS_AND_FILES.md](SCRIPTS_AND_FILES.md) | Exact paths of every custom script, unit, and config we added |
-| [PROVISIONING.md](PROVISIONING.md) | Infra-as-code: `rootfs/` mirror + `sync.sh`/`provision.sh` to push the repo to the phone |
-| [ACCESS_CHEATSHEET.md](ACCESS_CHEATSHEET.md) | Copy-paste commands to log in and operate the device |
+## Operating commands
 
-## TL;DR
+Login `user` on the WireGuard address (see [NETWORKING.md](NETWORKING.md)):
 
-- **SSH in (normal):** `ssh user@10.200.0.5` (works from ThinkPad or the build box — both
-  are WireGuard peers). The phone is reachable over the SIM + VPN, no Wi-Fi needed.
-- **Power:** `sudo prius-power low` (key off / resting) or `sudo prius-power full`
-  (key on / full performance). Or just write `low`/`full` to `/etc/prius/power-mode`.
-- **Wi-Fi:** `sudo prius-wifi client` (join home Wi-Fi), `ap` (become SSID `prius`), or
-  `off` (modem-only, production). Never disturbs the SIM WAN or VPN.
-- **GPU compute:** OpenCL 3.0 (`rusticl`) + Vulkan 1.3 (`turnip`) work on the Adreno 630;
-  apps must `export RUSTICL_ENABLE=freedreno`. See [GPU_COMPUTE.md](GPU_COMPUTE.md).
-- **Login user:** `user`, hostname `prius`, passwordless sudo.
-- **Never suspend** the device — it would drop modem, WireGuard, SSH, and OTG serial.
+```bash
+ssh user@10.200.0.14
+```
+
+```bash
+# power profile (flag /etc/prius/power-mode; the backend normally writes it)
+sudo prius-power full | low | status
+
+# Wi-Fi (flag /etc/prius/wifi-mode); never touches the SIM WAN or WireGuard
+sudo prius-wifi ap | client | off | status
+nmcli -s -t -f 802-11-wireless-security.psk con show prius-ap   # AP password
+
+# USB role (DTB + reboot); host is the production role
+sudo prius-usb status
+sudo prius-usb host --reboot | device --reboot
+
+# health
+cat /etc/prius/power-mode; sudo prius-power status
+nmcli -t -f NAME,DEVICE,STATE c show --active
+ip route | grep default
+sudo wg show wg-homelab | grep -E 'endpoint|handshake'
+mmcli -m any | grep -iE 'state:|signal'
+sudo prius-netwatch status
+
+# reboot and wait for it over the VPN (~65 s: SIM unlock -> LTE -> WireGuard)
+ssh user@10.200.0.14 'sudo systemctl --no-block reboot'
+until ssh -o ConnectTimeout=5 -o BatchMode=yes user@10.200.0.14 'echo UP'; do sleep 5; done
+
+# WireGuard rebind after a link change
+nmcli con down wg-homelab; nmcli con up wg-homelab; ping -c2 10.200.0.1
+
+# GPU compute
+RUSTICL_ENABLE=freedreno clinfo | grep -E 'Device Name|Max compute units'   # FD630, 2 CUs
+vulkaninfo --summary | grep -E 'deviceName|driverName'                       # Turnip Adreno (TM) 630
+```
+
+`reboot &` over SSH gets SIGHUP and does not reboot; use
+`systemctl --no-block reboot`.
+
+## Rules
+
+- Never suspend the device (`systemctl suspend`, `freeze`): it drops modem, VPN, SSH
+  and the USB serial links.
+- Switch power, Wi-Fi and USB role only with `prius-power`, `prius-wifi`,
+  `prius-usb` (or their flag files).
+- Do not move the SIM (`prius-sim-unlock` addresses the slot it is in).
+- In USB host mode there is no USB network lifeline; LTE + WireGuard is the only
+  remote channel. `prius-usb device --reboot` restores the lifeline for low-level
+  recovery.
+- GPU apps must `export RUSTICL_ENABLE=freedreno` or OpenCL sees no device.
+- WireGuard server admin path: jump host → WG server (`/etc/wireguard/wg0.conf`,
+  `wg show wg0`); real addresses are kept out of this repo.

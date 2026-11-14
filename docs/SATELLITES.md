@@ -1,7 +1,7 @@
 # Satellites: multi-transport discovery, trust and a single API
 
-Design contract, 2026-11-09. Supersedes the "RS485 only" view of
-`SATELLITE_POWER.md` (which stays valid for the RS485 rail/wake-lock model).
+Contract between the backend, `prius-bled`, `prius-satkey` and satellite firmware.
+The RS485 rail, wake-locks and RS485 job queue are in `SATELLITE_POWER.md`.
 
 A **satellite** is any small device that talks NDJSON with the car computer:
 the RS485 nodes behind the gateway (DRL 106, rain/light 107, VFD 110), BLE
@@ -24,7 +24,7 @@ addresses a satellite by its **satellite id** and never sees the transport.
 ## 1. Identity and ids
 
 * `sat_id` is a stable integer assigned at enrolment and stored in the
-  keychain. Ranges: RS485 `100–199` (fixed by firmware, as today), BLE
+  keychain. Ranges: RS485 `100–199` (fixed by firmware), BLE
   `300–399`, Wi-Fi `400–499`. Ids never move between transports.
 * `name` is a short slug (`drl`, `garage`, `trailer`), unique in the keychain.
 * Cryptographic identity: every authenticated satellite holds an **Ed25519
@@ -88,7 +88,8 @@ warning when that is not writable, e.g. on the P52).
   * `new`/`sign` take `--ble-role scanner|beacon` (BLE only, default
     scanner) and `--address` (required for a beacon: the car connects to it;
     see §4 "BLE roles");
-  * `revoke <id|fp|name>`, `forget <id>`, `export-pub`.
+  * `add-rs485` (keychain entry for a wired node), `show` (print a provisioning
+    blob, §8), `revoke <id|fp|name>`, `forget <id>`, `export-pub`.
 
 ## 3. Authentication handshake (transport-agnostic, NDJSON)
 
@@ -141,7 +142,7 @@ Wraps the existing gateway `OutputPort` + ingress. Address = the device id
 as a string. Presence stays passive (any ingress refreshes), plus
 rediscovery = `{"a":"status"}` poll of every keychain RS485 id and of the
 `satellite_poll_devices` list, sent through the RS485 job queue (so the rail
-wake-lock is taken, as today). Auth: `none` unless the keychain entry says
+wake-lock is taken). Auth: `none` unless the keychain entry says
 otherwise.
 
 ### BLE (`BleTransport` ↔ `prius-bled`)
@@ -154,8 +155,7 @@ Python 3, `dbus-python` + GLib, root, `prius-bled.service`) owns `hci0`:
   `580e04f7-d4c0-458b-b2e0-4ebb01a960c8`, interval 10 000–10 240 ms by
   default (`adv` command changes it; 1 000 ms while a pairing window is
   open or when ACC is on), manufacturer data 2 bytes = flags (bit0 ACC on,
-  bit1 pairing open). Rotating (RPA) addresses are **off** until the user
-  asks for them.
+  bit1 pairing open). Rotating (RPA) addresses are **off**.
 * **GATT service** `580e04f7-…` with two characteristics:
   * `…-0001` TX: car → satellite, `notify` (+ `read`), encrypted;
   * `…-0002` RX: satellite → car, `write` / `write-without-response`,
@@ -188,9 +188,7 @@ Python 3, `dbus-python` + GLib, root, `prius-bled.service`) owns `hci0`:
   `BleTransport` reconnects to the socket with backoff; `available=false`
   while bled is unreachable.
 
-#### BLE implementation decisions (prius-bled, 2026-11-09)
-
-Fixed by the first implementation where the contract above was silent:
+#### BLE implementation details (prius-bled)
 
 * **UUIDs**: TX = `580e04f7-d4c0-458b-b2e0-4ebb01a90001`, RX =
   `580e04f7-d4c0-458b-b2e0-4ebb01a90002` (service UUID with its last 4 hex
@@ -224,7 +222,7 @@ Fixed by the first implementation where the contract above was silent:
   `link`/`status` is the ATT MTU BlueZ passes with each write (23 until the
   first write). Link down = Device1 `Connected=false`, bluetoothd gone, or the
   adapter powered off.
-* **TX addressing** (coordinator decision 2026-11-09): the BlueZ D-Bus GATT
+* **TX addressing**: the BlueZ D-Bus GATT
   server has no per-device notify, so one TX characteristic is shared and
   every notified line is framed as `<ADDR> <line>\n` — ADDR = destination
   device address exactly as BlueZ reports it (17 chars, upper-case,
@@ -242,9 +240,7 @@ Fixed by the first implementation where the contract above was silent:
     bled's bookkeeping.
   * **Caveat**: other authenticated satellites of the same car connected at
     the same time can read this traffic — the links are encrypted, but the
-    notifications are shared. The planned upgrade, once a second BLE
-    satellite exists, is a per-link session key (X25519 exchanged in the
-    auth handshake + AEAD on each line).
+    notifications are shared (open gap, §9).
 * **Control socket**: newest client wins (a second connection replaces the
   first). Every command gets an ack `{"ack":<cmd>,"ok":bool[,"error":"…"]}`
   (errors: `not linked`, `not connected`, `scan in progress`, `radio down`,
@@ -265,7 +261,7 @@ Fixed by the first implementation where the contract above was silent:
   (after a bled restart). Optional `rediscover_s` makes `tick()` scan on its
   own; by default the registry drives rediscovery.
 
-### BLE roles: car-advertises and satellite-advertises (decision 2026-11-11)
+### BLE roles: car-advertises and satellite-advertises
 
 Two satellite kinds, chosen per satellite at enrolment (`keychain.json`
 `ble_role`: `"scanner"` default, or `"beacon"`):
@@ -290,7 +286,7 @@ hook. A beacon link surfaces to the backend exactly like a scanner link
 Power: continuous scanning ≈ 10 mA at the phone, only with ACC on, so free;
 in `low` the car just advertises (< 0.1 mA) and beacon satellites wait.
 
-#### Central role implementation (prius-bled, 2026-11-11)
+#### Central role implementation (prius-bled)
 
 * **Command** `{"cmd":"central","enabled":bool,"addresses":[…],"scan_s":8,"period_s":20}`
   → ack `{"ack":"central","ok":true}`. `enabled` must be a JSON boolean
@@ -381,8 +377,8 @@ Satellites are clients of the `prius` AP (`10.42.0.1/24`, NM shared).
 * Session: the **car connects** to the satellite's TCP 8788 (or accepts a
   satellite connecting to the car's 8788 — both allowed), NDJSON lines, auth
   handshake first, keep-alive `{"a":"ping"}` every 15 s, dead after 45 s.
-* nftables: accept 8787/udp and 8788/tcp on `wlan*` (add to
-  `POCO/rootfs/etc/nftables.d/50_prius_backend.nft`).
+* nftables: 8787/udp and 8788/tcp are accepted on `wlan*` only
+  (`POCO/rootfs/etc/nftables.d/50_prius_backend.nft`).
 
 ## 5. Registry, queues, state
 
@@ -421,7 +417,7 @@ the keychain and the auth state machine per link, and exposes:
 }
 ```
 
-Field rules (agreed with the dashboard lane):
+Field rules (the dashboard relies on them):
 
 * `transport` is exactly one of `rs485|ble|wifi`; `caps` is always a list of
   strings; `rssi` a number or null.
@@ -467,9 +463,8 @@ Advertising at 10 s < 0.1 mA; one connected BLE satellite polled at ~1 Hz
 Wi-Fi listener running; Wi-Fi satellites are only reachable while the AP is
 up (wifi-grace), which the `wifi` transport reports as `ap-down`.
 
-## 8. Implementation decisions (2026-11-09)
+## 8. Implementation details
 
-Where §1–7 were silent, the backend implementation decided as follows.
 Code: `backend/satellite_keychain.py`, `backend/satellite_auth.py`,
 `backend/satellite_registry.py`, `io/rs485_transport.py`,
 `io/wifi_transport.py`, `POCO/rootfs/usr/local/sbin/prius-satkey`.
@@ -600,8 +595,11 @@ python3 scripts/sat_wifi_sim.py --blob $K/garage.json --dial 127.0.0.1:8788 --no
 
 **Reference BLE satellite firmware** (ESP32-C6/S3, Arduino + NimBLE, scanner mode A and beacon mode B, bench-verified against prius-bled): `satellites/esp32s3-ble/README.md`.
 
-## 9. Not in this round
+## 9. Open gaps
 
-Rotating BLE addresses (privacy), central-mode sensor beacons (coin-cell
-satellites that advertise instead of scanning), reference satellite
-firmware (ESP32-C3 / RP2040: Ed25519 via monocypher or mbedtls), MFD screens.
+| Gap | What would resolve it |
+|---|---|
+| Shared TX notifications: every authenticated BLE satellite connected at the same time can read lines addressed to the others. | Per-link session key (X25519 in the auth handshake + AEAD per line), needed once a second BLE satellite exists. |
+| Rotating BLE addresses (privacy) not supported. | — |
+| No reference Wi-Fi satellite firmware (only `scripts/sat_wifi_sim.py`); no ESP32-C3 / RP2040 firmware (Ed25519 via monocypher or mbedtls). | Write and bench one against the backend. |
+| Satellite screens on the MFD. | — |

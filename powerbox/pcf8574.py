@@ -9,7 +9,7 @@ Relay board (HW-281 type, 8 channels, active-low inputs on P0..P7):
     NO contact: load powered when the coil is energised  (pin LOW).
     NC contact: load powered when the coil is released   (pin HIGH).
 
-Rules this module enforces (powerbox/RELAY-CHANGE-PLAN.md, item 7):
+Rules this module enforces (powerbox/README.md, "Relay board"):
     * the cached byte is updated only after a successful I2C write;
     * reported states come from a chip read-back, not from the cache;
     * every read-back is compared with the wanted byte; a mismatch (lost

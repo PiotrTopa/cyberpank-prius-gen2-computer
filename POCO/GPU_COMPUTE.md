@@ -1,20 +1,16 @@
 # GPU Compute — Adreno 630 (freedreno / Turnip)
 
-The POCO F1's **Adreno 630** GPU is usable for general-purpose compute (point clouds,
-matrices, signal processing) headlessly. This documents exactly what is installed, how to
-reach the GPU from code, and which math libraries to use.
-
-> The phone is headless (no display output), but the GPU **render node**
-> `/dev/dri/renderD128` works for off-screen compute. No X/Wayland needed.
+The Adreno 630 is usable for headless general-purpose compute through the render node
+`/dev/dri/renderD128` (no X/Wayland). roadsense runs its road model on it (ncnn/Vulkan).
 
 ## What works
 
 | API | Status | Driver | Version |
 |-----|--------|--------|---------|
-| **OpenCL** | ✅ working | `rusticl` (Mesa, LLVM-backed) | OpenCL **3.0** (device OpenCL C 1.2) |
-| **Vulkan** | ✅ working | `turnip` (Mesa) | Vulkan **1.3.348**, Mesa 26.1.1 |
-| OpenGL ES | ✅ present | `freedreno` (Mesa) | GLES via `mesa-gles` |
-| CUDA / ROCm | ❌ n/a | — | not NVIDIA/AMD; do not attempt |
+| **OpenCL** | working | `rusticl` (Mesa, LLVM-backed) | OpenCL **3.0** (device OpenCL C 1.2) |
+| **Vulkan** | working | `turnip` (Mesa) | Vulkan **1.3.348**, Mesa 26.1.1 |
+| OpenGL ES | present | `freedreno` (Mesa) | GLES via `mesa-gles` |
+| CUDA / ROCm | n/a | — | not NVIDIA/AMD; do not attempt |
 
 GPU reported as **`FD630`** (OpenCL) / **`Turnip Adreno (TM) 630`** (Vulkan).
 
@@ -32,12 +28,11 @@ GPU reported as **`FD630`** (OpenCL) / **`Turnip Adreno (TM) 630`** (Vulkan).
 | SPIR-V IL | 1.0 – 1.6 |
 | Notable extensions | `cl_khr_fp16` (half), `cles_khr_int64`, `cl_khr_3d_image_writes`, `cl_khr_integer_dot_product`, image2d/3d support |
 
-> ⚠️ **No native double precision** advertised — design kernels around `float` (fp32) and
-> `half` (fp16). 64-bit integers are available (`cles_khr_int64`).
-> Local memory is only 32 KiB and is "Global" type — tiling/blocking that assumes large
-> fast shared memory will not help here.
+No native double precision is advertised: use `float` (fp32) and `half` (fp16).
+64-bit integers are available (`cles_khr_int64`). Local memory is 32 KiB of "Global"
+type, so tiling that assumes large fast shared memory does not help.
 
-## CRITICAL: enabling rusticl
+## Enabling rusticl
 
 `rusticl` only exposes the freedreno device when this environment variable is set:
 
@@ -68,9 +63,7 @@ ICD registration files:
 
 Render node: `/dev/dri/renderD128`.
 
-## Which math / compute libraries to use when writing software
-
-Pick based on the workload:
+## Libraries
 
 ### OpenCL (recommended default for number crunching)
 - **PyOpenCL** — Python bindings; pair with **NumPy** for host arrays. Best fit for point
@@ -88,9 +81,9 @@ Pick based on the workload:
 - Use **fp32** as the working type; use **fp16** (`cl_khr_fp16`) to cut memory bandwidth
   where precision allows. **Avoid fp64** (not supported).
 - Keep buffers **≤ 64 MiB** per allocation; stream large point clouds in tiles.
-- This GPU is modest (2 CUs @ 710 MHz, ~150 GFLOPS-class). It wins on **parallel
-  elementwise / vector** work (transforms, filtering, projection of point clouds), not on
-  problems dominated by small serial steps. Benchmark vs. the 8-core CPU before committing.
+- 2 CUs @ 710 MHz, ~150 GFLOPS class (estimate, not benchmarked here): suited to
+  parallel elementwise/vector work, not to small serial steps. Benchmark against the
+  CPU before committing.
 
 ## Quick verification commands
 
@@ -104,8 +97,7 @@ vulkaninfo --summary | grep -E "deviceName|driverName|apiVersion"
 
 ## Firmware dependency
 
-The GPU needs `a630_sqe.fw` + `a630_gmu.bin` microcode, which must be available at early
-boot. See [ARCHITECTURE.md](ARCHITECTURE.md#gpu) and
-[SCRIPTS_AND_FILES.md](SCRIPTS_AND_FILES.md) — the firmware is bundled into the initramfs
-via `/etc/mkinitfs/files-extra/adreno-fw`. If the GPU stops initializing after a kernel or
-firmware update, re-run `sudo mkinitfs` and reboot.
+The GPU needs the `a630_sqe.fw` + `a630_gmu.bin` microcode at early boot; it is bundled
+into the initramfs via `/etc/mkinitfs/files-extra/adreno-fw`
+([ARCHITECTURE.md](ARCHITECTURE.md#gpu-firmware)). If the GPU stops initializing after a
+kernel or firmware update, run `sudo mkinitfs` and reboot.

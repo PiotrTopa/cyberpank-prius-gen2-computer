@@ -6,27 +6,18 @@ The VFD Display satellite (device ID 110) receives pre-processed data from the m
 
 This document defines the protocol between the main CyberPunk Computer application and the VFD satellite.
 
-## Design Philosophy
+## Principle
 
-The protocol represents a **sweet spot** between raw vehicle data and fully pre-rendered content:
-
-| Approach | Pros | Cons |
-|----------|------|------|
-| **Raw CAN/AVC data** | Simple host | VFD needs decoders, high bandwidth |
-| **Pre-rendered pixels** | Simple VFD | ~1.5KB/frame, wasteful bandwidth |
-| **Normalized values** ✅ | Efficient, clean separation | Both sides do their job |
-
-**Our choice**: Send **normalized values and states** that allow the VFD to render independently:
-- Values are 0.0-1.0 normalized (or appropriate enums)
-- VFD handles animation, rendering, and timing
-- Host computes the "what to show", VFD handles "how to show"
+The host sends normalized values (0.0–1.0) and enums; the VFD does all rendering,
+animation and timing. Raw CAN/AVC data would need decoders on the VFD; pre-rendered
+pixels would cost ~1.5 KB per frame.
 
 ## Transport
 
 - **Device ID**: `110` (VFD Display satellite)
 - **Protocol**: NDJSON over RS485 (production) or UDP (development)
 - **Direction**: Primarily Host → VFD (some status messages VFD → Host)
-- **Update Rate**: 10-20 Hz target (every 50-100ms)
+- **Update rate**: energy 20 Hz, state on change + 1 Hz keepalive (backend constants in `state/rules/vfd_display.py`)
 
 ## Message Structure
 
@@ -271,7 +262,7 @@ At 20 Hz update rate:
 - Energy only: 90 × 20 = **1,800 bytes/sec** (~15 kbit/s)
 - With state keepalive: +50 bytes/sec
 
-RS485 at 115200 baud: ~10,000 bytes/sec available → **Plenty of headroom**
+RS485 at 115200 baud: ~10,000 bytes/s available.
 
 ---
 
@@ -314,24 +305,19 @@ The host only sends data updates; VFD interpolates between updates for smooth di
 
 ---
 
-## Implementation Notes
+## Implementation
 
-### Host (Main Application)
+| Side | Where |
+|---|---|
+| Host: normalization | `VFDDisplayRule` in `cyberpunk_computer/state/rules/vfd_display.py` (energy 20 Hz, state 1 Hz / on change, speed normalized to 120 km/h) |
+| Host: egress | `cyberpunk_computer/io/vfd_output.py` (`build_energy_message`, `build_state_message`, `build_config_message`, `create_vfd_energy_handler`) |
+| Host: clock sync `K` | `cyberpunk_computer/backend/service.py`, once a minute |
+| Simulator | `vfd_satellite/` (pygame; handles `E`, `S`, `C`, `R` only) |
+| Hardware firmware | not in this repo / location not documented here |
 
-1. Create `VfdDisplayRule` in rules engine that:
-   - Watches `VEHICLE`, `ENERGY` state slices
-   - Computes normalized values from raw state
-   - Updates `VfdDisplayState` with computed data
+## Open gaps
 
-2. Register egress handler for device 110:
-   - Watches `VfdDisplayState` changes
-   - Builds and sends `E` messages at configured rate
-   - Sends `S` messages on state change
-
-### VFD Satellite
-
-1. NDJSON receiver (serial or UDP)
-2. State machine for current values
-3. Animation engine (power flow arrows, bars)
-4. Framebuffer renderer
-5. Display output (pygame for dev, SPI for hardware)
+- No host code sends `T`/`D`/`B` (canvas) or `R` yet; they are defined for the
+  hardware firmware only.
+- `VFD_READY` / error messages from the VFD are not consumed by the backend as far as
+  this document records.

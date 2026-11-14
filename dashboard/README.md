@@ -1,73 +1,22 @@
-# React + TypeScript + Vite
+# Dashboard
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Web UI of the backend (React 19, TypeScript, Vite, Tailwind, Recharts). The backend serves the
+built `dist/` at `/` on port 8080 when `dashboard/dist` exists next to `cyberpunk_computer/`
+(`api/app.py`); `POCO/sync.sh --app` copies it to the phone.
 
-Currently, two official plugins are available:
-
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm ci
+npm run dev       # dev server; talks to the backend at the address in src/lib/api.ts
+npm run build     # tsc + vite build -> dist/
+npm run lint
+npm test          # unit tests (camera preview)
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Data: one WebSocket to `/api/v1/stream` (state snapshots, `hooks/useAppStream.ts`) and REST
+`POST /api/v1/commands/<name>` for actions (`lib/api.ts`). In production both use the page's own host;
+in dev mode the backend address is hard-coded in `src/lib/api.ts`. Ages are computed against the
+backend clock (the POCO has no reliable RTC).
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+Tabs (`src/tabs/`): Overview, Satellites, Telemetry (metrics history charts), Diagnostics (all-ECU
+diagnostics, [docs/TOYOTA_DIAGNOSTICS.md](../docs/TOYOTA_DIAGNOSTICS.md)), Controls. The header shows aux
+voltage, computer draw, power mode and cabin temperature from the powerbox state.

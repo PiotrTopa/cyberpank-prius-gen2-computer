@@ -1,10 +1,10 @@
-# Head unit integration — facts and design (2026-10-19)
+# Head unit integration
 
-The Chinese Android head unit in the Prius becomes a managed peripheral of the car computer
-(backend on the Poco F1), in the same way the Toyota MFD is one. This document records what was
-measured on the unit on 2026-10-19 and the design that follows from it. Evidence lives in
-`cyberpunk-prius-gateway/captures/2026-10-19/` (`CAPTURES.md`, `headunit/`) and the decompiled vendor
-framework (scratch copy from the dumped system image; images in `~/backups/headunit-9520-2026-10-19/`).
+The Chinese Android head unit in the Prius as a managed peripheral of the car computer (backend on
+the POCO F1), like the Toyota MFD. Status: facts measured on the unit on 2026-10-19; the design in
+sections 2–5 is not built (parked). Evidence: `cyberpunk-prius-gateway/captures/2026-10-19/`
+(`CAPTURES.md`, `headunit/`) and the decompiled vendor framework from the dumped system image (the
+image backups are kept outside the repo).
 
 ## 1. Facts
 
@@ -31,7 +31,7 @@ framework (scratch copy from the dumped system image; images in `~/backups/headu
 | USB | RNDIS gadget configurations exist in the init rc, so the OTG port can be a network device as well as ADB | `headunit/init_rc.txt` |
 | JBL amplifier | Not on the AVC-LAN: with the unit's amplifier switch on, the display's roll call (14:25:21) was answered only by our nav emulator and the gateway node | `captures/2026-10-19/emu2_amp_on.ndjson` |
 
-## 2. Use cases
+## 2. Use cases (design)
 
 1. **Wheel keys through the car computer.** Every wheel key is visible on the unit. Policy proposal:
    VOL± and PLAY/NEXT/PREV stay with the unit while it is the active audio device (it owns the amp
@@ -56,12 +56,12 @@ framework (scratch copy from the dumped system image; images in `~/backups/headu
 7. **Health reporting.** Agent heartbeat, ZLink status, current source, volume and MCU state as a
    `headunit` section of the backend state.
 
-## 3. Architecture
+## 3. Architecture (design)
 
 - **Agent app on the unit** (Android, API 27), installed as a privileged system app on the writable
   `/system` so it can register the vendor broadcasts, hold the overlay permission and run a foreground
-  service. It needs no exploit: the unit ships root and a writable system partition; the images in
-  `~/backups` restore it. Responsibilities: subscribe to the vendor broadcasts and MCU state, forward
+  service. It needs no exploit: the unit ships root and a writable system partition; the dumped
+  images restore it. Responsibilities: subscribe to the vendor broadcasts and MCU state, forward
   them to the backend, execute backend commands (volume, source, LED, backlight, overlay content,
   key injection), expose a local status page.
 - **Optional key splitter.** Only if the policy needs to *suppress* a wheel key from the vendor
@@ -86,7 +86,7 @@ framework (scratch copy from the dumped system image; images in `~/backups/headu
 - Restore path: `ANDROID_system.img`, `VENDOR.img`, `BOOTIMG.img` etc. with SHA256 sums; there is no
   documented fastboot/SP-Flash route, so write only to `/system` and keep the originals.
 
-## 5. Plan
+## 5. Order of work
 
 1. Offline: agent app skeleton (receivers, overlay service, ZMQ client), backend `headunit` state.
 2. On the car (unit on the cable): `newkeypad_debug 1`; confirm every broadcast listed above fires;
@@ -96,9 +96,16 @@ framework (scratch copy from the dumped system image; images in `~/backups/headu
 4. USB RNDIS link to the Poco; backend integration; wheel-key policy.
 5. Only if suppression is needed: the ttyMT2 splitter.
 
-## 6. Open questions for the user
+## 6. Open gaps
 
-1. Which keys should the unit keep, which should the computer own (decides whether the splitter is needed)?
-2. USB or Wi-Fi to the Poco?
-3. Is the head unit the car's permanent audio amplifier (then it owns volume and the computer mirrors), or will the JBL amp return on the AVC-LAN?
-4. How much of our content on the unit: overlays only, or a full screen when Android Auto is idle?
+Decisions (owner):
+
+1. Which keys the unit keeps and which the computer owns (decides whether the splitter is needed).
+2. USB or Wi-Fi link to the POCO.
+3. Whether the head unit is the car's permanent audio amplifier (then it owns volume and the
+   computer mirrors), or the JBL amplifier returns on the AVC-LAN.
+4. How much of our content on the unit: overlays only, or a full screen when Android Auto is idle.
+
+Measurements (step 2 of section 5): that every listed broadcast fires; that `xy.android.gtpkey.volset`,
+the `canbus.intent.action.cmd` LED frame and `xy.android.lightscreen` act; overlay behaviour over ZLink
+with Android Auto running; the amplifier-button trace left on the unit.

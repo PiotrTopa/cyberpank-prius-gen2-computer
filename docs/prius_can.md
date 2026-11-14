@@ -1,404 +1,212 @@
-Prius Gen2 (2009) CAN/OBD2 PID Codes
-Following is a list of CAN/OBD2 PID codes which have been working with a Gen2
-2009 Prius. This list is not original, but an incomplete compilation of the work of
-others who are gratefully acknowledged; in-particular Atilla Vass and
-usbseawolf2000. These codes are for directly monitoring the Prius CAN-bus using
-the following hardware which is given here for information only (not association,
-recommendation or otherwise). An Arduino CAN-bus shield is connected to the
-Prius OBD2 connector, and fitted to an Arduino Mega2560 which also connects to
-a display, GPS and relay board, and logs data to a µSD card.
-Mega2560 firmware is based on the CAN-bus shield/Arduino library expanded to
-parse (Prius Gen2) ISO 15765-2 CAN multi-frame messages. This library
-communicates with CAN using a message structure comprised of an unsigned
-integer (2-byte) ID, a (data length) header byte, and 8 bytes of data. (The
-nomenclature may not be correct, but) the list refers to “OBD2” messages, where
-the message ID is comprised of Mode and PID code, and “CAN” messages, where
-the message ID is the source ECU address (eg. 0x07E0, elsewhere referred to as
-the Header), and Mode and PID code are embedded in the message data bytes.
-OBD2 messages are the (un-solicited) messages broadcast by Prius ECU’s during
-their normal activity (~1500/sec); CAN messages are the (solicited) generic or
-Prius-specific requests for data sent to an ECU.
-Any corrections, additions (particularly regarding unknown Prius OBD2
-messages), etc. are most welcome.
-MSB LSB Header A B C D E F G H
-ID
-(unsigned int)
-Header
-(byte)
-Data
-(byte[8])
-Bits 7..5 Bits 3..0
-Data
-Length
-Bit 4
-rtr
-CAN-Shield Library Message Structure:
-Mode PID Header A B C D E F G H
-Bits 7..5 Bits 3..0
-Data
-Length
-Bit 4
-0
-OBD2 Message:
-ECU Header Frame
-Info Mode PID A B C D E
-CAN (SF) Single-Frame Message:
-Bits 7..4
-SF Frame
-Type: 0x0
-Bits 3..0
-CAN Data
-Length
-Bits 15..0
-Bit 3 Set in Reply
-1
-Bits 5..0
-Mode
-Bit 6 Set
-1
-ECU Header Mode PID A B C D
-CAN (FF) First-Frame (of multi-frame) Message:
-Bits 15..12
-FF Frame
-Type: 0x1
-CAN Data
-Length
-Bits 15..0
-Bit 3 Set in Reply
-1
-Bits 5..0
-Mode
-Bit 6 Set
-1
-Bits 11..0
-MCU CAN-Bus
-MCU CAN-Bus
-MCU CAN-Bus
-ECU Header CAN Tx
-Len: 0x02 Mode PID 0 0 0 0 0
-CAN PID Request Message:
-MCU CAN-Bus
-ECU Header Frame
-Info
-Block
-Size: 0x00
-Min Sep.
-Time: 0x00 0 0 0 0 0
-CAN (FC) Flow Control (further frames) Request Message:
-MCU CAN-Bus
-CAN (CF) Consecutive-Frames (of multi-frame) Message:
-MCU CAN-Bus ECU Header Frame
-Info E,L, F,M, G,N, H,O, I,P, J,Q, K,R,etc.
-Bits 7..4
-CF Frame
-Type: 0x2
-Bits 3..0
-Frame Seq #
-(starting 1)
-Bits 15..0
-Bit 3 Set in Reply
-1
-Frame Info
-(2 bytes)
-Bits 7..4
-FC Frame
-Type: 0x3
-Bits 3..0
-Flow Control
-Flag: 0x0
-eg. Car Speed 0x03 0xCA A B C D E
-Bits 7..5 Bits 3..0
-Data
-Length
-Bit 4
-0
-Bits 7..5 Bits 3..0
-Data
-Length
-Bit 4
-0
-Bits 7..5 Bits 3..0
-Data
-Length
-Bit 4
-0
-Bits 7..5 Bits 3..0
-Data Len
-0x8
-Bit 4
-0
-Bits 7..5 Bits 3..0
-Data
-Length
-Bit 4
-0
-0 0x5
-Request with SF reply: eg. Car Speed 0x07E0 0 0x8 2 0x01 0x0D 0 0 0 0 0
-Request with FF/CF reply: eg. Hybrid Info 0x07E2 0 0x8 2 0x21 0xC3 0 0 0 0 0
-eg. Car Speed (SF) 0x07E8 0 0x8 0x0 0x41 0x0D A
-eg. Hybrid Info (FF) 0x07EA 0 0x8 0x027 0x61 0xC4 A B C D
-eg. Hybrid Info (FC) 0x07E2 0 0x8 0x00 0x00 0 0 0 0 0
-eg. Hybrid Info (CF1) 0x07EA 0 0x8 E F G H I J K
-eg. Hybrid Info (CF2) 0x07EA 0 0x8 L M N O P Q R
-0x3
-0x1
-0x3 0x0
-0x2 0x1
-0x2 0x2
-:
-Arduino CAN-Shield / CAN-bus Message Exchange
-Conventions - #: decimal, 0x# hexidecimal (one # per 4-bit nibble)
-: additional CF's as required to pass message data length
-ref: Automated Cross-Platform Reverse Engineering of CAN Bus Commands From Mobile Apps.pdf
-ECU Description
-0x727 Transmission
-0x750 Main Body
-0x780 AirBag
-0x781 Precrash
-0x790 Distance
-0x791 Precrash2
-0x7A1 Steering Assist
-0x7A2 Park Assist
-0x7B0 ABS Brake
-0x7C0 Instrument
-0x7C4 Air Conditioner
-0x7D0 Navigation
-0x7E0 Engine Controls
-0x7E2 Hybrid System
-Description ECU
-Mode
-&PID Equation
-~Update
-(mS) Min Max Units Notes (Toyota Prius Gen2 2009, ref: https://en.wikipedia.org/wiki/Toyota_Prius_(XW20))
-Un-Solicited (OBD2), Prius2 Specific
-Lateral acceleration 0022 (256 * A + B) - 0x0200 13 Un'Cal Units unknown
-Longitudinal acceleration 0023 (256 * A + B) - 0x0200 13 Un'Cal Units unknown
-Steering angle 0025 (256 * A + B) 13 Un'Cal 12bit signed integer, "straight-ahead" value vehicle specific
-Brake Pedal Position 0030 E 6 0 127 Un'Cal Value may be 0x7F (maybe slightly -ve) when not-pressed or on start-up with brake pedal depressed for READY
-ICE Temperature 0039 A 8 0 255 °C Same result as (solicited) 07E00105, though can't go negative. Use 07E00105 as this unnecessarily rapid
-EM Amp 003B (256 * A + B) / 10 8 Amp 12bit signed integer. Use 07E221C3, same + additional info
-EM Volt 003B D 8 0 255 Volt Nominal 201V
-Front right wheel pulses 00B1 256 * A + B 13 0 65535 Pulses Measured ~185 pulses/revolution, seems odd encoder rate ?
-Front left wheel pulses 00B1 256 * C + D 13 0 65535 Pulses
-Rear right wheel pulses 00B3 256 * A + B 13 0 65535 Pulses Measured ~185 pulses/revolution, seems odd encoder rate ?
-Rear left wheel pulses 00B3 256 * C + D 13 0 65535 Pulses
-Drive Mode 0120 {D:0-1} 17 0 3 Binary P: 0x0, R: 0x1, N: 0x2, D: 0x3. Nb: differs from A.Vass
-Throttle pedal position 0244 G 25 0 0xC8 Un'Cal Use 07E221C4, same + additional info
-ICE Speed (Target) 03C8 256 * C + D 70 0 65535 RPM Target not actual. Use 07E221C3, same + additional info
-Vehicle speed 03CA C 108 0 255 km/hr
-HV SOC % 03CB (256 * C + D)/2 108 0 100 % Nb: MFD SOC displays 40%-80% of SOC range (refer 00000529{D:0-2} for MFD SOC bars displayed)
-HV Max Discharge Current 03CB A 108 0 255 Amp Nominally 100A <51°C (ref: https://www.eaa-phev.org/wiki/Prius_PHEV_TechInfo#Battery_ECU_messages)
-HV Max Charge Current 03CB B 108 0 255 Amp Nominally 105A <51°C (ref: https://www.eaa-phev.org/wiki/Prius_PHEV_TechInfo#Battery_ECU_messages)
-Ignition Timing Advance 0526 B,C ? 530 Un'Cal Use 07E0010E
-0x00000529 Msg Event 0529 {A:7} 1000* 0 1 Binary * Event occurred causing immediate 00000529 msg; By default 00000529 issued every 1sec (ref: https://www.eaa-phev.org/wiki/Prius_PHEV_TechInfo)
-General Problem, with Triangle 0529 {B:2,4,6} 0 1 Binary 1 beep, red triangle
-Not in Park and Drivers Door is Open 0529 {B:3} 0 1 Binary
-General Problem 0529 {B:5} 0 1 Binary 1 beep
-General Problem 0529 {C:0} 0 1 Binary 1 beep
-General Problem, with Triangle 0529 {C:1} 0 1 Binary 1 beep, red triangle
-MFD SOC Bars displayed (40-80%) 0529 {D:0-2} 0 7 Number bars depends on SOC % (~40%-80%) and whether HV charging/discharging (re: https://www.eaa-phev.org/wiki/Toyota_Prius_Battery_Specs)
-Brake Pedal Depressed 0529 {D:3} 0 1 Binary
-EV-Mode Active 0529 {E:6} 0 1 Binary
-EV-Mode Cancelled 0529 {E:7} 0 1 Binary 1 beep
-Parking Brake Problem 0529 {F:4} 0 1 Binary MFD: "There's a problem with the transmission 'P' lock mechanism. Park you car on a flat surface, and fully apply the parking brake."
-EV-Mode Denied 0529 {F:5,6,7} 0 1 Binary MFD: "Cannot change to EV mode now"
-ICE Temperature 052C B / 2 1050 0 127 °C Use 07E00105
-Headlights Status 057F {B:3-5} 1050 Binary Off: 0x00, Parkers: 0x10, Low-Beam: 0x30, High-Beam: 0x38
-Fuel Tank Level 05A4 B 3400 0 ~0x2C litres? Measured full tank 0x2C/44, assume calibration in litres
-Doors/Hatch Open 05B6 {C:6-7} 1050 Binary Closed: 0x00, Drivers Door Open: 0x80, Other Doors/Hatch Open: 0x40
-Cruise Control Active 05C8 {C:4} 1050 Binary Cruise control On and Active
-Solicited (CAN), Generic (ECU 07E0)
-PID's Supported (0101 - 0120) 07E0 0100 {A:7}-{D:0} Binary Supported Mode 01 PID's: 0x01,0x03,0x04,0x05,0x06,0x07,0x0C,0x0D,0x0E,0x0F,0x10,0x11,0x13,0x15,0x1C,0x1F,0x20
-Number of emissions-related DTC's 07E0 0101 {A:0-6} ref: https://en.wikipedia.org/wiki/OBD-II_PIDs#Service_01_PID_01
-MIL Status 07E0 0101 {A:7} Binary MIL light off/on
-Engine Type 07E0 0101 {B:3} Binary 0: Spark ignition monitors supported (e.g. Otto or Wankel engines), 1: Compression ignition monitors supported (e.g. Diesel engines)
-Calc'd Engine Load (Torque) 07E0 0104 A 0 100 % Indicates a percentage of peak available torque, 115Nm @ 4200
-ICE Temperature 07E0 0105 A - 40 -40 215 °C Same result as (un-solicited) 00000039
-Short-Term Fuel Trim 07E0 0106 0.7812 * (A - 128) -100 99.22 % -100%(Rich) to 99.22%(Lean)
-Long-Term Fuel Trim 07E0 0107 0.7812 * (A - 128) -100 99.22 % -100%(Rich) to 99.22%(Lean)
-Vehicle speed 07E0 010D A 0 255 km/hr
-Timing Advance 07E0 010E (A / 2) - 64 -64 63.5 ° Relative to cylinder #1
-ICE RPM Actual 07E0 010C (256 * A + B) / 4 0 5200 rpm
-Intake Air Temperature 07E0 010F A - 40 -40 215 °C
-MAF Air Flow Rate 07E0 0110 (256 * A + B) / 100 0 655.35 g/sec
-Throttle pedal position 07E0 0111 (100 * A) / 255 0 100 %
-PID's Supported (0121 - 0140) 07E0 0120 {A:7}-{D:0} Binary Supported Mode 01 PID's: 0x21,0x24,0x30,0x31,0x33,0x3C,0x3E,0x40
-Lambda 07E0 0124 0.0000305 * (256 * A + B) 0 2 Lambda value
-O2 Sensor Output 07E0 0124 0.000122 * (256 * C + D) 0 8 Volt O2 (voltage) sensor output
-Odometer since DTC's Last Cleared 07E0 0131 256 * A + B 0 65535 Km
-Barometric Pressure 07E0 0133 A 0 255 kPa
-PID's Supported (0141 - 0160) 07E0 0140 {A:7}-{D:0} Binary Supported Mode 01 PID's: 0x42,0x43,0x44,0x45,0x46,0x47,0x4C,0x4D,0x4E
-ECU Power Voltage (Aux Batt Voltage) 07E0 0142 (256 * A + B) / 1000 0 65.54 Volt
-Ambient Air Temperature 07E0 0146 A - 40 -40 215 °C
-Injector Time 07E0 21F3 0.128 * C 0 32.64 mS ref: https://priuschat.com/threads/gen2-prius-custom-pids-for-torque-android-app-with-formulas.95370/page-8#post-1415782
-Solicited (CAN), Prius2 Specific
-ICE Temperature 07E0 0105 A - 40 -40 215 °C Same result as (un-solicited) 00000039
-ICE Actual rpm 07E0 010C (256 * A + B) / 4 0 5200 rpm
-Timing Advance 07E0 010E (A / 2) - 64 -64 63.5 °
-Lambda 07E0 0124 0.0000305 * (256 * A + B) 0 2
-O2 Sensor Output 07E0 0124 0.000122 * (256 * C + D) 0 8 Volt O2 (voltage) sensor output
-MG2 Revolution (MG2_RPM) 07E2 21C3 ((256 * A) + B) - 16383 -2000 7000 rpm
-MG1 Revolution 07E2 21C3 ((256 * G) + H) - 16383 -13000 13000 rpm
-Engine Speed (Target) 07E2 21C3 (256 * M) + N 0 8000 rpm Not much interest
-Engine Speed (Actual, ICE_RPM) 07E2 21C3 (256 * O) + P 0 8000 rpm
-State Of Charge 07E2 21C3 (100 * S) / 255 40 80 % Same result as (un-solicited) 0x000003CB (Vass conversion SOC = 0.5*S)
-WOUT HV Batt to Converter 07E2 21C3 320 * T 0 21 kW
-WIN HV Batt to Converter 07E2 21C3 U - 40800 -25 0 kW
-Discharge Request to Adjust SOC 07E2 21C3 V - 20480 -20480 20320 Watt
-Drive Condition ID 07E2 21C3 X 0 6 Num
-MG1 Inverter Temperature 07E2 21C3 Y - 40 -40 215 °C
-MG2 Inverter Temperature 07E2 21C3 Z - 40 -40 215 °C
-Motor Temperature No2 (MG2 ?) 07E2 21C3 AA - 40 -40 215 °C
-Motor Temperature No1 (MG1 ?) 07E2 21C3 AB - 40 -40 215 °C
-HV Power Resource VB 07E2 21C3 2 * AC 150 300 Volt HV battery (sum cells) voltage
-HV Power Resource IB 07E2 21C3 2 * AE - 256 -100 100 Amp HV battery current
-Regenerative Brake Torque (Actual, ReGen_T) 07E2 21C3 4 * E 0 186 Nm Equals MG2 torque when MG2 regen braking (ie. negative) else zero. Doesn't show MG2 doing simulated engine braking (ie. off throttle but not on brake).
-Regenerative Brake Torque (Request) 07E2 21C3 4 * F 0 186 Nm Much the same as Regenerative Brake Torque (Actual)
-Master Cylinder Torque 07E2 21C3 (4 * R) - 512 -512 508 Nm Seems to be Total braking effort (units of torque) being Regen braking (MG2) + friction braking. Nb: Raw value behaves like a signed 7bit value. ReGen_T same
-as MG2_T when +ve, though MG2_2 shows "engine braking" component of regen.
-(ICE) Power Request 07E2 21C3 ((256 * K) + L) / 100 0 320 kW Nb: ~Linear with ICE RPM * (115Nm * Calc'd Engine Load (07E00104)) with ~3kW intercept
-MG2 Torque (MG2_T) 07E2 21C3 (256 * C + D) / 8 - 500 -400 400 Nm
-MG1 Torque (MG1_T) 07E2 21C3 (256 * I + J) / 8 - 500 -200 200 Nm
-Shift Sensor Main 07E2 21C3 0.019608 * AF 0 5 Volt
-Shift Sensor Sub 07E2 21C3 0.019608 * AG 0 5 Volt
-Shift Sensor Select Main 07E2 21C3 0.019608 * AH 0 5 Volt
-Shift Sensor Select Sub 07E2 21C3 0.019608 * AI 0 5 Volt
-Shift Sensor Shift Position 07E2 21C3 0.019608 * AJ 0 5 Num
-Accelerator Pedal Angle 07E2 21C4 (100 * C) / 255 0 100 %
-VL-Voltage Before Boosted 07E2 21C4 2 * D 0 510 Volt
-VH-Voltage After Boosted 07E2 21C4 2 * E 0 765 Volt
-Converter Temperature 07E2 21C4 F - 40 -40 215 °C
-Crank Position 07E2 21C4 0.706 * G 0 100 °
-System Main Relay 1 Status 07E2 21C4 {H:0} 0 1 Bin
-System Main Relay 2 Status 07E2 21C4 {H:1} 0 1 Bin
-System Main Relay 3 Status 07E2 21C4 {H:2} 0 1 Bin
-Converter Carrier Frequency 07E2 21C4 {I:0} 0 1 Bin
-Smart Key Status 07E2 21C4 {I:2} 0 1 Bin
-Aircon Gate Status 07E2 21C4 {I:4} 0 1 Bin
-Converter Gate Status 07E2 21C4 {I:5} 0 1 Bin
-MG2 Gate Status 07E2 21C4 {I:6} 0 1 Bin
-MG1 Gate Status 07E2 21C4 {I:7} 0 1 Bin
-Motor (MG2) Torque Execute Value 07E2 21C4 4 * J - 512 -512 508 Nm
-Motor (MG1) Torque Execute Value 07E2 21C4 4 * K - 512 -512 508 Nm
-Short Circuit Wave Highest Value 07E2 21C4 0.019608 * L 0 5 Volt
-Raising Pressure Ratio 07E2 21C4 (100 * O) / 255 0 100 %
-Aircon Consumption Power 07E2 21C4 0.019608 * P 0 5 kW
-Driving Pattern 1 07E2 21C4 {A:0} 0 1 Bin
-Driving Pattern 2 07E2 21C4 {A:1} 0 1 Bin
-Driving Pattern 3 07E2 21C4 {A:2} 0 1 Bin
-Loading Condition 07E2 21C4 {A:7} 0 1 Bin
-Engine Warming Up Request 07E2 21C4 {B:0} 0 1 Bin
-Aircon Request 07E2 21C4 {B:1} 0 1 Bin
-Engine Stop Inhibit Request 07E2 21C4 {B:2} 0 1 Bin
-HVAC OBD Request 07E2 21C4 {B:3} 0 1 Bin
-Main Battery Charging Request 07E2 21C4 {B:4} 0 1 Bin
-Engine Idling Request 07E2 21C4 {B:5} 0 1 Bin
-Engine Stop Request 07E2 21C4 {B:6} 0 1 Bin
-Check Mode 07E2 21C4 {B:7} 0 1 Bin
-Cruise Control Memory Vehicle SPD 07E2 21D3 A 0 150 km/h Vehicle speed (used by cruise control)
-Cruise Set/Resume Speed 07E2 21D3 B 0 255 km/h Resets to 0 when speed < ~40km/hr. Originally ref'd as "Cruise Throttle Opening Angle"
-Cruise Control Main Switch -- (Main CPU) 07E2 21D3 {C:0} 0 1 Bin
-Cruise Control Main Switch -- Ready (Main CPU) 07E2 21D3 {C:2} 0 1 Bin
-Cruise Control Main Switch -- Indicator (Main CPU)07E2 21D3 {C:5} 0 1 Bin
-Cruise Control 07E2 21D3 {C:6} 0 1 Bin
-Shift D Position 07E2 21D3 {C:7} 0 1 Bin
-Stop Light Switch 1 (Sub CPU) 07E2 21D3 {D:0} 0 1 Bin
-Stop Light Switch 2 (Sub CPU) 07E2 21D3 {D:1} 0 1 Bin
-Stop Light Switch 1 (Main CPU) 07E2 21D3 {D:2} 0 1 Bin
-RES / ACC Switch 07E2 21D3 {D:3} 0 1 Bin
-SET / COAST Switch 07E2 21D3 {D:4} 0 1 Bin
-Cancel Switch 07E2 21D3 {D:5} 0 1 Bin
-Cruise Control Active (Set) 07E2 21D3 {D:6} 0 1 Bin Cruise control active. Use with care as seems to occassionaly give 0 while cruise active for a short period (<1sec).
-D drive mode selected 07E2 21D3 {D:7} 0 1 Bin Originally ref'd as "Cruise Control Enabled"
-HV Battery State of Charge 07E3 21CE 0.5 * A 40 80 %
-HV Battery Current 07E3 21CE (256 * B + C) / 100 - 327.68 -100 100 Amp
-Battery power (kW) 07E3 21CE HV Battery Current * Σ Blocks Volts -27 27 kW
-HV Battery Block-01 Voltage 07E3 21CE (256 * D + E) / 100 - 327.68 0 18 Volt
-HV Battery Block-02 Voltage 07E3 21CE (256 * F + G) / 100 - 327.68 0 18 Volt
-HV Battery Block-03 Voltage 07E3 21CE (256 * H + I) / 100 - 327.68 0 18 Volt
-HV Battery Block-04 Voltage 07E3 21CE (256 * J + K) / 100 - 327.68 0 18 Volt
-HV Battery Block-05 Voltage 07E3 21CE (256 * L + M) / 100 - 327.68 0 18 Volt
-HV Battery Block-06 Voltage 07E3 21CE (256 * N + O) / 100 - 327.68 0 18 Volt
-HV Battery Block-07 Voltage 07E3 21CE (256 * P + Q) / 100 - 327.68 0 18 Volt
-HV Battery Block-08 Voltage 07E3 21CE (256 * R + S) / 100 - 327.68 0 18 Volt
-HV Battery Block-09 Voltage 07E3 21CE (256 * T + U) / 100 - 327.68 0 18 Volt
-HV Battery Block-10 Voltage 07E3 21CE (256 * V + W) / 100 - 327.68 0 18 Volt
-HV Battery Block-11 Voltage 07E3 21CE (256 * X + Y) / 100 - 327.68 0 18 Volt
-HV Battery Block-12 Voltage 07E3 21CE (256 * Z + AA) / 100 - 327.68 0 18 Volt
-HV Battery Block-13 Voltage 07E3 21CE (256 * AB + AC) / 100 - 327.68 0 18 Volt
-HV Battery Block-14 Voltage 07E3 21CE (256 * AD + AE) / 100 - 327.68 0 18 Volt
-HV Battery Air Intake Temp 07E3 21CF (256 * A + B) / 100 - 327.68 -327.7 350 °C
-VMF Fan Motor Voltage 07E3 21CF (0.2 * C) - 25.6 9 12 Volt
-Auxiliary Battery Voltage 07E3 21CF (0.2 * D) - 25.6 0 15 Volt
-HV Battery Charge 07E3 21CF E - 64 0 50 kW
-HV Battery Discharge 07E3 21CF F - 64 0 50 kW
-Delta SOC 07E3 21CF 0.01 * G 0 60 %
-HV Battery Fan Speed 07E3 21CF I 0 6 Num
-HV Battery Temp 1 07E3 21CF (256 * K + L) / 100 - 327.68 -327.7 350 °C
-HV Battery Temp 2 07E3 21CF (256 * M + N) / 100 - 327.68 -327.7 350 °C
-HV Battery Temp 3 07E3 21CF (256 * O + P) / 100 - 327.68 -327.7 350 °C
-Internal Resistance R01 07E3 21D0 0.001 * P 0 10 Ohm
-Internal Resistance R02 07E3 21D0 0.001 * Q 0 10 Ohm
-Internal Resistance R03 07E3 21D0 0.001 * R 0 10 Ohm
-Internal Resistance R04 07E3 21D0 0.001 * S 0 10 Ohm
-Internal Resistance R05 07E3 21D0 0.001 * T 0 10 Ohm
-Internal Resistance R06 07E3 21D0 0.001 * U 0 10 Ohm
-Internal Resistance R07 07E3 21D0 0.001 * V 0 10 Ohm
-Internal Resistance R08 07E3 21D0 0.001 * W 0 10 Ohm
-Internal Resistance R09 07E3 21D0 0.001 * X 0 10 Ohm
-Internal Resistance R10 07E3 21D0 0.001 * Y 0 10 Ohm
-Internal Resistance R11 07E3 21D0 0.001 * Z 0 10 Ohm
-Internal Resistance R12 07E3 21D0 0.001 * AA 0 10 Ohm
-Internal Resistance R13 07E3 21D0 0.001 * AB 0 10 Ohm
-Internal Resistance R14 07E3 21D0 0.001 * AC 0 10 Ohm
-HV Battery Block Count 07E3 21D0 A 0 14 Num
-Accumulated Time of Battery LOW 07E3 21D0 (256 * B) + C 0 5000 Sec
-Accumulated Time of DC Inhibit 07E3 21D0 (256 * D) + E 0 5000 Sec
-Accumulated Time of Battery Too High 07E3 21D0 (256 * F) + G 0 5000 Sec
-Accumulated Time of Hot Temperature 07E3 21D0 (256 * H) + I 0 5000 Sec
-NiMH Volt Delta 07E3 21D0 ((2.56 * M) + (0.01 * N) - 327.68) - ((2.56 * J) + (0.01 * K) - 327.68) -3 3 Volt
-HV Battery Block Lowest Volt 07E3 21D0 (2.56 * J) + (0.01 * K) - 327.68 0 15 Volt
-HV Battery Block # with Min V 07E3 21D0 L 0 13 Num
-HV Battery Block Highest Volt 07E3 21D0 (2.56 * M) + (0.01 * N) - 327.68 0 23 Volt
-HV Battery Block # with Max V 07E3 21D0 O 0 13 Num
-Un-Solicited & Unknown (OBD2), Prius2 Specific
-0020 12
-0030 6
-0038 8
-003A 8
-003E 8
-00B4 14
-0230 28
-0262 21
-0348 44
-03C9 106
-03CD 108
-03CF 139
-0423 1075
-0484 1120
-04C1 971
-04C3 1042
-04C6 1018
-04C7 1028
-04C8 1058
-04CE 1099
-04D0 1118
-04D1 1135
-0520 2231
-0521 322
-0527 1064
-0528 522
-0529 1032
-053F 10647
-0540 1049
-0553 1042
-0554 1066
-056D 1069
-0591 336
-05B2 5268
-05CC 272
-05D4 1073
-05EC 526
-05ED 1066
-05F8 1087
-0602 73009
+# Prius NHW20 CAN: broadcast IDs and diagnostic PIDs
+
+CAN 500 kbit/s on the DLC3 (pins 6/14). Decoders: `cyberpunk_computer/comm/can_decoder.py`
+(broadcast) and `cyberpunk_computer/comm/solicited_can.py` (PIDs). Diagnostic services, ISO-TP and
+safety rules: [`TOYOTA_DIAGNOSTICS.md`](TOYOTA_DIAGNOSTICS.md). BEAN messages the gateway copies to
+CAN 0x5xx: [`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §5.
+
+## 1. Sources and conventions
+
+* Base list: a third-party compilation for a 2009 Gen 2 Prius (work of Attila Vass, usbseawolf2000
+  and others; EAA-PHEV wiki "Prius PHEV TechInfo" for the battery ECU), hardware an Arduino CAN shield
+  on the OBD port. Its decodes are **third-party (G)** unless a row says otherwise.
+* **Car** in the confidence column = checked on this car (correlation in a recording, or a value the
+  owner read); the evidence is named.
+* Byte letters: A = data byte 0, B = byte 1, …; for solicited replies A is the first byte after the
+  mode/PID echo. `{C:4}` = byte C bit 4; `{D:0-2}` = bits 0–2.
+* Period = the list's approximate update interval in ms.
+
+## 2. Broadcast IDs
+
+| ID | Period | Content | Decode | Confidence |
+|---|---|---|---|---|
+| 0x022 | 13 | lateral / longitudinal acceleration | (256A + B) − 0x200 and (256C + D) − 0x200, uncalibrated | G |
+| 0x023 | 13 | longitudinal acceleration | (256A + B) − 0x200, uncalibrated | G |
+| 0x025 | 13 | steering angle | 256A + B, 12-bit signed; straight-ahead offset vehicle-specific | G |
+| 0x030 | 6 | brake pedal | E, 0–127; may read 0x7F at start-up with the brake held | Car: E > 8 edges match BEAN `FE:29` brake bit (74/79 within 1 s) |
+| 0x038 | 8 | ICE running | B > 0 = ICE running (not an rpm) | P (`can_decoder.py` comment, own logs) |
+| 0x039 | 8 | ICE coolant | A °C, no offset; 254/255 = sensor not ready | Car: within 1 °C of BEAN `FE:2C` (r = 0.995) |
+| 0x03B | 8 | HV battery current, voltage | current = low 12 bits of A,B signed × 0.1 A (> 0 discharge); voltage = 256C + D V | Car: voltage is 16-bit (byte D alone wraps at 256 V; the pack reaches ~260 V under hard regen) |
+| 0x0B1 / 0x0B3 | 13 | front / rear wheels (right A,B; left C,D) | list: wheel pulses (~185 per revolution); code: speed × 0.01 km/h | contradiction, see §8 |
+| 0x0B4 | 14 | vehicle speed | (256F + G) × 0.01 km/h | Car: true speed; the meter's trip distance agrees with it; the speedometer (`FE:24`) reads 12 % higher |
+| 0x120 | 17 | gear | byte F low nibble: 0 P, 1 R, 2 N, 3 D, 4 B (observed F = 0x20–0x23) | Car: P/R/N/D on 20 shifts, BEAN `FE:40` follows 45–110 ms later; B not observed. (The list's `{D:0-1}` does not match this car) |
+| 0x244 | 25 | accelerator pedal | G, 0–0xC8 | G |
+| 0x3B6 | — | energy-monitor flow | bytes F, G bitmask | G (unvalidated; 0x528 carries the energy arrows, [`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §5) |
+| 0x3C8 | 70 | ICE speed target | 256C + D rpm | G |
+| 0x3CA | 108 | vehicle speed | C km/h | G |
+| 0x3CB | 108 | battery ECU | A discharge limit A; B charge limit A (nominal ~100 / 105 A below 51 °C); SOC = (256C + D)/2 %; E, F battery temperatures, signed °C | Car: SOC tracks the MFD SOC bars (`FE:29`); temperatures correlate with `98:EC` b4 |
+| 0x3CD | 108 | battery fault code, voltage | AB fault code; voltage field unresolved | G |
+| 0x4CE | — | battery-compartment intake air temperature (not outside air) | — | P (`can_decoder.py` comment) |
+| 0x520 | 2231 | ECM injection quantity (gateway CAN → BEAN `62:20`) | header + 16-bit value | Car (BEAN copy) |
+| 0x526 | 530 | engine rpm (gateway CAN → BEAN `FE:26`) | header + word / 5.12 | Car (the list's "ignition timing B,C" is this rpm word) |
+| 0x528 | 522 | energy-monitor arrows | `25 xx yy 00`, see [`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §5 | P |
+| 0x529 | 1000, immediate on event | HV status to the meter (gateway CAN → BEAN `FE:29`) | see below | Car for `{D:3}`, `{D:0-2}` |
+| 0x52C | 1050 | coolant (→ BEAN `FE:2C`) | B / 2 °C | Car |
+| 0x57F | 1050 | lamps (BEAN `FE:7F` → CAN) | `{B:3-5}`: 0x00 off, 0x10 parking, 0x30 low beam, 0x38 high beam; `{D:7}` = any door open | Car (parking, low beam, door) |
+| 0x5A4 | 3400 | fuel level (BEAN `52:A4` → CAN) | B; full tank read 0x2C (44), assumed litres | G (scale) |
+| 0x5B6 | 1050 | doors (BEAN `FE:B6` → CAN) | `{C:7}` driver door, `{C:6}` front passenger door, `{C:2}` rear or back door | Car (the list's "0x40 = other doors" is the passenger door only) |
+| 0x5C8 | 1050 | cruise control (gateway CAN → BEAN `62:C8`) | list: `{C:4}` cruise on and active | ?, see §8 and [`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §1 |
+| 0x5CC | 272 | BEAN `98:CC` copy (not a temperature) | header `24` + 10-bit value | Car |
+
+0x529 bits (list; byte A bit 7 = event flag, an event causes an immediate frame):
+
+| Bits | Meaning |
+|---|---|
+| `{B:2,4,6}`, `{C:1}` | general problem with red triangle, 1 beep |
+| `{B:5}`, `{C:0}` | general problem, 1 beep |
+| `{B:3}` | not in Park and driver door open |
+| `{D:0-2}` | MFD SOC bars (Car: 3–5 seen, hysteresis against SOC) |
+| `{D:3}` | brake pedal depressed (Car) |
+| `{D:7}` | READY / HV active (Car, from BEAN `FE:29` b2 `80`) |
+| `{E:6}` / `{E:7}` | EV mode active / EV mode cancelled (1 beep) |
+| `{F:4}` | P-lock problem ("problem with the transmission 'P' lock mechanism") |
+| `{F:5-7}` | EV mode denied ("Cannot change to EV mode now") |
+
+## 3. Broadcast IDs without a decode, and gateway copies
+
+All gateway copies 0x5xx have byte 0 = header and bytes 1… = the BEAN data
+([`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §5): 0x520/521/526/527/529/52C/540/591/5B2/5C8/5CC/5D4/5EC/5F8
+(CAN → BEAN) and 0x53F/553/554/56D/57F/5A4/5B6/5ED (BEAN → CAN).
+
+No decode (period in ms): 0x020 (12), 0x03A (8; yaw rate? `can_decoder.py`), 0x03E (8), 0x230 (28),
+0x262 (21), 0x348 (44), 0x3C9 (106), 0x3CF (139), 0x423 (1075), 0x484 (1120), 0x4C1 (971), 0x4C3
+(1042), 0x4C6 (1018), 0x4C7 (1028), 0x4C8 (1058), 0x4D0 (1118), 0x4D1 (1135), 0x602 (73009).
+
+## 4. Diagnostic addresses
+
+| Request ID | ECU |
+|---|---|
+| 0x727 | transmission |
+| 0x750 | main body (sub-address byte, body ECU 0x40 on 2010+ cars; reported not answering on 2005–2008 NHW20, whose body ECUs are on K-line) |
+| 0x780 | airbag |
+| 0x781 | pre-crash |
+| 0x790 | distance |
+| 0x791 | pre-crash 2 |
+| 0x7A1 | steering assist |
+| 0x7A2 | park assist |
+| 0x7B0 | ABS / brake |
+| 0x7C0 | instrument |
+| 0x7C4 | air conditioner |
+| 0x7D0 | navigation |
+| 0x7E0 | engine (reply 0x7E8) |
+| 0x7E2 | hybrid system (reply 0x7EA) |
+| 0x7E3 | HV battery (reply 0x7EB) |
+
+Which of these answer on this car: [`TOYOTA_DIAGNOSTICS.md`](TOYOTA_DIAGNOSTICS.md).
+
+## 5. Solicited PIDs, engine ECU 0x7E0
+
+| PID | Content | Formula | Range / unit | Notes |
+|---|---|---|---|---|
+| 0100 | supported 0101–0120 | bitmap | | 01, 03, 04, 05, 06, 07, 0C, 0D, 0E, 0F, 10, 11, 13, 15, 1C, 1F, 20 |
+| 0101 | MIL status / DTC count / engine type | `{A:7}` MIL, `{A:0-6}` count, `{B:3}` compression ignition | | |
+| 0104 | calculated engine load | A (as listed and decoded; J1979 scales 100A/255) | % | Car: correlates with `62:20` (r = 0.84) |
+| 0105 | ICE coolant | A − 40 | °C | same as 0x039 |
+| 0106 / 0107 | short / long-term fuel trim | 0.7812 × (A − 128) | % | |
+| 010C | ICE rpm | (256A + B) / 4 | rpm | Car: BEAN `FE:26` r = 0.991 |
+| 010D | vehicle speed | A | km/h | |
+| 010E | timing advance | A/2 − 64 | ° | |
+| 010F | intake air temperature | A − 40 | °C | |
+| 0110 | MAF | (256A + B) / 100 | g/s | |
+| 0111 | throttle position | A × 100 / 255 | % | |
+| 0120 | supported 0121–0140 | bitmap | | 21, 24, 30, 31, 33, 3C, 3E, 40 |
+| 0124 | lambda / O2 sensor | 0.0000305 × (256A + B); 0.000122 × (256C + D) V | | |
+| 0131 | distance since DTCs cleared | 256A + B | km | |
+| 0133 | barometric pressure | A | kPa | |
+| 0140 | supported 0141–0160 | bitmap | | 42, 43, 44, 45, 46, 47, 4C, 4D, 4E |
+| 0142 | ECU (12 V) supply | (256A + B) / 1000 | V | |
+| 0146 | ambient air temperature | A − 40 | °C | Car: 4–5 °C against BEAN `FE:CD` 4 °C |
+| 21F3 | injector time | 0.128 × C | ms | |
+
+## 6. Solicited PIDs, hybrid ECU 0x7E2
+
+21C3 (multi-frame, about 30 bytes):
+
+| Bytes | Content | Formula | Range / unit |
+|---|---|---|---|
+| A,B | MG2 speed | 256A + B − 16383 | rpm |
+| C,D | MG2 torque | (256C + D)/8 − 500 | Nm |
+| E | regenerative brake torque, actual (= MG2 torque while regen braking, else 0) | 4E | Nm |
+| F | regenerative brake torque, request | 4F | Nm |
+| G,H | MG1 speed | 256G + H − 16383 | rpm |
+| I,J | MG1 torque | (256I + J)/8 − 500 | Nm |
+| K,L | ICE power request | (256K + L)/100 | kW |
+| M,N | ICE speed target | 256M + N | rpm |
+| O,P | ICE speed actual | 256O + P | rpm |
+| R | master cylinder torque (regen + friction) | 4R − 512 | Nm |
+| S | state of charge | 100S/255 (Vass: 0.5S) | % |
+| T | WOUT battery → converter | 320T | W |
+| U | WIN battery → converter | U − 40800 | (as listed) |
+| V | discharge request to adjust SOC | V − 20480 | W |
+| X | drive condition ID | X | 0–6 |
+| Y / Z | MG1 / MG2 inverter temperature | − 40 | °C |
+| AA / AB | motor temperature No2 (MG2?) / No1 (MG1?) | − 40 | °C |
+| AC | HV battery voltage (sum of cells) | 2AC | V |
+| AE | HV battery current | 2AE − 256 | A |
+| AF–AJ | shift sensors main / sub / select main / select sub / position | 0.019608 × x | V |
+
+21C4:
+
+| Bytes | Content | Formula / bit |
+|---|---|---|
+| A | driving pattern 1/2/3, loading condition | `{A:0}`, `{A:1}`, `{A:2}`, `{A:7}` |
+| B | requests: engine warm-up, A/C, engine-stop inhibit, HVAC OBD, battery charging, idling, engine stop; check mode | `{B:0}` … `{B:7}` in that order |
+| C | accelerator pedal angle | 100C/255 % |
+| D | VL, voltage before boost | 2D V |
+| E | VH, voltage after boost | 2E V |
+| F | converter temperature | F − 40 °C |
+| G | crank position | 0.706G ° |
+| H | system main relays 1/2/3 | `{H:0}`, `{H:1}`, `{H:2}` |
+| I | converter carrier frequency, smart key, A/C gate, converter gate, MG2 gate, MG1 gate | `{I:0}`, `{I:2}`, `{I:4}`, `{I:5}`, `{I:6}`, `{I:7}` |
+| J / K | MG2 / MG1 torque execute value | 4x − 512 Nm |
+| L | short-circuit wave highest value | 0.019608L V |
+| O | boost (raising pressure) ratio | 100O/255 % |
+| P | A/C consumption power | 0.019608P kW |
+
+21D3 (cruise control; never checked against an engaged cruise on this car):
+
+| Byte | Content |
+|---|---|
+| A | cruise memory vehicle speed, km/h (0–150) |
+| B | **cruise set/resume speed, km/h**; 0 below about 40 km/h |
+| C | `{C:0}` main switch, `{C:2}` main switch ready, `{C:5}` indicator, `{C:6}` cruise control, `{C:7}` shift D |
+| D | `{D:0}` stop light switch 1 (sub CPU), `{D:1}` switch 2 (sub), `{D:2}` switch 1 (main), `{D:3}` RES/ACC, `{D:4}` SET/COAST, `{D:5}` CANCEL, `{D:6}` cruise active (set; reported to drop to 0 for < 1 s at times), `{D:7}` D selected |
+
+## 7. Solicited PIDs, HV battery ECU 0x7E3
+
+| PID | Bytes | Content | Formula |
+|---|---|---|---|
+| 21CE | A | SOC | 0.5A % |
+| 21CE | B,C | battery current | (256B + C)/100 − 327.68 A |
+| 21CE | D…AE | block 01…14 voltages, two bytes each | (256x + y)/100 − 327.68 V |
+| 21CF | A,B | battery air intake temperature | (256A + B)/100 − 327.68 °C |
+| 21CF | C | VMF fan motor voltage | 0.2C − 25.6 V |
+| 21CF | D | auxiliary battery voltage | 0.2D − 25.6 V |
+| 21CF | E / F | charge / discharge limit | x − 64 kW |
+| 21CF | G | delta SOC | 0.01G % |
+| 21CF | I | battery fan speed | 0–6 |
+| 21CF | K,L / M,N / O,P | battery temperatures 1 / 2 / 3 | (256x + y)/100 − 327.68 °C |
+| 21D0 | A | block count | 0–14 |
+| 21D0 | B,C / D,E / F,G / H,I | accumulated time of battery low / DC inhibit / battery too high / hot temperature | 256x + y s |
+| 21D0 | J,K / L | lowest block voltage / its block number | 2.56J + 0.01K − 327.68 V |
+| 21D0 | M,N / O | highest block voltage / its block number | 2.56M + 0.01N − 327.68 V |
+| 21D0 | P…AC | internal resistance R01…R14 | 0.001x Ω |
+
+Battery power = current × sum of block voltages.
+
+## 8. Open gaps
+
+* **0x5C8 / 21D3 (cruise):** the list reads 0x5C8 `{C:4}` as "cruise active"; a comment in
+  `can_decoder.py` reads the same bit as a cancel event and calls the message sparse (about 18 frames
+  in 37 min), while the list gives a 1050 ms period. Neither has been checked with cruise engaged.
+  Resolves with experiment E5 in [`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §1.
+* **0x5xx cadence:** the list gives about 1 s for most gateway copies; own CAN logs contain far fewer
+  frames (e.g. 58 × 0x5C8 in 53 min). Whether the gateway sends them on change only or the logs drop
+  them: compare a CAN log with a simultaneous BEAN capture (BEAN side is 1 s).
+* **0x0B1/0x0B3:** wheel pulses (list) or speed × 0.01 km/h (code). Resolves by comparing with 0x0B4 at
+  a steady speed.
+* **0x348:** decoded as a pack temperature (byte C − 40) in `can_decoder.py`, while a comment there
+  reports byte C × 25 tracking ICE rpm (r = 0.986). Resolves with a log covering ICE start/stop at a
+  steady pack temperature.
+* **0x120 B position** and **0x3B6 bits**: not observed / unvalidated.
+* **0x3CA, 0x3C8, 0x244, 0x022/0x023/0x025 scalings**: third-party, unchecked.

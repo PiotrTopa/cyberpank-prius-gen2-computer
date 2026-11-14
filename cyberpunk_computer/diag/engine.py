@@ -7,7 +7,7 @@ Threading: everything here runs on the backend engine thread (``tick`` and
 entry point is :meth:`DiagEngine.on_bus_frame` (panda reader thread), which
 only appends to a deque that ``tick`` drains.
 
-Transport (gateway firmware 3.2.9, see docs/TOYOTA_DIAGNOSTICS.md section 6):
+Transport (gateway firmware 3.2.9, see docs/TOYOTA_DIAGNOSTICS.md section 8):
 
 * ``gw`` — normal-addressed ECUs. One ``req`` with ``"isotp": true``; the
   gateway reassembles multi-frame responses and sends the flow control itself.

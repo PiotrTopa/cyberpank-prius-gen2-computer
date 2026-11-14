@@ -3,7 +3,7 @@
 
 Marks are intervals in the owner's clock (mm:ss after HH:00 CET), given either
   * in a CSV/TSV file: one per line "mm:ss[-mm:ss],label" (a single time = a 2 s window), or
-  * --builtin session30: the door intervals from docs/BEAN_FINDINGS.md.
+  * --builtin session30: the door intervals from docs/BEAN_SIGNALS.md §10.
 Marks with the same label are pooled.
 
 For every DST:MES / byte / bit the script samples the bit on a 50 ms grid over the time the
@@ -23,7 +23,7 @@ from collections import defaultdict
 from beanlib import load_any, node_key, owner_clock, parse_owner_clock, wake_segments
 
 BUILTIN = {
-    # from docs/BEAN_FINDINGS.md (owner's action list, session30, car OFF)
+    # from docs/BEAN_SIGNALS.md §10 (owner's action list, session30, car OFF)
     "session30": [
         ("31:21", "31:26", "driver door open"),
         ("32:01", "32:11", "driver door open"),

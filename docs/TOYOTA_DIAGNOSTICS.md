@@ -1,9 +1,8 @@
 # Toyota diagnostics on the Prius NHW20 (Gen 2, 2004–2009)
 
-Research and design notes for the all-ECU diagnostics engine
-(`cyberpunk_computer/diag/`). Written 2026-11-13, without access to the car:
-nothing below was measured on this vehicle. Every fact carries one of these
-labels:
+Reference for the all-ECU diagnostics engine (`cyberpunk_computer/diag/`). The facts come from
+Toyota documents, public captures and code; **none has been measured on this car yet** (the
+procedure in section 9 does that). Every fact carries one of these labels:
 
 | Label | Meaning |
 |---|---|
@@ -18,7 +17,7 @@ page group by page group at
 `https://toyotamanuals.gitlab.io/PZ471-Z01S0-CA/htmlweb/rm/rm1076e/m_05_NNNN.pdf`
 (NNNN = first page of the group; `RM 05-2308` is in `m_05_2308.pdf`).
 
-## 0. Findings in short
+## 0. Summary
 
 1. **Only three ECUs do DTC communication over the DLC3 CAN on this car: the
    ECM, the HV control ECU and the battery ECU.** Every other ECU is diagnosed
@@ -56,7 +55,7 @@ page group by page group at
 | "The ECM, hybrid vehicle control ECU, and battery ECU use the CAN communication system to perform DTC communication instead of the conventional communication line (SIL)." | RM 05-2310 | PRIMARY |
 | Skid control ECU and power steering ECU: "DTC communication uses the SIL line"; gateway ECU: "connected to the CAN communication system but CAN communication system DTCs are not output" | later NHW20 manual, CAN section, [jaygroh CA] | PRIMARY |
 | BEAN members: body ECU, meter ECU, A/C ECU, transponder key ECU, power source control ECU, transmission control ECU, theft deterrent ECU, smart ECU, gateway ECU | RM 05-2242…2244; meter system diagram RM 05-1677 | PRIMARY |
-| "The gateway ECU connects the CAN, BEAN, AVC-LAN and the DLC3" | 2004 New Features manual BE-9 (via the web lane) | PRIMARY |
+| "The gateway ECU connects the CAN, BEAN, AVC-LAN and the DLC3" | 2004 New Features manual BE-9 | PRIMARY |
 | Gateway ECU pin `SIL (G1-7)`: "Bus + line, pulse generation during transmission" | RM 05-2251 | PRIMARY |
 | DLC3 tables of the body-side systems (push button start, multiplex, door lock, theft deterrent, key reminder) list **SIL (7)** as the only communication pin | RM 05-2139, 05-2259, 05-1785, 05-2213, 05-2037 | PRIMARY |
 | Transmission control ECU pin `SIL (T4-20)`: "Diagnosis tester"; power steering ECU `SIL (P8-2)`: "Diagnosis communication"; airbag sensor `A18-16 SIL DLC3` | later NHW20 manual, HX / PS / RS sections, [jaygroh] | PRIMARY |
@@ -85,7 +84,7 @@ The ids already in `comm/solicited_can.py` (`ECUAddress`): ENGINE, HYBRID,
 HV_BATTERY and their response ids are **verified**; TRANSMISSION 0x727,
 MAIN_BODY 0x750, AIRBAG 0x780, STEERING_ASSIST 0x7A1, ABS_BRAKE 0x7B0,
 INSTRUMENT 0x7C0, AIR_CONDITIONER 0x7C4 and the others come from a generic
-table (the web lane traced it to a non-NHW20 paper) and are **not verified for
+table (traced to a non-NHW20 paper) and are **not verified for
 this car**. The legacy `dtc` scan's 0x780 request is expected to stay
 unanswered.
 
@@ -156,7 +155,8 @@ diagnostics engine exposes these by name through `diag_read`:
 | engine | `monitor_status`, `coolant_temp`, `short_fuel_trim`, `long_fuel_trim`, `rpm`, `speed`, `distance_since_clear`, `warmups_since_clear`, `vin` | `01 xx` / `09 02` | standard OBD scaling |
 
 Any other read-only request can be sent as hex (`diag_read {ecu:"hv",
-item:"21C4"}`).
+item:"21C4"}`). The backend's own periodic subscriptions (independent of the
+diagnostics engine) are listed in `docs/ARCHITECTURE.md` §3.
 
 ## 3. ISO-TP (ISO 15765-2)
 
@@ -262,14 +262,17 @@ be read.
   its first request gets no second one.
 * Requests go to physical ids only (never the 0x7DF functional id), so exactly
   one ECU answers.
-* 2026-11-06 incident (gateway firmware forcing a resetting MCP2515 into NORMAL
-  mode): the engine adds no new transmit path — every frame is an ordinary
-  gateway `req`, serialised by the firmware's single job engine.
+* No new transmit path: every frame is an ordinary gateway `req`, serialised
+  by the firmware's single job engine and subject to its transmit safety rules
+  (bit timing verified before every frame, re-init into listen-only on a
+  controller fault; `docs/PROTOCOL.md` §3.4). Those rules exist because a
+  gateway firmware forced a self-resetting MCP2515 into NORMAL mode on
+  2026-11-06 and disturbed the bus.
 
 ## 8. Gateway firmware 3.2.9: what it supports, what is missing
 
 Read from `cyberpunk-prius-gateway/gateway-rp2350/src/can_sol.c` and
-`commands.c`; the gateway repo was not changed.
+`commands.c`. Wire format: `docs/PROTOCOL.md`.
 
 | Need | Firmware 3.2.9 | Used how |
 |---|---|---|
@@ -334,7 +337,7 @@ confirm:true, allow_moving?}`, `diag_cancel`, `diag_autoclear_set {…}`.
 (`PRIUS_DIAG_DIR` overrides): `diag_report_<date>_<time>.json`, `latest.json`,
 `clear_log.jsonl`.
 
-### Procedure for the next drive (IG ON or READY, parked)
+### Procedure on the car (IG ON or READY, parked; not yet run)
 
 1. `diag_identify {}` — VIN, calibration ids, `1A 88 01`. Shows which of the
    three ECUs answer and whether the Toyota identification service exists.
@@ -400,19 +403,21 @@ Design (`diag/autoclear.py`):
 | Limits | not during a scan; at most one attempt per `min_interval_s` (600 s) and `max_per_day` (6) per ECU; a refusal by the ECU counts as an attempt; limits survive a restart (read back from the clear log) |
 | Log | before the clear: monitor status, km since the previous clear (PID 31), stored + pending codes, freeze frame (code, load, coolant, fuel trims, rpm, speed, …); then the clear's result, the codes read back, and the driving context (speed, READY, engine running, gear, km since previous clear). One JSON line per clear in `clear_log.jsonl`; `GET /api/v1/diag/clears` |
 
-## 11. Not found / open questions
+## 11. Open gaps
 
-1. Toyota enhanced DTC read / INF code / freeze frame / clear request bytes on
-   the NHW20's CAN ECUs — the central unknown; step 3–4 of the procedure
-   settles it on the car.
-2. Whether any non-powertrain ECU answers on CAN at all (the probe settles it).
-3. K-line parameters of the NHW20's SIL ECUs.
-4. Whether the master warning stays on for history-only codes.
-5. Whether mode 04 on the HV control ECU also erases its non-emission codes.
-6. Mode 09 (VIN) support of the 2004 European ECM.
-7. Engine-running behaviour of mode 04 and its effect on fuel trims.
-8. PriusChat thread texts were unreachable (HTTP 522) throughout the research;
-   owner reports of this exact fault were not seen.
+| # | Unknown | What settles it |
+|---|---|---|
+| 1 | Toyota enhanced DTC read / INF code / freeze frame / clear request bytes on the NHW20's CAN ECUs (the central unknown) | steps 3–4 of the procedure in section 9 |
+| 2 | Whether any non-powertrain ECU answers on CAN at all | `diag_scan {"probe": true}` (step 2) |
+| 3 | K-line parameters (init, baud rate, node addresses) of the NHW20's SIL ECUs | capture a Toyota tester on DLC3 pin 7 of this car; needs K-line hardware (section 8) |
+| 4 | Whether the master warning stays on for history-only codes | read codes with the triangle on and off; compare |
+| 5 | Whether mode 04 on the HV control ECU also erases its non-emission codes | step 5 of the procedure, then re-read with `13` |
+| 6 | Mode 09 (VIN) support of the 2004 European ECM | `diag_identify {}` (step 1) |
+| 7 | Mode 04 with the engine running; its effect on fuel trims | logged auto-clears (`clear_log.jsonl`) with `long_fuel_trim` before/after |
+| 8 | Whether the HV ECU honours ISO-TP BlockSize / STmin | the `host` transport trace of a multi-frame read |
+
+PriusChat thread texts were unreachable (HTTP 522) during the research; owner reports of this
+exact fault were not seen.
 
 ## Sources
 
