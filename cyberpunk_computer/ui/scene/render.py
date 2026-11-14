@@ -1,5 +1,5 @@
 """
-Scene renderer (pygame): the car, the floor, the road and the HUD.
+Scene renderer (pygame): the car, the floor, the road, the scenery and the HUD.
 
 The whole scene is drawn into one cached surface (``SceneRenderer.surface``)
 that the main screen blits every frame. It is re-drawn only when something
@@ -8,13 +8,17 @@ parked car costs one opaque blit per UI frame.
 
 Layers, back to front (each one a function, so new elements slot in):
 
-    sky strip (pre-rendered per light condition)
-    floor grid                     _draw_floor
-    road: lane fill, lines, edges  _draw_road
-    world objects, lead vehicle    _draw_objects   (far -> near)
-    own car (cached sprite)        CarCache
-    lamp glows (additive sprites)  _draw_glows
-    HUD                            _draw_hud_drive / _draw_hud_parked
+    backdrop strip by place/light/weather   _draw_sky        (scenery.py)
+    lane fill, floor grid                   _draw_lane_fill, _draw_floor
+    tunnel / car-park frames                Scenery.draw_enclosure
+    headlamp beams on the road              _draw_beams
+    planned path, lane lines, road edges    _draw_path, _draw_road
+    roadside scenery by place               _draw_roadside
+    fog band                                Scenery.draw_fog
+    world objects, lead vehicle             _draw_objects    (far -> near)
+    own car (cached sprite), lamp halos     CarCache, _draw_glows
+    rain / snow                             Scenery.draw_precipitation
+    HUD: speed, limit, signal, sign columns _draw_hud_drive / _draw_hud_parked
 
 No anti-aliasing anywhere (analog MFD link): lines and text are 1-bit, the
 only soft pixels are the stepped lamp halos.
@@ -33,22 +37,24 @@ from .car import CarRenderer, car_palette
 from .director import DOOR_STEPS, VIEW_STEPS, SceneDirector
 from .inputs import DOOR_KEYS, SceneInputs
 from .model import Camera
+from .scenery import ENCLOSED, PAN, Scenery
+from .signs import sign_surface
 
 RGB = Tuple[int, int, int]
 
 KEY = (255, 0, 255)            # colour key of cached car sprites
 MIN_REDRAW_S = 0.095           # scene redraw cap while animating (~10 fps)
 CAM_X = 0.4                    # roadsense camera ahead of the car centre (m)
-CHASE_POS = (-8.0, 0.0, 3.6)   # chase camera
-CHASE_TARGET = (12.0, 0.0, 0.2)
+CHASE_POS = (-8.5, 0.0, 5.2)   # chase camera
+CHASE_TARGET = (10.0, 0.0, 0.0)
 CHASE_F = 196.0
 # Depth mapping of the chase view. True perspective squeezes 30..100 m into a
 # few pixel rows under the horizon; instead the inverse depth (= screen
 # height above the car) falls with log(distance), like a radar range scale:
 # the road keeps 100 m on screen and a far lead vehicle stays >= 10 px wide.
 COMP_X0 = 1.0                  # mapping starts here (world x, under the nose)
-COMP_DFAR = 32.0               # displayed camera depth of the 100 m line
-COMP_S = 1.55                  # log knee; chosen so the scale is 1:1 at X0
+COMP_DFAR = 48.0               # displayed camera depth of the 100 m line
+COMP_S = 1.92                  # log knee; chosen so the scale is 1:1 at X0
 _COMP_DN = COMP_X0 - CHASE_POS[0]
 _COMP_LN = math.log(1.0 + 100.0 / COMP_S)
 NEAR = 0.4                     # near plane (m)
@@ -56,6 +62,20 @@ GAP_WARN_S = 1.5               # time gap colouring
 GAP_CRIT_S = 0.8
 
 DOOR_LABELS = ("DRIVER", "PASSENGER", "REAR L", "REAR R", "BACK")
+
+CHASE_CY_OFFSET = 14           # chase camera centre below the scene centre (px)
+SKY_H = 68                     # backdrop strip height (px above the horizon)
+LEAD_BRAKING = -1.5            # lead acceleration (m/s2) shown as stop lamps
+SIGN_PITCH = 21
+
+# Headlamp beams on the road: reach (m ahead of the nose), parked-view reach,
+# half-width at the lamps, spread per metre, widest half-width, colours.
+BEAMS = {
+    "fog": (13.0, 2.4, 0.9, 0.50, 6.2, (56, 96, 44), (104, 170, 80)),
+    "low": (46.0, 3.4, 0.8, 0.05, 2.7, (98, 86, 40), (190, 170, 90)),
+    "high": (112.0, 6.0, 0.8, 0.045, 4.6, (150, 140, 96), (236, 226, 170)),
+}
+LOW_BEAM_NEAR_SIDE = 0.70      # the low beam's cut-off: the left half reaches this share
 
 
 def _k(c: RGB, k: float) -> RGB:
@@ -128,7 +148,7 @@ class CarCache:
 class SceneRenderer:
     """Owns the scene surface; ``render()`` returns it, redrawn if needed."""
 
-    def __init__(self, size: Tuple[int, int] = (238, 168),
+    def __init__(self, size: Tuple[int, int] = (238, 216),
                  colors: Optional[Mapping[str, RGB]] = None):
         self.w, self.h = size
         c = dict(colors or COLORS)
@@ -154,19 +174,23 @@ class SceneRenderer:
             "veh_body": (0, 30, 36),
             "veh_glass": (26, 22, 56),
             "tail": (220, 30, 34),
+            "path": (0, 108, 98),
+            "tree": (0, 132, 84),
         }
         self.surface = pygame.Surface(size)
         self.surface.fill((0, 0, 0))
         cx = self.w / 2.0
         hero = self._orbit(52.0, 17.0, 11.0, 470.0, (0.0, 0.0, 0.5), cx, self.h / 2.0 + 12)
-        chase = Camera(CHASE_POS, CHASE_TARGET, CHASE_F, cx, self.h / 2.0)
+        self._chase_cy = self.h / 2.0 + CHASE_CY_OFFSET
+        chase = Camera(CHASE_POS, CHASE_TARGET, CHASE_F, cx, self._chase_cy)
+        self.horizon_y = int(chase.horizon_y())
+        self.scenery = Scenery(self.w, SKY_H, self.pal["horizon"])
         self.cameras: List[Camera] = [
             Camera.lerp(hero, chase, i / VIEW_STEPS) for i in range(VIEW_STEPS + 1)]
         self.car = CarRenderer(car_palette(c))
         self.cache = CarCache(size, self.car, self.cameras)
         self._text: Dict[tuple, pygame.Surface] = {}
         self._glow: Dict[tuple, pygame.Surface] = {}
-        self._sky: Dict[str, pygame.Surface] = {}
         # Chase-view fast path: that camera looks straight down the road, so
         # a ground point's screen row and scale depend on its distance only
         # and its column is linear in the lateral offset (no per-point
@@ -177,6 +201,7 @@ class SceneRenderer:
         self._row_u0 = cu[0]
         self._row_uz = -CHASE_POS[2] * cu[2]
         self._fast = False
+        self._beam_sprites: Dict[str, tuple] = {}
         self._xs_tab: Dict[tuple, tuple] = {}
         self._sig: Optional[tuple] = None
         self._cen_xs: Sequence[float] = ()
@@ -211,7 +236,8 @@ class SceneRenderer:
 
     @staticmethod
     def _lamps(inp: SceneInputs) -> Tuple[bool, bool, bool]:
-        return (bool(inp.head), bool(inp.tail or inp.head), bool(inp.brake))
+        return (bool(inp.head or inp.high), bool(inp.tail or inp.head or inp.high),
+                bool(inp.brake))
 
     def prewarm(self, inp: SceneInputs) -> bool:
         """Render ONE not-yet-cached car sprite of the opening/closing move
@@ -230,10 +256,15 @@ class SceneRenderer:
     def _signature(self, d: SceneDirector, inp: SceneInputs) -> tuple:
         blink = int(d.clock * 2) if d.vision in ("stale", "lost") or (
             inp.light is not None and inp.light.flashing) else 0
+        # rain and snow keep falling while the road view is open
+        fall = int(d.clock * 10) if (d.view_step == VIEW_STEPS
+                                     and inp.env_weather in ("rain", "snow")) else 0
         return (d.view_step, d.door_step, d.vision, int(inp.speed_kmh + 0.5), inp.gear,
-                inp.ready, inp.acc_on, inp.doors, inp.rear_group, inp.door_any, inp.head, inp.high, inp.tail, inp.fog,
-                inp.brake, inp.limit_kmh, inp.light, inp.env_light, inp.ice_running,
-                inp.cruise_active, inp.cruise_set_kmh, blink)
+                inp.ready, inp.acc_on, inp.doors, inp.rear_group, inp.door_any, inp.head,
+                inp.high, inp.tail, inp.fog, inp.brake, inp.limit_kmh, inp.limit_source,
+                inp.light, inp.env_light, inp.env_place, inp.env_weather, inp.ice_running,
+                inp.signs_on, inp.signs_ahead, inp.cruise_active, inp.cruise_set_kmh,
+                inp.limit_conf is not None and inp.limit_conf < 0.35, blink, fall)
 
     # ── helpers ──────────────────────────────────────────────────────────────
 
@@ -291,7 +322,7 @@ class SceneRenderer:
         """Chase camera: ground row at world x -> (screen y, pixels per metre)."""
         dx = wx - CHASE_POS[0]
         k = CHASE_F / (dx * self._row_f0 + self._row_fz)
-        return (self.h / 2.0 - k * (dx * self._row_u0 + self._row_uz), k)
+        return (self._chase_cy - k * (dx * self._row_u0 + self._row_uz), k)
 
     def _xs_table(self, xs: Sequence[float]) -> tuple:
         """Per sample distance: (screen y, px/m, 1 - depth ratio), plus the
@@ -317,6 +348,7 @@ class SceneRenderer:
         """Road centre line (lateral, per sample distance) for ``_lat``."""
         xs = d.xs
         left, right = d.lanes[1], d.lanes[2]
+        path = d.path
         cen: List[float] = []
         for i in range(len(xs)):
             lv = left[i] if left and i < len(left) else None
@@ -327,8 +359,10 @@ class SceneRenderer:
                 cen.append(lv - 1.75)
             elif rv is not None:
                 cen.append(rv + 1.75)
+            elif path and i < len(path):
+                cen.append(path[i])
             else:
-                cen.append(0.0)
+                cen.append(cen[-1] if cen else 0.0)
         self._cen_xs = xs
         self._cen = cen
         self._cen_v = v
@@ -369,24 +403,40 @@ class SceneRenderer:
         v = d.view_step / VIEW_STEPS
         road_k = max(0.0, min(1.0, (v - 0.45) / 0.4))       # road/HUD fade-in
 
-        self._fast = d.view_step == VIEW_STEPS
-        self._draw_sky(s, cam, inp)
+        fast = self._fast = d.view_step == VIEW_STEPS
+        place = inp.env_place
+        enclosed = fast and place in ENCLOSED
         road = road_k > 0.0 and d.vision in ("live", "stale")
+        lines: list = []
         if road:
-            # lane fill under the floor lines: they double as speed stripes
             self._set_centre(d, v)
             lines = self._lane_points(cam, d, v)
-            self._draw_lane_fill(s, lines, d, road_k)
-            self._draw_floor(s, cam, d, v)
-            self._draw_road(s, cam, d, v, road_k, lines)
-            self._draw_objects(s, cam, d, inp, v, road_k)
         else:
             self._cen = []
-            self._draw_floor(s, cam, d, v)
+        if not enclosed:
+            self._draw_sky(s, cam, inp)
+        if road:
+            # lane fill under the floor lines: they double as speed stripes
+            self._draw_lane_fill(s, lines, d, road_k)
+        self._draw_floor(s, cam, d, v)
+        if enclosed:
+            self.scenery.draw_enclosure(s, place, self._row, compress, d.odo, self.pal["grid_hi"])
+        self._draw_beams(s, cam, inp, v)
+        if road:
+            self._draw_path(s, cam, d, v, road_k)
+            self._draw_road(s, cam, d, v, road_k, lines)
+        if fast and place and not enclosed:
+            self._draw_roadside(s, d, place, inp.env_light)
+        if fast and inp.env_weather == "fog":
+            self.scenery.draw_fog(s, self.horizon_y)
+        if road:
+            self._draw_objects(s, cam, d, inp, v, road_k)
 
         spr, pos = self.cache.get(d.view_step, d.door_step, self._lamps(inp))
         s.blit(spr, pos)
         self._draw_glows(s, cam, inp)
+        if fast and inp.env_weather in ("rain", "snow"):
+            self.scenery.draw_precipitation(s, inp.env_weather, d.clock)
 
         if v >= 0.5:
             self._draw_hud_drive(s, d, inp)
@@ -395,65 +445,16 @@ class SceneRenderer:
 
     # -- sky ---------------------------------------------------------------------
 
-    SKY_H = 64
-
-    def _sky_strip(self, light: Optional[str]) -> pygame.Surface:
-        key = light or "none"
-        strip = self._sky.get(key)
-        if strip is not None:
-            return strip
-        w, h = self.w, self.SKY_H
-        strip = pygame.Surface((w, h))
-        strip.fill((0, 0, 0))
-        cx = w // 2
-        if key == "night":
-            # fixed star field + crescent
-            seed = 12345
-            for _ in range(46):
-                seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF
-                x = seed % w
-                seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF
-                y = seed % (h - 14)
-                c = self.pal["label"] if seed & 0x300 else self.pal["text"]
-                strip.set_at((x, y), c)
-            mx, my = cx + 6, 17
-            pygame.draw.circle(strip, self.pal["warn"], (mx, my), 7)
-            pygame.draw.circle(strip, (0, 0, 0), (mx + 4, my - 2), 7)
-        elif key in ("dusk_dawn", "day"):
-            # striped sun: half set at dusk, clear of the horizon by day
-            r = 23 if key == "dusk_dawn" else 15
-            cy = h - 2 if key == "dusk_dawn" else h - 30
-            top, bot = self.pal["warn"], (232, 96, 96)
-            for yy in range(cy - r, min(h, cy + r + 1)):
-                dy = yy - cy
-                half = int(math.sqrt(max(0, r * r - dy * dy)))
-                t = (yy - (cy - r)) / float(2 * r)
-                if key == "dusk_dawn":
-                    # gaps grow towards the horizon
-                    band = (yy - (cy - r)) % 5
-                    if t > 0.28 and band >= 5 - int(1 + t * 3.2):
-                        continue
-                col = (int(top[0] + (bot[0] - top[0]) * t), int(top[1] + (bot[1] - top[1]) * t),
-                       int(top[2] + (bot[2] - top[2]) * t))
-                pygame.draw.line(strip, col, (cx - half, yy), (cx + half, yy))
-        # far ridge (decoration; black fill hides the sun behind it)
-        pts = [(0, h)]
-        heights = (7, 12, 6, 15, 9, 4, 3, 5, 3, 4, 8, 14, 7, 11, 5)
-        step = w / float(len(heights) - 1)
-        for i, hh in enumerate(heights):
-            pts.append((int(i * step), h - 1 - hh))
-        pts.append((w, h))
-        pygame.draw.polygon(strip, (0, 0, 0), pts)
-        pygame.draw.lines(strip, self.pal["ridge"], False, pts[1:-1])
-        pygame.draw.line(strip, self.pal["horizon"], (0, h - 1), (w, h - 1))
-        self._sky[key] = strip
-        return strip
-
     def _draw_sky(self, s: pygame.Surface, cam: Camera, inp: SceneInputs) -> None:
         hy = int(cam.horizon_y())
         if hy < -4 or hy > self.h:
             return
-        s.blit(self._sky_strip(inp.env_light), (0, hy - self.SKY_H + 1))
+        strip = self.scenery.backdrop(inp.env_place, inp.env_light, inp.env_weather)
+        # pan with the road: the far end of the centre line moves the backdrop
+        pan = 0
+        if self._fast and self._cen:
+            pan = int(max(-PAN, min(PAN, self._cen[-1] * 1.6)))
+        s.blit(strip, (0, hy - SKY_H + 1), (PAN - pan, 0, self.w, SKY_H))
 
     # -- floor -------------------------------------------------------------------
 
@@ -503,7 +504,181 @@ class SceneRenderer:
                 line(s, col, p[0], p[1])
             x += spacing
 
+    # -- headlamp beams ----------------------------------------------------------
+
+    def _draw_beams(self, s: pygame.Surface, cam: Camera, inp: SceneInputs, v: float) -> None:
+        """Light on the road ahead: a hatched fan per lamp set, in the vector
+        style (rows of the floor lit, an outline, a cut-off line).
+
+            position lamps only  nothing on the road (the lenses glow)
+            low beam             46 m fan with the asymmetric cut-off
+            high beam            112 m, wider, brighter, no cut-off
+            front fog            short wide fan under the others
+        """
+        kinds = []
+        if inp.fog:
+            kinds.append("fog")
+        if inp.high:
+            kinds.append("high")
+        elif inp.head:
+            kinds.append("low")
+        for kind in kinds:
+            if self._fast:
+                # the fan is fixed to the car: one cached sprite per kind
+                hit = self._beam_sprites.get(kind)
+                if hit is None:
+                    tmp = pygame.Surface((self.w, self.h))
+                    tmp.fill(KEY)
+                    box = self._beam_lines(tmp, cam, kind, 1.0)
+                    rect = pygame.Rect(box).clip(tmp.get_rect())
+                    spr = pygame.Surface(rect.size)
+                    spr.blit(tmp, (0, 0), rect)
+                    spr.set_colorkey(KEY, pygame.RLEACCEL)
+                    hit = self._beam_sprites[kind] = (spr, rect.topleft)
+                s.blit(hit[0], hit[1])
+            else:
+                self._beam_lines(s, cam, kind, v)
+
+    def _beam_lines(self, s: pygame.Surface, cam: Camera, kind: str, v: float):
+        """Draw one beam fan; returns its bounding box (x, y, w, h).
+
+        The fan points straight ahead of the car (it does not follow the
+        road), so in the chase view it is the same picture every frame."""
+        line = pygame.draw.line
+        fast = v >= 1.0
+        cx = self.w / 2.0
+        reach, parked, w0, spread, wmax, col, edge = BEAMS[kind]
+        reach = parked + (reach - parked) * v
+        near_side = reach * (LOW_BEAM_NEAR_SIDE if kind == "low" else 1.0)
+        left_pts = []
+        right_pts = []
+        r = 0.25
+        while True:
+            last = r >= reach
+            if last:
+                r = reach
+            hw = min(wmax, w0 + spread * r)
+            wx = 2.3 + r
+            yl = hw if r <= near_side else 0.0       # left of the cut-off: dark beyond
+            if fast:
+                sy, k = self._row(compress(wx))
+                a = (cx - k * yl, sy)
+                b = (cx + k * hw, sy)
+            else:
+                p = self._seg(cam, self._wx(wx, v), yl, self._wx(wx, v), -hw)
+                if p is None:
+                    break
+                a, b = p
+            line(s, edge if last else col, a, b)
+            if r <= near_side:
+                left_pts.append(a)
+            right_pts.append(b)
+            if last:
+                break
+            r = r * 1.16 + (0.28 if v > 0.5 else 0.22)
+        if len(left_pts) >= 2:
+            pygame.draw.lines(s, edge, False, left_pts)
+            if kind == "low" and len(right_pts) > len(left_pts):
+                # the step of the cut-off
+                n = len(left_pts)
+                mid = ((right_pts[n - 1][0] + left_pts[-1][0]) / 2.0, left_pts[-1][1])
+                line(s, edge, left_pts[-1], mid)
+        if len(right_pts) >= 2:
+            pygame.draw.lines(s, edge, False, right_pts)
+        pts = left_pts + right_pts
+        if not pts:
+            return (0, 0, 1, 1)
+        x0 = min(p[0] for p in pts)
+        x1 = max(p[0] for p in pts)
+        y0 = min(p[1] for p in pts)
+        y1 = max(p[1] for p in pts)
+        return (int(x0) - 1, int(y0) - 1, int(x1 - x0) + 4, int(y1 - y0) + 4)
+
+    # -- roadside scenery (by place label) ---------------------------------------
+
+    def _draw_roadside(self, s: pygame.Surface, d: SceneDirector, place: str,
+                       light: Optional[str]) -> None:
+        """Things that stream past, chosen by the place label (decoration,
+        like the backdrop; detected objects come through ``objects``)."""
+        pal = self.pal
+        left_e, right_e = d.edges[0], d.edges[1]
+        xs = d.xs
+
+        def side_y(x: float, sgn: float, off: float) -> float:
+            e = left_e if sgn > 0 else right_e
+            base = self._interp(xs, e, x) if e else sgn * 5.5
+            return base + sgn * off
+
+        if place == "forest_road":
+            col = pal["tree"] if light != "night" else _k(pal["tree"], 0.7)
+            pitch = 17.0
+            x = 102.0 - (d.odo % pitch)
+            while x > 9.0:
+                for sgn in (1.0, -1.0):
+                    g = self._place(None, x, side_y(x, sgn, 3.4), 1.0)
+                    if g is None:
+                        continue
+                    gx, gy, k = g
+                    tall = min(36.0, k * 4.4)
+                    half = max(2.0, min(9.0, k * 1.1))
+                    pts = [(gx - half, gy), (gx, gy - tall), (gx + half, gy)]
+                    pygame.draw.polygon(s, (0, 0, 0), pts)
+                    pygame.draw.lines(s, col, False, pts)
+                    pygame.draw.line(s, col, (gx - half * 0.6, gy - tall * 0.42),
+                                     (gx + half * 0.6, gy - tall * 0.42))
+                x -= pitch
+        elif place in ("highway", "rural_road", "bridge"):
+            # marker posts: white reflector on the left, red on the right
+            pitch = 25.0
+            rail = place == "bridge"
+            prev = {1.0: None, -1.0: None}
+            x = 100.0 - (d.odo % pitch)
+            while x > 3.0:
+                for sgn in (1.0, -1.0):
+                    g = self._place(None, x, side_y(x, sgn, 0.8), 1.0)
+                    if g is None:
+                        continue
+                    gx, gy, k = g
+                    top = gy - max(2.0, k * 1.0)
+                    pygame.draw.line(s, pal["lane_dim"], (gx, gy), (gx, top))
+                    s.set_at((int(gx), int(top)), (220, 220, 220) if sgn > 0 else pal["red"])
+                    if rail:
+                        if prev[sgn] is not None:
+                            pygame.draw.line(s, pal["lane_dim"], prev[sgn], (gx, top))
+                        prev[sgn] = (gx, top)
+                x -= pitch
+        elif place == "parking_lot":
+            # painted bays on both sides
+            pitch = 5.0
+            x = 60.0 - (d.odo % pitch)
+            while x > 2.0:
+                for sgn in (1.0, -1.0):
+                    a = self._place(None, x, sgn * 3.2, 1.0)
+                    b = self._place(None, x, sgn * 8.0, 1.0)
+                    if a and b:
+                        pygame.draw.line(s, pal["lane_dim"], (a[0], a[1]), (b[0], b[1]))
+                x -= pitch
+
     # -- road --------------------------------------------------------------------
+
+    def _draw_path(self, s: pygame.Surface, cam: Camera, d: SceneDirector,
+                   v: float, k: float) -> None:
+        """The model's planned path as chevrons (shows where the road goes
+        even without lane lines)."""
+        path = d.path
+        if not path or len(path) < 3 or d.vision != "live":
+            return
+        pts = self._line_points(cam, d.xs[:len(path)], path, v)
+        col = _k(self.pal["path"], k)
+        for i in range(2, len(pts)):
+            x, y = pts[i]
+            px, py = pts[i - 1]
+            half = max(2.0, (py - y) * 0.55)
+            if half > 9.0:
+                half = 9.0
+            drop = max(1.0, half * 0.5)
+            pygame.draw.lines(s, col, False, [(x - half, y + drop), (x, y), (x + half, y + drop)])
+
 
     def _line_points(self, cam: Camera, xs: Sequence[float], ys: Sequence[float],
                      v: float) -> List[Tuple[float, float]]:
@@ -609,7 +784,8 @@ class SceneRenderer:
         return g[0], g[1], cam.f / g[2]
 
     def draw_vehicle_rear(self, s: pygame.Surface, cx: float, by: float, w: float,
-                          line: RGB, kind: str = "car", k: float = 1.0) -> pygame.Rect:
+                          line: RGB, kind: str = "car", k: float = 1.0,
+                          braking: bool = False) -> pygame.Rect:
         """A vehicle seen from behind, ``w`` pixels wide, standing on ``by``."""
         pal = self.pal
         w = max(7.0, w)
@@ -642,9 +818,15 @@ class SceneRenderer:
         lw = max(2, int(w * 0.20))
         lh = max(1, int(h * 0.13))
         ly = int(by - h * (0.30 if tall else 0.50))
-        red = _k(pal["tail"], k)
+        red = _k(pal["red"] if braking else pal["tail"], k)
         pygame.draw.rect(s, red, (int(x0) + 1, ly, lw, lh))
         pygame.draw.rect(s, red, (int(x1) - lw, ly, lw, lh))
+        if braking and k > 0.6:
+            r = max(3, int(w * 0.22))
+            self._add_glow(s, (int(x0) + 1 + lw // 2, ly + lh // 2), r, pal["red"])
+            self._add_glow(s, (int(x1) - lw // 2, ly + lh // 2), r, pal["red"])
+            if w >= 14:
+                pygame.draw.line(s, red, (cx - w * 0.14, top + 1), (cx + w * 0.14, top + 1))
         if w >= 26:
             pw = int(w * 0.24)
             pygame.draw.rect(s, _k(pal["lane_dim"], k),
@@ -669,7 +851,8 @@ class SceneRenderer:
         gap = d.time_gap_s(inp.real_speed_kmh)
         col = self.gap_color(gap)
         w = max(9.0, 1.8 * ppm)
-        rect = self.draw_vehicle_rear(s, cx, by, w, col, lead.kind, a)
+        braking = lead.accel is not None and lead.accel <= LEAD_BRAKING
+        rect = self.draw_vehicle_rear(s, cx, by, w, col, lead.kind, a, braking)
         if a < 0.6:
             return
         # target brackets
@@ -701,11 +884,15 @@ class SceneRenderer:
             s.blit(st, (tx, ty + 17))
             sx = tx + st.get_width() + 4
         if lead.v_rel is not None and abs(lead.v_rel) >= 0.8:
-            pygame.draw.rect(s, (0, 0, 0), (sx - 1, ty + 16, 9, 9))
-            if lead.v_rel < 0:      # closing: arrow towards us
-                pygame.draw.polygon(s, self.pal["warn"], [(sx, ty + 18), (sx + 6, ty + 18), (sx + 3, ty + 23)])
+            closing = lead.v_rel < 0
+            vc = self.pal["warn"] if closing else self.pal["green"]
+            vt = self.text("%d" % int(abs(lead.v_rel) * 3.6 + 0.5), 8, vc, mono=False)
+            pygame.draw.rect(s, (0, 0, 0), (sx - 1, ty + 16, 10 + vt.get_width(), 9))
+            if closing:             # arrow towards us, closing speed in km/h
+                pygame.draw.polygon(s, vc, [(sx, ty + 18), (sx + 6, ty + 18), (sx + 3, ty + 23)])
             else:                   # pulling away
-                pygame.draw.polygon(s, self.pal["green"], [(sx, ty + 23), (sx + 6, ty + 23), (sx + 3, ty + 18)])
+                pygame.draw.polygon(s, vc, [(sx, ty + 23), (sx + 6, ty + 23), (sx + 3, ty + 18)])
+            s.blit(vt, (sx + 8, ty + 17))
 
     def _draw_object(self, s: pygame.Surface, cam: Camera, o, v: float, k: float) -> None:
         g = self._place(cam, o.x, o.y, v)
@@ -778,15 +965,20 @@ class SceneRenderer:
     # -- glows -------------------------------------------------------------------
 
     def _draw_glows(self, s: pygame.Surface, cam: Camera, inp: SceneInputs) -> None:
-        if not (inp.head or inp.tail or inp.brake):
+        if not (inp.head or inp.high or inp.tail or inp.brake):
             return
         pts = self.car.lamp_points(cam)
         scale = cam.f / max(1.0, math.dist(cam.pos, (0.0, 0.0, 0.6)))
         r = max(4, int(scale * 0.30))
-        if inp.head:
+        if inp.head or inp.high:
             for n in ("head_l", "head_r"):
                 if n in pts:
-                    self._add_glow(s, pts[n], r + 3, self.pal["warn"])
+                    self._add_glow(s, pts[n], r + (6 if inp.high else 3), self.pal["warn"])
+        elif inp.tail:
+            # position lamps: a small marker glow in the headlamp
+            for n in ("head_l", "head_r"):
+                if n in pts:
+                    self._add_glow(s, pts[n], max(3, r - 2), (150, 130, 70))
         if inp.brake:
             for n in ("tail_l", "tail_r"):
                 if n in pts:
@@ -817,36 +1009,84 @@ class SceneRenderer:
         pygame.draw.rect(s, self.pal["lane_mid"], (x, y, 15, 19), 1)
         s.blit(g, (x + (15 - g.get_width()) // 2 + 1, y + 2))
 
-    def _draw_limit(self, s: pygame.Surface, cx: int, cy: int, kmh: int, over: bool) -> None:
-        """European limit sign as a neon ring."""
+    def _draw_limit(self, s: pygame.Surface, cx: int, cy: int, kmh: int, over: bool,
+                    seen: bool = True) -> None:
+        """European limit sign as a neon ring. A limit that follows from a
+        default rule (no sign seen) gets a thin dim ring."""
         r = 13
         pygame.draw.circle(s, (0, 0, 0), (cx, cy), r)
-        pygame.draw.circle(s, self.pal["red"], (cx, cy), r, 3)
-        txt = self.text(str(kmh), 14, self.pal["warn"] if over else self.pal["text"])
+        if seen:
+            pygame.draw.circle(s, self.pal["red"], (cx, cy), r, 3)
+        else:
+            pygame.draw.circle(s, (150, 30, 34), (cx, cy), r, 1)
+        col = self.pal["warn"] if over else self.pal["text"] if seen else self.pal["dim"]
+        txt = self.text(str(kmh), 14, col)
         s.blit(txt, (cx - txt.get_width() // 2 + (1 if kmh < 100 else 0), cy - txt.get_height() // 2))
+
+    def _tiny(self, string: str, color: RGB) -> pygame.Surface:
+        return self.text(string, 8, color, mono=False)
+
+    def _draw_sign_columns(self, s: pygame.Surface, inp: SceneInputs) -> None:
+        """Right: the rules in effect, newest at the bottom. Left: warning
+        signs ahead with the expected distance."""
+        pal = self.pal
+        x = self.w - 22
+        y = 33
+        for it in inp.signs_on:
+            if y + 19 > self.h - 16:
+                break
+            s.blit(sign_surface(it.id, it.code, it.unsure, self._tiny), (x, y))
+            if it.side:
+                t = self._tiny("R" if it.side == "r" else "L", pal["label"])
+                s.blit(t, (x - t.get_width() - 1, y + 6))
+            y += SIGN_PITCH
+        y = 45
+        for it in inp.signs_ahead[:3]:
+            s.blit(sign_surface(it.id, it.code, it.unsure, self._tiny), (4, y))
+            if it.m is not None:
+                t = self._tiny("%dm" % it.m, pal["warn"])
+                pygame.draw.rect(s, (0, 0, 0), (25, y + 5, t.get_width() + 2, 9))
+                s.blit(t, (26, y + 6))
+            y += SIGN_PITCH
 
     def _draw_hud_drive(self, s: pygame.Surface, d: SceneDirector, inp: SceneInputs) -> None:
         pal = self.pal
         # speed + gear, top-left
         spd = self.text("%d" % int(inp.speed_kmh + 0.5), 28, pal["text"])
+        pygame.draw.rect(s, (0, 0, 0), (2, 2, spd.get_width() + 30, 27))
         s.blit(spd, (5, 1))
-        unit = self.text("km/h", 8, pal["label"], mono=False)
-        s.blit(unit, (5 + spd.get_width() + 3, 6))
         gx = 5 + spd.get_width() + 3
-        g = self.text(inp.gear, 14, pal["value"])
-        s.blit(g, (gx + 1, 14))
+        s.blit(self._tiny("km/h", pal["label"]), (gx, 6))
+        s.blit(self.text(inp.gear, 14, pal["value"]), (gx + 1, 14))
         # speed limit + traffic light, top-right (the corner dot is the link LED)
         x_right = self.w - 20
         if inp.limit_kmh:
             over = inp.speed_kmh > inp.limit_kmh + 3
-            self._draw_limit(s, x_right - 14, 16, inp.limit_kmh, over)
+            seen = inp.limit_source != "default" and (inp.limit_conf is None or inp.limit_conf >= 0.35)
+            self._draw_limit(s, x_right - 14, 16, inp.limit_kmh, over, seen)
             x_right -= 32
         if inp.light is not None and inp.light.state in self.LIGHT_COLORS:
             self._draw_signal(s, x_right - 12, 3, 3, inp.light, d.clock)
             if inp.light.dist_m is not None:
-                t = self.text("%dm" % int(inp.light.dist_m + 0.5), 8, pal["label"], mono=False)
+                t = self._tiny("%dm" % int(inp.light.dist_m + 0.5), pal["text"])
+                pygame.draw.rect(s, (0, 0, 0), (x_right - 12 - t.get_width() - 4, 4, t.get_width() + 2, 9))
                 s.blit(t, (x_right - 12 - t.get_width() - 3, 5))
-        # perception status, bottom-left (nothing when live)
+        if inp.cruise_active and inp.cruise_set_kmh:
+            # engaged cruise: the set speed sits under the speed (the full
+            # cruise slot is in the strip below the scene)
+            t = self._tiny("SET %d" % inp.cruise_set_kmh, (0, 0, 0))
+            pygame.draw.rect(s, pal["green"], (5, 31, t.get_width() + 6, 10))
+            s.blit(t, (8, 33))
+        self._draw_sign_columns(s, inp)
+        # bottom-left: lamps that are on, above them the perception status
+        x = 4
+        y = self.h - 14
+        for on, label, col in ((inp.tail and not inp.head and not inp.high, "POS", pal["green"]),
+                               (inp.head and not inp.high, "LOW", pal["warn"]),
+                               (inp.high, "HIGH", (66, 165, 245)),
+                               (inp.fog, "FOG", pal["green"])):
+            if on:
+                x += self._chip(s, x, y, label, col) + 2
         tag = None
         if d.vision == "off":
             tag = ("VISION OFF", pal["dim"])
@@ -857,7 +1097,7 @@ class SceneRenderer:
         elif d.vision == "stale":
             tag = ("SIGNAL LOST", pal["warn"] if int(d.clock * 2) % 2 else pal["orange"])
         if tag:
-            self._chip(s, 4, self.h - 14, tag[0], tag[1])
+            self._chip(s, 4, y - 13 if x > 4 else y, tag[0], tag[1])
 
     def _draw_hud_parked(self, s: pygame.Surface, d: SceneDirector, inp: SceneInputs) -> None:
         pal = self.pal

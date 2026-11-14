@@ -6,9 +6,14 @@ Simulated drive for the main-screen scene: screenshots and a desk demo.
     python -m cyberpunk_computer.ui.scene.demo --bench           # frame cost
 
 The timeline (seconds): parked, doors open and close, READY, lamps on, pull
-away, lead vehicle closing in, speed-limit sign, left curve with street
-lamps, red traffic light, stop, scene closes. ``timeline()`` is pure Python
-(AppState + a roadsense scene mapping), so tests use it without pygame.
+away, lead vehicle closing in, speed-limit sign and rules, left curve with
+street lamps, red traffic light, stop, scene closes. ``state_at`` /
+``scene_at`` are pure Python (AppState + a roadsense scene mapping).
+
+``mods`` (a dict) overrides parts of the timeline for the variant shots:
+``env`` (place / light / weather labels), ``signs``, ``limit``, ``lamps``
+(tail / head / high / fog), ``cruise`` (VehicleState cruise fields),
+``lead`` (False = none), ``objects`` (False = none), ``straight``.
 
 Vehicle values go through the real state fields; the road arrives the way the
 backend is expected to send it: ``roadsense_scene`` events into a SceneFeed.
@@ -50,14 +55,24 @@ def speed_at(t: float) -> float:
     return 0.0
 
 
-def scene_at(t: float, seq: int) -> Optional[Dict[str, Any]]:
+SIGNS_DEMO = {
+    "on": [{"id": "built_up_area", "s": "D-42", "q": True},
+           {"id": "priority_road", "s": "D-1"},
+           {"id": "no_overtaking", "s": "B-25"},
+           {"id": "no_stopping", "s": "B-36", "side": "r"}],
+    "ahead": [{"id": "pedestrian_crossing_ahead", "s": "A-16", "m": 80}],
+}
+
+
+def scene_at(t: float, seq: int, mods: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """The roadsense scene mapping at time t (wire format, y RIGHT positive)."""
+    mods = mods or {}
     if t < 9.5:
         return None
     xs = DEFAULT_XS
     # curvature: straight, then a left curve between 22 s and 29 s
     kappa = 0.0
-    if 21.0 < t < 30.0:
+    if 21.0 < t < 30.0 and not mods.get("straight"):
         kappa = 0.0052 * math.sin(math.pi * (t - 21.0) / 9.0)
     wander = 0.15 * math.sin(t * 0.9)
 
@@ -77,7 +92,9 @@ def scene_at(t: float, seq: int) -> Optional[Dict[str, Any]]:
             d = _ramp(t, 30.0, 36.0, 24.0, 6.5)
         v_rel = -6.7 if t < 20.0 else (-2.9 if t >= 30.0 else 0.0)
         lead = {"d": round(d, 1), "y": round(-(wander * 0.5 + 0.5 * kappa * d * d), 2),
-                "v_rel": v_rel, "prob": 0.95}
+                "v_rel": v_rel, "prob": 0.95, "a": -2.4 if 30.0 <= t < 36.0 else 0.1}
+    if mods.get("lead") is False:
+        lead = None
     objects: List[Dict[str, Any]] = []
     if 19.0 < t < 36.0:
         # street lamps every 30 m on the right, anchored to the road
@@ -88,22 +105,35 @@ def scene_at(t: float, seq: int) -> Optional[Dict[str, Any]]:
             if x > 2.0:
                 objects.append({"kind": "lamp", "x": round(x, 1),
                                 "y": round(4.2 - (wander + 0.5 * kappa * x * x), 2), "state": "on"})
+    if mods.get("objects") is False:
+        objects = []
+    reach = min(100.0, 25.0 + speed_at(t) / 3.6 * 6.0)       # the plan covers ~6 s
+    path = {"y": [round(-(wander * (1 - x / 100.0) + 0.5 * kappa * x * x), 2)
+                  for x in xs if x <= reach]}
     out: Dict[str, Any] = {"seq": seq, "x": list(xs), "lanes": lanes, "edges": edges,
-                           "lead": lead, "objects": objects,
+                           "path": path, "lead": lead, "objects": objects,
                            "env": {"light": "dusk_dawn" if t < 19.0 else "night",
                                    "place": "city_street", "weather": "clear"}}
     if t >= 13.5:
-        out["limit"] = {"kmh": 50, "src": "sign"}
+        out["limit"] = {"kmh": 50, "src": "sign", "conf": 0.8}
+        out["signs"] = SIGNS_DEMO
+    for key in ("env", "signs", "limit"):
+        if key in mods:
+            if mods[key] is None:
+                out.pop(key, None)
+            else:
+                out[key] = mods[key]
     if 28.5 <= t < 40.0:
         out["light"] = {"state": "red" if t < 39.0 else "green",
                         "d": round(_ramp(t, 28.5, 36.0, 70.0, 12.0), 0), "y": 4.0}
     return out
 
 
-def state_at(t: float, vision: str = "live") -> AppState:
+def state_at(t: float, vision: str = "live", mods: Optional[Dict[str, Any]] = None) -> AppState:
     """AppState at time t. ``vision``: ``live`` (scene events), ``off``
     (roadsense not running) or ``health`` (running, but only the 5 s health
     mirror reaches the state: what the backend delivers today)."""
+    mods = mods or {}
     st = AppState()
     spd = speed_at(t)
     ready = t >= 6.0
@@ -120,18 +150,23 @@ def state_at(t: float, vision: str = "live") -> AppState:
     veh = replace(
         st.vehicle, ready_mode=ready, acc_on=True, ig_on=True, gear=gear, speed_kmh=spd,
         real_speed_kmh=spd, display_speed_kmh=float(int(spd * 1.08 + 0.5)),
-        ice_running=ice, brake_switch=braking, brake_pressed=40 if braking else 0)
+        ice_running=ice, brake_switch=braking, brake_pressed=40 if braking else 0,
+        cruise_main_switch=False if ready else None)
+    if "cruise" in mods:
+        veh = replace(veh, **mods["cruise"])
     energy = replace(st.energy, hv_battery_voltage=228.0 - power * 0.6,
                      hv_battery_current=power * 1000.0 / 228.0,
                      battery_soc=0.62 - t * 0.0004)
+    lamps = {"tail": lights, "head": lights, "high": False, "fog": False}
+    lamps.update(mods.get("lamps") or {})
     decoded = {
         "driver_door_open": {"value": 2.0 <= t < 5.2},
         "passenger_door_open": {"value": 3.0 <= t < 4.6},
         "rear_door_open": {"value": 3.6 <= t < 4.9},
-        "lamp_tail": {"value": lights},
-        "lamp_head": {"value": lights},
-        "lamp_high_beam": {"value": False},
-        "lamp_fog_front": {"value": False},
+        "lamp_tail": {"value": lamps["tail"]},
+        "lamp_head": {"value": lamps["head"]},
+        "lamp_high_beam": {"value": lamps["high"]},
+        "lamp_fog_front": {"value": lamps["fog"]},
     }
     rs_state = "running" if vision != "off" else "off"
     health = None
@@ -178,7 +213,9 @@ class DemoStore:
 class Sim:
     """MainScreen driven by the timeline with a simulated clock."""
 
-    def __init__(self, vision: str = "live", size: Tuple[int, int] = SIZE):
+    def __init__(self, vision: str = "live", size: Tuple[int, int] = SIZE,
+                 mods: Optional[Dict[str, Any]] = None):
+        self.mods = mods or {}
         from ..screens.main_screen import MainScreen
         from .page import ScenePage
         self.t = 0.0
@@ -186,6 +223,7 @@ class Sim:
         self.feed = SceneFeed(clock=lambda: self.t)
         self.store = DemoStore()
         self.screen = MainScreen(size, None)
+        self.screen._frames = 1            # no start-up frame without the scene
         old = self.screen.scene_page
         self.screen.scene_page = ScenePage(old.x, old.y, old.width, feed=self.feed,
                                            clock=lambda: self.t)
@@ -196,10 +234,10 @@ class Sim:
 
     def step(self, dt: float) -> None:
         self.t += dt
-        self.store.push(state_at(self.t, self.vision))
+        self.store.push(state_at(self.t, self.vision, self.mods))
         stale = self.stale_from is not None and self.t >= self.stale_from
         if self.vision == "live" and not stale and self.t - self._last_scene_t >= 0.2:
-            sc = scene_at(self.t, self._seq + 1)
+            sc = scene_at(self.t, self._seq + 1, self.mods)
             if sc is not None:
                 self._seq += 1
                 self._last_scene_t = self.t
@@ -215,48 +253,135 @@ class Sim:
         self.screen.render(surface)
 
 
-# (file name, time, vision variant, stale from, caption)
+def _env(place: Optional[str], light: Optional[str], weather: Optional[str] = "clear") -> Dict[str, Any]:
+    return {"env": {k: v for k, v in (("place", place), ("light", light), ("weather", weather)) if v}}
+
+
+_NO_LAMPS = {"tail": False, "head": False, "high": False, "fog": False}
+_OPEN_ROAD = {"lead": False, "objects": False, "signs": None, "straight": True}
+
+# (file name, time, vision variant, stale from, caption, mods)
 SHOTS = (
-    ("01_parked_acc", 1.0, "live", None, "parked, ACC on, doors closed"),
-    ("02_doors_opening", 3.3, "live", None, "driver + passenger door, rear swinging open"),
-    ("03_doors_open", 4.4, "live", None, "driver, passenger and rear doors open"),
-    ("04_ready_lights", 7.6, "live", None, "READY, low beam + tail lamps on"),
-    ("05_pull_away", 9.7, "live", None, "pulling away: camera swings behind the car"),
-    ("06_transition", 10.1, "live", None, "transition: road fades in"),
-    ("07_drive_road", 11.5, "live", None, "driving, lanes live, no lead vehicle"),
-    ("08_lead_far", 14.0, "live", None, "lead vehicle far, speed limit sign seen"),
-    ("09_lead_close", 19.5, "live", None, "lead vehicle closing in (gap colouring)"),
-    ("10_curve_night", 25.5, "live", None, "left curve at night, street lamps"),
-    ("11_red_light", 33.0, "live", None, "red light ahead, braking behind the lead"),
-    ("12_stopped_hold", 37.0, "live", None, "stopped at the light, scene still open"),
-    ("13_closing", 39.2, "live", None, "scene closing after the stop"),
-    ("14_parked_again", 43.0, "live", None, "back to the parked view (P)"),
-    ("15_drive_no_vision", 19.5, "off", None, "driving, roadsense off: floor only"),
-    ("16_drive_stale", 24.0, "live", 20.0, "driving, road data stale: dimmed, no lead"),
-    ("17_drive_lost", 29.0, "live", 20.0, "driving, road data lost: NO SIGNAL"),
-    ("18_drive_health_only", 19.5, "health", None,
-     "driving, roadsense up but no scene feed (today's backend): limit + sky only"),
+    # ── states ──
+    ("parked_acc", 1.0, "live", None, "parked, ACC on, doors closed", None),
+    ("doors_opening", 3.3, "live", None, "driver + passenger door, rear swinging open", None),
+    ("doors_open", 4.4, "live", None, "driver, passenger and rear group open", None),
+    ("parked_position_lamps", 7.6, "live", None, "parked, READY, position lamps only",
+     {"lamps": {"tail": True, "head": False}}),
+    ("parked_low_beam", 7.6, "live", None, "parked, READY, low beam", None),
+    ("parked_high_beam_fog", 7.6, "live", None, "parked, high beam + front fog",
+     {"lamps": {"tail": True, "head": True, "high": True, "fog": True}}),
+    ("pull_away", 9.7, "live", None, "pulling away: camera swings behind the car", None),
+    ("transition", 10.1, "live", None, "transition: road fades in", None),
+    ("drive_road", 11.5, "live", None, "driving, lanes + path live, no lead vehicle", None),
+    ("lead_far_signs", 14.0, "live", None, "lead far, limit sign, rules in effect, warning ahead", None),
+    ("lead_close", 19.5, "live", None, "lead vehicle closing in (gap colouring, closing speed)", None),
+    ("curve_night", 25.5, "live", None, "left curve at night: backdrop pans, street lamps", None),
+    ("red_light_lead_braking", 33.0, "live", None, "red light, lead braking (stop lamps), own stop lamps", None),
+    ("stopped_hold", 37.0, "live", None, "stopped at the light, scene still open", None),
+    ("closing", 39.2, "live", None, "scene closing after the stop", None),
+    ("parked_again", 43.0, "live", None, "back to the parked view (P)", None),
+    ("drive_no_vision", 19.5, "off", None, "driving, roadsense off: floor only", None),
+    ("drive_stale", 24.0, "live", 20.0, "road data stale: dimmed, no lead", None),
+    ("drive_lost", 29.0, "live", 20.0, "road data lost: NO SIGNAL", None),
+    ("drive_health_only", 19.5, "health", None, "roadsense up, no scene feed: limit + sky only", None),
+    # ── headlamps on the road (rural night, open road) ──
+    ("beam_off", 19.5, "live", None, "lamps off",
+     dict(_OPEN_ROAD, lamps=_NO_LAMPS, **_env("rural_road", "night"))),
+    ("beam_position", 19.5, "live", None, "position lamps: nothing on the road",
+     dict(_OPEN_ROAD, lamps={"tail": True, "head": False}, **_env("rural_road", "night"))),
+    ("beam_low", 19.5, "live", None, "low beam: 46 m fan with the cut-off step",
+     dict(_OPEN_ROAD, **_env("rural_road", "night"))),
+    ("beam_high", 19.5, "live", None, "high beam: 112 m, wider, brighter",
+     dict(_OPEN_ROAD, lamps={"tail": True, "head": True, "high": True}, **_env("rural_road", "night"))),
+    ("beam_low_fog", 19.5, "live", None, "low beam + front fog lamps",
+     dict(_OPEN_ROAD, lamps={"tail": True, "head": True, "fog": True}, **_env("rural_road", "night", "fog"))),
+    # ── scenery by place / light / weather ──
+    ("env_unknown", 19.5, "live", None, "no environment labels: neutral ridge", {"env": None}),
+    ("env_city_day", 19.5, "live", None, "city_street, day, clear", _env("city_street", "day")),
+    ("env_city_dusk", 19.5, "live", None, "city_street, dusk_dawn, clear", _env("city_street", "dusk_dawn")),
+    ("env_city_night_rain", 19.5, "live", None, "city_street, night, rain", _env("city_street", "night", "rain")),
+    ("env_residential_dusk", 19.5, "live", None, "residential, dusk_dawn", _env("residential", "dusk_dawn")),
+    ("env_residential_night_snow", 19.5, "live", None, "residential, night, snow",
+     _env("residential", "night", "snow")),
+    ("env_highway_day", 19.5, "live", None, "highway, day, clear",
+     dict(_env("highway", "day"), limit={"kmh": 140, "src": "default"},
+          signs={"on": [{"id": "motorway", "s": "D-9"}]}, lamps=_NO_LAMPS)),
+    ("env_highway_night", 19.5, "live", None, "highway, night", _env("highway", "night")),
+    ("env_rural_day_overcast", 19.5, "live", None, "rural_road, day, overcast",
+     dict(_env("rural_road", "day", "overcast"), lamps=_NO_LAMPS)),
+    ("env_rural_dusk", 19.5, "live", None, "rural_road, dusk_dawn, clear", _env("rural_road", "dusk_dawn")),
+    ("env_forest_day", 19.5, "live", None, "forest_road, day", dict(_env("forest_road", "day"), lamps=_NO_LAMPS)),
+    ("env_forest_night_fog", 19.5, "live", None, "forest_road, night, fog", _env("forest_road", "night", "fog")),
+    ("env_bridge_dusk", 19.5, "live", None, "bridge, dusk_dawn", _env("bridge", "dusk_dawn")),
+    ("env_gas_station_night", 19.5, "live", None, "gas_station, night", _env("gas_station", "night")),
+    ("env_parking_lot_night", 19.5, "live", None, "parking_lot, night",
+     dict(_env("parking_lot", "night"), signs=None, limit=None)),
+    ("env_tunnel", 19.5, "live", None, "tunnel", dict(_env("tunnel", "night"), objects=False)),
+    ("env_underground_parking", 19.5, "live", None, "underground_parking",
+     dict(_env("underground_parking", "night"), objects=False, signs=None, limit=None, lead=False)),
+    # ── signs and cruise ──
+    ("signs_many", 19.5, "live", None, "six rules in effect, three warnings, default-rule limit",
+     {"limit": {"kmh": 50, "src": "default"}, "signs": {
+         "on": [{"id": "built_up_area", "s": "D-42"}, {"id": "living_street", "s": "D-40", "v": 20},
+                {"id": "one_way", "s": "D-3"}, {"id": "no_parking", "s": "B-35", "side": "l"},
+                {"id": "no_left_turn", "s": "B-21"}, {"id": "no_dangerous_goods", "s": "B-13"}],
+         "ahead": [{"id": "roundabout_ahead", "s": "A-8", "m": 60},
+                   {"id": "children_ahead", "s": "A-17", "m": 140},
+                   {"id": "uneven_road_ahead", "s": "A-11", "m": 210}]}}),
+    ("cruise_ready", 19.5, "live", None, "cruise main switch on, memory speed",
+     {"cruise": {"cruise_main_switch": True, "cruise_memory_speed": 70}}),
+    ("cruise_active", 19.5, "live", None, "cruise engaged, set speed",
+     {"cruise": {"cruise_main_switch": True, "cruise_active": True, "cruise_set_speed": 50}}),
 )
 
 
-def render_shots(out_dir: str, scale: int = 4) -> List[str]:
+def render_shots(out_dir: str, scale: int = 4, copy_to: Optional[str] = None) -> List[str]:
+    """Render every SHOTS entry: ``NN_name.png`` (native) and ``NN_name@4x.png``;
+    the upscaled ones are also copied to ``copy_to`` as ``mfd2_NN_name.png``."""
     import pygame
     os.makedirs(out_dir, exist_ok=True)
     pygame.init()
     pygame.display.set_mode(SIZE)
     surf = pygame.Surface(SIZE)
     paths = []
-    for name, t, vision, stale_from, _caption in SHOTS:
-        sim = Sim(vision)
+    for i, (name, t, vision, stale_from, _caption, mods) in enumerate(SHOTS):
+        sim = Sim(vision, mods=mods)
         sim.stale_from = stale_from
         sim.run_to(t)
-        sim.screen.scene_page.scene and sim.screen.scene_page.scene.invalidate()
+        scene = sim.screen.scene_page.scene
+        if scene is not None:
+            scene.invalidate()
         sim.frame(surf)
-        p = os.path.join(out_dir, name + ".png")
+        base = "%02d_%s" % (i + 1, name)
+        p = os.path.join(out_dir, base + ".png")
         pygame.image.save(surf, p)
         big = pygame.transform.scale(surf, (SIZE[0] * scale, SIZE[1] * scale))
-        pygame.image.save(big, os.path.join(out_dir, name + "@%dx.png" % scale))
+        pygame.image.save(big, os.path.join(out_dir, base + "@%dx.png" % scale))
+        if copy_to:
+            os.makedirs(copy_to, exist_ok=True)
+            pygame.image.save(big, os.path.join(copy_to, "mfd2_%s.png" % base))
         paths.append(p)
+    # the sign pictograms, enlarged, as a legend
+    from .signs import KNOWN_IDS, S, sign_surface
+    from ..fonts import get_tiny_font
+    font = get_tiny_font(8)
+    cols, cell_w, cell_h = 6, 80, 34
+    rows = (len(KNOWN_IDS) + 1 + cols - 1) // cols
+    sheet = pygame.Surface((cols * cell_w, rows * cell_h))
+    sheet.fill((0, 0, 0))
+    ids = list(KNOWN_IDS) + ["(unknown id)"]
+    for n, rid in enumerate(ids):
+        x, y = (n % cols) * cell_w, (n // cols) * cell_h
+        pic = sign_surface(rid, "B-13", False, lambda s_, c_: font.render(s_, False, c_))
+        sheet.blit(pic, (x + (cell_w - S) // 2, y + 2))
+        lab = font.render(rid.replace("_ahead", "~").replace("_", " ")[:18], False, (110, 150, 160))
+        sheet.blit(lab, (x + (cell_w - lab.get_width()) // 2, y + 23))
+    big = pygame.transform.scale(sheet, (sheet.get_width() * scale, sheet.get_height() * scale))
+    pygame.image.save(sheet, os.path.join(out_dir, "signs_legend.png"))
+    pygame.image.save(big, os.path.join(out_dir, "signs_legend@%dx.png" % scale))
+    if copy_to:
+        pygame.image.save(big, os.path.join(copy_to, "mfd2_signs_legend.png"))
     return paths
 
 
@@ -319,12 +444,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--live", action="store_true", help="run in a window")
     ap.add_argument("--bench", action="store_true", help="print frame cost")
     ap.add_argument("--scale", type=int, default=4)
+    ap.add_argument("--copy-to", metavar="DIR", help="also copy the upscaled shots there")
     args = ap.parse_args(argv)
     if args.shots or args.bench:
         os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
         os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
     if args.shots:
-        for p in render_shots(args.shots, args.scale):
+        for p in render_shots(args.shots, args.scale, args.copy_to):
             print(p)
     if args.bench:
         for k, v in bench().items():

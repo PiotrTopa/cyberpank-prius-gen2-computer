@@ -1,8 +1,8 @@
 """
-Power box: the strip under the scene (HV battery power, history graph, SOC).
+Status strip under the scene: cruise slot, HV battery power, history, SOC.
 
 ``PowerHistory`` (pure Python) keeps one averaged sample per second for an
-hour; ``PowerBox`` draws the strip into a cached surface that is re-drawn
+hour; ``StatusStrip`` draws the strip into a cached surface that is re-drawn
 only when a shown value changes (about once a second while driving).
 """
 
@@ -80,12 +80,23 @@ def soc_color(pct: int, colors: Mapping[str, RGB]) -> RGB:
     return colors["red_bright"]
 
 
-class PowerBox:
-    """Draws the power strip. ``render()`` returns the cached surface."""
+class StatusStrip:
+    """The slim strip under the scene: cruise slot | HV power | (page dots).
+
+        x 0..71     CRUISE  state (-- / OFF / READY / ON), set speed, gap bars
+        x 74..      HV power in kW with ICE / EV / CHG flag, history bars
+                    (1 px bar + 1 px gap, discharge up, charge down), SOC as
+                    the eight segments of the factory gauge
+
+    The cruise slot is reserved for the cruise settings: today it shows what
+    the state has (active flag, main switch, set / memory speed) and "--" for
+    what it does not; the gap bars appear only when a gap setting exists.
+    ``render()`` returns a cached surface, redrawn when a shown value changes.
+    """
 
     RANGE_KW = 25.0
-    COLS = 41
-    COL_W = 3                       # 2 px bar + 1 px gap
+    COLS = 22
+    CRUISE_W = 72
 
     def __init__(self, size: Tuple[int, int], history: PowerHistory,
                  colors: Optional[Mapping[str, RGB]] = None):
@@ -112,97 +123,136 @@ class PowerBox:
             self._text[key] = t
         return t
 
+    @staticmethod
+    def cruise_view(active: bool, main: Optional[bool], set_kmh: Optional[int],
+                    mem_kmh: Optional[int]) -> Tuple[str, str, str]:
+        """(state word, speed text, speed kind) of the cruise slot.
+
+        state: ON (engaged) / READY (main switch on) / OFF (main switch off) /
+        "--" (nothing known). speed kind: "set", "mem" (memory speed, not
+        engaged) or "" (unknown, shown as "--")."""
+        if active:
+            state = "ON"
+        elif main is True:
+            state = "READY"
+        elif main is False:
+            state = "OFF"
+        else:
+            state = "--"
+        if set_kmh:
+            return state, str(set_kmh), "set"
+        if mem_kmh:
+            return state, str(mem_kmh), "mem"
+        return state, "--", ""
+
     def render(self, power_kw: Optional[float], soc: Optional[float], bars: Optional[int],
-               ice_running: Optional[bool], ready: bool, time_base_s: int):
+               ice_running: Optional[bool], ready: bool, time_base_s: int,
+               cruise_active: bool = False, cruise_main: Optional[bool] = None,
+               cruise_set: Optional[int] = None, cruise_mem: Optional[int] = None,
+               cruise_gap: Optional[int] = None):
         kw_txt = "--.-" if power_kw is None else ("%+.1f" % power_kw if abs(power_kw) >= 0.05 else "0.0")
         soc_pct = None if soc is None else int(soc * 100)
-        sig = (kw_txt, soc_pct, bars, ice_running, ready, time_base_s, self.history.version)
+        sig = (kw_txt, soc_pct, bars, ice_running, ready, time_base_s, self.history.version,
+               cruise_active, cruise_main, cruise_set, cruise_mem, cruise_gap)
         if sig != self._sig:
             self._sig = sig
-            self._draw(power_kw, kw_txt, soc_pct, bars, ice_running, ready, time_base_s)
+            self._draw(power_kw, kw_txt, soc_pct, bars, ice_running, ready, time_base_s,
+                       self.cruise_view(cruise_active, cruise_main, cruise_set, cruise_mem),
+                       cruise_gap)
             self.redraws += 1
         return self.surface
 
-    def _draw(self, power_kw, kw_txt, soc_pct, bars, ice_running, ready, time_base_s) -> None:
+    def _draw(self, power_kw, kw_txt, soc_pct, bars, ice_running, ready, time_base_s,
+              cruise, cruise_gap) -> None:
         pg = self._pg
         c = self.colors
         s = self.surface
         s.fill((0, 0, 0))
-        w, h = self.w, self.h
+        h = self.h
         label = c["text_secondary"]
 
-        # ---- left: live value ----
-        s.blit(self._t("HV POWER", 8, label, False), (5, 3))
+        # ---- cruise slot ----
+        state, speed, kind = cruise
+        s.blit(self._t("CRUISE", 8, label, False), (3, 2))
+        if state == "ON":
+            st = self._t("ON", 8, (0, 0, 0), False)
+            pg.draw.rect(s, c["green_bright"], (3, 10, st.get_width() + 5, 10))
+            s.blit(st, (6, 12))
+        else:
+            col = c["cyan_bright"] if state == "READY" else c["text_dim"]
+            s.blit(self._t(state, 8, col, False), (3, 12))
+        if kind == "set":
+            vcol = c["green_bright"] if state == "ON" else c["text_value"]
+        elif kind == "mem":
+            vcol = c["text_dim"]
+        else:
+            vcol = c["cyan_dark"]
+        val = self._t(speed, 14, vcol, True)
+        s.blit(val, (58 - val.get_width(), 4))
+        if kind == "mem":
+            s.blit(self._t("M", 8, label, False), (59, 12))
+        if cruise_gap:
+            # adaptive-cruise gap setting: 1..3 bars (drawn only when known)
+            for i in range(3):
+                bh = 4 + i * 3
+                rect = (61 + i * 3, 17 - bh, 2, bh)
+                pg.draw.rect(s, c["green_bright"] if i < cruise_gap else c["cyan_dark"], rect)
+        pg.draw.line(s, c["border_normal"], (self.CRUISE_W, 0), (self.CRUISE_W, h - 1))
+
+        # ---- HV power ----
+        x0 = self.CRUISE_W + 4
         if power_kw is None:
             vcol = c["text_dim"]
         elif power_kw < -0.05:
             vcol = c["green_bright"]
         else:
             vcol = c["text_value"]
-        val = self._t(kw_txt, 16, vcol, True)
-        s.blit(val, (5, 13))
-        s.blit(self._t("kW", 8, label, False), (5 + val.get_width() + 2, 20))
-        x = 5
+        val = self._t(kw_txt, 14, vcol, True)
+        s.blit(val, (x0, 4))
+        fx = x0 + 37
+        s.blit(self._t("kW", 8, label, False), (fx, 3))
         if ice_running:
-            t = self._t("ICE", 8, (0, 0, 0), False)
-            pg.draw.rect(s, c["orange"], (x, 36, t.get_width() + 6, 11))
-            s.blit(t, (x + 3, 38))
-            x += t.get_width() + 9
+            s.blit(self._t("ICE", 8, c["orange"], False), (fx, 12))
+        elif power_kw is not None and power_kw < -0.05:
+            s.blit(self._t("CHG", 8, c["green_bright"], False), (fx, 12))
         elif ice_running is False and ready:
-            t = self._t("EV", 8, c["green_bright"], False)
-            pg.draw.rect(s, c["green_bright"], (x, 36, t.get_width() + 6, 11), 1)
-            s.blit(t, (x + 3, 38))
-            x += t.get_width() + 9
-        if power_kw is not None and power_kw < -0.05:
-            s.blit(self._t("CHG", 8, c["green_bright"], False), (x, 38))
+            s.blit(self._t("EV", 8, c["green_bright"], False), (fx, 12))
 
-        # ---- middle: history bars, discharge up / charge down ----
-        gx, gy, gh = 68, 4, h - 9
-        gw = self.COLS * self.COL_W
-        mid = gy + gh // 2
-        half = gh // 2 - 1
-        pg.draw.line(s, c["cyan_dark"], (gx - 2, gy), (gx - 2, gy + gh - 1))
-        pg.draw.line(s, c["cyan_dark"], (gx + gw, gy), (gx + gw, gy + gh - 1))
-        for yy in (gy, gy + gh - 1):
-            pg.draw.line(s, c["cyan_dark"], (gx - 4, yy), (gx - 2, yy))
-            pg.draw.line(s, c["cyan_dark"], (gx + gw, yy), (gx + gw + 2, yy))
+        # ---- history: 1 px bars, discharge up / charge down ----
+        gx = x0 + 57
+        gw = self.COLS * 2
+        mid = h // 2
+        half = mid - 2
+        pg.draw.line(s, c["cyan_dark"], (gx - 2, mid - half), (gx - 2, mid + half))
         pg.draw.line(s, c["cyan_dim"], (gx - 2, mid), (gx + gw, mid))
         cols = self.history.columns(self.COLS, time_base_s)
         up, up_hi = c["cyan_mid"], c["cyan_bright"]
         dn, dn_hi = (0, 150, 78), c["green_bright"]
-        rng = self.RANGE_KW
         for i, v in enumerate(cols):
             if v is None:
                 continue
-            x0 = gx + i * self.COL_W
-            n = int(round(min(1.0, abs(v) / rng) * half))
+            n = int(round(min(1.0, abs(v) / self.RANGE_KW) * half))
             if n <= 0:
                 continue
+            x = gx + i * 2
             if v > 0:
-                pg.draw.rect(s, up, (x0, mid - n, 2, n))
-                pg.draw.line(s, up_hi, (x0, mid - n), (x0 + 1, mid - n))
+                pg.draw.line(s, up, (x, mid - 1), (x, mid - n))
+                s.set_at((x, mid - n), up_hi)
             else:
-                pg.draw.rect(s, dn, (x0, mid + 1, 2, n))
-                pg.draw.line(s, dn_hi, (x0, mid + n), (x0 + 1, mid + n))
-        tb = "%ds" % time_base_s if time_base_s < 120 else "%dm" % (time_base_s // 60)
-        t = self._t(tb, 8, label, False)
-        s.blit(t, (gx + 1, gy + gh - 8))
+                pg.draw.line(s, dn, (x, mid + 1), (x, mid + n))
+                s.set_at((x, mid + n), dn_hi)
 
-        # ---- right: SOC, 8 segments like the factory gauge ----
-        sx = gx + gw + 9
-        sw = w - sx - 5
-        s.blit(self._t("SOC", 8, label, False), (sx, 3))
-        if soc_pct is not None:
-            pt = self._t("%d" % soc_pct, 8, c["text_value"], False)
-            s.blit(pt, (sx + sw - pt.get_width(), 3))
+        # ---- SOC: 8 segments ----
+        sx = gx + gw + 5
+        sw = max(6, self.w - sx - 3)
         if bars is None and soc_pct is not None:
             bars = int(round(soc_pct / 100.0 * 8))
         fill = soc_color(soc_pct if soc_pct is not None else 50, c)
-        seg_h, gap = 3, 1
-        y0 = 13
+        y0 = mid - 8
         for i in range(8):
-            yy = y0 + (7 - i) * (seg_h + gap)
+            yy = y0 + (7 - i) * 2
             if bars is not None and i < bars:
-                pg.draw.rect(s, fill, (sx, yy, sw, seg_h))
+                pg.draw.line(s, fill, (sx, yy), (sx + sw - 1, yy))
             else:
-                pg.draw.rect(s, c["cyan_dark"], (sx, yy, sw, seg_h), 1)
+                pg.draw.line(s, c["cyan_dark"], (sx, yy), (sx + 1, yy))
+                pg.draw.line(s, c["cyan_dark"], (sx + sw - 2, yy), (sx + sw - 1, yy))

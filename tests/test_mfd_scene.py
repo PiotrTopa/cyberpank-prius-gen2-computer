@@ -22,9 +22,9 @@ from cyberpunk_computer.ui.scene import demo  # noqa: E402
 from cyberpunk_computer.ui.scene.director import (  # noqa: E402
     LOST_S, REAR_GROUP_AJAR, STALE_S, STOP_HOLD_S, VIEW_SECONDS, VIEW_STEPS, SceneDirector)
 from cyberpunk_computer.ui.scene.inputs import (  # noqa: E402
-    SCENE_EVENT, SceneFeed, SceneInputs, parse_scene, read_inputs)
+    SCENE_EVENT, SceneFeed, SceneInputs, parse_scene, parse_signs, read_inputs)
 from cyberpunk_computer.ui.scene.model import Camera, get_model  # noqa: E402
-from cyberpunk_computer.ui.scene.powerbox import PowerHistory  # noqa: E402
+from cyberpunk_computer.ui.scene.powerbox import PowerHistory, StatusStrip  # noqa: E402
 
 SIZE = (480, 240)
 
@@ -268,18 +268,18 @@ def region_colours(surf, rect):
 
 def test_main_screen_renders_every_demo_state():
     surf = pygame.Surface(SIZE)
-    for name, t, vision, stale_from, _ in demo.SHOTS:
-        sim = demo.Sim(vision)
+    for name, t, vision, stale_from, _, mods in demo.SHOTS:
+        sim = demo.Sim(vision, mods=mods)
         sim.stale_from = stale_from
         sim.run_to(t)
         sim.frame(surf)
-        assert len(region_colours(surf, (121, 1, 238, 168))) > 3, name
-        assert len(region_colours(surf, (121, 170, 238, 54))) > 2, name
+        assert len(region_colours(surf, (121, 1, 238, 216))) > 3, name
+        assert len(region_colours(surf, (121, 218, 194, 21))) > 2, name
 
 
 def test_no_lead_vehicle_without_lead_data_and_redraw_is_cached():
     from cyberpunk_computer.ui.scene.render import SceneRenderer
-    r = SceneRenderer((238, 168))
+    r = SceneRenderer((238, 216))
     d = SceneDirector()
     drive = SceneInputs(speed_kmh=50, real_speed_kmh=50, gear="D", rs_state="running", rs_ok=True,
                         road=parse_scene(scene(1)))
@@ -290,12 +290,12 @@ def test_no_lead_vehicle_without_lead_data_and_redraw_is_cached():
     step(d, with_lead, 1.0)
     r.render(d, with_lead, 20.0)
     assert pygame.image.tobytes(r.surface, "RGB") != no_lead
-    assert r.pal["tail"] in region_colours(r.surface, (80, 40, 90, 70))   # a drawn vehicle
+    assert r.pal["tail"] in region_colours(r.surface, (80, 70, 90, 70))   # a drawn vehicle
     # parked and steady: repeated frames do not redraw the scene
     p = SceneDirector()
     parked = SceneInputs()
     step(p, parked, 1.0)
-    r2 = SceneRenderer((238, 168))
+    r2 = SceneRenderer((238, 216))
     for i in range(10):
         p.update(parked, 0.05)
         r2.render(p, parked, 30.0 + i * 0.05)
@@ -304,27 +304,33 @@ def test_no_lead_vehicle_without_lead_data_and_redraw_is_cached():
 
 def test_open_door_changes_the_picture_and_uses_the_warning_colour():
     from cyberpunk_computer.ui.scene.render import SceneRenderer
-    r = SceneRenderer((238, 168))
+    r = SceneRenderer((238, 216))
     d = SceneDirector()
     closed = SceneInputs(doors=(False, False, None, None, None), rear_group=False)
     step(d, closed, 0.5)
     r.render(d, closed, 1.0)
-    assert r.car.pal["open"] not in region_colours(r.surface, (0, 20, 238, 130))
+    assert r.car.pal["open"] not in region_colours(r.surface, (0, 20, 238, 170))
     opened = closed._replace(doors=(True, False, None, None, None))
     step(d, opened, 1.0)
     r.render(d, opened, 5.0)
-    assert r.car.pal["open"] in region_colours(r.surface, (0, 20, 238, 130))
+    assert r.car.pal["open"] in region_colours(r.surface, (0, 20, 238, 170))
 
 
-def test_scene_page_survives_a_bare_main_screen():
+def test_scene_page_survives_a_bare_main_screen_and_is_built_after_the_first_frame():
     """No store attached (other headless tests build MainScreen that way)."""
     from cyberpunk_computer.ui.screens import MainScreen
     m = MainScreen(SIZE, None)
     surf = pygame.Surface(SIZE)
     m.update(0.05)
     m.render(surf)
+    assert m._scene_page is None          # the first frame goes out without the scene
+    m.update(0.05)
+    assert m._scene_page is not None
+    m.render(surf)
+    assert len(region_colours(surf, (121, 1, 238, 216))) > 3
     m.show_page(1)
     m.render(surf)
+    assert len(region_colours(surf, (121, 218, 194, 21))) > 2     # the strip is on every page
 
 
 def test_prewarm_makes_the_camera_move_free_of_car_renders():
@@ -372,7 +378,7 @@ def test_roadsense_messages_become_a_drawn_road():
     st = replace(st, vehicle=replace(st.vehicle, speed_kmh=57, real_speed_kmh=57,
                                      gear=GearPosition.DRIVE))
     d = SceneDirector()
-    r = SceneRenderer((238, 168))
+    r = SceneRenderer((238, 216))
     t = 0.0
     sent = 0
     inp = read_inputs(st, feed)
@@ -405,3 +411,194 @@ def test_roadsense_messages_become_a_drawn_road():
     assert pygame.image.tobytes(r.surface, "RGB") != live
     step(d, inp, LOST_S)
     assert d.vision == "lost" and d.lanes[1] is None
+
+
+# ── iteration 2: signs, beams, scenery, cruise slot ─────────────────────────
+
+def drive_inputs(**kw):
+    base = dict(speed_kmh=50, real_speed_kmh=50, gear="D", rs_state="running", rs_ok=True,
+                road=parse_scene(scene(1)))
+    base.update(kw)
+    return SceneInputs(**base)
+
+
+def drawn(inp, seconds=2.0):
+    from cyberpunk_computer.ui.scene.render import SceneRenderer
+    r = SceneRenderer((238, 216))
+    d = SceneDirector()
+    step(d, inp, seconds)
+    r.render(d, inp, 10.0)
+    return pygame.image.tobytes(r.surface, "RGB"), r
+
+
+def test_signs_reach_the_inputs_only_while_roadsense_runs():
+    on, ahead = parse_signs({"on": [{"id": "no_overtaking", "s": "B-25"},
+                                    {"id": "no_stopping", "s": "B-36", "side": "r", "q": True},
+                                    {"id": "living_street", "v": 20}, {"nope": 1}, "x"],
+                             "ahead": [{"id": "roundabout_ahead", "s": "A-8", "m": 60.4}]})
+    assert [s.id for s in on] == ["no_overtaking", "no_stopping", "living_street"]
+    assert on[1].side == "r" and on[1].unsure and on[2].value == 20 and on[0].m is None
+    assert ahead[0].m == 60 and ahead[0].code == "A-8"
+    assert parse_signs(None) == ((), ()) and parse_signs({"on": "x"}) == ((), ())
+    feed = SceneFeed()
+    feed.push(SCENE_EVENT, scene(signs={"on": [{"id": "priority_road"}]},
+                                 limit={"kmh": 50, "src": "default", "conf": 0.3},
+                                 path={"y": [0.0, 0.1, 0.2, 0.4]}))
+    assert read_inputs(AppState(), feed).signs_on == ()
+    inp = read_inputs(running(AppState()), feed)
+    assert inp.signs_on[0].id == "priority_road"
+    assert inp.limit_source == "default" and inp.limit_conf == 0.3
+    assert inp.road.path.ys == (-0.0, -0.1, -0.2, -0.4)
+
+
+def test_every_known_sign_has_its_own_pictogram_and_unknown_ids_a_plate():
+    from cyberpunk_computer.ui.scene.signs import KNOWN_IDS, sign_surface
+    from cyberpunk_computer.ui.fonts import get_tiny_font
+    font = get_tiny_font(8)
+    text = lambda s_, c_: font.render(s_, False, c_)   # noqa: E731
+    seen = {}
+    for rid in KNOWN_IDS:
+        seen.setdefault(pygame.image.tobytes(sign_surface(rid, "", False, text), "RGB"), []).append(rid)
+    shared = [ids for ids in seen.values() if len(ids) > 1]
+    # ids that are the same sign by design share a drawing; nothing else may
+    allowed = [{"one_way", "one_way_side"}, {"no_buses", "no_motor_vehicles", "no_motorcycles",
+               "no_trailers", "no_trucks"}, {"other_danger_ahead", "stop_ahead", "warning_other"},
+               {"lane_change_ahead", "road_narrows_ahead"}]
+    assert all(set(ids) in allowed for ids in shared), shared
+    # every rule id roadsense can put in effect or ahead for a car is drawn
+    for rid in ("priority_road", "no_stopping", "no_parking", "no_overtaking", "height_limit",
+                "weight_limit", "width_limit", "one_way", "no_left_turn", "no_right_turn",
+                "no_u_turn", "stop", "yield", "roundabout", "mandatory_direction", "no_entry",
+                "built_up_area", "living_street", "motorway", "expressway",
+                "roundabout_ahead", "crossroads_ahead", "children_ahead", "curve_ahead"):
+        assert rid in KNOWN_IDS, rid
+    plate = sign_surface("no_dangerous_goods", "B-13", False, text)
+    other = sign_surface("something_new", "X-9", False, text)
+    assert pygame.image.tobytes(plate, "RGB") != pygame.image.tobytes(other, "RGB")
+    unsure = sign_surface("priority_road", "", True, text)
+    assert pygame.image.tobytes(unsure, "RGB") != pygame.image.tobytes(
+        sign_surface("priority_road", "", False, text), "RGB")
+
+
+def test_signs_and_limit_confidence_change_the_picture():
+    from cyberpunk_computer.ui.scene.inputs import SignItem
+    plain, _ = drawn(drive_inputs(limit_kmh=50, limit_source="sign"))
+    signs, _ = drawn(drive_inputs(limit_kmh=50, limit_source="sign",
+                                  signs_on=(SignItem("no_overtaking", "B-25"),),
+                                  signs_ahead=(SignItem("roundabout_ahead", "A-8", m=60),)))
+    default, _ = drawn(drive_inputs(limit_kmh=50, limit_source="default"))
+    assert len({plain, signs, default}) == 3
+
+
+def test_each_lamp_state_looks_different_on_the_road():
+    states = {
+        "off": {},
+        "position": {"tail": True},
+        "low": {"tail": True, "head": True},
+        "high": {"tail": True, "head": True, "high": True},
+        "low+fog": {"tail": True, "head": True, "fog": True},
+    }
+    pics = {name: drawn(drive_inputs(**kw))[0] for name, kw in states.items()}
+    assert len(set(pics.values())) == len(states)
+    # parked view too
+    parked = {name: drawn(SceneInputs(**kw), 0.5)[0] for name, kw in states.items()}
+    assert len(set(parked.values())) == len(states)
+
+
+def test_every_environment_label_has_its_own_scenery():
+    from cyberpunk_computer.ui.scene.scenery import LIGHTS, PLACES, WEATHERS, Scenery
+    # the vocabulary of roadsense envd (models/envd-classes.json)
+    assert PLACES == ("highway", "city_street", "residential", "rural_road", "forest_road",
+                      "tunnel", "parking_lot", "underground_parking", "gas_station", "bridge")
+    assert LIGHTS == ("day", "dusk_dawn", "night")
+    assert WEATHERS == ("clear", "overcast", "rain", "snow", "fog")
+    pics = {}
+    for place in (None,) + PLACES:
+        pics[place] = drawn(drive_inputs(env_place=place, env_light="night", env_weather="clear"))[0]
+    assert len(set(pics.values())) == len(pics), "two places share a picture"
+    lights = {lt: drawn(drive_inputs(env_place="city_street", env_light=lt))[0]
+              for lt in (None,) + LIGHTS}
+    assert len(set(lights.values())) == len(lights)
+    weather = {w: drawn(drive_inputs(env_place="rural_road", env_light="day", env_weather=w))[0]
+               for w in (None,) + WEATHERS}
+    assert len(set(weather.values())) == len(weather) - 1      # None and "clear" look the same
+    assert weather[None] == weather["clear"]
+    # a label outside the vocabulary draws the neutral variant, it does not fail
+    odd, _ = drawn(drive_inputs(env_place="moon_base", env_light="noon", env_weather="hail"))
+    assert odd == drawn(drive_inputs())[0]
+    # backdrops are cached: asking twice builds once
+    s = Scenery(238, 68, (53, 93, 104))
+    assert s.backdrop("bridge", "night", "clear") is s.backdrop("bridge", "night", "clear")
+
+
+def test_rain_keeps_the_road_view_alive_but_not_the_parked_view():
+    from cyberpunk_computer.ui.scene.render import SceneRenderer
+    r = SceneRenderer((238, 216))
+    d = SceneDirector()
+    inp = drive_inputs(env_weather="rain")
+    step(d, inp, 2.0)
+    stopped = inp._replace(speed_kmh=0, real_speed_kmh=0)
+    d.update(stopped, 0.05)
+    n0 = None
+    t = 50.0
+    for i in range(20):                 # 1 s standing in the road view
+        d.update(stopped, 0.05)
+        t += 0.05
+        r.render(d, stopped, t)
+        n0 = n0 if n0 is not None else r.redraws
+    assert r.redraws - n0 >= 5
+    p = SceneDirector()
+    parked = SceneInputs(env_weather="rain", rs_ok=True, rs_state="running")
+    step(p, parked, 1.0)
+    r2 = SceneRenderer((238, 216))
+    for i in range(20):
+        p.update(parked, 0.05)
+        r2.render(p, parked, 80.0 + i * 0.05)
+    assert r2.redraws == 1
+
+
+def test_cruise_slot_states():
+    view = StatusStrip.cruise_view
+    assert view(False, None, None, None) == ("--", "--", "")        # nothing known
+    assert view(False, False, None, None) == ("OFF", "--", "")
+    assert view(False, True, None, 70) == ("READY", "70", "mem")
+    assert view(True, True, 80, 70) == ("ON", "80", "set")
+    st = AppState()
+    inp = read_inputs(st)
+    assert inp.cruise_main is None and inp.cruise_set_kmh is None and inp.cruise_gap is None
+    st = replace(st, vehicle=replace(st.vehicle, cruise_active=True, cruise_main_switch=True,
+                                     cruise_set_speed=80, cruise_memory_speed=80))
+    inp = read_inputs(st)
+    assert inp.cruise_active and inp.cruise_main is True and inp.cruise_set_kmh == 80
+    strip = StatusStrip((194, 21), PowerHistory(clock=lambda: 0.0))
+    a = pygame.image.tobytes(strip.render(1.0, 0.6, 5, False, True, 60), "RGB")
+    b = pygame.image.tobytes(strip.render(1.0, 0.6, 5, False, True, 60, True, True, 80, 80), "RGB")
+    c = pygame.image.tobytes(strip.render(1.0, 0.6, 5, False, True, 60, True, True, 80, 80, 2), "RGB")
+    assert a != b and b != c and strip.redraws == 3
+
+
+def test_path_alone_draws_the_road_direction():
+    """No lane lines (a rural road): the planned path still shows."""
+    sc = {"seq": 1, "x": [0, 10, 20, 40, 80], "lanes": [None] * 4, "edges": [None, None],
+          "path": {"y": [0.0, 0.2, 0.8, 3.0, 9.0]}, "lead": None}
+    with_path, r = drawn(drive_inputs(road=parse_scene(sc)))
+    sc2 = dict(sc, path=None, lanes=[None, {"y": [-9] * 5, "prob": 0.1}, None, None])
+    without, _ = drawn(drive_inputs(road=parse_scene(sc2)))
+    assert with_path != without
+    assert r.pal["path"] in region_colours(r.surface, (0, 60, 238, 100))
+
+
+def test_side_panel_styling_can_be_switched_off_per_item(monkeypatch):
+    import cyberpunk_computer.ui.screens.main_screen as ms
+    surf = pygame.Surface(SIZE)
+    pics = {}
+    for name, flags in (("old", {"corner_ticks": False, "ambient_swatch": False}),
+                        ("ticks", {"corner_ticks": True, "ambient_swatch": False}),
+                        ("both", {"corner_ticks": True, "ambient_swatch": True})):
+        monkeypatch.setattr(ms, "SIDE_STYLE", flags)
+        m = ms.MainScreen(SIZE, None)
+        m.update(0.05)
+        surf.fill((0, 0, 0))
+        m.render(surf)
+        pics[name] = pygame.image.tobytes(surf.subsurface((0, 0, 120, 240)), "RGB")
+    assert len(set(pics.values())) == 3

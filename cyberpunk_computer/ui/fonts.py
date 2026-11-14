@@ -49,8 +49,26 @@ class CrispFont(pygame.font.Font):
     needs 1-bit glyphs, so the flag is overridden here in one place.
     """
 
+    # Rendered strings are cached per font: the screens re-render the same
+    # labels and values every frame, and a 1-bit glyph run is far cheaper to
+    # look up than to rasterise on the Pi Zero. Callers only blit the result
+    # (never modify it), so sharing the surface is safe.
+    CACHE_MAX = 256
+
     def render(self, text, antialias=True, color=(255, 255, 255), background=None):
-        return super().render(text, ANTIALIAS, color, background)
+        cache = self.__dict__.get("_cache")
+        if cache is None:
+            cache = self.__dict__["_cache"] = {}
+        try:
+            key = (text, tuple(color), background if background is None else tuple(background))
+        except TypeError:
+            return super().render(text, ANTIALIAS, color, background)
+        surf = cache.get(key)
+        if surf is None:
+            if len(cache) >= self.CACHE_MAX:
+                cache.clear()
+            surf = cache[key] = super().render(text, ANTIALIAS, color, background)
+        return surf
 
 
 class PixelFont(CrispFont):

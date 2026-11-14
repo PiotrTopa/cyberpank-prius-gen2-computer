@@ -1,14 +1,16 @@
 """
-ScenePage: the home page of the main screen's centre column.
+ScenePage: the centre column of the main screen.
 
     ┌──────────────────────────┐  y = 1
-    │  scene 238 x 168         │  parked: the car / driving: the road
-    ├──────────────────────────┤  y = 169
-    │  power box 238 x 54      │  HV power, history, SOC
-    └──────────────────────────┘  y = 224 (bottom bar below: cruise, pages)
+    │  scene 238 x 216         │  parked: the car / driving: the road
+    ├──────────────────────────┤  y = 217
+    │  strip 194 x 21  │ dots  │  cruise slot, HV power, history, SOC
+    └──────────────────────────┘  y = 239
 
 ``update()`` steps the director every UI frame (cheap arithmetic);
-``render()`` blits two cached surfaces and re-draws them only when needed.
+``render_scene()`` and ``render_strip()`` blit cached surfaces that are
+re-drawn only when needed. The strip is shown on every page of the main
+screen, the scene on the home page.
 """
 
 from __future__ import annotations
@@ -21,11 +23,12 @@ import pygame
 from ..colors import COLORS
 from .director import SceneDirector
 from .inputs import FEED, SceneFeed, SceneInputs, read_inputs
-from .powerbox import PowerBox, PowerHistory
+from .powerbox import PowerHistory, StatusStrip
 from .render import SceneRenderer
 
-SCENE_H = 168
-BOX_H = 54
+SCENE_H = 216
+STRIP_H = 21
+DOTS_W = 44            # room of the page dots at the right end of the strip
 PREWARM_S = 0.4
 
 
@@ -43,7 +46,7 @@ class ScenePage:
         self._feed_seen = -1
         # pygame objects are created on first render (keeps start-up light)
         self.scene: Optional[SceneRenderer] = None
-        self.box: Optional[PowerBox] = None
+        self.strip: Optional[StatusStrip] = None
         self._warm_t = 0.0
 
     # -- data -------------------------------------------------------------------
@@ -80,13 +83,17 @@ class ScenePage:
             energy = getattr(self._state, "energy", None)
             self.history.add(getattr(energy, "battery_power_kw", None))
 
-    def render(self, surface: pygame.Surface) -> None:
+    def render_scene(self, surface: pygame.Surface) -> None:
         if self.scene is None:
             self.scene = SceneRenderer((self.width, SCENE_H))
-            self.box = PowerBox((self.width, BOX_H), self.history)
-        st = self._state
         surface.blit(self.scene.render(self.director, self.inputs, self._clock()),
                      (self.x, self.y))
+
+    def render_strip(self, surface: pygame.Surface) -> None:
+        if self.strip is None:
+            self.strip = StatusStrip((self.width - DOTS_W, STRIP_H), self.history)
+        st = self._state
+        inp = self.inputs
         sep_y = self.y + SCENE_H
         pygame.draw.line(surface, COLORS["border_normal"],
                          (self.x, sep_y), (self.x + self.width - 1, sep_y))
@@ -96,7 +103,13 @@ class ScenePage:
         if bars is None:
             bars = getattr(getattr(st, "dynamics", None), "soc_bars", 0) or None
         tb = getattr(getattr(st, "display", None), "power_chart_time_base", 60) or 60
-        box = self.box.render(
+        strip = self.strip.render(
             getattr(energy, "battery_power_kw", None), soc if soc else None, bars,
-            self.inputs.ice_running, self.inputs.ready, int(tb))
-        surface.blit(box, (self.x, sep_y + 1))
+            inp.ice_running, inp.ready, int(tb),
+            inp.cruise_active, inp.cruise_main, inp.cruise_set_kmh, inp.cruise_mem_kmh,
+            inp.cruise_gap)
+        surface.blit(strip, (self.x, sep_y + 1))
+
+    def render(self, surface: pygame.Surface) -> None:
+        self.render_scene(surface)
+        self.render_strip(surface)

@@ -1,16 +1,17 @@
 """
 roadsense -> MFD road scene feed (backend event ``roadsense_scene``).
 
-The MFD main screen draws lanes, road edges, the lead vehicle, the ego traffic
-light, the speed limit and the sky from a compact "scene" mapping (contract:
+The MFD main screen draws lanes, road edges, the planned path, the lead
+vehicle, the ego traffic light, the speed limit, the signs in effect and the
+scenery from a compact "scene" mapping (contract:
 docs/MFD_MAIN_SCREEN.md section 7; consumer: ``ui/scene/inputs.SceneFeed``).
 This module builds that mapping from what the roadsense stack already
 publishes and hands it to the ZMQ event channel:
 
-    roadsense api  ws://127.0.0.1:8090/ws?topics=road,lights,speed_limit,env
-         │  (road 10-14/s ~16 kB, lights ~3/s, speed_limit >= 1/s, env ~1/s)
+    roadsense api  ws://127.0.0.1:8090/ws?topics=road,lights,speed_limit,env,rules
+         │  (road 10-14/s ~16 kB, lights ~3/s, speed_limit and rules >= 1/s, env ~1/s)
          ▼
-    RoadsenseSceneFeed (own thread)  ──SceneBuilder──▶  publish(scene)  <= 10/s, ~0.5 kB
+    RoadsenseSceneFeed (own thread)  ──SceneBuilder──▶  publish(scene)  <= 10/s, ~0.7 kB
 
 Boundary: roadsense's documented WebSocket only (roadsense
 docs/ARCHITECTURE.md, "api"); nothing is imported from the roadsense repos.
@@ -55,7 +56,11 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 logger = logging.getLogger(__name__)
 
 EVENT_NAME = "roadsense_scene"
-TOPICS = ("road", "lights", "speed_limit", "env")
+TOPICS = ("road", "lights", "speed_limit", "env", "rules")
+
+# Caps of the sign lists (payload and screen room: the MFD shows this many).
+MAX_SIGNS_ON = 6
+MAX_SIGNS_AHEAD = 3
 
 # Sample distances of the scene polylines (m ahead of the camera). This is the
 # contract's default "x", so the key is not sent.
@@ -74,6 +79,7 @@ class SceneFeedConfig:
     lights_max_age_s: float = 2.0      # lights ~3/s
     limit_max_age_s: float = 3.0       # speed_limit: on change and >= 1/s
     env_max_age_s: float = 5.0         # env ~1/s
+    rules_max_age_s: float = 3.0       # rules: on change and >= 1/s
     lane_min_prob: float = 0.2         # below this a lane line goes out as null (UI draws >= 0.3)
     lead_min_prob: float = 0.3         # below this the lead goes out as null (UI draws >= 0.5)
     connect_timeout_s: float = 3.0
@@ -127,12 +133,16 @@ def resample(xs: Any, ys: Any, xq: Sequence[float] = SCENE_XS) -> Optional[List[
 
 
 def road_to_scene(road: Dict[str, Any], cfg: SceneFeedConfig) -> Dict[str, Any]:
-    """modeld ``road`` message -> scene keys ``seq``, ``lanes``, ``edges``, ``lead``.
+    """modeld ``road`` message -> scene keys ``seq``, ``lanes``, ``edges``,
+    ``path``, ``lead``.
 
     lanes[i] = {"y": lane_lines[i].y at SCENE_XS, "prob": lane_lines[i].prob}
     edges[i] = {"y": road_edges[i].y at SCENE_XS}
+    path     = {"y": plan.y at SCENE_XS} (the model's planned path; the list
+               ends where the plan ends, so it is short at low speed)
     lead     = leads[0] (the "now" hypothesis): d = x[0], y = y[0],
-               v_rel = v[0] - v_ego (the model's own speed estimate), prob
+               v_rel = v[0] - v_ego (the model's own speed estimate),
+               a = a[0] (its acceleration, m/s2), prob
     """
     lanes: List[Optional[Dict[str, Any]]] = [None, None, None, None]
     for i, ln in enumerate((road.get("lane_lines") or [])[:4]):
@@ -151,6 +161,12 @@ def road_to_scene(road: Dict[str, Any], cfg: SceneFeedConfig) -> Dict[str, Any]:
         ys = resample(ed.get("x"), ed.get("y"))
         if ys is not None:
             edges[i] = {"y": ys}
+    path = None
+    plan = road.get("plan")
+    if isinstance(plan, dict):
+        ys = resample(plan.get("x"), plan.get("y"))
+        if ys is not None:
+            path = {"y": ys}
     lead = None
     leads = road.get("leads") or []
     if leads and isinstance(leads[0], dict):
@@ -167,9 +183,16 @@ def road_to_scene(road: Dict[str, Any], cfg: SceneFeedConfig) -> Dict[str, Any]:
                 v_ego = _num((road.get("pose") or {}).get("vx"))
             if v is not None and v_ego is not None:
                 lead["v_rel"] = round(v - v_ego, 1)
+            acc = ld.get("a") or []
+            a = _num(acc[0]) if acc else None
+            if a is not None:
+                lead["a"] = round(a, 1)
     seq = road.get("seq")
-    return {"seq": int(seq) if _num(seq) is not None else 0,
-            "lanes": lanes, "edges": edges, "lead": lead}
+    out = {"seq": int(seq) if _num(seq) is not None else 0,
+           "lanes": lanes, "edges": edges, "lead": lead}
+    if path is not None:
+        out["path"] = path
+    return out
 
 
 def lights_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -201,6 +224,68 @@ def limit_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     out: Dict[str, Any] = {"kmh": int(round(k))}
     if isinstance(kind, str) and kind:
         out["src"] = kind
+    conf = _num(msg.get("confidence"))
+    if conf is not None:
+        out["conf"] = round(conf, 2)
+    return out
+
+
+def rules_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """api ``rules`` message -> scene ``signs`` or None (nothing in effect).
+
+    on    = rules in effect that bind the car, without the speed limit (it has
+            its own key): {"id", "s": sign code, "v": value, "side": "l"|"r",
+            "q": true when the engine marks the entry uncertain}
+    ahead = warning signs, nearest first: {"id", "s", "m": expected distance}
+    """
+    on: List[Dict[str, Any]] = []
+    for e in msg.get("in_effect") or ():
+        if not isinstance(e, dict) or e.get("id") == "speed_limit":
+            continue
+        if e.get("applies_to_car") is False:
+            continue
+        rid = e.get("id")
+        if not isinstance(rid, str) or not rid:
+            continue
+        item: Dict[str, Any] = {"id": rid}
+        code = e.get("sign")
+        if isinstance(code, str) and code:
+            item["s"] = code[:8]
+        val = _num(e.get("value"))
+        if val is not None:
+            item["v"] = int(val) if val == int(val) else round(val, 1)
+        side = e.get("side")
+        if isinstance(side, str) and side[:1] in ("l", "r"):
+            item["side"] = side[:1]
+        if e.get("uncertain"):
+            item["q"] = True
+        on.append(item)
+        if len(on) >= MAX_SIGNS_ON:
+            break
+    ahead: List[Dict[str, Any]] = []
+    for w in msg.get("ahead") or ():
+        if not isinstance(w, dict):
+            continue
+        rid = w.get("id")
+        if not isinstance(rid, str) or not rid:
+            continue
+        item = {"id": rid}
+        code = w.get("sign")
+        if isinstance(code, str) and code:
+            item["s"] = code[:8]
+        m = _num(w.get("expected_in_m"))
+        if m is not None:
+            item["m"] = int(round(m))
+        ahead.append(item)
+        if len(ahead) >= MAX_SIGNS_AHEAD:
+            break
+    if not on and not ahead:
+        return None
+    out: Dict[str, Any] = {}
+    if on:
+        out["on"] = on
+    if ahead:
+        out["ahead"] = ahead
     return out
 
 
@@ -269,6 +354,8 @@ class SceneBuilder:
             self._slow["limit"] = (now, limit_to_scene(msg))
         elif mtype == "env":
             self._slow["env"] = (now, env_to_scene(msg))
+        elif mtype == "rules":
+            self._slow["signs"] = (now, rules_to_scene(msg))
 
     def time_to_due(self, now: float) -> Optional[float]:
         """Seconds until a pending road frame may be published; None if none."""
@@ -298,7 +385,7 @@ class SceneBuilder:
         self._last_seq = scene["seq"]
         self._last_pub = now
         ages = {"light": self.cfg.lights_max_age_s, "limit": self.cfg.limit_max_age_s,
-                "env": self.cfg.env_max_age_s}
+                "env": self.cfg.env_max_age_s, "signs": self.cfg.rules_max_age_s}
         for key, (t, val) in self._slow.items():
             if now - t <= ages[key]:
                 scene[key] = val

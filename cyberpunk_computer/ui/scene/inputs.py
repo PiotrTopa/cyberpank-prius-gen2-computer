@@ -41,6 +41,7 @@ class Lead(NamedTuple):
     v_rel: Optional[float] = None    # m/s, negative = closing
     prob: float = 1.0
     kind: str = "car"
+    accel: Optional[float] = None    # m/s2 (the model's estimate), negative = braking
 
 
 class RoadLine(NamedTuple):
@@ -53,6 +54,16 @@ class RoadObject(NamedTuple):
     x: float                         # metres ahead
     y: float                         # LEFT positive
     state: str = ""                  # kind-specific (e.g. lamp: "on")
+
+
+class SignItem(NamedTuple):
+    """A rule in effect (``m`` None) or a warning sign ahead (``m`` metres)."""
+    id: str                          # roadsense rule id: no_overtaking, priority_road, ...
+    code: str = ""                   # sign code as roadsense prints it: "B-25"
+    value: Optional[float] = None    # e.g. 20 for a living street
+    side: str = ""                   # "l" / "r" for rules that bind one side of the road
+    unsure: bool = False             # roadsense marks the entry uncertain
+    m: Optional[int] = None          # expected distance of a warning's hazard
 
 
 class TrafficLight(NamedTuple):
@@ -69,6 +80,7 @@ class RoadScene(NamedTuple):
     edges: Tuple[Optional[RoadLine], ...] = (None, None)               # left, right
     lead: Optional[Lead] = None
     objects: Tuple[RoadObject, ...] = ()
+    path: Optional[RoadLine] = None                                    # the model's planned path
 
 
 class SceneInputs(NamedTuple):
@@ -93,13 +105,19 @@ class SceneInputs(NamedTuple):
     brake: Optional[bool] = None
     # cruise
     cruise_active: bool = False
+    cruise_main: Optional[bool] = None     # main switch; None = not known
     cruise_set_kmh: Optional[int] = None
+    cruise_mem_kmh: Optional[int] = None
+    cruise_gap: Optional[int] = None       # adaptive-cruise gap setting 1..3 (no source yet)
     # perception
     rs_state: str = ""                     # RoadsenseState.state ("" = not configured)
     rs_ok: bool = False                    # stack running and API answering
     road: Optional[RoadScene] = None
     limit_kmh: Optional[int] = None
-    limit_source: str = ""
+    limit_source: str = ""                 # sign | default | ...
+    limit_conf: Optional[float] = None     # roadsense's 0..1 heuristic
+    signs_on: Tuple[SignItem, ...] = ()    # rules in effect (without the speed limit)
+    signs_ahead: Tuple[SignItem, ...] = () # warning signs, nearest first
     light: Optional[TrafficLight] = None
     env_light: Optional[str] = None        # day | dusk_dawn | night
     env_place: Optional[str] = None
@@ -226,7 +244,7 @@ def parse_scene(raw: Any) -> Optional[RoadScene]:
             y = _num(lr.get("y")) or 0.0
             p = _num(lr.get("prob"))
             lead = Lead(d, -y, _num(lr.get("v_rel")), 1.0 if p is None else p,
-                        str(lr.get("kind") or "car"))
+                        str(lr.get("kind") or "car"), _num(lr.get("a")))
     objs = []
     for o in raw.get("objects") or ():
         if not isinstance(o, Mapping):
@@ -237,7 +255,30 @@ def parse_scene(raw: Any) -> Optional[RoadScene]:
         objs.append(RoadObject(str(o.get("kind") or ""), x, -y, str(o.get("state") or "")))
     seq = raw.get("seq")
     return RoadScene(int(seq) if isinstance(seq, (int, float)) else 0,
-                     xs, lanes, edges, lead, tuple(objs))
+                     xs, lanes, edges, lead, tuple(objs), _line(raw.get("path"), n))
+
+
+def parse_signs(raw: Any) -> Tuple[Tuple[SignItem, ...], Tuple[SignItem, ...]]:
+    """Scene ``signs`` mapping -> (in effect, ahead)."""
+    if not isinstance(raw, Mapping):
+        return (), ()
+
+    def items(lst: Any, ahead: bool) -> Tuple[SignItem, ...]:
+        out = []
+        for e in lst if isinstance(lst, (list, tuple)) else ():
+            if not isinstance(e, Mapping):
+                continue
+            rid = e.get("id")
+            if not isinstance(rid, str) or not rid:
+                continue
+            m = _num(e.get("m")) if ahead else None
+            side = e.get("side")
+            out.append(SignItem(rid, str(e.get("s") or ""), _num(e.get("v")),
+                                side if side in ("l", "r") else "", bool(e.get("q")),
+                                None if m is None else int(m)))
+        return tuple(out)
+
+    return items(raw.get("on"), False), items(raw.get("ahead"), True)
 
 
 def _traffic_light(raw: Any) -> Optional[TrafficLight]:
@@ -332,7 +373,8 @@ def read_inputs(state: Any, feed: Optional[SceneFeed] = None) -> SceneInputs:
         raw_scene = health.get("scene")
     raw_scene = raw_scene if isinstance(raw_scene, Mapping) else {}
     road = parse_scene(raw_scene) if raw_scene else None
-    if road is not None and road.seq == 0 and not any(road.lanes) and road.lead is None:
+    if (road is not None and road.seq == 0 and not any(road.lanes) and road.lead is None
+            and road.path is None):
         road = None
 
     limit = raw_scene.get("limit") if raw_scene else None
@@ -340,11 +382,14 @@ def read_inputs(state: Any, feed: Optional[SceneFeed] = None) -> SceneInputs:
         limit = health.get("speed_limit")
     limit_kmh = None
     limit_src = ""
+    limit_conf = None
     if isinstance(limit, Mapping):
         lk = _num(limit.get("kmh", limit.get("limit_kmh")))
         if lk is not None and lk > 0:
             limit_kmh = int(lk)
             limit_src = str(limit.get("src", limit.get("source")) or "")
+            limit_conf = _num(limit.get("conf", limit.get("confidence")))
+    signs_on, signs_ahead = parse_signs(raw_scene.get("signs") if raw_scene else None)
     light = _traffic_light(raw_scene.get("light") if raw_scene else None)
     if light is None:
         light = _traffic_light(health.get("lights"))
@@ -354,6 +399,8 @@ def read_inputs(state: Any, feed: Optional[SceneFeed] = None) -> SceneInputs:
     env = env if isinstance(env, Mapping) else {}
 
     cs = _num(getattr(veh, "cruise_set_speed", None))
+    cm = _num(getattr(veh, "cruise_memory_speed", None))
+    cg = _num(_first((veh,), ("cruise_gap", "acc_gap")))
     return SceneInputs(
         speed_kmh=max(0.0, spd),
         real_speed_kmh=max(0.0, real),
@@ -364,12 +411,18 @@ def read_inputs(state: Any, feed: Optional[SceneFeed] = None) -> SceneInputs:
         doors=doors, rear_group=rear_group, door_any=door_any,
         head=head, high=high, tail=tail, fog=fog, brake=_opt_bool(brake_v),
         cruise_active=bool(getattr(veh, "cruise_active", False)),
+        cruise_main=_opt_bool(getattr(veh, "cruise_main_switch", None)),
         cruise_set_kmh=int(cs) if cs else None,
+        cruise_mem_kmh=int(cm) if cm else None,
+        cruise_gap=int(cg) if cg else None,
         rs_state=rs_state,
         rs_ok=rs_ok,
         road=road if rs_ok else None,
         limit_kmh=limit_kmh if rs_ok else None,
         limit_source=limit_src,
+        limit_conf=limit_conf,
+        signs_on=signs_on if rs_ok else (),
+        signs_ahead=signs_ahead if rs_ok else (),
         light=light if rs_ok else None,
         env_light=env.get("light") if rs_ok else None,
         env_place=env.get("place") if rs_ok else None,

@@ -32,6 +32,7 @@ from cyberpunk_computer.backend.roadsense_scene import (
     peek_type,
     resample,
     road_to_scene,
+    rules_to_scene,
 )
 
 FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "roadsense_ws_2026-11-14.jsonl.gz")
@@ -136,7 +137,9 @@ def test_slow_topics():
     msgs = {peek_type(ln): json.loads(ln) for ln in load_lines()}
     assert lights_to_scene(msgs["lights"]) == {"state": "red", "d": 34.0, "y": 2.1}
     assert lights_to_scene({"type": "lights", "ego": None}) is None
-    assert limit_to_scene(msgs["speed_limit"]) == {"kmh": 50, "src": "sign"}
+    lim = limit_to_scene(msgs["speed_limit"])
+    assert lim["kmh"] == 50 and lim["src"] == "sign"
+    assert lim.get("conf") == round(msgs["speed_limit"]["confidence"], 2)
     assert limit_to_scene({"limit_kmh": None, "source": {"kind": "unknown"}}) is None
     assert env_to_scene(msgs["env"]) == {"light": "day", "place": "city_street",
                                          "weather": "overcast"}
@@ -196,7 +199,7 @@ def test_builder_sends_nothing_stale():
     # everything old
     b.feed(rl[2], 6.0)
     s = b.build(6.0)
-    assert set(s) == {"seq", "lanes", "edges", "lead"}
+    assert set(s) - {"path"} == {"seq", "lanes", "edges", "lead"}
     # a road frame that waited longer than road_max_age_s is dropped
     b.feed(rl[3], 7.0)
     assert b.build(7.0 + c.road_max_age_s + 0.1) is None
@@ -219,11 +222,73 @@ def test_payload_size_and_decode_budget():
             sizes.append(len(json.dumps(env, separators=(",", ":"))))
         t += 0.11
     assert sizes
-    assert max(sizes) < 900, sizes                   # ~0.6-0.75 kB per event
+    assert max(sizes) < 1000, sizes                  # ~0.7-0.85 kB per event (with the path)
     t0 = time.perf_counter()
     for _ in range(200):
         json.loads(json.dumps(env, separators=(",", ":")))
     assert (time.perf_counter() - t0) / 200 < 0.002
+
+
+def rules_msg():
+    """A ``rules`` message shaped like roadsense api/roadsense_api/rules.py
+    builds it (docs/ARCHITECTURE.md, "api-derived topic rules")."""
+    def eff(rid, sign, **kw):
+        e = {"id": rid, "sign": sign, "name": rid, "category": "lasting", "value": None,
+             "unit": None, "confidence": 0.7, "uncertain": [], "applies_to_car": True,
+             "side": None}
+        e.update(kw)
+        return e
+    return {"type": "rules", "seq": 9, "in_effect": [
+        eff("speed_limit", "B-33", value=40, unit="km/h"),
+        eff("built_up_area", "D-42", uncertain=["entry sign D-42 not observable; area from envd"]),
+        eff("no_stopping", "B-36", side="right"),
+        eff("no_overtaking_hgv", "B-26", applies_to_car=False),
+        eff("living_street", "D-40", value=20, unit="km/h"),
+        eff("no_left_turn", "B-21", category="momentary")],
+        "recent": [], "ahead": [
+            {"id": "roundabout_ahead", "sign": "A-8", "name": "roundabout ahead",
+             "category": "warning", "expected_in_m": 60.4},
+            {"id": "children_ahead", "sign": "A-17", "name": "children ahead",
+             "category": "warning", "expected_in_m": 140.0}]}
+
+
+def test_rules_become_the_sign_lists():
+    s = rules_to_scene(rules_msg())
+    assert [e["id"] for e in s["on"]] == ["built_up_area", "no_stopping", "living_street",
+                                          "no_left_turn"]          # no limit, no truck rule
+    assert s["on"][0] == {"id": "built_up_area", "s": "D-42", "q": True}
+    assert s["on"][1] == {"id": "no_stopping", "s": "B-36", "side": "r"}
+    assert s["on"][2]["v"] == 20
+    assert s["ahead"] == [{"id": "roundabout_ahead", "s": "A-8", "m": 60},
+                          {"id": "children_ahead", "s": "A-17", "m": 140}]
+    assert rules_to_scene({"type": "rules", "in_effect": [], "ahead": []}) is None
+    many = {"in_effect": [{"id": "r%d" % i, "sign": "X"} for i in range(20)],
+            "ahead": [{"id": "w%d" % i} for i in range(9)]}
+    out = rules_to_scene(many)
+    assert len(out["on"]) == 6 and len(out["ahead"]) == 3
+
+
+def test_path_and_lead_acceleration():
+    r = roads()[0]
+    s = road_to_scene(r, cfg())
+    assert s["path"]["y"][0] == pytest.approx(r["plan"]["y"][0], abs=0.02)
+    assert 2 <= len(s["path"]["y"]) <= len(SCENE_XS)
+    assert s["lead"]["a"] == round(r["leads"][0]["a"][0], 1)
+    del r["plan"]
+    assert "path" not in road_to_scene(r, cfg())
+
+
+def test_signs_ride_along_and_expire():
+    b = SceneBuilder(cfg())
+    road = [ln for ln in load_lines() if peek_type(ln) == "road"]
+    b.feed(json.dumps(rules_msg()), 0.0)
+    b.feed(road[0], 0.0)
+    s = b.build(0.0)
+    assert s["signs"]["on"][0]["id"] == "built_up_area"
+    env = {"type": "event", "ts": 1794665136.123, "name": EVENT_NAME, "data": s}
+    assert len(json.dumps(env, separators=(",", ":"))) < 1300
+    b.feed(road[1], 10.0)                       # rules older than rules_max_age_s
+    assert "signs" not in b.build(10.0)
 
 
 # ── WebSocket client and feed thread against a local server ──────────────────
@@ -357,7 +422,7 @@ def test_feed_publishes_while_active_and_reconnects(server):
         assert server.accepted == 0 and not got        # idle: no connection at all
         feed.set_active(True)
         assert wait_for(lambda: len(got) >= 3)
-        assert server.paths[0] == "/ws?topics=road,lights,speed_limit,env"
+        assert server.paths[0] == "/ws?topics=road,lights,speed_limit,env,rules"
         assert all(set(s) >= {"seq", "lanes", "edges", "lead"} for s in got)
         # roadsense restarts: the stream drops, the feed reconnects on its own
         n = len(got)

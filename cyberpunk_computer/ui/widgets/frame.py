@@ -75,6 +75,10 @@ class Frame(Widget):
         self._press_x = 0
         self._press_y = 0
 
+        # Corner ticks in the resting state (set by the screen; off = the
+        # plain border)
+        self.corner_ticks = False
+
         # Cached title rendering (text, colour) -> surface
         self._title_key = None
         self._title_surf = None
@@ -176,6 +180,16 @@ class Frame(Widget):
         # Draw corner accents when focused
         if focus_t > 0.1:
             self._draw_corner_accents(surface, border_color, focus_t)
+        elif self.corner_ticks and not self._active:
+            # resting state: short bright ticks, the same motif as the
+            # target brackets of the road scene
+            col = COLORS["cyan_mid"]
+            r = self.rect
+            n = 5
+            for cx, cy, dx, dy in ((r.x, r.y, 1, 1), (r.right - 1, r.y, -1, 1),
+                                   (r.x, r.bottom - 1, 1, -1), (r.right - 1, r.bottom - 1, -1, -1)):
+                pygame.draw.line(surface, col, (cx, cy), (cx + dx * n, cy))
+                pygame.draw.line(surface, col, (cx, cy), (cx, cy + dy * n))
         
         # Draw title bar line
         title_line_y = self.rect.y + self.TITLE_HEIGHT

@@ -59,6 +59,7 @@ class SceneDirector:
         self.lanes: List[Optional[List[float]]] = [None] * 4
         self.lane_prob: List[float] = [0.0] * 4
         self.edges: List[Optional[List[float]]] = [None] * 2
+        self.path: Optional[List[float]] = None       # planned path (may be shorter than xs)
         self.xs: Tuple[float, ...] = ()
         self.lead: Optional[Lead] = None      # smoothed
         self.lead_alpha = 0.0                 # 0..1 appear/disappear
@@ -167,6 +168,7 @@ class SceneDirector:
         if self.vision in ("off", "wait", "lost"):
             self.lanes = [None] * 4
             self.edges = [None] * 2
+            self.path = None
             self.lead = None
             self.lead_alpha = 0.0
             self.objects = ()
@@ -201,6 +203,16 @@ class SceneDirector:
                 for k, y in enumerate(ed.ys):
                     cur[k] += (y - cur[k]) * a
 
+        pth = road.path
+        if pth is None:
+            self.path = None
+        elif self.path is None or len(self.path) != len(pth.ys):
+            self.path = list(pth.ys)
+        else:
+            cur_p = self.path
+            for k, y in enumerate(pth.ys):
+                cur_p[k] += (y - cur_p[k]) * a
+
         lead = road.lead if self.vision == "live" else None
         if lead is not None and lead.prob < 0.5:
             lead = None
@@ -212,7 +224,7 @@ class SceneDirector:
             else:
                 self.lead = Lead(cur_l.dist_m + (lead.dist_m - cur_l.dist_m) * a,
                                  cur_l.lat_m + (lead.lat_m - cur_l.lat_m) * a,
-                                 lead.v_rel, lead.prob, lead.kind)
+                                 lead.v_rel, lead.prob, lead.kind, lead.accel)
             self.lead_alpha = min(1.0, self.lead_alpha + fade)
         else:
             self.lead_alpha = max(0.0, self.lead_alpha - fade)
