@@ -74,6 +74,10 @@ class Frame(Widget):
         self.on_drag: Optional[Callable[[int, int, int, int], bool]] = None
         self._press_x = 0
         self._press_y = 0
+
+        # Cached title rendering (text, colour) -> surface
+        self._title_key = None
+        self._title_surf = None
     
     def _calculate_content_rect(self) -> Rect:
         """Calculate the content area rectangle."""
@@ -185,8 +189,13 @@ class Frame(Widget):
         
         # Draw title text, clipped so it never runs under the title widget
         if self.title:
-            font = get_title_font(self.TITLE_FONT_SIZE)
-            title_surface = font.render(self.title.upper(), True, title_color)
+            # the title is re-rendered only when its text or colour changes
+            key = (self.title, tuple(title_color))
+            if key != self._title_key:
+                font = get_title_font(self.TITLE_FONT_SIZE)
+                self._title_surf = font.render(self.title.upper(), True, title_color)
+                self._title_key = key
+            title_surface = self._title_surf
             title_x = self.rect.x + self.PADDING + 2
             title_y = self.rect.y + (self.TITLE_HEIGHT - title_surface.get_height()) // 2
             if self._title_widget:

@@ -18,6 +18,7 @@ from ..widgets.frame import Frame
 from ..widgets.controls import VolumeBar, ToggleSwitch, ValueDisplay, ModeIcon, StatusIcon, BatteryBarsIcon
 from ..widgets.vehicle_status import ConnectionIndicator
 from ..widgets.pagination import PaginationControl
+from ..scene.page import ScenePage
 from ..pointer import TAP_SLOP
 # VFD widget removed - now runs as separate satellite app (device 110)
 # See vfd_satellite/ and docs/VFD_SATELLITE_PROTOCOL.md
@@ -39,14 +40,17 @@ class MainScreen(Screen):
     Layout:
     ┌───────────┬─────────────────────────────┬───────────────────┐
     │  AUDIO    │                             │   CLIMATE         │
-    │  120×80   │                             │   120×80          │
-    ├───────────┤      CENTER AREA            ├───────────────────┤
-    │  AMBIENT  │      (available)            │   LIGHTS          │
-    │  120×80   │                             │   120×80          │
-    ├───────────┤                             ├───────────────────┤
-    │  ENGINE   │                             │   BATTERY         │
-    │  120×80   │                             │   120×80          │
+    │  120×80   │   SCENE 238×168             │   120×80          │
+    ├───────────┤   parked: the car, doors,   ├───────────────────┤
+    │  AMBIENT  │   lamps / driving: road,    │   LIGHTS          │
+    │  120×80   │   lead vehicle, signs       │   120×80          │
+    ├───────────┤─────────────────────────────├───────────────────┤
+    │  ENGINE   │   POWER BOX 238×54          │   BATTERY         │
+    │  120×80   │   cruise · pages (16 px)    │   120×80          │
     └───────────┴─────────────────────────────┴───────────────────┘
+
+    The centre column's home page is ``ui/scene`` (docs/MFD_MAIN_SCREEN.md);
+    page 2 is the dynamics page.
     """
     
     # Layout constants
@@ -457,6 +461,8 @@ class MainScreen(Screen):
     
     # Bottom bar height for cruise + pagination
     BOTTOM_BAR_HEIGHT = 16
+    _cruise_bar_key = None
+    _cruise_bar_parts: tuple = ()
     
     def _create_center_area(self) -> None:
         """Create center area with connection indicator and status bar."""
@@ -508,9 +514,9 @@ class MainScreen(Screen):
             center_x, 30, center_width, self.height - 30 - self.BOTTOM_BAR_HEIGHT
         )
         
-        # VFD Display has been moved to separate satellite app (device 110)
-        # Page 1 now shows placeholder indicating VFD is on external display
-        # See: vfd_satellite/ package and docs/VFD_SATELLITE_PROTOCOL.md
+        # Home page: live scene + power box (ui/scene, docs/MFD_MAIN_SCREEN.md).
+        # Its pygame surfaces are created on the first render.
+        self.scene_page = ScenePage(center_x + 1, 1, center_width - 2)
 
     def _on_page_change(self, page_index: int) -> None:
         """Handle page change."""
@@ -534,6 +540,7 @@ class MainScreen(Screen):
         
         # Subscribe to all state changes
         store.subscribe(StateSlice.ALL, self._on_store_update)
+        self.scene_page.set_state(store.state)
     
     # Gear enum -> display letter
     _GEAR_LETTERS = {
@@ -619,6 +626,9 @@ class MainScreen(Screen):
         # Connection
         self._connection_indicator.set_connected(state.connection.connected)
 
+        # Home-page scene (door/lamp/road inputs, power history)
+        self.scene_page.set_state(state)
+
         # AVC input visualization (touch and button events)
         if state.input.last_touch_time > self._last_touch_time:
             self._last_touch_x = state.input.last_touch_x
@@ -633,6 +643,7 @@ class MainScreen(Screen):
     def update(self, dt: float) -> None:
         """Update screen and check for focus timeout."""
         super().update(dt)
+        self.scene_page.update(dt)
 
         # Flush a throttled pointer volume change
         if self._volume_pending and time.time() - self._volume_sent_t >= self.VOLUME_DISPATCH_MIN_S:
@@ -740,159 +751,48 @@ class MainScreen(Screen):
             return
         
         v = self._store.state.vehicle
-        font = get_font(8, "mono")
         text_y = bar_y + 3
         x = center_x + 6
-        
-        # Cruise active indicator
+
+        # CRU indicator, set speed, memory speed, engaged flag. The strip is
+        # re-rendered only when one of its values changes.
         if v.cruise_active:
-            indicator = "CRU"
             ind_color = COLORS["green_bright"]
         elif v.cruise_main_switch:
-            indicator = "CRU"
             ind_color = COLORS["yellow"]
         else:
-            indicator = "CRU"
             ind_color = COLORS["text_dim"]
-        
-        ind_surf = font.render(indicator, True, ind_color)
-        surface.blit(ind_surf, (x, text_y))
-        x += ind_surf.get_width() + 3
-        
-        # Set speed
         if v.cruise_set_speed is not None and v.cruise_set_speed > 0:
             set_str = f"SET:{v.cruise_set_speed}"
             set_color = COLORS["green_bright"] if v.cruise_active else COLORS["text_secondary"]
         else:
             set_str = "SET:--"
             set_color = COLORS["text_dim"]
-        set_surf = font.render(set_str, True, set_color)
-        surface.blit(set_surf, (x, text_y))
-        x += set_surf.get_width() + 4
-        
-        # Memory speed
         if v.cruise_memory_speed is not None and v.cruise_memory_speed > 0:
             mem_str = f"MEM:{v.cruise_memory_speed}"
             mem_color = COLORS["cyan_bright"] if v.cruise_active else COLORS["text_secondary"]
         else:
             mem_str = "MEM:--"
             mem_color = COLORS["text_dim"]
-        mem_surf = font.render(mem_str, True, mem_color)
-        surface.blit(mem_surf, (x, text_y))
-        x += mem_surf.get_width() + 4
-        
-        # Engaged/Off status text
-        if v.cruise_active:
-            status_surf = font.render("ON", True, COLORS["green_bright"])
-            surface.blit(status_surf, (x, text_y))
-    
-    # Battery power range shown on the home page power bar (kW).
-    HOME_POWER_RANGE_KW = 25.0
+
+        key = (ind_color, set_str, set_color, mem_str, mem_color, v.cruise_active)
+        if key != self._cruise_bar_key:
+            font = get_font(8, "mono")
+            parts = [font.render("CRU", True, ind_color), font.render(set_str, True, set_color),
+                     font.render(mem_str, True, mem_color)]
+            if v.cruise_active:
+                parts.append(font.render("ON", True, COLORS["green_bright"]))
+            self._cruise_bar_key = key
+            self._cruise_bar_parts = parts
+        for part, gap in zip(self._cruise_bar_parts, (3, 4, 4, 0)):
+            surface.blit(part, (x, text_y))
+            x += part.get_width() + gap
 
     def _render_home_page(self, surface: pygame.Surface, center_x: int, center_width: int) -> None:
-        """Render Page 1: drive dashboard (speed, gear, power flow, SOC, fuel)."""
-        state = self._store.state if self._store else None
-        mid_x = center_x + center_width // 2
-
-        # ── Speed (unit drawn beside the digits) ──
-        speed = 0
-        if state and state.vehicle.speed_kmh is not None:
-            speed = int(state.vehicle.speed_kmh)
-        # Terminus, not Orbitron: Orbitron's slashed zero and tight tracking
-        # are illegible as large 1-bit digits on the panel
-        font_speed = get_mono_font(32)
-        speed_surf = font_speed.render(str(speed), True, COLORS["text_highlight"])
-        unit_surf = get_tiny_font(8).render("km/h", True, COLORS["text_secondary"])
-        speed_y = 30
-        speed_x = mid_x - (speed_surf.get_width() + 4 + unit_surf.get_width()) // 2
-        surface.blit(speed_surf, (speed_x, speed_y))
-        surface.blit(
-            unit_surf,
-            (speed_x + speed_surf.get_width() + 4,
-             speed_y + speed_surf.get_height() - unit_surf.get_height() - 4)
-        )
-
-        # ── Gear strip: P R N D B ──
-        gear_letter = self._gear_letter(state.vehicle.gear) if state else "P"
-        font_gear = get_mono_font(14)
-        gears = ["P", "R", "N", "D", "B"]
-        step = 26
-        gx = mid_x - (step * (len(gears) - 1)) // 2
-        gy = speed_y + speed_surf.get_height() + 18
-        for g in gears:
-            active = g == gear_letter
-            color = COLORS["cyan_bright"] if active else COLORS["text_dim"]
-            g_surf = font_gear.render(g, True, color)
-            g_rect = g_surf.get_rect(center=(gx, gy))
-            if active:
-                box = g_rect.inflate(8, 4)
-                pygame.draw.rect(surface, COLORS["cyan_dark"], box)
-                pygame.draw.rect(surface, COLORS["cyan_mid"], box, 1)
-            surface.blit(g_surf, g_rect)
-            gx += step
-
-        # ── Battery power bar: charge (left) <- 0 -> discharge (right) ──
-        bar_y = gy + 28
-        bar_w = center_width - 48
-        bar_x = center_x + (center_width - bar_w) // 2
-        bar_h = 10
-        power_kw = state.energy.battery_power_kw if state else None
-
-        pygame.draw.rect(surface, COLORS["bg_panel"], (bar_x, bar_y, bar_w, bar_h))
-        pygame.draw.rect(surface, COLORS["border_normal"], (bar_x, bar_y, bar_w, bar_h), 1)
-        half_w = bar_w // 2
-        if power_kw is not None and abs(power_kw) >= 0.1:
-            frac = max(-1.0, min(1.0, power_kw / self.HOME_POWER_RANGE_KW))
-            fill = int(abs(frac) * (half_w - 2))
-            if frac >= 0:  # discharge: battery -> wheels
-                pygame.draw.rect(
-                    surface, COLORS["cyan_mid"],
-                    (bar_x + half_w, bar_y + 2, fill, bar_h - 4))
-            else:  # charge / regen
-                pygame.draw.rect(
-                    surface, COLORS["green_bright"],
-                    (bar_x + half_w - fill, bar_y + 2, fill, bar_h - 4))
-        # Center zero marker
-        pygame.draw.line(
-            surface, COLORS["text_secondary"],
-            (bar_x + half_w, bar_y - 2), (bar_x + half_w, bar_y + bar_h + 1))
-
-        font_tiny = get_tiny_font(8)
-        chg_surf = font_tiny.render("CHG", True, COLORS["text_secondary"])
-        surface.blit(chg_surf, (bar_x, bar_y + bar_h + 3))
-        pwr_surf = font_tiny.render("PWR", True, COLORS["text_secondary"])
-        surface.blit(pwr_surf, (bar_x + bar_w - pwr_surf.get_width(), bar_y + bar_h + 3))
-        kw_text = f"{power_kw:+.1f} kW" if power_kw is not None else "--.- kW"
-        kw_surf = font_tiny.render(kw_text, True, COLORS["text_value"])
-        surface.blit(kw_surf, (mid_x - kw_surf.get_width() // 2, bar_y + bar_h + 3))
-
-        # ── SOC bar (8 segments, mirrors the factory MFD bars) ──
-        soc_y = bar_y + bar_h + 24
-        soc = state.energy.battery_soc if state else 0.0
-        soc_pct = int(soc * 100)
-        lbl_surf = font_tiny.render("SOC", True, COLORS["text_secondary"])
-        surface.blit(lbl_surf, (bar_x, soc_y + 1))
-        seg_area_x = bar_x + 24
-        seg_area_w = bar_w - 24 - 30
-        self._draw_segment_bar(
-            surface, seg_area_x, soc_y, seg_area_w, 9, 8, soc,
-            fill_color=self._soc_color(soc_pct))
-        pct_surf = font_tiny.render(f"{soc_pct}%", True, COLORS["text_value"])
-        surface.blit(pct_surf, (bar_x + bar_w - pct_surf.get_width(), soc_y + 1))
-
-        # ── Fuel levels ──
-        if state:
-            fuel_y = soc_y + 22
-            active_fuel = getattr(state.vehicle.active_fuel, "name", "OFF")
-            for label, liters, x_pos in (
-                ("PET", state.vehicle.fuel_level, bar_x),
-                ("LPG", state.vehicle.lpg_level, mid_x + 12),
-            ):
-                is_active = active_fuel.startswith(label[:1] if label == "PET" else label)
-                color = COLORS["text_value"] if is_active else COLORS["text_dim"]
-                text = f"{label} {liters}L"
-                f_surf = font_tiny.render(text, True, color)
-                surface.blit(f_surf, (x_pos, fuel_y))
+        """Render Page 1: the live scene (car / road) and the power box."""
+        self.scene_page.render(surface)
+        # the scene covers the top bar: put the link LED back on top of it
+        self._connection_indicator.render(surface)
 
     @staticmethod
     def _soc_color(soc_pct: int):
@@ -1059,13 +959,13 @@ class MainScreen(Screen):
         surface.blit(val_surf, (right_x + col_width - val_surf.get_width(), ry))
         ry += row_h
         
-        # DRL indicator
-        lbl = font_label.render("DRL", True, COLORS["text_secondary"])
+        # Door-open indicator (CAN 0x57F / BEAN FE:7F b2 0x80; was "DRL")
+        lbl = font_label.render("DOOR", True, COLORS["text_secondary"])
         surface.blit(lbl, (right_x, ry))
-        if dyn.drl_active:
-            val_surf = font_value.render("ON", True, COLORS["green_bright"])
+        if dyn.door_open:
+            val_surf = font_value.render("OPEN", True, COLORS["yellow"])
         else:
-            val_surf = font_value.render("OFF", True, COLORS["text_dim"])
+            val_surf = font_value.render("SHUT", True, COLORS["text_dim"])
         surface.blit(val_surf, (right_x + col_width - val_surf.get_width(), ry))
         ry += row_h
         

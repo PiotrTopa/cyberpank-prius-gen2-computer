@@ -115,6 +115,10 @@ class Application:
         # thread; they are only queued here and consumed on the main loop.
         if hasattr(virtual_twin, "add_event_callback"):
             virtual_twin.add_event_callback(self.touch_queue.push)
+            # Road perception for the home-page scene ("roadsense_scene"
+            # events, latest-only; docs/MFD_MAIN_SCREEN.md)
+            from ..ui.scene.inputs import FEED
+            virtual_twin.add_event_callback(FEED.push)
         
         # Start the Virtual Twin
         virtual_twin.start()
