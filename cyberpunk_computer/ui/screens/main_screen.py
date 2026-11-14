@@ -32,14 +32,6 @@ from ...state.actions import (
 )
 
 
-# Side-box styling that goes with the centre scene. Each entry can be switched
-# off on its own to get that box's earlier look back.
-SIDE_STYLE = {
-    "corner_ticks": True,      # short bright corner ticks on the six panels
-    "ambient_swatch": True,    # AMBIENT: hue bar, brightness bar, mode (was empty)
-}
-
-
 class MainScreen(Screen):
     """
     Main dashboard screen.
@@ -136,10 +128,10 @@ class MainScreen(Screen):
         # Set focus order: Audio -> Climate -> Ambient -> Lights -> System -> Vehicle
         self._set_focus_order()
 
-        if SIDE_STYLE.get("corner_ticks"):
-            for frame in (self._audio_frame, self._ambient_frame, self._vehicle_frame,
-                          self._climate_frame, self._lights_frame, self._battery_frame):
-                frame.corner_ticks = True
+        # Side-panel items that go with the scene are tunables too
+        # (ui/scene/tuning.py: side_ticks, ambient_panel); applied when the
+        # scene page is built.
+        self._ambient_level = False
         self._ambient_swatch_key = None
         self._ambient_swatch = None
 
@@ -540,13 +532,22 @@ class MainScreen(Screen):
             from ..scene.page import ScenePage
             cx = self.SIDE_PANEL_WIDTH
             self._scene_page = ScenePage(cx + 1, 1, self.width - 2 * cx - 2)
+            self._apply_tuning(self._scene_page.tuning)
             if self._scene_state is not None:
                 self._scene_page.set_state(self._scene_state)
         return self._scene_page
 
+    def _apply_tuning(self, tuning) -> None:
+        for frame in (self._audio_frame, self._ambient_frame, self._vehicle_frame,
+                      self._climate_frame, self._lights_frame, self._battery_frame):
+            frame.corner_ticks = bool(getattr(tuning, "side_ticks", True))
+        self._ambient_level = getattr(tuning, "ambient_panel", "plain") == "level"
+
     @scene_page.setter
     def scene_page(self, page) -> None:
         self._scene_page = page
+        if page is not None:
+            self._apply_tuning(page.tuning)
         if page is not None and self._scene_state is not None:
             page.set_state(self._scene_state)
 
@@ -749,8 +750,8 @@ class MainScreen(Screen):
             1
         )
 
-        if SIDE_STYLE.get("ambient_swatch"):
-            self._render_ambient_swatch(surface)
+        if self._ambient_level:
+            self._render_ambient_level(surface)
 
         # Render page-specific content
         if self._current_page == 1:
@@ -784,51 +785,31 @@ class MainScreen(Screen):
             pygame.draw.line(surface, COLORS["border_normal"],
                              (center_x + 1, bar_y), (center_x + center_width - 2, bar_y))
 
-    def _render_ambient_swatch(self, surface: pygame.Surface) -> None:
-        """AMBIENT panel content: the hue as a segmented spectrum with a
-        marker, the brightness as a segment bar, the mode name. Drawn once per
-        change of (mode, hue, saturation, brightness, on) and cached."""
+    def _render_ambient_level(self, surface: pygame.Surface) -> None:
+        """AMBIENT panel content (tuning ``ambient_panel = "level"``): the
+        mode and the brightness as a 10-segment bar, in the panel's own type
+        sizes. No colour picker. Drawn once per change and cached."""
         amb = get_settings().ambient
         on = bool(getattr(self._ambient_toggle, "state", True))
-        key = (self._ambient_mode, amb.hue, amb.saturation, amb.brightness, on)
+        key = (self._ambient_mode, amb.brightness, on)
         c = self._ambient_frame.content_rect
         if key != self._ambient_swatch_key:
             self._ambient_swatch_key = key
             surf = pygame.Surface((c.width, c.height))
             surf.fill(COLORS["bg_frame"])
             surf.set_colorkey(COLORS["bg_frame"])
-            font = get_tiny_font(8)
-            label = COLORS["text_secondary"]
             value = COLORS["text_value"] if on else COLORS["text_dim"]
-            # hue bar: 26 blocks of 3 px + 1 px gap
-            n, bw = 26, 4
-            x0 = (c.width - n * bw) // 2
-            col = pygame.Color(0, 0, 0)
-            for i in range(n):
-                if on:
-                    col.hsva = (i * 360.0 / n, max(35, min(100, amb.saturation)),
-                                max(45, min(100, amb.brightness)), 100)
-                    pygame.draw.rect(surf, (col.r, col.g, col.b), (x0 + i * bw, 2, bw - 1, 7))
-                else:
-                    pygame.draw.rect(surf, COLORS["cyan_dark"], (x0 + i * bw, 2, bw - 1, 7), 1)
-            mx = x0 + int((amb.hue % 360) / 360.0 * n * bw)
-            pygame.draw.polygon(surf, value, [(mx - 3, 14), (mx + 3, 14), (mx, 10)])
-            surf.blit(font.render("HUE", False, label), (x0, 18))
-            t = font.render(str(int(amb.hue)), False, value)
-            surf.blit(t, (x0 + 22, 18))
-            # brightness: 10 segments
-            surf.blit(font.render("BRI", False, label), (x0, 30))
+            mode = self._ambient_mode if self._ambient_mode != "OFF" else "MANUAL"
+            mt = get_mono_font(14).render(mode if on else "OFF", False, value)
+            surf.blit(mt, ((c.width - mt.get_width()) // 2, 4))
             lit = int(round(max(0, min(100, amb.brightness)) / 10.0))
+            x0 = (c.width - 10 * 10) // 2
             for i in range(10):
-                r = (x0 + 22 + i * 6, 30, 5, 6)
+                r = (x0 + i * 10, 26, 8, 12)
                 if on and i < lit:
                     pygame.draw.rect(surf, COLORS["cyan_mid"], r)
                 else:
                     pygame.draw.rect(surf, COLORS["cyan_dark"], r, 1)
-            mode = self._ambient_mode if self._ambient_mode != "OFF" else ""
-            if mode:
-                mt = font.render(mode, False, value)
-                surf.blit(mt, (x0 + n * bw - mt.get_width() - 1, 18))
             self._ambient_swatch = surf
         surface.blit(self._ambient_swatch, (c.x, c.y + 2))
 

@@ -27,36 +27,39 @@ y 240 └──────────┴──────────┴─�
 The side panels (AUDIO, AMBIENT, ENGINE, CLIMATE, LIGHTS, BATTERY) and page 2 are unchanged; the
 strip is shown on every page. The link LED stays in the top-right corner of the scene.
 
+The look is "quiet road": the road and the lead vehicle dominate, the scenery is a faint band over
+the horizon, and secondary information appears when it matters. How much is shown is set in one
+place, `ui/scene/tuning.py` (section 12).
+
 Scene HUD while driving (all on the scene surface):
 
 | Place | Content |
 |---|---|
-| top-left | speed (Terminus 28, `display_speed_kmh`), `km/h`, gear; under it `SET nn` in green while cruise is engaged |
-| top-right | link LED, speed-limit sign, ego traffic light as a three-lamp signal with its distance |
-| right column, from y 33 | the rules in effect as sign pictograms, 21 px pitch, up to six; `L` / `R` beside a rule that binds one side |
-| left column, from y 45 | up to three warning signs ahead, each with the expected distance |
-| bottom-left | chips for the lamps that are on (`POS`, `LOW`, `HIGH`, `FOG`), above them the perception status (nothing when live) |
-| on the road | lead vehicle with target brackets, distance (m), time gap (s) and a closing/opening arrow with the speed difference in km/h |
+| top-left | speed (Terminus 28, `display_speed_kmh`), `km/h`, gear; beside it `SET nn` in green while cruise is engaged |
+| top-right | link LED, speed-limit sign, ego traffic light as a three-lamp signal with its distance in metres |
+| sign row, y 33..52 | from the left: warning signs ahead, nearest first, each followed by the expected distance in metres (default: two, within 400 m). From the right: the rules in effect (default: four; `+n` for the rest); a small pointer under a rule that binds one side of the road |
+| bottom-left | chip `HIGH` while the high beam is on (all lamps with `lamp_chips = all`), above it the perception status (nothing when live) |
+| on the road | lead vehicle with target brackets and its distance; under it the time gap when shorter than 2.5 s and the closing/opening speed in km/h with an arrow from 5 km/h |
+
+Rules and warnings stay for 4 s after the feed stops carrying them (`sign_hold_s`; the feed drops
+its `signs` key 3 s after roadsense's last `rules` message), never while roadsense is off.
 
 Status strip (`scene/powerbox.py::StatusStrip`, 194 x 21):
 
 | x | Content |
 |---|---|
-| 0..71 | **Cruise slot.** `CRUISE`, the state (`--` nothing known, `OFF` main switch off, `READY` main switch on, `ON` engaged, green), the set speed in Terminus 14 (`--` when unknown; the memory speed, dim with an `M`, when only that is known), three gap bars at x 61..69 drawn only when a gap setting exists |
-| 76..130 | HV battery power in kW (green while charging), `ICE` / `CHG` / `EV` flag |
-| 133..176 | 22 history bars (1 px + 1 px gap, discharge up in cyan, charge down in green, +-25 kW, time base = `display.power_chart_time_base`, 60 s by default) |
-| 182..190 | SOC as the 8 segments of the factory gauge |
+| 0..71 | **Cruise slot.** Caption `CRUISE`; the state in Terminus 14 (`--` nothing known, `OFF` main switch off, `READY` main switch on, `ON` engaged, green); the set speed in Terminus 14 (`--` when unknown; the memory speed dim with a bar over it when only that is known); three gap bars at x 64..72 drawn only when a gap setting exists |
+| 76..138 | Caption `HV kW`; the HV battery power in Terminus 14 (green while charging); `ICE` / `CHG` / `EV` in Terminus 14 |
+| 140..176 | 18 history bars (1 px + 1 px gap, discharge up in cyan, charge down in green, +-25 kW, time base = `display.power_chart_time_base`, 60 s by default) |
+| 180..191 | SOC as the 8 segments of the factory gauge |
 
 The strip is the stopgap for the power read-out until the VFD satellite shows it; the BATTERY panel
 keeps the numbers.
 
-Side panels: two additions tie them to the scene, each switchable in
-`main_screen.SIDE_STYLE` (off = the earlier look of that item):
-
-| Key | Effect |
-|---|---|
-| `corner_ticks` | 5 px bright ticks on the corners of the six panels at rest (the motif of the lead vehicle's target brackets); the focus and edit accents are unchanged |
-| `ambient_swatch` | AMBIENT, empty before: the hue as 26 colour blocks with a marker, the brightness as 10 segments, the mode name; outlines only while ambient is off. Values from the persisted ambient settings, drawn once per change |
+Side panels: original width, purple background and type sizes. Two tunables touch them: `side_ticks`
+(5 px bright corner ticks at rest, the motif of the lead's target brackets; focus and edit accents
+unchanged) and `ambient_panel` (`plain` = empty as originally; `level` = the mode in Terminus 14 and
+the brightness as a 10-segment bar; there is no colour picker).
 
 ## 3. Art direction
 
@@ -87,7 +90,7 @@ striped sun and the skylines are 80s arcade; the depth scale is logarithmic (sec
 | Doors | per door, 0.55 s swing | the door opens on the model with an amber outline; `OPEN DRIVER PASSENGER ...` at the bottom; `DOORS CLOSED` only when the state is known |
 | Rear group | only the shared "rear door or back door" bit is set | both rear doors and the hatch ajar (34 %) in amber, text `REAR/BACK`: one of them is open, the car does not say which |
 | Opening | real speed >= 3 km/h in a forward gear | 1.3 s camera swing from the three-quarter view to the chase view, the pad opens into the road |
-| Driving, road live | roadsense running, scene data younger than 2.5 s | ego lane filled, lane lines (ego pair bright and 2 px, outer pair dim, below probability 0.3 not drawn), road edges violet, the planned path as chevrons, lead vehicle with distance, time gap and closing speed (stop lamps lit when it decelerates harder than 1.5 m/s2), objects, traffic light, limit sign, sign columns, scenery by place / light / weather |
+| Driving, road live | roadsense running, scene data younger than 2.5 s | ego lane filled, lane lines (ego pair bright and 2 px, outer pair dim, below probability 0.3 not drawn), road edges violet, lead vehicle with distance (time gap and closing speed when they matter; stop lamps lit when it decelerates harder than 1.5 m/s2), objects, traffic light, limit sign, sign row, scenery band by place / light / weather; the planned path as chevrons with `path_chevrons` |
 | Driving, road stale | scene data 2.5..7 s old | lanes frozen and dimmed, no lane fill, no lead vehicle, no objects, `SIGNAL LOST` blinking |
 | Driving, signal lost | road data was live and is now older than 7 s | floor grid only, `NO SIGNAL` blinking |
 | Driving, no road data | roadsense running, no scene data received yet (stack starting, scene feed off) | floor grid only, `NO ROAD DATA` (steady, dim); limit sign and traffic light from the health mirror still show |
@@ -164,8 +167,10 @@ Explicit per-door fields are read first if a state ever has them (`door_fl_open`
 | high beam | fan 112 m long, up to 4.6 m half-width, brighter, no cut-off | fan 6 m, larger halo |
 | front fog | short wide fan, 13 m long, up to 6.2 m half-width, green-yellow, under the others | fan 2.4 m |
 
-A fan is rows of the road lit at geometric distance steps, an outline and a bright end line. It is
-fixed to the car (it does not follow the road), so in the road view each kind is one cached sprite.
+A fan is an outline with a bright end line (`beam_style = outline`, the default); `hatch_light`
+adds every other row of the road inside it, `hatch` every row at full brightness, `off` draws no
+fan. It is fixed to the car (it does not follow the road), so in the road view each kind is one
+cached sprite.
 
 ### 6.2 Scenery (`scene/scenery.py`)
 
@@ -186,9 +191,9 @@ feed and by the health mirror):
 | `city_street` | skyline of slabs and a stepped ziggurat; lit windows, mast lights and neon signs at dusk and night | none |
 | `residential` | houses with pitched roofs, trees; lit windows at dusk and night | none |
 | `rural_road` | two mountain ridges, lone trees | marker posts |
-| `forest_road` | two rows of conifers, opening over the road | conifers every 17 m beyond both road edges |
+| `forest_road` | a solid far tree line and two rows of tiered conifers, opening over the road | tiered conifers beyond both road edges (one row; a second, farther row with `roadside = normal`) |
 | `bridge` | suspension towers, main cables, hangers | marker posts joined by a rail |
-| `parking_lot` | parked cars along the far edge, light masts | painted bays every 5 m on both sides |
+| `parking_lot` | parked cars along the far edge, light masts | painted bays every 5 m on both sides (`roadside = normal` only) |
 | `gas_station` | canopy with lamps, pumps, price pylon | none |
 | `tunnel` | none (no sky): arch frames every 10 m, wall and ceiling lines, a lamp row on each wall | the frames themselves |
 | `underground_parking` | none: low ceiling beams, four pillar rows, strip lights | the frames themselves |
@@ -208,6 +213,10 @@ feed and by the health mirror):
 | `snow` | cloud deck; flakes drifting down |
 | `fog` | cloud deck; a dithered band over the far road and the foot of the skyline |
 
+By default the backdrop is drawn at 40 % brightness and only its lowest 34 rows are kept
+(`scenery_brightness`, `scenery_band_px`), rain and snow at half density and 45 % brightness, the
+floor grid at 45 %, tunnel frames at 60 %.
+
 All of this is decoration that states a label; detected things arrive as `objects`. A label outside
 the vocabulary draws the neutral variant. The backdrop pans up to 40 px with the lateral position of
 the road's far end. Roadside scenery, weather and the enclosed places are drawn in the open road
@@ -215,8 +224,9 @@ view only (the parked view stays static).
 
 ### 6.3 Signs (`scene/signs.py`)
 
-The right column shows `signs.on` (rules in effect that bind the car, without the speed limit), the
-left column `signs.ahead` (warnings, nearest first, with the expected distance). Pictograms are
+The sign row (section 2) shows `signs.on` (rules in effect that bind the car, without the speed
+limit) from the right and `signs.ahead` (warnings, nearest first, with the expected distance) from
+the left. Pictograms are
 19 x 19 original drawings keyed by the roadsense rule id (`api/roadsense_api/rules/pl.json`,
 `effects[].id`); `--shots` writes a legend of all of them. Drawn ids:
 
@@ -234,8 +244,8 @@ left column `signs.ahead` (warnings, nearest first, with the expected distance).
   `two_way_ahead`, `curve_ahead`, `lane_change_ahead`, `steep_ahead`, `falling_rocks_ahead`,
   `other_danger_ahead`, `height_restriction_ahead`, `warning_other`.
 
-Any other id is shown as a plate with roadsense's sign code (`B13`), so a rule is never dropped. An
-entry roadsense marks uncertain carries a `?`.
+Any other id is shown as a plate with roadsense's sign code in Terminus 14 (`B13`), so a rule is
+never dropped. An entry roadsense marks uncertain carries an amber corner flag.
 
 ## 7. Road scene contract (backend -> frontend)
 
@@ -400,11 +410,12 @@ treat it as x50..x85). Averages assume 20 UI frames and 10 scene redraws a secon
 | Case | Desktop | Pi Zero estimate |
 |---|---|---|
 | main screen before the scene existed (every frame) | 0.56 ms | 39 ms |
-| parked, steady (cached blits) | 0.31 ms | 22 ms |
-| driving, no vision | 0.31 ms + 0.07 ms per scene redraw | 24 ms average |
-| driving, city at night: lead, four lamp objects, four signs, low beam | 0.32 ms + 0.21 ms per redraw | 30 ms average |
-| the same in rain | 0.32 ms + 0.22 ms per redraw | 30 ms average |
-| forest at night in fog with high beam; tunnel | 0.32 ms + 0.28 ms per redraw | 32 ms average |
+| parked, steady (cached blits) | 0.30 ms | 21 ms |
+| driving, no vision | 0.30 ms + 0.07 ms per scene redraw | 23 ms average |
+| driving, city at night: lead, four lamp objects, four signs, low beam | 0.31 ms + 0.19 ms per redraw | 28 ms average |
+| the same in rain | 0.31 ms + 0.19 ms per redraw | 29 ms average |
+| forest at night in fog with high beam | 0.31 ms + 0.29 ms per redraw | 32 ms average |
+| tunnel | 0.31 ms + 0.25 ms per redraw | 31 ms average |
 | one car render (cache miss): camera step, door step or lamp change | 0.4..0.75 ms | 30..50 ms, once per sprite |
 | a backdrop strip on a label change | 0.1..0.45 ms | 7..30 ms, once per (place, light, weather) |
 | rain / snow tile, fog band, a beam sprite, a sign pictogram (first use) | 0.85 / 0.15 / 0.13 / 0.006 ms | 60 / 10 / 9 / 0.4 ms, once |
@@ -425,7 +436,7 @@ Rules that keep it there:
   full-surface blend anywhere;
 * text: `ui/fonts.py::CrispFont.render` caches every rendered string per font (256 entries), for
   every screen of the UI. This took the six side panels from 0.34 ms to 0.18 ms a frame and is the
-  largest single saving (the corner ticks and the ambient swatch of section 2 add 0.05 ms back);
+  largest single saving (the corner ticks of section 2 add about 0.03 ms back);
 * the chase view projects nothing per point (section 5);
 * `MainScreen` builds the scene after its first frame; importing `main_screen` no longer imports
   `ui/scene`;
@@ -439,14 +450,87 @@ python -m cyberpunk_computer.ui.scene.demo --live --scale 3                  # t
 python -m cyberpunk_computer.ui.scene.demo --bench                           # frame cost incl. the simulation
 ```
 
-`--shots` writes `NN_name.png` (native 480 x 240) and `NN_name@4x.png` for 45 cases: the states of
-section 4, the five lamp states on the road and three parked, 17 scenery variants covering every
-place, light and weather label, a full sign column, the cruise slot states, and `signs_legend`
-with every pictogram. `--copy-to` also writes the 4x images there as `mfd2_NN_name.png`.
+`--shots` writes `NN_name.png` (native 480 x 240) and `NN_name@4x.png` for 46 cases: the states of
+section 4, the five lamp states on the road and three parked, 18 scenery variants covering every
+place, light and weather label, a full sign row, the cruise slot states, and `signs_legend`
+with every pictogram. `--copy-to` also writes the 4x images there as `<prefix>NN_name.png`
+(`--prefix`, default `final_`).
 
 Timeline (44 s): parked, doors open and close, READY and lamps, pull away, lead vehicle closing in,
 limit sign and rules, left curve at night with street lamps, red light with the lead braking, stop,
 the scene closes. Vehicle values go through the real state fields; the road goes in as
 `roadsense_scene` events; `mods` override labels, signs, lamps and cruise for the variant shots. The
 street lamps of the demo are simulated data for the `lamp` object kind (section 9).
+
+## 12. Tunables (`ui/scene/tuning.py`)
+
+One class, `Tuning`, holds every setting of how much the scene shows; each is read where the thing
+is drawn. Override without editing code: a JSON object with any of these names in
+`mfd_scene_tuning.json` next to `user_settings.json` (or the file named by the environment variable
+`MFD_SCENE_TUNING`), read when the scene is built (UI start). Unknown names and wrong types are
+ignored and logged.
+
+| Name | Default | Meaning |
+|---|---|---|
+| `signs_max_on` | 4 | rules in effect shown in the sign row; the rest become `+n` |
+| `signs_max_ahead` | 2 | warning signs shown, nearest first |
+| `warning_max_m` | 400 | a warning is shown while its hazard is expected within this distance (m) |
+| `sign_hold_s` | 4.0 | rules and warnings stay this long after the feed stops carrying them (0 = drop at once) |
+| `gap_show_below_s` | 2.5 | the time gap to the lead is shown when shorter (99 = always, 0 = never) |
+| `closing_show_kmh` | 5.0 | closing / opening speed and its arrow are shown from this difference (999 = never) |
+| `lead_brackets` | true | target brackets around the lead vehicle |
+| `scenery_brightness` | 0.40 | backdrop brightness, 0..1 |
+| `scenery_band_px` | 34 | rows of the backdrop kept above the horizon (0 = the whole strip, 68 rows) |
+| `roadside` | `sparse` | `off`, `sparse` (marker posts on open roads, one tree row in a forest), `normal` (also a second tree row and parking bays) |
+| `grid_brightness` | 0.45 | floor grid on the road |
+| `pad_brightness` | 0.55 | floor grid under the parked car |
+| `edge_brightness` | 0.5 | road edges |
+| `enclosure_brightness` | 0.6 | tunnel and car-park frames |
+| `weather_density` | 0.5 | share of rain streaks / snow flakes drawn |
+| `weather_brightness` | 0.45 | their brightness |
+| `fog_band` | true | the dithered fog band |
+| `beam_style` | `outline` | `outline`, `hatch_light`, `hatch`, `off` (section 6.1) |
+| `path_chevrons` | false | the model's planned path as chevrons in the lane |
+| `lamp_chips` | `high` | `none`, `high` (only the high-beam chip), `all` (POS / LOW / HIGH / FOG) |
+| `cruise_chip` | true | `SET nn` beside the speed while cruise is engaged |
+| `side_ticks` | true | corner ticks on the six side panels |
+| `ambient_panel` | `plain` | `plain` or `level` (section 2) |
+
+The fuller look of the previous version is `{"signs_max_on": 6, "signs_max_ahead": 3,
+"gap_show_below_s": 99, "closing_show_kmh": 0, "scenery_brightness": 1, "scenery_band_px": 0,
+"roadside": "normal", "grid_brightness": 1, "edge_brightness": 1, "enclosure_brightness": 1,
+"weather_density": 1, "weather_brightness": 1, "beam_style": "hatch", "path_chevrons": true,
+"lamp_chips": "all"}`.
+
+## 13. Type sizes
+
+Rule: what the driver reads at a glance is Terminus 14 or larger (the size of the values in the
+side panels); the 8 px pixel font is only for captions of the kind the panels use it for (`VOL`,
+`IN`, `RPM`). Audit of the centre and the strip at native size:
+
+| Text | Was | Verdict | Now |
+|---|---|---|---|
+| speed | Terminus 28 | fine | unchanged |
+| gear letter, limit digits | Terminus 14 / 16 | fine | unchanged |
+| lead distance | Terminus 16 | fine | unchanged |
+| `km/h`, the `m` after the lead distance | 04B03 8 | captions, like the panels' labels | unchanged |
+| time gap `2.0s` | 04B03 8 | a value: too small | Terminus 14, shown only when short |
+| closing / opening speed | 04B03 8 | a value: too small | Terminus 14 with the arrow, shown from 5 km/h |
+| warning distance `80m` | 04B03 8 | too small | Terminus 14 number beside the sign (metres implied) |
+| traffic-light distance `36m` | 04B03 8 | too small | Terminus 14 number |
+| `+n` more rules | 04B03 8 | too small | Terminus 14 |
+| `L` / `R` beside a one-sided rule | 04B03 8 | too small | replaced by a drawn pointer under the sign |
+| `?` on an uncertain sign | 04B03 8 | too small | replaced by an amber corner flag |
+| sign-code plate (`B13`) | 04B03 8 | too small | Terminus 14 on a plate as wide as the text |
+| lamp chips `POS LOW HIGH FOG` | 04B03 8 | too small | Terminus 14 chips (18 px tall); only `HIGH` by default |
+| `SET nn` cruise chip | 04B03 8 | too small | Terminus 14 chip |
+| perception status (`VISION OFF`, `NO ROAD DATA`, `NO SIGNAL`, `SIGNAL LOST`) | 04B03 8 | too small | Terminus 14 chip |
+| parked: `READY` / `ACC` / `OFF` / `ICE`, lamp chips | 04B03 8 | too small | Terminus 14 chips |
+| parked: `DOORS CLOSED`, `OPEN ...` door list | 04B03 8 | too small | Terminus 14; names shortened to `DRIVER PASS REAR` (`RL` `RR` `BACK` with per-door data) so the line fits |
+| parked: `NHW20` tag | 04B03 8 | decoration, unreadable | dropped |
+| strip: cruise state `OFF` / `READY` / `ON` | 04B03 8 | a value: too small | Terminus 14 |
+| strip: set speed, HV power | Terminus 14 | fine | unchanged |
+| strip: `ICE` / `EV` / `CHG` | 04B03 8 | too small | Terminus 14 |
+| strip: `M` (memory speed) | 04B03 8 | too small | replaced by a bar over the dim digits |
+| strip captions `CRUISE`, `HV kW` | 04B03 8 | captions | unchanged, above the values |
 

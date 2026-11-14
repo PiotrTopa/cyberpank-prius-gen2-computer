@@ -95,7 +95,7 @@ class StatusStrip:
     """
 
     RANGE_KW = 25.0
-    COLS = 22
+    COLS = 18
     CRUISE_W = 72
 
     def __init__(self, size: Tuple[int, int], history: PowerHistory,
@@ -164,6 +164,8 @@ class StatusStrip:
 
     def _draw(self, power_kw, kw_txt, soc_pct, bars, ice_running, ready, time_base_s,
               cruise, cruise_gap) -> None:
+        # Type: everything the driver reads is Terminus 14; only the two
+        # captions (CRUISE, kW) are in the 8 px pixel font, sitting above.
         pg = self._pg
         c = self.colors
         s = self.surface
@@ -173,14 +175,14 @@ class StatusStrip:
 
         # ---- cruise slot ----
         state, speed, kind = cruise
-        s.blit(self._t("CRUISE", 8, label, False), (3, 2))
+        s.blit(self._t("CRUISE", 8, label, False), (3, 1))
         if state == "ON":
-            st = self._t("ON", 8, (0, 0, 0), False)
-            pg.draw.rect(s, c["green_bright"], (3, 10, st.get_width() + 5, 10))
-            s.blit(st, (6, 12))
+            st = self._t("ON", 14, (0, 0, 0), True)
+            pg.draw.rect(s, c["green_bright"], (2, 8, st.get_width() + 5, 13))
+            s.blit(st, (5, 7))
         else:
             col = c["cyan_bright"] if state == "READY" else c["text_dim"]
-            s.blit(self._t(state, 8, col, False), (3, 12))
+            s.blit(self._t(state, 14, col, True), (3, 7))
         if kind == "set":
             vcol = c["green_bright"] if state == "ON" else c["text_value"]
         elif kind == "mem":
@@ -188,14 +190,16 @@ class StatusStrip:
         else:
             vcol = c["cyan_dark"]
         val = self._t(speed, 14, vcol, True)
-        s.blit(val, (58 - val.get_width(), 4))
+        right = 62 if cruise_gap else self.CRUISE_W - 4
+        s.blit(val, (right - val.get_width(), 7))
         if kind == "mem":
-            s.blit(self._t("M", 8, label, False), (59, 12))
+            # memory speed, not a set speed: a small bar over the digits
+            pg.draw.line(s, label, (right - val.get_width(), 4), (right - 1, 4))
         if cruise_gap:
             # adaptive-cruise gap setting: 1..3 bars (drawn only when known)
             for i in range(3):
                 bh = 4 + i * 3
-                rect = (61 + i * 3, 17 - bh, 2, bh)
+                rect = (64 + i * 3, 18 - bh, 2, bh)
                 pg.draw.rect(s, c["green_bright"] if i < cruise_gap else c["cyan_dark"], rect)
         pg.draw.line(s, c["border_normal"], (self.CRUISE_W, 0), (self.CRUISE_W, h - 1))
 
@@ -207,19 +211,19 @@ class StatusStrip:
             vcol = c["green_bright"]
         else:
             vcol = c["text_value"]
+        s.blit(self._t("HV kW", 8, label, False), (x0, 1))
         val = self._t(kw_txt, 14, vcol, True)
-        s.blit(val, (x0, 4))
-        fx = x0 + 37
-        s.blit(self._t("kW", 8, label, False), (fx, 3))
+        s.blit(val, (x0, 7))
+        fx = x0 + 38
         if ice_running:
-            s.blit(self._t("ICE", 8, c["orange"], False), (fx, 12))
+            s.blit(self._t("ICE", 14, c["orange"], True), (fx, 7))
         elif power_kw is not None and power_kw < -0.05:
-            s.blit(self._t("CHG", 8, c["green_bright"], False), (fx, 12))
+            s.blit(self._t("CHG", 14, c["green_bright"], True), (fx, 7))
         elif ice_running is False and ready:
-            s.blit(self._t("EV", 8, c["green_bright"], False), (fx, 12))
+            s.blit(self._t("EV", 14, c["green_bright"], True), (fx, 7))
 
         # ---- history: 1 px bars, discharge up / charge down ----
-        gx = x0 + 57
+        gx = x0 + 64
         gw = self.COLS * 2
         mid = h // 2
         half = mid - 2
@@ -243,8 +247,8 @@ class StatusStrip:
                 s.set_at((x, mid + n), dn_hi)
 
         # ---- SOC: 8 segments ----
-        sx = gx + gw + 5
-        sw = max(6, self.w - sx - 3)
+        sx = gx + gw + 4
+        sw = max(6, self.w - sx - 2)
         if bars is None and soc_pct is not None:
             bars = int(round(soc_pct / 100.0 * 8))
         fill = soc_color(soc_pct if soc_pct is not None else 50, c)

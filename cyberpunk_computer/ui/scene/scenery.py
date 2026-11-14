@@ -69,8 +69,38 @@ def _line_colour(light: Optional[str]) -> RGB:
     return (96, 66, 160)           # dusk / unknown: the violet of the ridge
 
 
+def conifer(s: pygame.Surface, x: float, base: float, tall: float, half: float,
+            line: RGB, fill: RGB, tiers: int = 3) -> None:
+    """A tiered conifer: stacked triangles widening downwards, on a trunk."""
+    trunk = max(1.0, tall * 0.12)
+    top = base - tall
+    body = tall - trunk
+    pts_l, pts_r = [], []
+    for i in range(tiers):
+        t0 = i / float(tiers)
+        t1 = (i + 1) / float(tiers)
+        w0 = half * (0.18 + 0.55 * t0) * (0.55 if i else 0.0)
+        w1 = half * (0.45 + 0.55 * t1)
+        y0 = top + body * t0
+        y1 = top + body * t1
+        pts_l += [(x - w0, y0), (x - w1, y1)]
+        pts_r += [(x + w0, y0), (x + w1, y1)]
+    pygame.draw.polygon(s, fill, pts_l + pts_r[::-1])
+    pygame.draw.lines(s, line, False, pts_l)
+    pygame.draw.lines(s, line, False, pts_r)
+    pygame.draw.line(s, line, (x, base - trunk), (x, base))
+
+
 class Scenery:
-    def __init__(self, width: int, sky_h: int, horizon_colour: RGB):
+    def __init__(self, width: int, sky_h: int, horizon_colour: RGB,
+                 brightness: float = 1.0, band_px: int = 0,
+                 weather_density: float = 1.0, weather_brightness: float = 1.0):
+        # brightness / band_px: how loud the backdrop is (tuning.py);
+        # weather_density / weather_brightness: the same for rain and snow
+        self.brightness = max(0.0, min(1.0, brightness))
+        self.band_px = int(band_px)
+        self.weather_density = max(0.0, min(1.0, weather_density))
+        self.weather_brightness = max(0.0, min(1.0, weather_brightness))
         self.w = width
         self.h = sky_h
         self.horizon = horizon_colour
@@ -97,6 +127,12 @@ class Scenery:
             strip.fill((0, 0, 0))
             self._sky(strip, light, weather)
             self._skyline(strip, place, light)
+            if self.brightness < 0.999:
+                f = int(255 * self.brightness)
+                strip.fill((f, f, f), special_flags=pygame.BLEND_RGB_MULT)
+            if 0 < self.band_px < self.h:
+                # only a band over the horizon is kept
+                pygame.draw.rect(strip, (0, 0, 0), (0, 0, strip.get_width(), self.h - self.band_px))
             pygame.draw.line(strip, self.horizon, (0, self.h - 1), (strip.get_width(), self.h - 1))
             self._strips[key] = strip
         return strip
@@ -209,25 +245,32 @@ class Scenery:
             pygame.draw.circle(s, green, (x, y - 7), 4, 1)
 
     def _place_forest_road(self, s, col, light) -> None:
+        """Three depth layers: a solid far tree line, then two rows of tiered
+        conifers, opening over the road."""
         w, h = s.get_size()
-        back = (0, 70, 60) if light != "night" else (0, 50, 52)
-        front = (0, 132, 84) if light != "night" else (0, 92, 70)
+        night = light == "night"
         rng = _Rng(5)
-        for colr, lo, hi, step in ((back, 22, 40, 9), (front, 12, 28, 11)):
-            x = -4
-            while x < w + 6:
-                tall = rng.n(lo, hi)
-                half = rng.n(4, 6)
-                # the trees open up over the road
-                gap = abs(x - w // 2)
-                if gap < 26:
-                    tall = max(4, tall * gap // 30)
-                pts = [(x - half, h - 2), (x - half // 2, h - 2 - tall // 2), (x - half + 1, h - 2 - tall // 2),
-                       (x, h - 2 - tall), (x + half - 1, h - 2 - tall // 2), (x + half // 2, h - 2 - tall // 2),
-                       (x + half, h - 2)]
-                pygame.draw.polygon(s, (0, 0, 0), pts)
-                pygame.draw.lines(s, colr, False, pts)
-                x += step + rng.n(-2, 3)
+        pts = [(0, h)]
+        x = 0
+        while x <= w:
+            gap = abs(x - w // 2)
+            top = rng.n(20, 30) if gap > 30 else 8 + gap // 3
+            pts.append((x, h - 2 - top))
+            x += rng.n(3, 6)
+        pts.append((w, h))
+        pygame.draw.polygon(s, (0, 20, 18), pts)
+        pygame.draw.lines(s, (0, 52, 46) if night else (0, 70, 58), False, pts[1:-1])
+        for line, fill, lo, hi, step, seed in (((0, 86, 62), (0, 26, 22), 22, 36, 17, 3),
+                                              ((0, 150, 92), (0, 36, 28), 30, 52, 23, 9)):
+            if night:
+                line = (0, int(line[1] * 0.7), int(line[2] * 0.7))
+            rng = _Rng(seed)
+            x = -6 + rng.n(0, 8)
+            while x < w + 8:
+                if abs(x - w // 2) > 34:
+                    tall = rng.n(lo, hi)
+                    conifer(s, x, h - 2, tall, tall * 0.26, line, fill, 3 if tall > 30 else 2)
+                x += step + rng.n(-3, 5)
 
     def _place_highway(self, s, col, light) -> None:
         w, h = s.get_size()
@@ -416,19 +459,28 @@ class Scenery:
         t.fill(KEY)
         t.set_colorkey(KEY, pygame.RLEACCEL)
         rng = _Rng(9 if kind == "rain" else 17)
+        dens, br = self.weather_density, self.weather_brightness
+
+        def tone(c: RGB) -> RGB:
+            return (int(c[0] * br), int(c[1] * br), int(c[2] * br))
+
         if kind == "rain":
             for _ in range(w * h // 420):
                 x, y = rng.n(0, w - 1), rng.n(0, h - 1)
                 ln = rng.n(3, 6)
                 c = (64, 112, 132) if rng.chance(0.7) else (110, 160, 176)
-                pygame.draw.line(t, c, (x, y), (x - ln // 2, y + ln))
+                if rng.chance(dens):
+                    pygame.draw.line(t, tone(c), (x, y), (x - ln // 2, y + ln))
         else:
             for _ in range(w * h // 520):
                 x, y = rng.n(0, w - 1), rng.n(0, h - 1)
-                if rng.chance(0.3):
-                    pygame.draw.rect(t, (210, 220, 228), (x, y, 2, 2))
+                bigf = rng.chance(0.3)
+                if not rng.chance(dens):
+                    continue
+                if bigf:
+                    pygame.draw.rect(t, tone((210, 220, 228)), (x, y, 2, 2))
                 else:
-                    t.set_at((x, y), (130, 146, 158))
+                    t.set_at((x, y), tone((130, 146, 158)))
         self._tiles[kind] = t
         return t
 

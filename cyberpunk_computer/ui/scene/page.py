@@ -25,6 +25,7 @@ from .director import SceneDirector
 from .inputs import FEED, SceneFeed, SceneInputs, read_inputs
 from .powerbox import PowerHistory, StatusStrip
 from .render import SceneRenderer
+from .tuning import Tuning, load as load_tuning
 
 SCENE_H = 216
 STRIP_H = 21
@@ -34,11 +35,13 @@ PREWARM_S = 0.4
 
 class ScenePage:
     def __init__(self, x: int, y: int, width: int, feed: Optional[SceneFeed] = FEED,
-                 clock=time.monotonic):
+                 clock=time.monotonic, tuning: Optional[Tuning] = None):
+        # the tunables (tuning.py): defaults + the optional JSON overrides
+        self.tuning = tuning if tuning is not None else load_tuning()
         self.x, self.y, self.width = x, y, width
         self._clock = clock
         self.feed = feed
-        self.director = SceneDirector()
+        self.director = SceneDirector(self.tuning)
         self.history = PowerHistory(clock)
         self.inputs = SceneInputs()
         self._state: Any = None
@@ -85,7 +88,7 @@ class ScenePage:
 
     def render_scene(self, surface: pygame.Surface) -> None:
         if self.scene is None:
-            self.scene = SceneRenderer((self.width, SCENE_H))
+            self.scene = SceneRenderer((self.width, SCENE_H), tuning=self.tuning)
         surface.blit(self.scene.render(self.director, self.inputs, self._clock()),
                      (self.x, self.y))
 

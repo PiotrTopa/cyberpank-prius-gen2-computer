@@ -446,8 +446,7 @@ def sign_surface(rule_id: str, code: str = "", unsure: bool = False,
                  text: Optional[Callable[[str, RGB], pygame.Surface]] = None) -> pygame.Surface:
     """The 19 x 19 pictogram of a roadsense rule id (colour-keyed, cached).
 
-    ``text(string, colour)`` renders tiny text for the fallback plate and the
-    "?" of an uncertain entry.
+    ``text(string, colour)`` renders the sign code of the fallback plate.
     """
     key = (rule_id, code if rule_id not in _DRAW else "", unsure)
     surf = _CACHE.get(key)
@@ -455,21 +454,27 @@ def sign_surface(rule_id: str, code: str = "", unsure: bool = False,
         return surf
     if len(_CACHE) > 96:
         _CACHE.clear()
-    s = _surface()
     draw = _DRAW.get(rule_id)
     if draw is not None:
+        s = _surface()
         draw(s)
     else:
-        # unknown rule: a plate with roadsense's sign code, never nothing
-        pygame.draw.rect(s, BLACK, (0, 4, S, 11))
-        pygame.draw.rect(s, (110, 150, 160), (0, 4, S, 11), 1)
-        if text is not None:
-            label = (code or "?").replace("-", "")[:4]
-            t = text(label, WHITE)
-            s.blit(t, (max(1, (S - t.get_width()) // 2 + 1), 6))
-    if unsure and text is not None:
-        q = text("?", (255, 235, 153))
-        pygame.draw.rect(s, BLACK, (S - 6, S - 8, 6, 8))
-        s.blit(q, (S - 5, S - 8))
+        # unknown rule: a plate with roadsense's sign code, never nothing.
+        # The plate is as wide as its text needs (the text callback decides
+        # the font: Terminus 14 on the screen).
+        label = (code or "?").replace("-", "")[:4]
+        t = text(label, WHITE) if text is not None else None
+        w = max(S, (t.get_width() + 6) if t is not None else S)
+        s = pygame.Surface((w, S))
+        s.fill(BLACK)
+        s.set_colorkey(KEY, pygame.RLEACCEL)
+        pygame.draw.rect(s, (110, 150, 160), (0, 1, w, S - 2), 1)
+        if t is not None:
+            s.blit(t, ((w - t.get_width()) // 2 + 1, (S - t.get_height()) // 2))
+    if unsure:
+        # uncertain entry: an amber corner flag (a pictogram, not small text)
+        w = s.get_width()
+        pygame.draw.polygon(s, (255, 235, 153), [(w - 7, S - 1), (w - 1, S - 1), (w - 1, S - 7)])
+        pygame.draw.polygon(s, BLACK, [(w - 8, S - 1), (w - 1, S - 8)], 1)
     _CACHE[key] = s
     return s

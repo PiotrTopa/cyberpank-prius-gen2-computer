@@ -37,8 +37,9 @@ from .car import CarRenderer, car_palette
 from .director import DOOR_STEPS, VIEW_STEPS, SceneDirector
 from .inputs import DOOR_KEYS, SceneInputs
 from .model import Camera
-from .scenery import ENCLOSED, PAN, Scenery
+from .scenery import ENCLOSED, PAN, Scenery, conifer
 from .signs import sign_surface
+from .tuning import Tuning
 
 RGB = Tuple[int, int, int]
 
@@ -61,7 +62,7 @@ NEAR = 0.4                     # near plane (m)
 GAP_WARN_S = 1.5               # time gap colouring
 GAP_CRIT_S = 0.8
 
-DOOR_LABELS = ("DRIVER", "PASSENGER", "REAR L", "REAR R", "BACK")
+DOOR_LABELS = ("DRIVER", "PASS", "RL", "RR", "BACK")
 
 CHASE_CY_OFFSET = 14           # chase camera centre below the scene centre (px)
 SKY_H = 68                     # backdrop strip height (px above the horizon)
@@ -149,7 +150,9 @@ class SceneRenderer:
     """Owns the scene surface; ``render()`` returns it, redrawn if needed."""
 
     def __init__(self, size: Tuple[int, int] = (238, 216),
-                 colors: Optional[Mapping[str, RGB]] = None):
+                 colors: Optional[Mapping[str, RGB]] = None,
+                 tuning: Optional[Tuning] = None):
+        self.tune = tune = tuning or Tuning()
         self.w, self.h = size
         c = dict(colors or COLORS)
         self.pal: Dict[str, RGB] = {
@@ -184,7 +187,13 @@ class SceneRenderer:
         self._chase_cy = self.h / 2.0 + CHASE_CY_OFFSET
         chase = Camera(CHASE_POS, CHASE_TARGET, CHASE_F, cx, self._chase_cy)
         self.horizon_y = int(chase.horizon_y())
-        self.scenery = Scenery(self.w, SKY_H, self.pal["horizon"])
+        self.scenery = Scenery(self.w, SKY_H, self.pal["horizon"], tune.scenery_brightness,
+                               tune.scenery_band_px, tune.weather_density, tune.weather_brightness)
+        # tiers (tuning.py): the floor, the edges and the enclosure frames
+        self._grid_road = _k(self.pal["grid"], tune.grid_brightness)
+        self._grid_pad = _k(self.pal["grid"], tune.pad_brightness)
+        self.pal["edge"] = _k(self.pal["edge"], tune.edge_brightness)
+        self.pal["grid_hi"] = _k(self.pal["grid_hi"], tune.enclosure_brightness)
         self.cameras: List[Camera] = [
             Camera.lerp(hero, chase, i / VIEW_STEPS) for i in range(VIEW_STEPS + 1)]
         self.car = CarRenderer(car_palette(c))
@@ -263,7 +272,7 @@ class SceneRenderer:
                 inp.ready, inp.acc_on, inp.doors, inp.rear_group, inp.door_any, inp.head,
                 inp.high, inp.tail, inp.fog, inp.brake, inp.limit_kmh, inp.limit_source,
                 inp.light, inp.env_light, inp.env_place, inp.env_weather, inp.ice_running,
-                inp.signs_on, inp.signs_ahead, inp.cruise_active, inp.cruise_set_kmh,
+                d.signs_on, d.signs_ahead, inp.cruise_active, inp.cruise_set_kmh,
                 inp.limit_conf is not None and inp.limit_conf < 0.35, blink, fall)
 
     # ── helpers ──────────────────────────────────────────────────────────────
@@ -423,11 +432,12 @@ class SceneRenderer:
             self.scenery.draw_enclosure(s, place, self._row, compress, d.odo, self.pal["grid_hi"])
         self._draw_beams(s, cam, inp, v)
         if road:
-            self._draw_path(s, cam, d, v, road_k)
+            if self.tune.path_chevrons:
+                self._draw_path(s, cam, d, v, road_k)
             self._draw_road(s, cam, d, v, road_k, lines)
-        if fast and place and not enclosed:
+        if fast and place and not enclosed and self.tune.roadside != "off":
             self._draw_roadside(s, d, place, inp.env_light)
-        if fast and inp.env_weather == "fog":
+        if fast and inp.env_weather == "fog" and self.tune.fog_band:
             self.scenery.draw_fog(s, self.horizon_y)
         if road:
             self._draw_objects(s, cam, d, inp, v, road_k)
@@ -459,7 +469,7 @@ class SceneRenderer:
     # -- floor -------------------------------------------------------------------
 
     def _draw_floor(self, s: pygame.Surface, cam: Camera, d: SceneDirector, v: float) -> None:
-        col = self.pal["grid"]
+        col = self._grid_road if v > 0.5 else self._grid_pad
         line = pygame.draw.line
         seg = self._seg
         # a pad under the parked car that opens into the road ahead
@@ -516,6 +526,8 @@ class SceneRenderer:
             front fog            short wide fan under the others
         """
         kinds = []
+        if self.tune.beam_style == "off":
+            return
         if inp.fog:
             kinds.append("fog")
         if inp.high:
@@ -548,6 +560,13 @@ class SceneRenderer:
         fast = v >= 1.0
         cx = self.w / 2.0
         reach, parked, w0, spread, wmax, col, edge = BEAMS[kind]
+        # style (tuning.beam_style): outline = edges and end line only;
+        # hatch_light = every other row, dimmer; hatch = every row
+        style = self.tune.beam_style
+        every = {"outline": 0, "hatch_light": 2}.get(style, 1)
+        if style != "hatch":
+            col, edge = _k(col, 0.6), _k(edge, 0.7)
+        row_n = 0
         reach = parked + (reach - parked) * v
         near_side = reach * (LOW_BEAM_NEAR_SIDE if kind == "low" else 1.0)
         left_pts = []
@@ -569,7 +588,11 @@ class SceneRenderer:
                 if p is None:
                     break
                 a, b = p
-            line(s, edge if last else col, a, b)
+            if last:
+                line(s, edge, a, b)
+            elif every and row_n % every == 0:
+                line(s, col, a, b)
+            row_n += 1
             if r <= near_side:
                 left_pts.append(a)
             right_pts.append(b)
@@ -610,23 +633,23 @@ class SceneRenderer:
             return base + sgn * off
 
         if place == "forest_road":
-            col = pal["tree"] if light != "night" else _k(pal["tree"], 0.7)
-            pitch = 17.0
-            x = 102.0 - (d.odo % pitch)
-            while x > 9.0:
-                for sgn in (1.0, -1.0):
-                    g = self._place(None, x, side_y(x, sgn, 3.4), 1.0)
-                    if g is None:
-                        continue
-                    gx, gy, k = g
-                    tall = min(36.0, k * 4.4)
-                    half = max(2.0, min(9.0, k * 1.1))
-                    pts = [(gx - half, gy), (gx, gy - tall), (gx + half, gy)]
-                    pygame.draw.polygon(s, (0, 0, 0), pts)
-                    pygame.draw.lines(s, col, False, pts)
-                    pygame.draw.line(s, col, (gx - half * 0.6, gy - tall * 0.42),
-                                     (gx + half * 0.6, gy - tall * 0.42))
-                x -= pitch
+            # tiered conifers beyond both road edges; "normal" adds a far row
+            rows = ((3.8, 26.0, (0, 110, 76), (0, 22, 18)),)
+            if self.tune.roadside == "normal":
+                rows = ((7.5, 19.0, (0, 78, 58), (0, 18, 16)), (3.6, 19.0, (0, 140, 88), (0, 30, 24)))
+            for off, pitch, line_c, fill in rows:
+                if light == "night":
+                    line_c = _k(line_c, 0.7)
+                x = 100.0 - ((d.odo + off * 3.1) % pitch)
+                while x > 7.0:
+                    for sgn in (1.0, -1.0):
+                        g = self._place(None, x, side_y(x, sgn, off + ((x * 13) % 5) * 0.25), 1.0)
+                        if g is None:
+                            continue
+                        gx, gy, k = g
+                        tall = min(44.0, k * (6.0 + ((x * 7) % 4) * 0.6))
+                        conifer(s, gx, gy, tall, tall * 0.27, line_c, fill, 3 if tall > 26 else 2)
+                    x -= pitch
         elif place in ("highway", "rural_road", "bridge"):
             # marker posts: white reflector on the left, red on the right
             pitch = 25.0
@@ -647,7 +670,7 @@ class SceneRenderer:
                             pygame.draw.line(s, pal["lane_dim"], prev[sgn], (gx, top))
                         prev[sgn] = (gx, top)
                 x -= pitch
-        elif place == "parking_lot":
+        elif place == "parking_lot" and self.tune.roadside == "normal":
             # painted bays on both sides
             pitch = 5.0
             x = 60.0 - (d.odo % pitch)
@@ -846,6 +869,7 @@ class SceneRenderer:
         g = self._place(cam, lead.dist_m, lead.lat_m, v)
         if g is None:
             return
+        tune = self.tune
         cx, by, ppm = g
         a = d.lead_alpha * k
         gap = d.time_gap_s(inp.real_speed_kmh)
@@ -855,14 +879,14 @@ class SceneRenderer:
         rect = self.draw_vehicle_rear(s, cx, by, w, col, lead.kind, a, braking)
         if a < 0.6:
             return
-        # target brackets
         r = rect.inflate(6, 6)
-        t = 3
         line = pygame.draw.line
-        for (px, py, dx, dy) in ((r.left, r.top, 1, 1), (r.right - 1, r.top, -1, 1),
-                                 (r.left, r.bottom - 1, 1, -1), (r.right - 1, r.bottom - 1, -1, -1)):
-            line(s, col, (px, py), (px + dx * t, py))
-            line(s, col, (px, py), (px, py + dy * t))
+        if tune.lead_brackets:
+            t = 3
+            for (px, py, dx, dy) in ((r.left, r.top, 1, 1), (r.right - 1, r.top, -1, 1),
+                                     (r.left, r.bottom - 1, 1, -1), (r.right - 1, r.bottom - 1, -1, -1)):
+                line(s, col, (px, py), (px + dx * t, py))
+                line(s, col, (px, py), (px, py + dy * t))
         # distance read-out beside the vehicle (left of it when it sits right)
         num = self.text("%d" % int(lead.dist_m + 0.5), 16, self.pal["text"])
         unit = self.text("m", 8, col, mono=False)
@@ -870,29 +894,29 @@ class SceneRenderer:
         right_side = cx <= self.w * 0.60
         tx = r.right + 5 if right_side else r.left - 5 - tw
         tx = max(2, min(self.w - tw - 2, tx))
-        ty = max(2, min(self.h - 30, r.centery - 9))
-        ax = r.right if right_side else r.left - 1
-        line(s, col, (ax, r.centery), (tx - 2 if right_side else tx + tw + 1, r.centery))
+        ty = max(2, min(self.h - 34, r.centery - 9))
         pygame.draw.rect(s, (0, 0, 0), (tx - 1, ty, tw + 2, 16))
         s.blit(num, (tx, ty))
         s.blit(unit, (tx + num.get_width() + 2, ty + 7))
-        # second line: time gap, and a closing / opening marker
+        # second line, Terminus 14, only when it matters (tuning): the time
+        # gap when short, the closing / opening speed when large
         sx = tx
-        if gap is not None:
-            st = self.text("%.1fs" % gap, 8, col, mono=False)
-            pygame.draw.rect(s, (0, 0, 0), (tx - 1, ty + 16, st.get_width() + 2, 9))
-            s.blit(st, (tx, ty + 17))
-            sx = tx + st.get_width() + 4
-        if lead.v_rel is not None and abs(lead.v_rel) >= 0.8:
+        y2 = ty + 16
+        if gap is not None and gap < tune.gap_show_below_s:
+            st = self.text("%.1fs" % gap, 14, col)
+            pygame.draw.rect(s, (0, 0, 0), (sx - 1, y2, st.get_width() + 3, 14))
+            s.blit(st, (sx, y2))
+            sx += st.get_width() + 5
+        if lead.v_rel is not None and abs(lead.v_rel) * 3.6 >= max(0.5, tune.closing_show_kmh):
             closing = lead.v_rel < 0
             vc = self.pal["warn"] if closing else self.pal["green"]
-            vt = self.text("%d" % int(abs(lead.v_rel) * 3.6 + 0.5), 8, vc, mono=False)
-            pygame.draw.rect(s, (0, 0, 0), (sx - 1, ty + 16, 10 + vt.get_width(), 9))
+            vt = self.text("%d" % int(abs(lead.v_rel) * 3.6 + 0.5), 14, vc)
+            pygame.draw.rect(s, (0, 0, 0), (sx - 1, y2, 11 + vt.get_width(), 14))
             if closing:             # arrow towards us, closing speed in km/h
-                pygame.draw.polygon(s, vc, [(sx, ty + 18), (sx + 6, ty + 18), (sx + 3, ty + 23)])
+                pygame.draw.polygon(s, vc, [(sx, y2 + 4), (sx + 6, y2 + 4), (sx + 3, y2 + 10)])
             else:                   # pulling away
-                pygame.draw.polygon(s, vc, [(sx, ty + 23), (sx + 6, ty + 23), (sx + 3, ty + 18)])
-            s.blit(vt, (sx + 8, ty + 17))
+                pygame.draw.polygon(s, vc, [(sx, y2 + 10), (sx + 6, y2 + 10), (sx + 3, y2 + 4)])
+            s.blit(vt, (sx + 9, y2))
 
     def _draw_object(self, s: pygame.Surface, cam: Camera, o, v: float, k: float) -> None:
         g = self._place(cam, o.x, o.y, v)
@@ -992,15 +1016,15 @@ class SceneRenderer:
 
     def _chip(self, s: pygame.Surface, x: int, y: int, label: str, color: RGB,
               filled: bool = False) -> int:
-        """Small label box; returns its width."""
-        t = self.text(label, 8, (0, 0, 0) if filled else color, mono=False)
-        w = t.get_width() + 6
+        """Label box in Terminus 14 (18 px tall); returns its width."""
+        t = self.text(label, 14, (0, 0, 0) if filled else color)
+        w = t.get_width() + 7
         if filled:
-            pygame.draw.rect(s, color, (x, y, w, 11))
+            pygame.draw.rect(s, color, (x, y, w, 17))
         else:
-            pygame.draw.rect(s, (0, 0, 0), (x, y, w, 11))
-            pygame.draw.rect(s, color, (x, y, w, 11), 1)
-        s.blit(t, (x + 3, y + 2))
+            pygame.draw.rect(s, (0, 0, 0), (x, y, w, 17))
+            pygame.draw.rect(s, color, (x, y, w, 17), 1)
+        s.blit(t, (x + 4, y + 2))
         return w
 
     def _draw_gear(self, s: pygame.Surface, x: int, y: int, gear: str) -> None:
@@ -1023,41 +1047,66 @@ class SceneRenderer:
         txt = self.text(str(kmh), 14, col)
         s.blit(txt, (cx - txt.get_width() // 2 + (1 if kmh < 100 else 0), cy - txt.get_height() // 2))
 
-    def _tiny(self, string: str, color: RGB) -> pygame.Surface:
-        return self.text(string, 8, color, mono=False)
+    def _plate_text(self, string: str, color: RGB) -> pygame.Surface:
+        return self.text(string, 14, color)
 
-    def _draw_sign_columns(self, s: pygame.Surface, inp: SceneInputs) -> None:
-        """Right: the rules in effect, newest at the bottom. Left: warning
-        signs ahead with the expected distance."""
+    SIGN_ROW_Y = 33
+
+    def _draw_sign_row(self, s: pygame.Surface, d: SceneDirector) -> None:
+        """One row under the speed / limit line: warnings ahead from the left
+        (each with its expected distance), rules in effect from the right."""
         pal = self.pal
-        x = self.w - 22
-        y = 33
-        for it in inp.signs_on:
-            if y + 19 > self.h - 16:
-                break
-            s.blit(sign_surface(it.id, it.code, it.unsure, self._tiny), (x, y))
+        tune = self.tune
+        y = self.SIGN_ROW_Y
+        # rules in effect, right-aligned; "+n" for those that do not fit
+        on = d.signs_on
+        shown = on[:max(0, int(tune.signs_max_on))]
+        x = self.w - 3
+        if len(on) > len(shown):
+            t = self.text("+%d" % (len(on) - len(shown)), 14, pal["label"])
+            x -= t.get_width()
+            s.blit(t, (x, y + 3))
+            x -= 4
+        for it in reversed(shown):
+            pic = sign_surface(it.id, it.code, it.unsure, self._plate_text)
+            x -= pic.get_width()
+            s.blit(pic, (x, y))
             if it.side:
-                t = self._tiny("R" if it.side == "r" else "L", pal["label"])
-                s.blit(t, (x - t.get_width() - 1, y + 6))
-            y += SIGN_PITCH
-        y = 45
-        for it in inp.signs_ahead[:3]:
-            s.blit(sign_surface(it.id, it.code, it.unsure, self._tiny), (4, y))
-            if it.m is not None:
-                t = self._tiny("%dm" % it.m, pal["warn"])
-                pygame.draw.rect(s, (0, 0, 0), (25, y + 5, t.get_width() + 2, 9))
-                s.blit(t, (26, y + 6))
-            y += SIGN_PITCH
+                # binds one side of the road: a small pointer under the sign
+                mx = x + pic.get_width() // 2
+                dx = -3 if it.side == "l" else 3
+                pygame.draw.polygon(s, pal["label"], [(mx - dx, y + 21), (mx - dx, y + 25), (mx + dx, y + 23)])
+            x -= 3
+        right_limit = x
+        # warnings ahead, left-aligned, nearest first
+        x = 4
+        for it in d.signs_ahead[:max(0, int(tune.signs_max_ahead))]:
+            pic = sign_surface(it.id, it.code, it.unsure, self._plate_text)
+            dist = self.text("%d" % it.m, 14, pal["warn"]) if it.m is not None else None
+            need = pic.get_width() + (dist.get_width() + 5 if dist is not None else 3)
+            if x + need > right_limit:
+                break
+            s.blit(pic, (x, y))
+            x += pic.get_width() + 2
+            if dist is not None:
+                pygame.draw.rect(s, (0, 0, 0), (x - 1, y + 3, dist.get_width() + 2, 14))
+                s.blit(dist, (x, y + 3))
+                x += dist.get_width() + 6
 
     def _draw_hud_drive(self, s: pygame.Surface, d: SceneDirector, inp: SceneInputs) -> None:
         pal = self.pal
+        tune = self.tune
         # speed + gear, top-left
         spd = self.text("%d" % int(inp.speed_kmh + 0.5), 28, pal["text"])
         pygame.draw.rect(s, (0, 0, 0), (2, 2, spd.get_width() + 30, 27))
         s.blit(spd, (5, 1))
         gx = 5 + spd.get_width() + 3
-        s.blit(self._tiny("km/h", pal["label"]), (gx, 6))
+        s.blit(self.text("km/h", 8, pal["label"], mono=False), (gx, 6))
         s.blit(self.text(inp.gear, 14, pal["value"]), (gx + 1, 14))
+        if tune.cruise_chip and inp.cruise_active and inp.cruise_set_kmh:
+            # engaged cruise: the set speed beside the speed (the cruise slot
+            # itself is in the strip below the scene)
+            self._chip(s, gx + 30, 6, "SET %d" % inp.cruise_set_kmh, pal["green"], filled=True)
         # speed limit + traffic light, top-right (the corner dot is the link LED)
         x_right = self.w - 20
         if inp.limit_kmh:
@@ -1068,25 +1117,21 @@ class SceneRenderer:
         if inp.light is not None and inp.light.state in self.LIGHT_COLORS:
             self._draw_signal(s, x_right - 12, 3, 3, inp.light, d.clock)
             if inp.light.dist_m is not None:
-                t = self._tiny("%dm" % int(inp.light.dist_m + 0.5), pal["text"])
-                pygame.draw.rect(s, (0, 0, 0), (x_right - 12 - t.get_width() - 4, 4, t.get_width() + 2, 9))
-                s.blit(t, (x_right - 12 - t.get_width() - 3, 5))
-        if inp.cruise_active and inp.cruise_set_kmh:
-            # engaged cruise: the set speed sits under the speed (the full
-            # cruise slot is in the strip below the scene)
-            t = self._tiny("SET %d" % inp.cruise_set_kmh, (0, 0, 0))
-            pygame.draw.rect(s, pal["green"], (5, 31, t.get_width() + 6, 10))
-            s.blit(t, (8, 33))
-        self._draw_sign_columns(s, inp)
-        # bottom-left: lamps that are on, above them the perception status
+                t = self.text("%d" % int(inp.light.dist_m + 0.5), 14, pal["text"])
+                pygame.draw.rect(s, (0, 0, 0), (x_right - 16 - t.get_width(), 8, t.get_width() + 2, 14))
+                s.blit(t, (x_right - 15 - t.get_width(), 8))
+        self._draw_sign_row(s, d)
+        # bottom-left: lamps (tuning.lamp_chips), above them the perception status
         x = 4
-        y = self.h - 14
-        for on, label, col in ((inp.tail and not inp.head and not inp.high, "POS", pal["green"]),
-                               (inp.head and not inp.high, "LOW", pal["warn"]),
-                               (inp.high, "HIGH", (66, 165, 245)),
-                               (inp.fog, "FOG", pal["green"])):
-            if on:
-                x += self._chip(s, x, y, label, col) + 2
+        y = self.h - 20
+        if tune.lamp_chips != "none":
+            every = tune.lamp_chips == "all"
+            for on, label, col in ((every and inp.tail and not inp.head and not inp.high, "POS", pal["green"]),
+                                   (every and inp.head and not inp.high, "LOW", pal["warn"]),
+                                   (inp.high, "HIGH", (66, 165, 245)),
+                                   (every and inp.fog, "FOG", pal["green"])):
+                if on:
+                    x += self._chip(s, x, y, label, col) + 2
         tag = None
         if d.vision == "off":
             tag = ("VISION OFF", pal["dim"])
@@ -1097,43 +1142,42 @@ class SceneRenderer:
         elif d.vision == "stale":
             tag = ("SIGNAL LOST", pal["warn"] if int(d.clock * 2) % 2 else pal["orange"])
         if tag:
-            self._chip(s, 4, y - 13 if x > 4 else y, tag[0], tag[1])
+            self._chip(s, 4, y - 19 if x > 4 else y, tag[0], tag[1])
 
     def _draw_hud_parked(self, s: pygame.Surface, d: SceneDirector, inp: SceneInputs) -> None:
         pal = self.pal
         self._draw_gear(s, 5, 4, inp.gear)
+        x = 24
         if inp.ready:
-            self._chip(s, 24, 4, "READY", pal["green"], filled=True)
+            x += self._chip(s, x, 5, "READY", pal["green"], filled=True) + 3
         elif inp.acc_on:
-            self._chip(s, 24, 4, "ACC", pal["value"])
+            x += self._chip(s, x, 5, "ACC", pal["value"]) + 3
         else:
-            self._chip(s, 24, 4, "OFF", pal["dim"])
+            x += self._chip(s, x, 5, "OFF", pal["dim"]) + 3
         if inp.ice_running:
-            self._chip(s, 24, 16, "ICE", pal["orange"])
+            x += self._chip(s, x, 5, "ICE", pal["orange"]) + 3
         if inp.speed_kmh >= 1.0:
             t = self.text("%d" % int(inp.speed_kmh + 0.5), 16, pal["text"])
-            s.blit(t, (66, 3))
-            s.blit(self.text("km/h", 8, pal["label"], mono=False), (68 + t.get_width(), 9))
-        # lamps that are on, top-right (left of the link LED)
-        x = self.w - 20
+            s.blit(t, (x + 3, 5))
+            s.blit(self.text("km/h", 8, pal["label"], mono=False), (x + 5 + t.get_width(), 11))
+        # lamps that are on: second row, right-aligned
+        x = self.w - 4
         for on, label, col in ((inp.fog, "FOG", pal["green"]), (inp.high, "HIGH", (66, 165, 245)),
                                (inp.head, "LOW", pal["warn"]), (inp.tail, "TAIL", pal["red"]),
                                (inp.brake, "BRAKE", pal["red"])):
             if on:
-                t = self.text(label, 8, col, mono=False)
-                x -= t.get_width() + 6 + 2
-                self._chip(s, x, 4, label, col)
+                t = self.text(label, 14, col)
+                x -= t.get_width() + 7 + 2
+                self._chip(s, x, 26, label, col)
         # doors, bottom
         opened = [DOOR_LABELS[i] for i, v in enumerate(inp.doors) if v]
         if inp.rear_group:
-            opened.append("REAR/BACK")      # one shared switch bit on this car
+            opened.append("REAR")           # one shared switch bit: a rear door or the back door
         if not opened and inp.door_any:
             opened.append("DOOR")
+        y = self.h - 20
         if opened:
-            w = self._chip(s, 4, self.h - 14, "OPEN", pal["warn"], filled=True)
-            t = self.text(" ".join(opened), 8, pal["warn"], mono=False)
-            s.blit(t, (4 + w + 4, self.h - 12))
+            w = self._chip(s, 4, y, "OPEN", pal["warn"], filled=True)
+            s.blit(self.text(" ".join(opened), 14, pal["warn"]), (4 + w + 5, y + 2))
         elif inp.doors_known:
-            s.blit(self.text("DOORS CLOSED", 8, pal["label"], mono=False), (5, self.h - 12))
-        tag = self.text("NHW20", 8, pal["label"], mono=False)
-        s.blit(tag, (self.w - tag.get_width() - 5, self.h - 12))
+            s.blit(self.text("DOORS CLOSED", 14, pal["label"]), (5, y + 2))

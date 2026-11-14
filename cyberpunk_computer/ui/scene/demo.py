@@ -308,6 +308,13 @@ SHOTS = (
      dict(_env("highway", "day"), limit={"kmh": 140, "src": "default"},
           signs={"on": [{"id": "motorway", "s": "D-9"}]}, lamps=_NO_LAMPS)),
     ("env_highway_night", 19.5, "live", None, "highway, night", _env("highway", "night")),
+    ("env_highway_dusk_signs", 19.5, "live", None, "highway, dusk, five rules and two warnings",
+     dict(_env("highway", "dusk_dawn"), objects=False, limit={"kmh": 90, "src": "sign", "conf": 0.8},
+          signs={"on": [{"id": "priority_road", "s": "D-1"}, {"id": "no_overtaking", "s": "B-25"},
+                        {"id": "no_stopping", "s": "B-36", "side": "r"}, {"id": "expressway", "s": "D-7"},
+                        {"id": "height_limit", "s": "B-16"}],
+                 "ahead": [{"id": "roundabout_ahead", "s": "A-8", "m": 80},
+                           {"id": "roadworks_ahead", "s": "A-14", "m": 190}]})),
     ("env_rural_day_overcast", 19.5, "live", None, "rural_road, day, overcast",
      dict(_env("rural_road", "day", "overcast"), lamps=_NO_LAMPS)),
     ("env_rural_dusk", 19.5, "live", None, "rural_road, dusk_dawn, clear", _env("rural_road", "dusk_dawn")),
@@ -336,9 +343,10 @@ SHOTS = (
 )
 
 
-def render_shots(out_dir: str, scale: int = 4, copy_to: Optional[str] = None) -> List[str]:
+def render_shots(out_dir: str, scale: int = 4, copy_to: Optional[str] = None,
+                 prefix: str = "final_") -> List[str]:
     """Render every SHOTS entry: ``NN_name.png`` (native) and ``NN_name@4x.png``;
-    the upscaled ones are also copied to ``copy_to`` as ``mfd2_NN_name.png``."""
+    the upscaled ones are also copied to ``copy_to`` as ``<prefix>NN_name.png``."""
     import pygame
     os.makedirs(out_dir, exist_ok=True)
     pygame.init()
@@ -360,12 +368,14 @@ def render_shots(out_dir: str, scale: int = 4, copy_to: Optional[str] = None) ->
         pygame.image.save(big, os.path.join(out_dir, base + "@%dx.png" % scale))
         if copy_to:
             os.makedirs(copy_to, exist_ok=True)
-            pygame.image.save(big, os.path.join(copy_to, "mfd2_%s.png" % base))
+            pygame.image.save(big, os.path.join(copy_to, "%s%s.png" % (prefix, base)))
         paths.append(p)
     # the sign pictograms, enlarged, as a legend
     from .signs import KNOWN_IDS, S, sign_surface
     from ..fonts import get_tiny_font
     font = get_tiny_font(8)
+    from ..fonts import get_mono_font
+    plate_font = get_mono_font(14)
     cols, cell_w, cell_h = 6, 80, 34
     rows = (len(KNOWN_IDS) + 1 + cols - 1) // cols
     sheet = pygame.Surface((cols * cell_w, rows * cell_h))
@@ -373,7 +383,7 @@ def render_shots(out_dir: str, scale: int = 4, copy_to: Optional[str] = None) ->
     ids = list(KNOWN_IDS) + ["(unknown id)"]
     for n, rid in enumerate(ids):
         x, y = (n % cols) * cell_w, (n // cols) * cell_h
-        pic = sign_surface(rid, "B-13", False, lambda s_, c_: font.render(s_, False, c_))
+        pic = sign_surface(rid, "B-13", False, lambda s_, c_: plate_font.render(s_, False, c_))
         sheet.blit(pic, (x + (cell_w - S) // 2, y + 2))
         lab = font.render(rid.replace("_ahead", "~").replace("_", " ")[:18], False, (110, 150, 160))
         sheet.blit(lab, (x + (cell_w - lab.get_width()) // 2, y + 23))
@@ -381,7 +391,7 @@ def render_shots(out_dir: str, scale: int = 4, copy_to: Optional[str] = None) ->
     pygame.image.save(sheet, os.path.join(out_dir, "signs_legend.png"))
     pygame.image.save(big, os.path.join(out_dir, "signs_legend@%dx.png" % scale))
     if copy_to:
-        pygame.image.save(big, os.path.join(copy_to, "mfd2_signs_legend.png"))
+        pygame.image.save(big, os.path.join(copy_to, prefix + "signs_legend.png"))
     return paths
 
 
@@ -445,12 +455,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--bench", action="store_true", help="print frame cost")
     ap.add_argument("--scale", type=int, default=4)
     ap.add_argument("--copy-to", metavar="DIR", help="also copy the upscaled shots there")
+    ap.add_argument("--prefix", default="final_", help="file name prefix of the copies")
     args = ap.parse_args(argv)
     if args.shots or args.bench:
         os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
         os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
     if args.shots:
-        for p in render_shots(args.shots, args.scale, args.copy_to):
+        for p in render_shots(args.shots, args.scale, args.copy_to, args.prefix):
             print(p)
     if args.bench:
         for k, v in bench().items():

@@ -422,10 +422,12 @@ def drive_inputs(**kw):
     return SceneInputs(**base)
 
 
-def drawn(inp, seconds=2.0):
+def drawn(inp, seconds=2.0, **tune):
     from cyberpunk_computer.ui.scene.render import SceneRenderer
-    r = SceneRenderer((238, 216))
-    d = SceneDirector()
+    from cyberpunk_computer.ui.scene.tuning import Tuning
+    tuning = Tuning(tune)
+    r = SceneRenderer((238, 216), tuning=tuning)
+    d = SceneDirector(tuning)
     step(d, inp, seconds)
     r.render(d, inp, 10.0)
     return pygame.image.tobytes(r.surface, "RGB"), r
@@ -581,24 +583,113 @@ def test_path_alone_draws_the_road_direction():
     """No lane lines (a rural road): the planned path still shows."""
     sc = {"seq": 1, "x": [0, 10, 20, 40, 80], "lanes": [None] * 4, "edges": [None, None],
           "path": {"y": [0.0, 0.2, 0.8, 3.0, 9.0]}, "lead": None}
-    with_path, r = drawn(drive_inputs(road=parse_scene(sc)))
+    with_path, r = drawn(drive_inputs(road=parse_scene(sc)), path_chevrons=True)
     sc2 = dict(sc, path=None, lanes=[None, {"y": [-9] * 5, "prob": 0.1}, None, None])
-    without, _ = drawn(drive_inputs(road=parse_scene(sc2)))
+    without, _ = drawn(drive_inputs(road=parse_scene(sc2)), path_chevrons=True)
+    assert drawn(drive_inputs(road=parse_scene(sc)))[0] != with_path     # off by default
     assert with_path != without
     assert r.pal["path"] in region_colours(r.surface, (0, 60, 238, 100))
 
 
-def test_side_panel_styling_can_be_switched_off_per_item(monkeypatch):
+def test_side_panel_items_follow_the_tuning():
     import cyberpunk_computer.ui.screens.main_screen as ms
+    from cyberpunk_computer.ui.scene.page import ScenePage
+    from cyberpunk_computer.ui.scene.tuning import Tuning
     surf = pygame.Surface(SIZE)
     pics = {}
-    for name, flags in (("old", {"corner_ticks": False, "ambient_swatch": False}),
-                        ("ticks", {"corner_ticks": True, "ambient_swatch": False}),
-                        ("both", {"corner_ticks": True, "ambient_swatch": True})):
-        monkeypatch.setattr(ms, "SIDE_STYLE", flags)
+    for name, flags in (("old", {"side_ticks": False, "ambient_panel": "plain"}),
+                        ("ticks", {"side_ticks": True, "ambient_panel": "plain"}),
+                        ("both", {"side_ticks": True, "ambient_panel": "level"})):
         m = ms.MainScreen(SIZE, None)
+        m.scene_page = ScenePage(121, 1, 238, tuning=Tuning(flags))
+        m._frames = 1
         m.update(0.05)
         surf.fill((0, 0, 0))
         m.render(surf)
         pics[name] = pygame.image.tobytes(surf.subsurface((0, 0, 120, 240)), "RGB")
     assert len(set(pics.values())) == 3
+
+
+# ── tunables (ui/scene/tuning.py) ────────────────────────────────────────────
+
+def test_tuning_defaults_overrides_and_file(tmp_path, monkeypatch):
+    from cyberpunk_computer.ui.scene import tuning as T
+    t = T.Tuning()
+    assert t.beam_style == "outline" and t.signs_max_on == 4 and t.path_chevrons is False
+    done = t.apply({"signs_max_on": 6, "beam_style": "hatch", "scenery_brightness": 1,
+                    "beam_style_typo": 1, "lamp_chips": "sometimes", "path_chevrons": "yes"})
+    assert done == {"signs_max_on": 6, "beam_style": "hatch", "scenery_brightness": 1}
+    assert t.signs_max_on == 6 and t.beam_style == "hatch" and t.scenery_brightness == 1.0
+    assert t.lamp_chips == "high" and t.path_chevrons is False       # bad values ignored
+    assert T.Tuning().signs_max_on == 4                               # instances do not leak
+    f = tmp_path / "tune.json"
+    f.write_text('{"warning_max_m": 150, "roadside": "normal"}')
+    monkeypatch.setenv(T.ENV_VAR, str(f))
+    loaded = T.load()
+    assert loaded.warning_max_m == 150 and loaded.roadside == "normal"
+    monkeypatch.setenv(T.ENV_VAR, str(tmp_path / "missing.json"))
+    assert T.load().warning_max_m == T.Tuning.warning_max_m
+    f.write_text("not json")
+    monkeypatch.setenv(T.ENV_VAR, str(f))
+    assert T.load().roadside == "sparse"
+    assert set(T.Tuning.names()) >= {"signs_max_on", "signs_max_ahead", "warning_max_m",
+                                     "sign_hold_s", "gap_show_below_s", "closing_show_kmh",
+                                     "scenery_brightness", "weather_density", "beam_style",
+                                     "path_chevrons", "lamp_chips", "side_ticks", "ambient_panel"}
+
+
+def test_every_scene_tunable_changes_the_picture():
+    from cyberpunk_computer.ui.scene.inputs import Lead, SignItem
+    road = parse_scene(scene(1, lead={"d": 20.0, "y": 0.0, "v_rel": -4.0, "prob": 0.95}))
+    signs = tuple(SignItem(i, "X") for i in ("priority_road", "no_overtaking", "no_stopping",
+                                             "one_way", "no_parking", "motorway"))
+    ahead = (SignItem("roundabout_ahead", "A-8", m=60), SignItem("children_ahead", "A-17", m=140),
+             SignItem("curve_ahead", "A-1", m=350))
+    inp = drive_inputs(road=road, signs_on=signs, signs_ahead=ahead, limit_kmh=50, limit_source="sign",
+                       env_place="forest_road", env_light="night", env_weather="rain",
+                       tail=True, head=True, high=True, cruise_active=True, cruise_set_kmh=50)
+    base = drawn(inp)[0]
+    for name, value in (("signs_max_on", 2), ("signs_max_ahead", 1), ("warning_max_m", 100),
+                        ("gap_show_below_s", 0.0), ("closing_show_kmh", 999.0),
+                        ("lead_brackets", False), ("scenery_brightness", 1.0),
+                        ("scenery_band_px", 0), ("roadside", "off"), ("roadside", "normal"),
+                        ("grid_brightness", 1.0),
+                        ("weather_density", 1.0), ("weather_brightness", 1.0),
+                        ("beam_style", "hatch"), ("beam_style", "hatch_light"), ("beam_style", "off"),
+                        ("lamp_chips", "none"), ("cruise_chip", False)):
+        assert drawn(inp, **{name: value})[0] != base, name
+    low = inp._replace(high=False)
+    assert drawn(low, lamp_chips="all")[0] != drawn(low)[0]
+    fog = inp._replace(env_weather="fog")
+    assert drawn(fog, fog_band=False)[0] != drawn(fog)[0]
+    tunnel = inp._replace(env_place="tunnel", env_weather="clear")
+    assert drawn(tunnel, enclosure_brightness=1.0)[0] != drawn(tunnel)[0]
+    parked = SceneInputs()
+    assert drawn(parked, 0.5, pad_brightness=1.0)[0] != drawn(parked, 0.5)[0]
+    edges = dict(scene(1), edges=[{"y": [-5.5] * 5}, {"y": [2.4] * 5}])
+    e_inp = drive_inputs(road=parse_scene(edges))
+    assert drawn(e_inp, edge_brightness=1.0)[0] != drawn(e_inp)[0]
+
+
+def test_signs_stay_through_feed_gaps_and_warnings_have_a_range():
+    from cyberpunk_computer.ui.scene.inputs import SignItem
+    from cyberpunk_computer.ui.scene.tuning import Tuning
+    d = SceneDirector(Tuning({"sign_hold_s": 4.0, "warning_max_m": 200}))
+    on = (SignItem("no_overtaking", "B-25"),)
+    ahead = (SignItem("roundabout_ahead", "A-8", m=60), SignItem("curve_ahead", "A-1", m=350))
+    with_signs = drive_inputs(signs_on=on, signs_ahead=ahead)
+    step(d, with_signs, 0.5)
+    assert d.signs_on == on and [w.id for w in d.signs_ahead] == ["roundabout_ahead"]
+    gone = drive_inputs()
+    step(d, gone, 3.0)
+    assert d.signs_on == on                       # the feed dropped the key: still shown
+    step(d, gone, 1.5)
+    assert d.signs_on == () and d.signs_ahead == ()
+    step(d, with_signs, 0.2)
+    d.update(with_signs._replace(rs_ok=False, rs_state="off"), 0.05)
+    assert d.signs_on == ()                       # roadsense off: nothing held
+    d0 = SceneDirector(Tuning({"sign_hold_s": 0.0}))
+    step(d0, with_signs, 0.2)
+    d0.update(gone, 0.05)
+    d0.update(gone, 0.05)
+    assert d0.signs_on == ()

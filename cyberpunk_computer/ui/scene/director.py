@@ -46,7 +46,12 @@ def ease(t: float) -> float:
 
 
 class SceneDirector:
-    def __init__(self) -> None:
+    def __init__(self, tuning=None) -> None:
+        self.sign_hold_s = float(getattr(tuning, "sign_hold_s", 0.0))
+        self.warning_max_m = float(getattr(tuning, "warning_max_m", 1e9))
+        self.signs_on: tuple = ()             # rules in effect as shown (held over feed gaps)
+        self.signs_ahead: tuple = ()          # warnings as shown (within warning_max_m)
+        self._signs_age = 0.0
         self.mode = "parked"            # parked | drive (the target view)
         self.view_raw = 0.0             # linear 0..1
         self.view = 0.0                 # eased
@@ -125,12 +130,32 @@ class SceneDirector:
         self.door_step = tuple(int(round(ease(f) * DOOR_STEPS)) for f in self.door_frac)
 
         self._update_road(inp, dt)
+        self._update_signs(inp, dt)
 
         self.animating = (
             self.view_raw != target or moving_doors or self.moving
             or (self.lead_alpha not in (0.0, 1.0))
             or was != (self.view_step, self.door_step, self.vision)
         )
+
+    # -- signs ----------------------------------------------------------------
+
+    def _update_signs(self, inp: SceneInputs, dt: float) -> None:
+        """The sign lists as shown: the feed's lists, kept for ``sign_hold_s``
+        when the feed stops carrying them (its rules key expires after 3 s
+        without a roadsense rules message), never while roadsense is off."""
+        if not inp.rs_ok:
+            self.signs_on = self.signs_ahead = ()
+            return
+        if inp.signs_on or inp.signs_ahead:
+            self._signs_age = 0.0
+            self.signs_on = inp.signs_on
+            self.signs_ahead = tuple(w for w in inp.signs_ahead
+                                     if w.m is None or w.m <= self.warning_max_m)
+        else:
+            self._signs_age += dt
+            if self._signs_age > self.sign_hold_s:
+                self.signs_on = self.signs_ahead = ()
 
     # -- road perception ------------------------------------------------------
 
