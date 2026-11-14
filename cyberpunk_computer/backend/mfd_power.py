@@ -424,6 +424,10 @@ class MfdPowerManager:
 
     # ── observability ─────────────────────────────────────────────────────
 
+    @property
+    def state(self) -> str:
+        return self._state
+
     def status(self) -> dict:
         return {
             "state": self._state,

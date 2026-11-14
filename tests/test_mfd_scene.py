@@ -346,3 +346,62 @@ def test_prewarm_makes_the_camera_move_free_of_car_renders():
         t += 0.05
         page.scene.render(d, drive, t)
     assert d.view == 1.0 and page.scene.cache.renders == warmed
+
+
+# ── end to end: roadsense messages -> backend feed -> ZMQ envelope -> scene ─
+
+def test_roadsense_messages_become_a_drawn_road():
+    """Recorded roadsense /ws frames (tests/fixtures/roadsense_ws_2026-11-14,
+    real modeld output with a lead vehicle) through the backend SceneBuilder,
+    the ZMQ envelope as the backend serializes it, the frontend client's
+    decode and SceneFeed, read_inputs, the director and the renderer."""
+    import gzip
+    import json
+    from cyberpunk_computer.backend.roadsense_scene import (
+        EVENT_NAME, SceneBuilder, SceneFeedConfig)
+    from cyberpunk_computer.frontend.client import BackendClient
+    from cyberpunk_computer.ui.scene.render import SceneRenderer
+
+    path = os.path.join(os.path.dirname(__file__), "fixtures", "roadsense_ws_2026-11-14.jsonl.gz")
+    with gzip.open(path, "rt") as f:
+        lines = [ln.rstrip("\n") for ln in f if ln.strip()]
+    feed = SceneFeed()
+    client = BackendClient("127.0.0.1", on_event=feed.push)
+    builder = SceneBuilder(SceneFeedConfig(host="127.0.0.1", port=1))
+    st = running(AppState())
+    st = replace(st, vehicle=replace(st.vehicle, speed_kmh=57, real_speed_kmh=57,
+                                     gear=GearPosition.DRIVE))
+    d = SceneDirector()
+    r = SceneRenderer((238, 168))
+    t = 0.0
+    sent = 0
+    inp = read_inputs(st, feed)
+    for ln in lines[:16]:                     # env, limit, lights, 12 road frames with a lead
+        builder.feed(ln, t)
+        sc = builder.build(t)
+        if sc is not None:
+            raw = json.dumps({"type": "event", "ts": 1.0, "name": EVENT_NAME, "data": sc},
+                             separators=(",", ":"))
+            client._handle_raw(raw)
+            sent += 1
+        inp = read_inputs(st, feed)
+        step(d, inp, 0.1)
+        t += 0.1
+    assert sent >= 8 and client.counters["event_rx"] == sent
+    assert d.vision == "live"
+    assert d.lanes[1] is not None and d.lanes[2] is not None
+    assert d.lanes[1][0] > 0 > d.lanes[2][0]          # left line LEFT-positive after the flip
+    assert d.edges[0] is not None and d.edges[1] is not None
+    assert d.lead is not None and 80.0 < d.lead.dist_m < 120.0
+    assert inp.light is not None and inp.light.state == "red"
+    assert inp.limit_kmh == 50 and inp.env_light == "day" and inp.env_place == "city_street"
+    r.render(d, inp, 10.0)
+    live = pygame.image.tobytes(r.surface, "RGB")
+    assert len(region_colours(r.surface, (0, 0, 238, 168))) > 4
+    # the feed stops (roadsense off / stale): stale, then lost; never an old lead
+    step(d, inp, STALE_S + 0.6)              # (the lead fades out over LEAD_FADE_S)
+    assert d.vision == "stale" and d.lead is None
+    r.render(d, inp, 20.0)
+    assert pygame.image.tobytes(r.surface, "RGB") != live
+    step(d, inp, LOST_S)
+    assert d.vision == "lost" and d.lanes[1] is None

@@ -66,7 +66,7 @@ striped sun and the ridge line are 80s arcade; the depth scale is logarithmic (s
 | Driving, road live | roadsense running, scene data younger than 2.5 s | ego lane filled, lane lines (ego pair bright and 2 px, outer pair dim, below probability 0.3 not drawn), road edges violet, lead vehicle with distance, time gap and closing/opening arrow, objects, traffic light, limit sign, sky by light condition |
 | Driving, road stale | scene data 2.5..7 s old | lanes frozen and dimmed, no lane fill, no lead vehicle, no objects, `SIGNAL LOST` blinking |
 | Driving, signal lost | road data was live and is now older than 7 s | floor grid only, `NO SIGNAL` blinking |
-| Driving, no road data | roadsense running, no scene data received yet (today's backend: always) | floor grid only, `NO ROAD DATA` (steady, dim); limit sign and traffic light from the health mirror still show |
+| Driving, no road data | roadsense running, no scene data received yet (stack starting, scene feed off) | floor grid only, `NO ROAD DATA` (steady, dim); limit sign and traffic light from the health mirror still show |
 | Driving, vision off | roadsense not running | floor grid only (a floor line runs under the car: never a fake lane), `VISION OFF` |
 | Closing | stopped for 2.5 s (at once in P or with a door open) | the swing in reverse |
 
@@ -113,7 +113,8 @@ projection (`SceneRenderer._row`, `_xs_table`).
 | HV power, SOC | `energy.battery_power_kw`, `energy.battery_soc`, bars from `avc.battery_bars` else `dynamics.soc_bars` |
 | roadsense running | `roadsense.state == "running"` and `roadsense.api_ok` not False |
 | speed limit, ego traffic light, light/place/weather | the scene mapping, else `roadsense.health["speed_limit" / "lights" / "env"]` (refreshed every 5 s) |
-| lanes, edges, lead vehicle, objects | the scene mapping only (section 7); **not delivered by the backend yet** |
+| lanes, edges, lead vehicle | the scene mapping only (section 7), from the backend feed `backend/roadsense_scene.py` |
+| objects | the scene mapping only; roadsense provides none yet (section 8.2) |
 
 Explicit per-door fields are read first if a state ever has them (`door_fl_open`, `door_fr_open`,
 `door_rl_open`, `door_rr_open`, `hatch_open` / `back_door_open` on `state.body`, `dynamics` or
@@ -144,28 +145,78 @@ Units and frame as roadsense: metres, x forward, **y right** (the frontend flips
 camera. `y` arrays are lateral offsets at the `x` distances. `v_rel` in m/s, negative = closing.
 Every key is optional; a missing key means "not known" and nothing is drawn for it.
 
-How the backend fills it from the roadsense API (`/api/v1/roadsense/ws?topics=road,lights,speed_limit,env`):
-`lanes[i]` = `lane_lines[i].y` interpolated at `x` plus `prob`; `edges[i]` = `road_edges[i].y`;
-`lead` = `leads[0]` (`x[0]`, `y[0]`, `v[0] - v_ego`, `prob`); `light` = `lights.ego`; `limit` =
-`speed_limit.limit_kmh` / `source.kind`; `env` labels. About 0.6 kB per event.
+### 7.1 Backend feed (`cyberpunk_computer/backend/roadsense_scene.py`)
+
+The backend reads roadsense's WebSocket `ws://127.0.0.1:8090/ws?topics=road,lights,speed_limit,env`
+(roadsense's own API on loopback, not the backend's `/api/v1/roadsense/ws` front) with a stdlib
+RFC 6455 client in its own thread and publishes `roadsense_scene` on the ZMQ PUB channel only (not
+on the dashboard websocket, whose latest-only queue would let scenes displace state snapshots),
+through a latest-only slot per event name (`ZmqServer.enqueue_latest_event`, compact JSON).
+
+| Scene field | roadsense source | Conversion |
+|---|---|---|
+| `seq` | `road.seq` (ring frame seq of the second frame of the model pair) | as is; restarts at 1 when the camera restarts |
+| `x` | not sent | the default distances above; lanes and edges are resampled to them |
+| `lanes[i].y` | `road.lane_lines[i].y` at `road.lane_lines[i].x` (33 points, 0..192 m) | linear interpolation at the 11 distances, 0.01 m; null when a needed point is null (invalid model output) |
+| `lanes[i].prob` | `road.lane_lines[i].prob` | 0.01; the whole lane is null below 0.2 (the screen draws from 0.3) |
+| `edges[i].y` | `road.road_edges[i].y` at `.x` | as lanes; no probability in roadsense |
+| `lead.d`, `lead.y` | `road.leads[0].x[0]`, `.y[0]` (the "now" hypothesis; m from the camera, y right) | 0.1 m / 0.01 m |
+| `lead.v_rel` | `road.leads[0].v[0] - road.v_ego` (else `- road.pose.vx`) | 0.1 m/s; both are the model's own estimates, so the car's speed is not mixed in |
+| `lead.prob` | `road.leads[0].prob` | 0.01; `lead` is null below 0.3 (the screen draws from 0.5) |
+| `lead.kind` | not provided | not sent: the screen draws a car |
+| `objects` | not provided | not sent |
+| `light` | `lights.ego` (api annotation): `state`, `dist_m`, `lateral_m`, `flashing` | `d` = `dist_m` (housing-size estimate, about +-30 %), `y` = `lateral_m`: offset from the planned path, not from the camera; null when no light is relevant |
+| `limit` | `speed_limit.limit_kmh`, `.source.kind` | `{"kmh", "src"}`; null when the limit is unknown |
+| `env` | `env.light/place/weather.label` | labels only |
+
+Rate and staleness:
+
+* one scene per new road frame, at most 10 per second (`BACKEND_ROADSENSE_SCENE_HZ`, 1..10); modeld
+  runs 10..14 times a second (fewer when it throttles), so the scene comes at 7..10 Hz;
+* a road frame is published only once (same `seq` never twice) and only within 1 s of its arrival;
+* `light`, `limit`, `env` ride along only while their last message is younger than 2 s, 3 s and 5 s
+  (roadsense sends them about 3/s, at least 1/s and 1/s); otherwise the key is left out and the
+  screen falls back to the health mirror;
+* publishing runs only while the roadsense manager is `running` and the MFD manager is `on` or
+  `grace` (without an MFD manager: roadsense alone decides); otherwise the socket is closed. When
+  roadsense stops or stalls nothing is sent and the screen's own staleness applies (section 4).
+
+Connection: 3 s connect timeout, reconnect after 1 s doubling to 10 s while active, a stream silent
+for 5 s is reopened, pings are answered (roadsense pings every 20 s). The feed never starts, stops or
+reconfigures roadsense and does not change its duty; it only reads what the stack already sends.
+
+Config: `BACKEND_ROADSENSE_SCENE=1` (default on; needs `BACKEND_ROADSENSE_ENABLED=1`), `0` turns
+the events off; `BACKEND_ROADSENSE_SCENE_HZ=10`. Host and port follow `BACKEND_ROADSENSE_API_HOST` /
+`BACKEND_ROADSENSE_API_PORT`.
+
+Budget, measured on the recorded roadsense messages of `tests/fixtures/roadsense_ws_2026-11-14`:
+
+| Item | Value |
+|---|---|
+| roadsense `road` message received by the feed | about 15 kB, 10..14/s (about 180 kB/s on loopback) |
+| work per road message that is not published | a 48-byte type peek, no JSON decode |
+| decode + conversion per published scene (phone) | 0.31 ms on an i7-8850H, about 1 ms on the phone's cpu3: about 1 % of that core at 10 Hz |
+| event on the wire (envelope, compact JSON) | 590 B without, 730..750 B with light, limit and env |
+| phone -> Pi link | about 7.5 kB/s (60 kbit/s) at 10 Hz |
+| decode on the Pi Zero per event | envelope `json.loads` 0.011 ms + `SceneFeed.push` and `read_inputs` 0.046 ms on the desktop: about 4 ms on the Pi (x70), about 4 % of its core at 10 Hz, plus the scene redraws of section 10 |
+
+The frontend client does not log `roadsense_scene` events (formatting one costs more than decoding
+it on the Pi).
 
 ## 8. Requests
 
 ### 8.1 Backend (this repository)
 
-| Item | Type | Meaning |
-|---|---|---|
-| event `roadsense_scene` | mapping, 5..10 Hz while roadsense runs | section 7 |
-| (alternative) `RoadsenseState.scene` | `Optional[dict]` | the same mapping in the 1 Hz state |
-| `RoadsenseState.health` keeps `speed_limit`, `lights`, `env` | dict | already there; the fallback for the slow items |
-
-Nothing else is missing for what the screen draws today.
+The event `roadsense_scene` (section 7.1) and the health mirror (`RoadsenseState.health`:
+`speed_limit`, `lights`, `env`) cover everything the screen draws today.
 
 ### 8.2 roadsense
 
 | Request | Field, meaning, units, rate |
 |---|---|
-| Scene topic | api-derived topic `scene` on `/ws` with exactly the mapping of section 7, 10 Hz: down-sampled lane/edge polylines (11 distances instead of 33), `leads[0]`, the ego light, the limit. Removes the resampling from every consumer |
+| Scene topic | api-derived topic `scene` on `/ws` with exactly the mapping of section 7, 10 Hz: down-sampled lane/edge polylines (11 distances instead of 33), `leads[0]`, the ego light, the limit. Removes the resampling from every consumer and the 15 kB `road` message per model run from the loopback socket (the backend needs 0.6 kB of it) |
+| Road edge confidence | `road_edges[i].prob` (or the `y_std` already sent, summarised) 0..1, per model run, so a doubtful edge can be dimmed or left out like a lane line |
+| Light distance from the road | `lights.ego` `lateral_m` measured from the camera axis, or the path offset at that distance alongside it, m, 3/s (today it is the offset from the planned path) |
 | Other vehicles | `objects[]` entries `{"track_id", "kind", "x" m, "y" m, "v_rel" m/s, "prob"}` for vehicles in adjacent lanes and oncoming, 5..10 Hz. Today modeld has only the lead hypotheses |
 | Lead vehicle class and stop lamps | `lead.kind` (`car`/`van`/`truck`/`bus`/`bike`), `lead.braking` bool, 5 Hz |
 | Lane line type | per lane line `"type": "solid|dashed|double"`, 2 Hz, so dashes can be drawn and scroll |

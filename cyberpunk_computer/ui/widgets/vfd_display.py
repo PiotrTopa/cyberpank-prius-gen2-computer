@@ -1127,7 +1127,7 @@ class VFDPowerBars:
         
         Args:
             mg_power_kw: Motor/Generator power in kW (positive = assist, negative = regen)
-            fuel_flow_rate: Fuel flow rate in L/h (0 to ~8 for Prius), -1 means N/A
+            fuel_flow_rate: Fuel flow rate in L/h (idle ~1.8, city 2-7, peaks ~12), -1 means N/A
             brake_pressure: Brake pedal pressure (0-127)
             ice_running: Whether the ICE is currently running
         """
@@ -1138,7 +1138,7 @@ class VFDPowerBars:
         # Normalize fuel/brake to -1.0 to +1.0 range
         # Fuel: 0-8 L/h maps to 0-1.0 (positive, goes up)
         # Brake: 0-127 maps to 0-1.0 (but negative, goes down)
-        max_fuel_flow = 8.0  # L/h at full load
+        max_fuel_flow = 8.0  # L/h: pegs only under hard acceleration (= rules.vfd_display)
         max_brake = 127.0
         
         if brake_pressure > 5:  # Some threshold to avoid noise
@@ -1320,7 +1320,8 @@ class VFDDisplayWidget(Widget):
         self.power_bars.update(mg_power_kw, fuel_flow_rate, brake_pressure, ice_running)
         
         # Update power flow diagram
-        # Estimate ICE power from fuel flow: ~2.5 kW per L/h (rough estimate)
+        # Estimate ICE power from fuel flow: ~2.5 kW per L/h (8.9 kWh of petrol per
+        # litre at ~28 % brake efficiency; the power-flow arrows do not use it)
         ice_power_kw = fuel_flow_rate * 2.5 if fuel_flow_rate > 0 else 0.0
         # Estimate brake regen from brake pressure
         brake_regen_kw = (brake_pressure / 127.0) * 15.0 if brake_pressure > 5 else 0.0

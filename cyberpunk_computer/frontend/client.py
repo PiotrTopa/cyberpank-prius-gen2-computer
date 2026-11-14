@@ -194,6 +194,10 @@ class BackendClient:
                 if name == "touch":
                     # 10-15 Hz while a finger is down: keep the log quiet
                     logger.debug("Event received: %s %s", name, data)
+                elif name == "roadsense_scene":
+                    # 5-10 Hz while driving: never format the scene (the
+                    # dict repr alone is ~0.6 kB per event on the Pi Zero)
+                    pass
                 else:
                     logger.info("Event received: %s %s", name, data)
                 self._on_event(name, data)

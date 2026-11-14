@@ -36,6 +36,9 @@ STATE_UPDATE_INTERVAL = 1.0     # 1 Hz for state flags (or on change)
 # Normalization constants
 MAX_MG_POWER_KW = 30.0      # Max MG power for normalization
 MAX_SPEED_KMH = 120.0       # Max speed for normalization
+# Full bar at 8 L/h of the corrected flow (K x word x rpm, 2026-11-13 drive: ICE
+# idling 1.8 L/h median, city driving p90 5-7 L/h, peak 12 L/h at 3300 rpm):
+# idle about a quarter, cruising half, only hard acceleration fills it.
 MAX_FUEL_FLOW_LH = 8.0      # Max fuel flow for normalization
 MAX_BRAKE_PRESSURE = 127.0  # Max brake pressure
 

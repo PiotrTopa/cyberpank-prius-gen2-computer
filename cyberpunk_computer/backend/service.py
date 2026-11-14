@@ -255,6 +255,10 @@ class BackendConfig:
     # map to BACKEND_ROADSENSE_* env vars — see backend.__main__.
     roadsense_enabled: bool = False
     roadsense_config: Optional[object] = None  # RoadsenseConfig; None -> defaults
+    # Road scene for the MFD main screen (backend.roadsense_scene): reads the
+    # stack's /ws while it runs and the MFD is on, publishes the ZMQ event
+    # "roadsense_scene" (<= 10 Hz). Needs roadsense_enabled. BACKEND_ROADSENSE_SCENE*.
+    roadsense_scene_config: Optional[object] = None  # SceneFeedConfig; None -> defaults (on)
 
     # ── USB hub port power (backend.port_power) ──────────────────────────────
     # Topology of hub port power control: the powerbox's socket has native PPPS
@@ -434,6 +438,8 @@ class BackendService:
         self._mfd_hold_until = 0.0     # monotonic; operator hold (mfd_hold command)
         # roadsense stack manager (backend.roadsense_power).
         self.roadsense_power = None
+        # roadsense -> MFD road scene feed (backend.roadsense_scene).
+        self.roadsense_scene = None
         # On-demand dashboard camera preview (backend.camera_preview).
         self.camera_preview = None
         # Key-off "low" CPU profile deferred until roadsense has stopped
@@ -707,6 +713,29 @@ class BackendService:
                 })
 
         twin.store.add_middleware(_input_event_middleware)
+
+        # Road scene for the MFD (event "roadsense_scene", latest-only on the
+        # ZMQ channel only: the dashboard websocket's latest-only queue would
+        # let 10 Hz scenes displace its state snapshots).
+        self.roadsense_scene = None
+        if cfg.roadsense_enabled:
+            from .roadsense_scene import EVENT_NAME, RoadsenseSceneFeed, SceneFeedConfig
+            from .roadsense_power import RoadsenseConfig as _RsCfg2
+            sc_cfg = cfg.roadsense_scene_config or SceneFeedConfig()
+            if sc_cfg.enabled:
+                _rs2 = cfg.roadsense_config or _RsCfg2()
+                if not sc_cfg.host:
+                    sc_cfg.host = _rs2.api_host
+                if not sc_cfg.port:
+                    sc_cfg.port = _rs2.api_port
+
+                def _publish_scene(scene: dict) -> None:
+                    zmq_srv.enqueue_latest_event({"type": "event", "ts": round(time.time(), 3),
+                                                  "name": EVENT_NAME, "data": scene})
+
+                self.roadsense_scene = RoadsenseSceneFeed(sc_cfg, _publish_scene)
+                logger.info("roadsense scene feed wired (ws://%s:%d, <= %.0f Hz)",
+                            sc_cfg.host, sc_cfg.port, sc_cfg.max_hz)
 
 
         self.twin = twin
@@ -1425,6 +1454,8 @@ class BackendService:
         self.sink.start()
         self.api.start()
         self.zmq.start()
+        if self.roadsense_scene is not None:
+            self.roadsense_scene.start()
         if self.dashcam is not None:
             try:
                 self.dashcam.start()
@@ -1460,6 +1491,7 @@ class BackendService:
                     self._mfd_power_tick()
                     self._camera_preview_tick()
                     self._roadsense_power_tick()
+                    self._roadsense_scene_tick()
                     self._poco_power_tick()
                     self._chassis_fan_tick()
                     self._vfd_clock_tick()
@@ -1557,6 +1589,18 @@ class BackendService:
                     logger.info("POCO power profile -> low (deferred until roadsense stopped)")
                 except Exception:
                     logger.exception("Deferred low power profile failed")
+
+    def _roadsense_scene_tick(self) -> None:
+        """Let the scene feed read roadsense only while the stack runs and the
+        MFD is powered (it never starts or holds the stack itself)."""
+        feed = self.roadsense_scene
+        if feed is None:
+            return
+        rs = self.roadsense_power
+        on = rs is not None and rs.state == "running"
+        if on and self.mfd_power is not None:
+            on = self.mfd_power.state in ("on", "grace")
+        feed.set_active(on)
 
     def _roadsense_holds_low(self) -> bool:
         """PowerModeRule hook: keep the Gold cluster online while roadsense runs.
@@ -2184,6 +2228,11 @@ class BackendService:
                 self.camera_preview.shutdown()
             except Exception:
                 logger.exception("Error releasing the camera preview")
+        if self.roadsense_scene is not None:
+            try:
+                self.roadsense_scene.stop()
+            except Exception:
+                logger.exception("Error stopping the roadsense scene feed")
         if self.api is not None:
             self.api.stop()
         if self.zmq:

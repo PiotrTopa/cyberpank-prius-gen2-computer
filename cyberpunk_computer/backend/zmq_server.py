@@ -5,6 +5,9 @@ ZmqServer — ZeroMQ transport for the headless backend.
   ``{"type":"state","ts":..,"state":{...}}`` (latest-only, throttled to
   ``state_min_interval``) and ``{"type":"event","ts":..,"name":..,"data":{...}}``
   (FIFO, never displaced by state frames).
+  Events that are a stream of snapshots (``roadsense_scene``, 5..10 Hz) go
+  through :meth:`ZmqServer.enqueue_latest_event` instead: one slot per event
+  name, an unsent envelope is replaced by the newer one, serialized compactly.
 * REP on ``rep_port`` (default 8082): ``{"command": name, "params": {...}}`` →
   ``{"status":"ok"}`` on ACCEPTANCE (the command is queued to the engine
   thread via StoreBridge; execution is asynchronous) or
@@ -50,10 +53,14 @@ class ZmqServer:
         self._thread: Optional[threading.Thread] = None
         self._state_box: "queue.Queue[dict]" = queue.Queue(maxsize=1)
         self._event_box: "queue.Queue[dict]" = queue.Queue(maxsize=64)
+        # Latest-only event slots (name -> envelope), e.g. roadsense_scene.
+        self._latest_lock = threading.Lock()
+        self._latest_events: dict = {}
         self._last_state_ts = 0.0
         # Telemetry for logs/debugging.
         self.stats = {"state_pub": 0, "event_pub": 0, "commands": 0,
-                      "command_errors": 0, "events_dropped": 0}
+                      "command_errors": 0, "events_dropped": 0,
+                      "latest_pub": 0, "latest_replaced": 0}
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -108,6 +115,16 @@ class ZmqServer:
             logger.warning("ZMQ event queue full — dropping %s",
                            envelope.get("name"))
 
+    def enqueue_latest_event(self, envelope: dict):
+        """Queue an event envelope latest-only per event name: an envelope of
+        the same name that is not sent yet is replaced (a scene stream must not
+        queue up behind a stalled socket). Thread-safe, non-blocking."""
+        name = envelope.get("name")
+        with self._latest_lock:
+            if name in self._latest_events:
+                self.stats["latest_replaced"] += 1
+            self._latest_events[name] = envelope
+
     # ── server thread ────────────────────────────────────────────────────────
 
     def _run(self):
@@ -140,6 +157,12 @@ class ZmqServer:
                                  envelope.get("data"))
                 else:
                     logger.info("ZMQ event published: %s", envelope.get("name"))
+            if self._latest_events:
+                with self._latest_lock:
+                    latest, self._latest_events = self._latest_events, {}
+                for envelope in latest.values():
+                    pub_sock.send_string(json.dumps(envelope, separators=(",", ":")))
+                    self.stats["latest_pub"] += 1
             try:
                 envelope = self._state_box.get_nowait()
                 pub_sock.send_string(json.dumps(envelope))

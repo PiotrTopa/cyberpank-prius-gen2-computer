@@ -116,6 +116,20 @@ def _build_roadsense():
     )
 
 
+def _build_roadsense_scene():
+    """Road scene feed for the MFD (backend.roadsense_scene) from env vars::
+
+        BACKEND_ROADSENSE_SCENE=1          # 0 = no roadsense_scene events (needs BACKEND_ROADSENSE_ENABLED)
+        BACKEND_ROADSENSE_SCENE_HZ=10      # publish cap, 5..10 per the MFD contract
+    """
+    from .roadsense_scene import SceneFeedConfig
+    env = os.environ.get
+    return SceneFeedConfig(
+        enabled=_env_flag("BACKEND_ROADSENSE_SCENE", "1"),
+        max_hz=max(1.0, min(10.0, float(env("BACKEND_ROADSENSE_SCENE_HZ") or "10"))),
+    )
+
+
 def _env_flag(name: str, default: str = "0") -> bool:
     return (os.environ.get(name, default) or "").strip().lower() in ("1", "true", "yes", "on")
 
@@ -312,6 +326,7 @@ def _build_config(args: argparse.Namespace) -> BackendConfig:
         mfd_config=mfd_config,
         roadsense_enabled=roadsense_enabled,
         roadsense_config=roadsense_config,
+        roadsense_scene_config=_build_roadsense_scene(),
         acc_off_debounce_s=float(os.environ.get("BACKEND_ACC_OFF_DEBOUNCE_S", "3")),
         panda_enabled=(not args.no_panda) and _env_flag("BACKEND_PANDA_ENABLED", "1"),
         panda_bus=args.panda_bus if args.panda_bus is not None
