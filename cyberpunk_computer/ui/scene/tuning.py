@@ -37,9 +37,13 @@ AMBIENT_PANELS = ("plain", "level")
 class Tuning:
     """Named settings with their defaults (documented in docs/MFD_MAIN_SCREEN.md)."""
 
-    # ── signs (one row under the speed / limit line) ──
-    signs_max_on = 4            # rules in effect shown; the rest become "+n"
-    signs_max_ahead = 2         # warning signs shown, nearest first
+    # ── top line ──
+    show_speed = False          # speed and gear in the scene's top-left corner (the car has a
+                                # speedometer; False gives the top line to the signs)
+
+    # ── signs (the top line; a row under it when show_speed is on) ──
+    signs_max_on = 6            # rules in effect shown; the rest become "+n"
+    signs_max_ahead = 3         # warning signs shown, nearest first
     warning_max_m = 400         # a warning is shown while its hazard is expected within this (m)
     sign_hold_s = 4.0           # keep the last rules / warnings this long after the feed stops
                                 # carrying them (bridges gaps; 0 = drop at once)
@@ -49,6 +53,11 @@ class Tuning:
     closing_show_kmh = 5.0      # closing / opening speed shown from this difference (0 = always,
                                 # 999 = never); the arrow follows the same rule
     lead_brackets = True        # target brackets around the lead vehicle
+
+    # ── lanes ──
+    lane_neighbours = True      # draw the neighbouring lane(s) when their lines are seen
+    lane_neighbour_min_prob = 0.5   # an outer lane line counts from this probability
+    lane_indicator = True       # "which lane of N" boxes (only with a neighbouring lane)
 
     # ── scenery ──
     scenery_brightness = 0.40   # backdrop strip brightness, 0..1 (1 = full)

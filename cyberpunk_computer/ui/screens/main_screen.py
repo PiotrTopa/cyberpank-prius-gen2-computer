@@ -18,6 +18,7 @@ from ..widgets.frame import Frame
 from ..widgets.controls import VolumeBar, ToggleSwitch, ValueDisplay, ModeIcon, StatusIcon, BatteryBarsIcon
 from ..widgets.vehicle_status import ConnectionIndicator
 from ..widgets.pagination import PaginationControl
+from ..widgets.led_keys import LedKeyIcon
 from ..pointer import TAP_SLOP
 # VFD widget removed - now runs as separate satellite app (device 110)
 # See vfd_satellite/ and docs/VFD_SATELLITE_PROTOCOL.md
@@ -317,21 +318,21 @@ class MainScreen(Screen):
         icon_height = content.height - temp_height - 4
         icon_width = content.width // 3
         
-        self._ac_icon = ModeIcon(
+        self._ac_icon = LedKeyIcon(
             Rect(content.x, icon_y, icon_width, icon_height),
             icon="ac",
             active=self._climate_ac
         )
         self._climate_frame.add_child(self._ac_icon)
         
-        self._auto_icon = ModeIcon(
+        self._auto_icon = LedKeyIcon(
             Rect(content.x + icon_width, icon_y, icon_width, icon_height),
             icon="auto",
             active=self._climate_auto
         )
         self._climate_frame.add_child(self._auto_icon)
         
-        self._recirc_icon = ModeIcon(
+        self._recirc_icon = LedKeyIcon(
             Rect(content.x + icon_width * 2, icon_y, icon_width, icon_height),
             icon="recirc",
             active=self._climate_recirc
@@ -595,7 +596,9 @@ class MainScreen(Screen):
             self._volume_label.set_value(str(state.audio.volume))
 
         # Climate
-        self._temp_target = f"{state.climate.target_temp:.0f}"
+        from ...state.climate_model import format_temp  # 0.5 °C grid: "21.5" / "22"
+        ctl = getattr(self, "_climate_ctl", None)  # quick edit: keep the optimistic setpoint
+        self._temp_target = format_temp(ctl.view().target_temp if ctl else state.climate.target_temp)
         self._temp_in = (
             f"{state.climate.inside_temp:.0f}"
             if state.climate.inside_temp is not None else "--"
@@ -1196,15 +1199,18 @@ class MainScreen(Screen):
             self._store.dispatch(SetVolumeAction(self._volume, source=ActionSource.UI))
     
     def _adjust_target_temp(self, delta: int) -> None:
-        """Adjust target temperature by delta."""
-        new_temp = int(self._temp_target) + delta
-        new_temp = max(16, min(28, new_temp))
-        self._temp_target = str(new_temp)
-        self._temp_target_display.set_value(self._temp_target)
-        
-        # Dispatch action to Store -> Gateway
+        """Adjust target temperature by ``delta`` 0.5 °C steps (one AVC press each)."""
+        from ...state.climate_model import ClimateController, format_temp, TEMP_MIN, TEMP_MAX, TEMP_STEP
         if self._store:
-            self._store.dispatch(SetTargetTempAction(float(new_temp), source=ActionSource.UI))
+            # Live: AVC command + optimistic value until the setpoint confirms
+            if getattr(self, "_climate_ctl", None) is None:
+                self._climate_ctl = ClimateController(self._store)
+            self._climate_ctl.step_target_temp(delta)
+            new_temp = self._climate_ctl.view().target_temp
+        else:
+            new_temp = max(TEMP_MIN, min(TEMP_MAX, float(self._temp_target) + delta * TEMP_STEP))
+        self._temp_target = format_temp(new_temp)
+        self._temp_target_display.set_value(self._temp_target)
     
     def _enter_volume_edit(self) -> None:
         """Enter volume editing mode."""
@@ -1370,44 +1376,23 @@ class MainScreen(Screen):
             try:
                 temp_in = int(self._temp_in)
             except (ValueError, TypeError):
-                temp_in = 0
-            
+                temp_in = None  # not on AVC-LAN
+
+            # With a store the screen is live: it re-reads every climate field
+            # each frame and sends AVC commands through state.climate_model
+            # (ClimateController); the values below only seed the no-store case.
             climate_screen = ClimateScreen(
                 (self.width, self.height),
                 self.app,
-                temp_target=int(self._temp_target),
+                temp_target=float(self._temp_target),
                 temp_in=temp_in,
                 temp_out=temp_out,
                 ac_on=self._climate_ac,
                 auto_mode=self._climate_auto,
-                recirc=self._climate_recirc
+                recirc=self._climate_recirc,
+                store=self._store,
             )
-            
-            # Connect Store for value changes (dispatches actions to gateway)
-            if self._store:
-                store = self._store  # Capture for closure
-                
-                # When user changes value in ClimateScreen, dispatch to Store
-                def on_climate_value_changed(label: str, value) -> None:
-                    if label == "TARGET TEMP":
-                        store.dispatch(SetTargetTempAction(float(value), source=ActionSource.UI))
-                    elif label == "FAN SPEED":
-                        store.dispatch(SetFanSpeedAction(value, source=ActionSource.UI))
-                    elif label == "A/C":
-                        # value is 0=ON, 1=OFF, convert to bool
-                        store.dispatch(SetACAction(value == 0, source=ActionSource.UI))
-                    elif label == "MODE":
-                        # value is 0=AUTO, 1=MANUAL, 2=OFF
-                        store.dispatch(SetAutoModeAction(value == 0, source=ActionSource.UI))
-                    elif label == "AIR INTAKE":
-                        # value is 0=FRESH, 1=RECIRC
-                        store.dispatch(SetRecirculationAction(value == 1, source=ActionSource.UI))
-                    elif label == "AIR DIRECTION":
-                        # value is 0=FACE, 1=FACE+FEET, 2=FEET, 3=DEFROST
-                        store.dispatch(SetAirDirectionAction(value, source=ActionSource.UI))
-                
-                climate_screen.set_on_value_changed(on_climate_value_changed)
-            
+
             self.app.push_screen(climate_screen)
     
     def _on_lights_select(self) -> None:

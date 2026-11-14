@@ -155,14 +155,14 @@ def test_long_press_climate_quick_edits():
     assert m.focus_manager.focus_visible
     assert m._editing_target_temp            # PRESS_LIGHT = quick temp edit
 
-    # Right half of the body = +1 (ROTATE_RIGHT), left half = -1
-    t0 = int(m._temp_target)
+    # Right half of the body = +0.5 °C (ROTATE_RIGHT), left half = -0.5 °C
+    t0 = float(m._temp_target)
     r = m._climate_frame.rect
     tap(pc, clock, r.right - 10, r.y + 50)
-    assert int(m._temp_target) == t0 + 1
+    assert float(m._temp_target) == t0 + 0.5
     tap(pc, clock, r.x + 10, r.y + 50)
     tap(pc, clock, r.x + 10, r.y + 50)
-    assert int(m._temp_target) == t0 - 1
+    assert float(m._temp_target) == t0 - 0.5
     # Title bar = done
     tap(pc, clock, r.x + 30, r.y + 5)
     assert not m._editing_target_temp

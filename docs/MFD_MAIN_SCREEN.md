@@ -35,9 +35,9 @@ Scene HUD while driving (all on the scene surface):
 
 | Place | Content |
 |---|---|
-| top-left | speed (Terminus 28, `display_speed_kmh`), `km/h`, gear; beside it `SET nn` in green while cruise is engaged |
-| top-right | link LED, speed-limit sign, ego traffic light as a three-lamp signal with its distance in metres |
-| sign row, y 33..52 | from the left: warning signs ahead, nearest first, each followed by the expected distance in metres (default: two, within 400 m). From the right: the rules in effect (default: four; `+n` for the rest); a small pointer under a rule that binds one side of the road |
+| top line, y 3..29 | the signs. From the left: warning signs ahead, nearest first, each followed by the expected distance in metres (default: up to three, within 400 m). Right-aligned against the limit: the rules in effect (default: up to six; as many as fit, `+n` for the rest); a small pointer under a rule that binds one side of the road. Then the ego traffic light as a three-lamp signal with its distance in metres, the speed-limit sign and the link LED |
+| speed | not shown in the scene (the car has a speedometer). `show_speed` brings back speed (Terminus 28, `display_speed_kmh`), `km/h`, gear and the green `SET nn` chip top-left; the signs then move to a row at y 33..52 |
+| bottom-right | lane boxes: one per lane seen, the own lane lit (only when a neighbouring lane is seen; section 6.4) |
 | bottom-left | chip `HIGH` while the high beam is on (all lamps with `lamp_chips = all`), above it the perception status (nothing when live) |
 | on the road | lead vehicle with target brackets and its distance; under it the time gap when shorter than 2.5 s and the closing/opening speed in km/h with an arrow from 5 km/h |
 
@@ -55,6 +55,18 @@ Status strip (`scene/powerbox.py::StatusStrip`, 194 x 21):
 
 The strip is the stopgap for the power read-out until the VFD satellite shows it; the BATTERY panel
 keeps the numbers.
+
+CLIMATE box: the three indicators are LED keys (`ui/widgets/led_keys.py`): an original 1-bit
+pictogram with a dash under it that is amber when on. A/C = snowflake, AUTO = the word (as on the
+car's key), intake = a car with the air looping inside and the dash lit for recirculation, a car
+with an arrow entering at the nose and no dash for fresh air.
+
+LIGHTS screen (`ui/screens/lights_screen.py`, opened by a tap on the LIGHTS box): left the car model
+lit from the real lamp state (`POS` / `LOW` / `HIGH` / `FOG` chips under it) and what the camera
+recommends (`vision.lights_recommended`, reason, confidence); right the stored settings as tiles:
+mode (three 74 x 44 tiles), BiLED (three 74 x 40 tiles, brightness keys 44 x 36 in steps of 10 with
+PWM), DRL (236 x 40). One tap per setting; the encoder path is unchanged. The settings are persisted
+values only (no command exists for them), and each control panel says `STORED ONLY`.
 
 Side panels: original width, purple background and type sizes. Two tunables touch them: `side_ticks`
 (5 px bright corner ticks at rest, the motif of the lead's target brackets; focus and edit accents
@@ -222,6 +234,21 @@ the vocabulary draws the neutral variant. The backdrop pans up to 40 px with the
 the road's far end. Roadside scenery, weather and the enclosed places are drawn in the open road
 view only (the parked view stays static).
 
+### 6.4 Lanes
+
+roadsense gives four lane lines (far-left, left, right, far-right), each with a probability, and two
+road edges. The own lane is the surface between the left and right line (bright 2 px lines, filled).
+A neighbouring lane is drawn on a side (its surface in a second, darker tint, its outer line at
+mid brightness, and a box in the lane indicator) when the outer line of that side has a probability
+of at least `lane_neighbour_min_prob` (0.5) and lies 2.3..4.8 m from the ego line 10 m ahead (so a
+kerb or barrier line is not taken for a lane). `lane_neighbours` and `lane_indicator` switch the
+surfaces and the boxes.
+
+What the data cannot say, and the picture therefore does not: more than one neighbour per side
+(with four lines "three lanes, the car in the left one" looks like two lanes); the total number of
+lanes; and whether a lane to the left carries oncoming traffic. The neighbour lanes are drawn as
+lanes without a direction. Requests to roadsense for these are in section 8.2.
+
 ### 6.3 Signs (`scene/signs.py`)
 
 The sign row (section 2) shows `signs.on` (rules in effect that bind the car, without the speed
@@ -362,7 +389,8 @@ The event `roadsense_scene` (section 7.1) and the health mirror (`RoadsenseState
 | Light distance from the road | `lights.ego` `lateral_m` measured from the camera axis, or the path offset at that distance alongside it, m, 3/s (today it is the offset from the planned path) |
 | Other vehicles | `objects[]` entries `{"track_id", "kind", "x" m, "y" m, "v_rel" m/s, "prob"}` for vehicles in adjacent lanes and oncoming, 5..10 Hz. Today modeld has only the lead hypotheses |
 | Lead vehicle class and stop lamps | `lead.kind` (`car`/`van`/`truck`/`bus`/`bike`), `lead.braking` bool, 5 Hz |
-| Lane line type | per lane line `"type": "solid|dashed|double"`, 2 Hz, so dashes can be drawn and scroll |
+| Lane line type | per lane line `"type": "solid|dashed|double"`, 2 Hz, so dashes can be drawn and scroll (a double or solid centre line also tells that the lane beyond it is oncoming) |
+| Lane layout | `lanes: {"count": n, "ego_index": i, "oncoming_left": bool}` (or a per-lane `direction: same|oncoming|unknown`), 1..2 Hz: how many lanes the carriageway has, which one the car is in, and whether the left neighbour is oncoming. Today only four lines with probabilities exist |
 | Street lamps and roadside furniture | `objects[]` with `kind: "lamp"`, `x`, `y`, `state: "on|off"`, 2..5 Hz (the renderer draws them already; the demo feeds simulated ones). The roadside of section 6.2 is label-driven decoration until then |
 | Stop line | `light.stop_line_m` / a `stop` rule distance in m, 5 Hz |
 | Rules in the health summary as data | `/v1/health` `rules` as `[{"id", "sign", "value", "side"}]` instead of display strings, so a consumer without the WebSocket can show the signs (today: `"B-36 no stopping (R)"`) |
@@ -411,11 +439,11 @@ treat it as x50..x85). Averages assume 20 UI frames and 10 scene redraws a secon
 |---|---|---|
 | main screen before the scene existed (every frame) | 0.56 ms | 39 ms |
 | parked, steady (cached blits) | 0.30 ms | 21 ms |
-| driving, no vision | 0.30 ms + 0.07 ms per scene redraw | 23 ms average |
-| driving, city at night: lead, four lamp objects, four signs, low beam | 0.31 ms + 0.19 ms per redraw | 28 ms average |
-| the same in rain | 0.31 ms + 0.19 ms per redraw | 29 ms average |
-| forest at night in fog with high beam | 0.31 ms + 0.29 ms per redraw | 32 ms average |
-| tunnel | 0.31 ms + 0.25 ms per redraw | 31 ms average |
+| driving, no vision | 0.30 ms + 0.06 ms per scene redraw | 23 ms average |
+| driving, city at night, two lanes: lead, four lamp objects, four signs, low beam | 0.31 ms + 0.21 ms per redraw | 29 ms average |
+| the same in rain | 0.31 ms + 0.22 ms per redraw | 29 ms average |
+| forest at night in fog with high beam | 0.31 ms + 0.32 ms per redraw | 33 ms average |
+| tunnel | 0.31 ms + 0.28 ms per redraw | 32 ms average |
 | one car render (cache miss): camera step, door step or lamp change | 0.4..0.75 ms | 30..50 ms, once per sprite |
 | a backdrop strip on a label change | 0.1..0.45 ms | 7..30 ms, once per (place, light, weather) |
 | rain / snow tile, fog band, a beam sprite, a sign pictogram (first use) | 0.85 / 0.15 / 0.13 / 0.006 ms | 60 / 10 / 9 / 0.4 ms, once |
@@ -450,9 +478,9 @@ python -m cyberpunk_computer.ui.scene.demo --live --scale 3                  # t
 python -m cyberpunk_computer.ui.scene.demo --bench                           # frame cost incl. the simulation
 ```
 
-`--shots` writes `NN_name.png` (native 480 x 240) and `NN_name@4x.png` for 46 cases: the states of
+`--shots` writes `NN_name.png` (native 480 x 240) and `NN_name@4x.png` for 51 cases: the states of
 section 4, the five lamp states on the road and three parked, 18 scenery variants covering every
-place, light and weather label, a full sign row, the cruise slot states, and `signs_legend`
+place, light and weather label, four lane layouts, the top line with the speed switched back on, a full sign row, the cruise slot states, and `signs_legend`
 with every pictogram. `--copy-to` also writes the 4x images there as `<prefix>NN_name.png`
 (`--prefix`, default `final_`).
 
@@ -472,13 +500,17 @@ ignored and logged.
 
 | Name | Default | Meaning |
 |---|---|---|
-| `signs_max_on` | 4 | rules in effect shown in the sign row; the rest become `+n` |
-| `signs_max_ahead` | 2 | warning signs shown, nearest first |
+| `show_speed` | false | speed, gear and the `SET nn` chip in the scene's top-left corner; the signs then use a row below instead of the top line |
+| `signs_max_on` | 6 | rules in effect shown (as many of them as fit); the rest become `+n` |
+| `signs_max_ahead` | 3 | warning signs shown, nearest first |
 | `warning_max_m` | 400 | a warning is shown while its hazard is expected within this distance (m) |
 | `sign_hold_s` | 4.0 | rules and warnings stay this long after the feed stops carrying them (0 = drop at once) |
 | `gap_show_below_s` | 2.5 | the time gap to the lead is shown when shorter (99 = always, 0 = never) |
 | `closing_show_kmh` | 5.0 | closing / opening speed and its arrow are shown from this difference (999 = never) |
 | `lead_brackets` | true | target brackets around the lead vehicle |
+| `lane_neighbours` | true | draw the neighbouring lane surfaces when their lines are seen (section 6.4) |
+| `lane_neighbour_min_prob` | 0.5 | probability from which an outer lane line counts |
+| `lane_indicator` | true | the lane boxes bottom-right (only with a neighbouring lane) |
 | `scenery_brightness` | 0.40 | backdrop brightness, 0..1 |
 | `scenery_band_px` | 34 | rows of the backdrop kept above the horizon (0 = the whole strip, 68 rows) |
 | `roadside` | `sparse` | `off`, `sparse` (marker posts on open roads, one tree row in a forest), `normal` (also a second tree row and parking bays) |
@@ -492,11 +524,11 @@ ignored and logged.
 | `beam_style` | `outline` | `outline`, `hatch_light`, `hatch`, `off` (section 6.1) |
 | `path_chevrons` | false | the model's planned path as chevrons in the lane |
 | `lamp_chips` | `high` | `none`, `high` (only the high-beam chip), `all` (POS / LOW / HIGH / FOG) |
-| `cruise_chip` | true | `SET nn` beside the speed while cruise is engaged |
+| `cruise_chip` | true | `SET nn` beside the speed while cruise is engaged (with `show_speed`; the cruise slot of the strip shows it always) |
 | `side_ticks` | true | corner ticks on the six side panels |
 | `ambient_panel` | `plain` | `plain` or `level` (section 2) |
 
-The fuller look of the previous version is `{"signs_max_on": 6, "signs_max_ahead": 3,
+The fuller look of the earlier version is `{"show_speed": true, "signs_max_on": 6, "signs_max_ahead": 3,
 "gap_show_below_s": 99, "closing_show_kmh": 0, "scenery_brightness": 1, "scenery_band_px": 0,
 "roadside": "normal", "grid_brightness": 1, "edge_brightness": 1, "enclosure_brightness": 1,
 "weather_density": 1, "weather_brightness": 1, "beam_style": "hatch", "path_chevrons": true,

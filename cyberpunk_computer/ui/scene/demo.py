@@ -12,7 +12,8 @@ street lamps, red traffic light, stop, scene closes. ``state_at`` /
 
 ``mods`` (a dict) overrides parts of the timeline for the variant shots:
 ``env`` (place / light / weather labels), ``signs``, ``limit``, ``lamps``
-(tail / head / high / fog), ``cruise`` (VehicleState cruise fields),
+(tail / head / high / fog), ``cruise`` (VehicleState cruise fields), ``lanes``
+("1", "2L", "2R", "3M": lane layout), ``tuning`` (overrides of ui/scene/tuning.py),
 ``lead`` (False = none), ``objects`` (False = none), ``straight``.
 
 Vehicle values go through the real state fields; the road arrives the way the
@@ -81,8 +82,13 @@ def scene_at(t: float, seq: int, mods: Optional[Dict[str, Any]] = None) -> Optio
         return {"y": [round(-(offset_left + wander + 0.5 * kappa * x * x), 2) for x in xs],
                 "prob": prob}
 
-    lanes = [line(5.25, 0.55), line(1.75, 0.95), line(-1.75, 0.92), None]
-    edges = [line(5.7, 1.0), line(-2.4, 1.0)]
+    # lane layout: "1" one lane, "2R" two lanes with the car in the right one
+    # (the default), "2L" in the left one, "3M" three lanes, the car in the middle
+    layout = mods.get("lanes", "2R")
+    far_l = line(5.25, 0.85) if layout in ("2R", "3M") else None
+    far_r = line(-5.25, 0.85) if layout in ("2L", "3M") else None
+    lanes = [far_l, line(1.75, 0.95), line(-1.75, 0.92), far_r]
+    edges = [line(5.7 if far_l else 2.3, 1.0), line(-5.8 if far_r else -2.4, 1.0)]
     lead = None
     if 12.0 <= t < 41.5:
         d = _ramp(t, 12.0, 20.0, 78.0, 24.0)
@@ -225,8 +231,12 @@ class Sim:
         self.screen = MainScreen(size, None)
         self.screen._frames = 1            # no start-up frame without the scene
         old = self.screen.scene_page
+        tune = None
+        if self.mods.get("tuning"):
+            from .tuning import Tuning
+            tune = Tuning(self.mods["tuning"])
         self.screen.scene_page = ScenePage(old.x, old.y, old.width, feed=self.feed,
-                                           clock=lambda: self.t)
+                                           clock=lambda: self.t, tuning=tune)
         self.screen.set_store(self.store)
         self._seq = 0
         self._last_scene_t = -1.0
@@ -328,6 +338,12 @@ SHOTS = (
     ("env_underground_parking", 19.5, "live", None, "underground_parking",
      dict(_env("underground_parking", "night"), objects=False, signs=None, limit=None, lead=False)),
     # ── signs and cruise ──
+    ("lanes_1", 19.5, "live", None, "one lane", {"lanes": "1"}),
+    ("lanes_2_car_left", 19.5, "live", None, "two lanes, the car in the left one", {"lanes": "2L"}),
+    ("lanes_2_car_right", 19.5, "live", None, "two lanes, the car in the right one", {"lanes": "2R"}),
+    ("lanes_3_car_middle", 19.5, "live", None, "three lanes, the car in the middle", {"lanes": "3M"}),
+    ("top_line_speed_on", 19.5, "live", None, "tuning show_speed: speed and gear back, signs in a row below",
+     {"tuning": {"show_speed": True}}),
     ("signs_many", 19.5, "live", None, "six rules in effect, three warnings, default-rule limit",
      {"limit": {"kmh": 50, "src": "default"}, "signs": {
          "on": [{"id": "built_up_area", "s": "D-42"}, {"id": "living_street", "s": "D-40", "v": 20},

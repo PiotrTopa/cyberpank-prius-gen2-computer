@@ -28,6 +28,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from ..state.actions import (
     Action,
     BatchAction,
+    ClimateButtonAction,
     SetACAction,
     SetAirDirectionAction,
     SetAutoModeAction,
@@ -193,6 +194,10 @@ def _translate(action: Action) -> Optional[Tuple[str, Dict]]:
         return "set_climate", {"recirculation": action.recirculation}
     if isinstance(action, SetAirDirectionAction):
         return "set_climate", {"air_direction": action.direction}
+    if isinstance(action, ClimateButtonAction):
+        # raw AVC climate touch button (system off, front defrost, rear
+        # defogger, ...): api/commands.py climate_button
+        return "climate_button", {"button": action.button, "count": action.count}
     if isinstance(action, SetReadyModeAction):
         return "set_ready", {"on": action.ready}
     if type(action).__name__ == "DtcCommandAction":

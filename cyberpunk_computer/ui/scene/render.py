@@ -160,6 +160,7 @@ class SceneRenderer:
             "grid": (44, 34, 84),
             "grid_hi": (70, 52, 128),
             "lane_fill": (0, 24, 28),
+            "lane_side": (8, 14, 30),
             "lane_ego": c["cyan_bright"],
             "lane_mid": c["cyan_mid"],
             "lane_dim": (30, 78, 86),
@@ -733,16 +734,67 @@ class SceneRenderer:
     def _lane_points(self, cam: Camera, d: SceneDirector, v: float) -> list:
         return [self._line_points(cam, d.xs, ys, v) if ys else [] for ys in d.lanes]
 
+    LANE_WIDTH_OK = (2.3, 4.8)      # a plausible lane width (m)
+
+    def lane_neighbours(self, d: SceneDirector) -> Tuple[bool, bool]:
+        """(left, right): is a neighbouring lane seen on that side?
+
+        A neighbour exists when the outer lane line of that side and the ego
+        line next to it are both there, the outer one with at least
+        ``lane_neighbour_min_prob``, and they are a lane width apart 10 m
+        ahead. roadsense gives four lines, so at most one neighbour per side
+        can be known, and nothing says whether a lane to the left carries
+        oncoming traffic: the picture shows lanes, not directions."""
+        if not self.tune.lane_neighbours or d.vision != "live":
+            return False, False
+        minp = self.tune.lane_neighbour_min_prob
+        lo, hi = self.LANE_WIDTH_OK
+        out = []
+        for outer, inner in ((0, 1), (3, 2)):
+            a, b = d.lanes[outer], d.lanes[inner]
+            ok = bool(a and b and d.lane_prob[outer] >= minp)
+            if ok:
+                i = min(2, len(a) - 1, len(b) - 1)
+                ok = lo <= abs(a[i] - b[i]) <= hi
+            out.append(ok)
+        return out[0], out[1]
+
     def _draw_lane_fill(self, s: pygame.Surface, lines: list, d: SceneDirector, k: float) -> None:
         left, right = lines[1], lines[2]
-        if len(left) >= 2 and len(right) >= 2 and d.vision != "stale":
+        if d.vision == "stale":
+            return
+        nl, nr = self.lane_neighbours(d)
+        side = _k(self.pal["lane_side"], k)
+        if nl and len(lines[0]) >= 2 and len(left) >= 2:
+            pygame.draw.polygon(s, side, lines[0] + left[::-1])
+        if nr and len(lines[3]) >= 2 and len(right) >= 2:
+            pygame.draw.polygon(s, side, right + lines[3][::-1])
+        if len(left) >= 2 and len(right) >= 2:
             pygame.draw.polygon(s, _k(self.pal["lane_fill"], k), left + right[::-1])
+
+    def _draw_lane_indicator(self, s: pygame.Surface, d: SceneDirector) -> None:
+        """Which lane of the lanes seen: one box per lane, the own one lit."""
+        nl, nr = self.lane_neighbours(d)
+        if not (nl or nr) or not self.tune.lane_indicator:
+            return
+        boxes = [False] * int(nl) + [True] + [False] * int(nr)
+        bw, bh, gap = 9, 14, 3
+        x = self.w - 5 - len(boxes) * (bw + gap) + gap
+        y = self.h - 19
+        for own in boxes:
+            if own:
+                pygame.draw.rect(s, self.pal["lane_ego"], (x, y, bw, bh))
+            else:
+                pygame.draw.rect(s, (0, 0, 0), (x, y, bw, bh))
+                pygame.draw.rect(s, self.pal["lane_mid"], (x, y, bw, bh), 1)
+            x += bw + gap
 
     def _draw_road(self, s: pygame.Surface, cam: Camera, d: SceneDirector,
                    v: float, k: float, lines: list) -> None:
         pal = self.pal
         stale = d.vision == "stale"
         xs = d.xs
+        nl, nr = self.lane_neighbours(d)
         for i, ed in enumerate(d.edges):
             if not ed:
                 continue
@@ -758,7 +810,8 @@ class SceneRenderer:
             elif i in (1, 2):
                 col = pal["lane_ego"] if d.lane_prob[i] >= 0.6 else pal["lane_mid"]
             else:
-                col = pal["lane_mid"] if d.lane_prob[i] >= 0.6 else pal["lane_dim"]
+                seen = (nl if i == 0 else nr)
+                col = pal["lane_mid"] if (seen or d.lane_prob[i] >= 0.6) else pal["lane_dim"]
             pygame.draw.lines(s, _k(col, k), False, pts, 2 if (i in (1, 2) and not stale) else 1)
 
     @staticmethod
@@ -1050,45 +1103,60 @@ class SceneRenderer:
     def _plate_text(self, string: str, color: RGB) -> pygame.Surface:
         return self.text(string, 14, color)
 
-    SIGN_ROW_Y = 33
+    SIGN_ROW_Y = 33         # the sign row under the speed line (show_speed on)
+    TOP_ROW_Y = 7           # the signs in the top line (show_speed off)
 
-    def _draw_sign_row(self, s: pygame.Surface, d: SceneDirector) -> None:
-        """One row under the speed / limit line: warnings ahead from the left
-        (each with its expected distance), rules in effect from the right."""
+    def _draw_sign_row(self, s: pygame.Surface, d: SceneDirector, y: int, x_right: int) -> None:
+        """Warnings ahead from the left (each with its expected distance in
+        metres), rules in effect right-aligned at ``x_right``."""
         pal = self.pal
         tune = self.tune
-        y = self.SIGN_ROW_Y
-        # rules in effect, right-aligned; "+n" for those that do not fit
         on = d.signs_on
         shown = on[:max(0, int(tune.signs_max_on))]
-        x = self.w - 3
-        if len(on) > len(shown):
-            t = self.text("+%d" % (len(on) - len(shown)), 14, pal["label"])
+        ahead = d.signs_ahead[:max(0, int(tune.signs_max_ahead))]
+        # room: the warnings take what they need first, the rules the rest
+        need_ahead = 4
+        for it in ahead:
+            pic = sign_surface(it.id, it.code, it.unsure, self._plate_text)
+            need_ahead += pic.get_width() + (self.text("%d" % it.m, 14, pal["warn"]).get_width() + 8
+                                             if it.m is not None else 3)
+        room = x_right - need_ahead - 4
+        fit = []
+        used = 0
+        for it in shown:
+            pic = sign_surface(it.id, it.code, it.unsure, self._plate_text)
+            if used + pic.get_width() + 3 > room:
+                break
+            fit.append((it, pic))
+            used += pic.get_width() + 3
+        more = len(on) - len(fit)
+        x = x_right
+        if more > 0:
+            t = self.text("+%d" % more, 14, pal["label"])
+            while fit and used + t.get_width() + 4 > room:
+                used -= fit[-1][1].get_width() + 3
+                fit.pop()
+                more += 1
+                t = self.text("+%d" % more, 14, pal["label"])
             x -= t.get_width()
             s.blit(t, (x, y + 3))
             x -= 4
-        for it in reversed(shown):
-            pic = sign_surface(it.id, it.code, it.unsure, self._plate_text)
+        for it, pic in reversed(fit):
             x -= pic.get_width()
             s.blit(pic, (x, y))
             if it.side:
                 # binds one side of the road: a small pointer under the sign
                 mx = x + pic.get_width() // 2
                 dx = -3 if it.side == "l" else 3
-                pygame.draw.polygon(s, pal["label"], [(mx - dx, y + 21), (mx - dx, y + 25), (mx + dx, y + 23)])
+                pygame.draw.polygon(s, pal["label"], [(mx - dx, y + 20), (mx - dx, y + 24), (mx + dx, y + 22)])
             x -= 3
-        right_limit = x
-        # warnings ahead, left-aligned, nearest first
         x = 4
-        for it in d.signs_ahead[:max(0, int(tune.signs_max_ahead))]:
+        for it in ahead:
             pic = sign_surface(it.id, it.code, it.unsure, self._plate_text)
-            dist = self.text("%d" % it.m, 14, pal["warn"]) if it.m is not None else None
-            need = pic.get_width() + (dist.get_width() + 5 if dist is not None else 3)
-            if x + need > right_limit:
-                break
             s.blit(pic, (x, y))
             x += pic.get_width() + 2
-            if dist is not None:
+            if it.m is not None:
+                dist = self.text("%d" % it.m, 14, pal["warn"])
                 pygame.draw.rect(s, (0, 0, 0), (x - 1, y + 3, dist.get_width() + 2, 14))
                 s.blit(dist, (x, y + 3))
                 x += dist.get_width() + 6
@@ -1096,17 +1164,18 @@ class SceneRenderer:
     def _draw_hud_drive(self, s: pygame.Surface, d: SceneDirector, inp: SceneInputs) -> None:
         pal = self.pal
         tune = self.tune
-        # speed + gear, top-left
-        spd = self.text("%d" % int(inp.speed_kmh + 0.5), 28, pal["text"])
-        pygame.draw.rect(s, (0, 0, 0), (2, 2, spd.get_width() + 30, 27))
-        s.blit(spd, (5, 1))
-        gx = 5 + spd.get_width() + 3
-        s.blit(self.text("km/h", 8, pal["label"], mono=False), (gx, 6))
-        s.blit(self.text(inp.gear, 14, pal["value"]), (gx + 1, 14))
-        if tune.cruise_chip and inp.cruise_active and inp.cruise_set_kmh:
-            # engaged cruise: the set speed beside the speed (the cruise slot
-            # itself is in the strip below the scene)
-            self._chip(s, gx + 30, 6, "SET %d" % inp.cruise_set_kmh, pal["green"], filled=True)
+        if tune.show_speed:
+            # speed + gear, top-left
+            spd = self.text("%d" % int(inp.speed_kmh + 0.5), 28, pal["text"])
+            pygame.draw.rect(s, (0, 0, 0), (2, 2, spd.get_width() + 30, 27))
+            s.blit(spd, (5, 1))
+            gx = 5 + spd.get_width() + 3
+            s.blit(self.text("km/h", 8, pal["label"], mono=False), (gx, 6))
+            s.blit(self.text(inp.gear, 14, pal["value"]), (gx + 1, 14))
+            if tune.cruise_chip and inp.cruise_active and inp.cruise_set_kmh:
+                # engaged cruise: the set speed beside the speed (the cruise
+                # slot itself is in the strip below the scene)
+                self._chip(s, gx + 30, 6, "SET %d" % inp.cruise_set_kmh, pal["green"], filled=True)
         # speed limit + traffic light, top-right (the corner dot is the link LED)
         x_right = self.w - 20
         if inp.limit_kmh:
@@ -1116,11 +1185,18 @@ class SceneRenderer:
             x_right -= 32
         if inp.light is not None and inp.light.state in self.LIGHT_COLORS:
             self._draw_signal(s, x_right - 12, 3, 3, inp.light, d.clock)
+            x_right -= 16
             if inp.light.dist_m is not None:
                 t = self.text("%d" % int(inp.light.dist_m + 0.5), 14, pal["text"])
-                pygame.draw.rect(s, (0, 0, 0), (x_right - 16 - t.get_width(), 8, t.get_width() + 2, 14))
-                s.blit(t, (x_right - 15 - t.get_width(), 8))
-        self._draw_sign_row(s, d)
+                pygame.draw.rect(s, (0, 0, 0), (x_right - t.get_width() - 1, 8, t.get_width() + 2, 14))
+                s.blit(t, (x_right - t.get_width(), 8))
+                x_right -= t.get_width() + 4
+        if tune.show_speed:
+            self._draw_sign_row(s, d, self.SIGN_ROW_Y, self.w - 3)
+        else:
+            # the top line belongs to the signs: warnings, rules, the limit
+            self._draw_sign_row(s, d, self.TOP_ROW_Y, x_right - 2)
+        self._draw_lane_indicator(s, d)
         # bottom-left: lamps (tuning.lamp_chips), above them the perception status
         x = 4
         y = self.h - 20

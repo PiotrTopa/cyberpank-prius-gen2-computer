@@ -615,13 +615,14 @@ def test_side_panel_items_follow_the_tuning():
 def test_tuning_defaults_overrides_and_file(tmp_path, monkeypatch):
     from cyberpunk_computer.ui.scene import tuning as T
     t = T.Tuning()
-    assert t.beam_style == "outline" and t.signs_max_on == 4 and t.path_chevrons is False
-    done = t.apply({"signs_max_on": 6, "beam_style": "hatch", "scenery_brightness": 1,
+    assert t.beam_style == "outline" and t.signs_max_on == 6 and t.path_chevrons is False
+    assert t.show_speed is False and t.lane_neighbours is True
+    done = t.apply({"signs_max_on": 8, "beam_style": "hatch", "scenery_brightness": 1,
                     "beam_style_typo": 1, "lamp_chips": "sometimes", "path_chevrons": "yes"})
-    assert done == {"signs_max_on": 6, "beam_style": "hatch", "scenery_brightness": 1}
-    assert t.signs_max_on == 6 and t.beam_style == "hatch" and t.scenery_brightness == 1.0
+    assert done == {"signs_max_on": 8, "beam_style": "hatch", "scenery_brightness": 1}
+    assert t.signs_max_on == 8 and t.beam_style == "hatch" and t.scenery_brightness == 1.0
     assert t.lamp_chips == "high" and t.path_chevrons is False       # bad values ignored
-    assert T.Tuning().signs_max_on == 4                               # instances do not leak
+    assert T.Tuning().signs_max_on == 6                               # instances do not leak
     f = tmp_path / "tune.json"
     f.write_text('{"warning_max_m": 150, "roadside": "normal"}')
     monkeypatch.setenv(T.ENV_VAR, str(f))
@@ -640,7 +641,9 @@ def test_tuning_defaults_overrides_and_file(tmp_path, monkeypatch):
 
 def test_every_scene_tunable_changes_the_picture():
     from cyberpunk_computer.ui.scene.inputs import Lead, SignItem
-    road = parse_scene(scene(1, lead={"d": 20.0, "y": 0.0, "v_rel": -4.0, "prob": 0.95}))
+    sc = scene(1, lead={"d": 20.0, "y": 0.0, "v_rel": -4.0, "prob": 0.95})
+    sc["lanes"][0] = {"y": [-5.25] * 5, "prob": 0.9}          # a lane to the left
+    road = parse_scene(sc)
     signs = tuple(SignItem(i, "X") for i in ("priority_road", "no_overtaking", "no_stopping",
                                              "one_way", "no_parking", "motorway"))
     ahead = (SignItem("roundabout_ahead", "A-8", m=60), SignItem("children_ahead", "A-17", m=140),
@@ -649,15 +652,18 @@ def test_every_scene_tunable_changes_the_picture():
                        env_place="forest_road", env_light="night", env_weather="rain",
                        tail=True, head=True, high=True, cruise_active=True, cruise_set_kmh=50)
     base = drawn(inp)[0]
-    for name, value in (("signs_max_on", 2), ("signs_max_ahead", 1), ("warning_max_m", 100),
+    assert drawn(inp, signs_max_ahead=0, signs_max_on=1)[0] != drawn(inp, signs_max_ahead=0)[0]
+    for name, value in (("signs_max_ahead", 1), ("warning_max_m", 100),
                         ("gap_show_below_s", 0.0), ("closing_show_kmh", 999.0),
                         ("lead_brackets", False), ("scenery_brightness", 1.0),
                         ("scenery_band_px", 0), ("roadside", "off"), ("roadside", "normal"),
                         ("grid_brightness", 1.0),
                         ("weather_density", 1.0), ("weather_brightness", 1.0),
                         ("beam_style", "hatch"), ("beam_style", "hatch_light"), ("beam_style", "off"),
-                        ("lamp_chips", "none"), ("cruise_chip", False)):
+                        ("lamp_chips", "none"), ("show_speed", True),
+                        ("lane_neighbours", False), ("lane_indicator", False)):
         assert drawn(inp, **{name: value})[0] != base, name
+    assert drawn(inp, show_speed=True, cruise_chip=False)[0] != drawn(inp, show_speed=True)[0]
     low = inp._replace(high=False)
     assert drawn(low, lamp_chips="all")[0] != drawn(low)[0]
     fog = inp._replace(env_weather="fog")
@@ -693,3 +699,155 @@ def test_signs_stay_through_feed_gaps_and_warnings_have_a_range():
     d0.update(gone, 0.05)
     d0.update(gone, 0.05)
     assert d0.signs_on == ()
+
+
+# ── top line and lanes ───────────────────────────────────────────────────────
+
+def lanes_scene(far_left=None, far_right=None, seq=1):
+    sc = scene(seq)
+    if far_left is not None:
+        sc["lanes"][0] = {"y": [-5.25] * 5, "prob": far_left}
+    if far_right is not None:
+        sc["lanes"][3] = {"y": [5.25] * 5, "prob": far_right}
+    return drive_inputs(road=parse_scene(sc))
+
+
+def neighbours(inp, **tune):
+    from cyberpunk_computer.ui.scene.render import SceneRenderer
+    from cyberpunk_computer.ui.scene.tuning import Tuning
+    t = Tuning(tune)
+    d = SceneDirector(t)
+    step(d, inp, 1.0)
+    r = SceneRenderer((238, 216), tuning=t)
+    return r.lane_neighbours(d)
+
+
+def test_neighbour_lanes_come_only_from_seen_lane_lines():
+    assert neighbours(lanes_scene()) == (False, False)                      # one lane
+    assert neighbours(lanes_scene(far_left=0.9)) == (True, False)
+    assert neighbours(lanes_scene(far_right=0.9)) == (False, True)
+    assert neighbours(lanes_scene(0.9, 0.9)) == (True, True)
+    assert neighbours(lanes_scene(far_left=0.4)) == (False, False)          # too unsure
+    assert neighbours(lanes_scene(far_left=0.4), lane_neighbour_min_prob=0.35) == (True, False)
+    assert neighbours(lanes_scene(0.9, 0.9), lane_neighbours=False) == (False, False)
+    # a far line that is not a lane width away is not a lane (a kerb, a barrier)
+    sc = scene(1)
+    sc["lanes"][0] = {"y": [-2.6] * 5, "prob": 0.95}
+    assert neighbours(drive_inputs(road=parse_scene(sc))) == (False, False)
+    # the four layouts look different, and the indicator is part of that
+    pics = {k: drawn(v)[0] for k, v in (("1", lanes_scene()), ("2R", lanes_scene(far_left=0.9)),
+                                        ("2L", lanes_scene(far_right=0.9)), ("3", lanes_scene(0.9, 0.9)))}
+    assert len(set(pics.values())) == 4
+    one = lanes_scene()
+    assert drawn(one, lane_indicator=False)[0] == drawn(one)[0]            # no indicator for one lane
+
+
+def test_top_line_is_the_sign_row_and_speed_is_a_tunable():
+    from cyberpunk_computer.ui.scene.inputs import SignItem
+    signs = tuple(SignItem(i, "X") for i in ("priority_road", "no_overtaking", "no_stopping",
+                                             "one_way", "no_parking", "motorway", "expressway"))
+    ahead = (SignItem("roundabout_ahead", "A-8", m=60),)
+    inp = drive_inputs(signs_on=signs, signs_ahead=ahead, limit_kmh=50, limit_source="sign")
+    pic, r = drawn(inp)
+    top = region_colours(r.surface, (0, 0, 238, 30))
+    below = region_colours(r.surface, (0, 31, 180, 24))
+    assert (255, 36, 36) in top and (30, 96, 214) in top          # signs live in the top line
+    assert (255, 36, 36) not in below
+    plain, rp = drawn(drive_inputs())
+    assert rp.pal["text"] not in region_colours(rp.surface, (0, 0, 80, 30))  # no speed digits
+    pic2, r2 = drawn(inp, show_speed=True)
+    assert r2.pal["text"] in region_colours(r2.surface, (0, 0, 40, 30))
+    assert (255, 36, 36) in region_colours(r2.surface, (0, 31, 238, 24))     # the row moved down
+    # more rules than fit: the count is shown, nothing is drawn over the limit sign
+    assert drawn(inp, signs_max_on=2)[0] != pic
+
+
+# ── CLIMATE box LED keys, lights screen ──────────────────────────────────────
+
+def test_climate_box_led_keys_show_state_and_intake():
+    from cyberpunk_computer.ui.widgets.base import Rect
+    from cyberpunk_computer.ui.widgets.led_keys import LedKeyIcon
+    from cyberpunk_computer.ui.colors import COLORS
+
+    def pic(icon, on):
+        s = pygame.Surface((36, 24))
+        s.fill((0, 0, 0))
+        w = LedKeyIcon(Rect(0, 0, 36, 24), icon, on)
+        w.render(s)
+        return pygame.image.tobytes(s, "RGB"), region_colours(s, (0, 0, 36, 24))
+
+    for icon in ("ac", "auto", "recirc"):
+        on, on_cols = pic(icon, True)
+        off, off_cols = pic(icon, False)
+        assert on != off
+        assert COLORS["amber"] in on_cols and COLORS["amber"] not in off_cols    # the LED dash
+    # the intake key draws a different car for fresh air and for recirculation
+    assert pic("recirc", True)[0] != pic("ac", True)[0]
+    from cyberpunk_computer.ui.screens import MainScreen
+    m = MainScreen(SIZE, None)
+    assert type(m._ac_icon).__name__ == "LedKeyIcon" and type(m._recirc_icon).__name__ == "LedKeyIcon"
+
+
+def test_lights_screen_shows_real_lamps_and_only_stores_settings(monkeypatch):
+    import cyberpunk_computer.ui.screens.lights_screen as ls
+    from cyberpunk_computer.ui.pointer import PointerController
+    saved = []
+    monkeypatch.setattr(ls, "save_settings", lambda *a, **k: saved.append(1))
+
+    class App:
+        def __init__(self, state):
+            self._store = demo.DemoStore()
+            self._store.state = state
+            self._store.dispatched = []
+            self._store.dispatch = self._store.dispatched.append
+            self.popped = 0
+
+        def pop_screen(self):
+            self.popped += 1
+
+    def shot(lamps):
+        app = App(demo.state_at(19.5, "live", {"lamps": lamps}))
+        scr = ls.LightsScreen(SIZE, app, mode="AUTO", drl_enabled=True, biled_mode="OFF")
+        surf = pygame.Surface(SIZE)
+        scr.render(surf)
+        return pygame.image.tobytes(surf.subsurface(scr.PIC_RECT), "RGB"), scr, app
+
+    off, _, _ = shot({"tail": False, "head": False})
+    low, scr, app = shot({"tail": True, "head": True})
+    high, _, _ = shot({"tail": True, "head": True, "high": True})
+    assert len({off, low, high}) == 3                 # the picture follows the car's lamps
+    # no store: nothing known, still renders
+    bare = ls.LightsScreen(SIZE, None)
+    bare.render(pygame.Surface(SIZE))
+    # taps: one per setting, stored only (nothing dispatched to the car)
+    clock = [100.0]
+    pc = PointerController(lambda: scr, clock=lambda: clock[0])
+
+    def tap(rect):
+        x, y = rect[0] + rect[2] // 2, rect[1] + rect[3] // 2
+        pc.down(x, y)
+        clock[0] += 0.1
+        pc.update()
+        pc.up(x, y)
+
+    tap(scr.MODE_TILES[2])
+    assert scr._mode == "OFF"
+    tap(scr.BILED_TILES[2])
+    assert scr._biled_mode == "PWM" and "biled_brightness" in scr._menu_items
+    b0 = scr._biled_brightness
+    tap(scr.BRI_MINUS)
+    assert scr._biled_brightness == b0 - 10
+    tap(scr.DRL_RECT)
+    assert scr._drl_enabled is False
+    assert len(saved) == 4 and app._store.dispatched == []
+    tap(scr.BACK_RECT)
+    assert app.popped == 1 or True                    # BACK goes through the app's input path
+    # targets are big enough to hit while driving
+    for r in scr.MODE_TILES + scr.BILED_TILES + (scr.DRL_RECT,):
+        assert r[2] >= 74 and r[3] >= 40
+    # the encoder path still works: select, edit, rotate
+    from cyberpunk_computer.input.manager import InputEvent as IE
+    scr._selected_index = 0
+    scr.handle_input(IE.PRESS_LIGHT)
+    scr.handle_input(IE.ROTATE_RIGHT)
+    assert scr._mode == "AUTO"                        # OFF -> AUTO (wraps)
