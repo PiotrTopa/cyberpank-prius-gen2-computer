@@ -530,8 +530,10 @@ class Scenery:
     # ── enclosed places ──────────────────────────────────────────────────────
 
     def draw_enclosure(self, s: pygame.Surface, place: str, row: Callable[[float], Tuple[float, float]],
-                       shown: Callable[[float], float], odo: float, grid: RGB) -> None:
-        """Tunnel / underground car park: frames marching towards the far end.
+                       shown: Callable[[float], float], odo: float, grid: RGB,
+                       end_m: float = 100.0) -> None:
+        """Tunnel / underground car park: frames marching towards the far end
+        (``end_m``: where the enclosure ends, when that is known and nearer).
 
         ``row(world x) -> (floor row, px per metre)`` is the chase view's row
         function, ``shown(x)`` its depth mapping.
@@ -546,7 +548,7 @@ class Scenery:
         line = pygame.draw.line
         x = -(odo % pitch) - pitch
         frames = []
-        while x <= 100.0:
+        while x <= end_m:
             if x > -6.5:
                 fy, k = row(shown(x) if x > 0 else x)
                 frames.append((fy, k))

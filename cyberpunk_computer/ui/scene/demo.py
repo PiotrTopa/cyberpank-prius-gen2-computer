@@ -127,6 +127,8 @@ def scene_at(t: float, seq: int, mods: Optional[Dict[str, Any]] = None) -> Optio
         if key in mods:
             if mods[key] is None:
                 out.pop(key, None)
+            elif callable(mods[key]):
+                out[key] = mods[key](t)          # a block that changes along the timeline
             else:
                 out[key] = mods[key]
     if 28.5 <= t < 40.0:
@@ -278,6 +280,40 @@ def _MAP_DEMO(src: str, kmh: int) -> Dict[str, Any]:
             "in": {"gnss": "headunit", "fix": "3d", "motion": "vehicle", "tag": "prius-can"}}
 
 
+def _map_drive(next_m: Optional[float] = 120.0, next_kmh: int = 90, bend: float = 1.0, end: str = "",
+               lanes=(1, 1, 0), tunnel_m: Optional[float] = None, state: str = "good", hacc: float = 3.0,
+               ref: str = "DK46", cls: str = "primary", name: str = "Opolska", **extra: Any):
+    """A scene ``map`` block as a function of the timeline: a usable map on a road
+    that bends right from 200 m (``bend``), distances as they are at 19.5 s and
+    shrinking with the 52 km/h of the demo drive (docs/MFD_MAIN_SCREEN.md 6.5)."""
+    xs = list(range(0, 601, 40))
+
+    def block(t: float) -> Dict[str, Any]:
+        gone = (t - 19.5) * 14.4
+        ahead: Dict[str, Any] = {"pc": 0.9, "jn": [[int(420 - gone), 0.9, {"roundabout": "r", "dead_end": "d"}[end]]]
+                                 if end else [[int(700 - gone), 0.9, "j"]]}
+        if next_m is not None:
+            ahead["limit"] = {"m": max(0, int(next_m - gone)), "kmh": next_kmh, "src": "maxspeed", "c": 0.85}
+        tun = {"in": False, "src": "map"}
+        if tunnel_m is not None:
+            tun = {"in": True, "exit_m": max(0, int(tunnel_m - gone)), "src": "map+vision"}
+        m = {"ok": True, "state": state, "conf": 0.93, "limit": {"kmh": 50, "src": "map", "conf": 0.8},
+             "road": {"cls": cls, "ref": ref, "name": name},
+             "lanes": {"n": lanes[0] + lanes[1], "fwd": lanes[0], "back": lanes[1], "ego": lanes[2],
+                       "onc_left": lanes[1] > 0 and lanes[2] == 0, "c": 0.8},
+             "tunnel": tun, "ahead": ahead,
+             "pos": {"src": "gnss" if state == "good" else "dead_reckoning", "hacc": hacc},
+             "in": {"gnss": "headunit", "fix": "3d", "motion": "vehicle", "tag": "prius-can"},
+             "shape": {"ds": 40, "x": xs, "y": [0 if x < 200 else int(bend * (x - 200) ** 2 / 1600) for x in xs]}}
+        m.update(extra)
+        return m
+
+    return block
+
+
+_MAP_ROAD = dict(_OPEN_ROAD, limit=None, lamps=_NO_LAMPS, **_env("rural_road", "day"))
+
+
 # (file name, time, vision variant, stale from, caption, mods)
 SHOTS = (
     # ── states ──
@@ -371,6 +407,43 @@ SHOTS = (
      {"limit": {"kmh": 50, "src": "default"}, "map": _MAP_DEMO("map", 70)}),
     ("limit_map_implicit", 19.5, "live", None, "implicit (statutory) map limit: thin dim ring",
      {"limit": None, "map": _MAP_DEMO("map_implicit", 50)}),
+    # ── ambient information from the map layer (docs/MFD_MAIN_SCREEN.md 6.5) ──
+    ("map_next_limit", 19.5, "live", None, "map: next limit 90 in 120 m (dashed ring), the road beyond 100 m, map pin",
+     dict(_MAP_ROAD, map=_map_drive())),
+    ("map_next_limit_roadside", 19.5, "live", None, "map: the next limit 40 m ahead also stands at the roadside",
+     dict(_MAP_ROAD, map=_map_drive(next_m=40.0))),
+    ("map_next_limit_beside", 19.5, "live", None, "variant map_next_limit=beside: next limit left of the limit sign",
+     dict(_MAP_ROAD, map=_map_drive(), tuning={"map_next_limit": "beside"})),
+    ("map_far_road_roundabout", 19.5, "live", None, "map: the far road ends at a roundabout 420 m ahead",
+     dict(_MAP_ROAD, map=_map_drive(next_m=None, end="roundabout"))),
+    ("map_far_road_off", 19.5, "live", None, "variant map_far_road=false: the camera's 100 m only",
+     dict(_MAP_ROAD, map=_map_drive(), tuning={"map_far_road": False})),
+    ("map_lanes_three", 19.5, "live", None, "map: three lanes, the car in the middle one; the camera sees no neighbour",
+     dict(_MAP_ROAD, lanes="1", map=_map_drive(next_m=None, lanes=(3, 0, 1), bend=0.0))),
+    ("map_lanes_oncoming", 19.5, "live", None, "map: the lane seen on the left is oncoming (violet), boxes 1 + 1",
+     dict(_MAP_ROAD, lanes="2R", map=_map_drive(next_m=None, bend=-1.0))),
+    ("map_lanes_2x2", 19.5, "live", None, "map: two lanes each way, the car in the left one",
+     dict(_MAP_ROAD, lanes="3M", map=_map_drive(next_m=None, lanes=(2, 2, 0), bend=0.0))),
+    ("map_tunnel_exit", 19.5, "live", None, "map: in a tunnel, 640 m to its exit",
+     dict(_OPEN_ROAD, limit=None, map=_map_drive(next_m=None, tunnel_m=640.0, bend=0.0, lanes=(2, 0, 1)), **_env("tunnel", "night"))),
+    ("map_tunnel_exit_km", 19.5, "live", None, "map: in a long tunnel on dead reckoning (amber pin), 1.8 km to go",
+     dict(_OPEN_ROAD, limit=None, map=_map_drive(next_m=None, tunnel_m=1840.0, bend=0.0, lanes=(2, 0, 1), state="dead_reckoning",
+                                                 hacc=14.0), **_env("tunnel", "night"))),
+    ("map_tunnel_portal", 19.5, "live", None, "map: the tunnel's mouth 60 m ahead",
+     dict(_OPEN_ROAD, limit=None, map=_map_drive(next_m=None, tunnel_m=60.0, bend=0.0, lanes=(2, 0, 1)), **_env("tunnel", "night"))),
+    ("map_dead_reckoning", 19.5, "live", None, "map: dead reckoning, position still good: amber pin, elements stay",
+     dict(_MAP_ROAD, map=_map_drive(state="dead_reckoning", hacc=9.0))),
+    ("map_position_poor", 19.5, "live", None, "map: dead reckoning with a 35 m position error: distances and far road hidden",
+     dict(_MAP_ROAD, map=_map_drive(state="dead_reckoning", hacc=35.0))),
+    ("map_road_label_ref", 19.5, "live", None, "variant map_road_label=ref: the road number for 8 s after it changed",
+     dict(_MAP_ROAD, map=_map_drive(next_m=None), tuning={"map_road_label": "ref", "map_road_label_s": 99.0})),
+    ("map_road_label_name", 19.5, "live", None, "variant map_road_label=name: number and street name",
+     dict(_MAP_ROAD, map=_map_drive(next_m=None, ref="414", cls="secondary", name="Bohaterów Powstań Śląskich"),
+          tuning={"map_road_label": "name", "map_road_label_s": 99.0})),
+    ("map_synthetic_ignored", 19.5, "live", None, "synthetic position (map.syn): the vision-only picture",
+     dict(_MAP_ROAD, map=_map_drive(syn=True))),
+    ("map_none", 19.5, "live", None, "the same road without a map",
+     dict(_MAP_ROAD)),
 )
 
 

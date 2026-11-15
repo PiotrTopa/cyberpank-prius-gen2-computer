@@ -39,6 +39,7 @@ Scene HUD while driving (all on the scene surface):
 | speed | not shown in the scene (the car has a speedometer). `show_speed` brings back speed (Terminus 28, `display_speed_kmh`), `km/h`, gear and the green `SET nn` chip top-left; the signs then move to a row at y 33..52 |
 | bottom-right | lane boxes: one per lane seen, the own lane lit (only when a neighbouring lane is seen; section 6.4) |
 | bottom-left | chip `HIGH` while the high beam is on (all lamps with `lamp_chips = all`), above it the perception status (nothing when live) |
+| from the map (section 6.5; only with a usable map) | top-left, before the warnings: the next speed limit as a dashed ring with its distance; under the link LED a 5 x 7 pin (amber on dead reckoning); beyond the camera's 100 m the road up to the horizon; bottom-right the lane boxes from the map's lane count; bottom-left the tunnel exit distance |
 | on the road | lead vehicle with target brackets and its distance; under it the time gap when shorter than 2.5 s and the closing/opening speed in km/h with an arrow from 5 km/h |
 
 Rules and warnings stay for 4 s after the feed stops carrying them (`sign_hold_s`; the feed drops
@@ -286,6 +287,55 @@ What the data cannot say, and the picture therefore does not: more than one neig
 lanes; and whether a lane to the left carries oncoming traffic. The neighbour lanes are drawn as
 lanes without a direction. Requests to roadsense for these are in section 8.2.
 
+### 6.5 Map layer: ambient information (`scene/mapinfo.py`, `scene/maplayer.py`)
+
+Built 2026-11-15. `mapinfo.parse_map` turns the scene's `map` block (section 7.2) into `SceneInputs.map`
+(None unless usable), `mapinfo.MapDirector` (`SceneDirector.map`) decides what is shown over time,
+`maplayer.py` draws it. Usable is the rule of the speed limit (section 4): `ok`, not `syn`, `in.gnss` not
+`synthetic`. Without a usable map nothing of this section is drawn and the picture is byte-identical to
+the vision-only one (tests `test_without_a_usable_map_the_picture_is_the_vision_only_one`, demo shots
+`map_synthetic_ignored` = `map_none`).
+
+Gates that hold for every element:
+
+| Gate | Rule | Tunable |
+|---|---|---|
+| match confidence | average of `conf` over about 3 s (a quarter of each new message) must reach 0.7; elements go when it falls under 0.55. roadsense itself uses the map from 0.5 per message, and on a village street the per-message value dips to 0.4..0.6 at every side road (recorded drive: an unavailable message every 2..20 s) | `map_min_match` |
+| short dropout | when the block is missing or unusable the last one is kept for 2.5 s, its distances shrinking with the distance driven; then everything goes at once | `map_hold_s` |
+| stalled feed | a block that does not change for 3.5 s while the car drives is dropped and does not come back until it changes (standing still it may repeat) | fixed |
+| road picture | elements exist only while the road picture is live (section 4): a stale feed carries a stale map | fixed |
+| position accuracy | distances and the far road need `pos.hacc` of at most 20 m | `map_max_hacc_m` |
+| between messages | the map sends 2 per second; distances are advanced by `real_speed_kmh x dt` between them and eased to each new value (a jump over 15 m is taken at once) | fixed |
+
+Elements:
+
+| Element | Fields | Drawn | Appears / disappears | Tunable (default) |
+|---|---|---|---|---|
+| map pin | `state` | 5 x 7 px outline pin under the link LED, dim cyan with a centre dot; amber without the dot on `dead_reckoning` | with any usable, trusted map | `map_mark` (on) |
+| next speed limit | `ahead.limit` (`m`, `kmh`, `src`, `c`), `limit` in effect | a dashed red ring (r 12; thin and dim for an implicit limit) with the value, and the distance in Terminus 14 rounded to 10 m, first in the top line before the warning signs. Within 100 m also a small ring on a post at the right road edge, at its distance | when the change is within `map_ahead_s` (12 s) of driving, at least 150 m, at most 400 m; reported for 1 s; confidence `c` (path up to it x the limit's own) at least 0.5; value different from the limit shown. Not when first seen closer than 20 m. Goes when the map no longer reports it (passed) or 25 % beyond the window | `map_next_limit` `ahead` / `beside` / `off`, `map_next_limit_road` (on), `map_ahead_s`, `map_ahead_min_m`, `map_ahead_max_m`, `map_min_conf` |
+| far road | `shape` (a point every 40 m to 600 m), `ahead.jn` | a ribbon from the far end of the camera's ego lane (100 m) to 3 rows under the horizon: rows logarithmic in the distance, columns in true perspective, width falling with 1 / distance, 80 % of the lane fill with dim edges. It ends where the most likely path stops being known: the first junction with a real side road whose path confidence is under 0.6, a roundabout (small ellipse), a dead end (bar), or 600 m. Not drawn inside a tunnel or car park | when at least 40 m beyond the camera remain and the camera's road centre agrees with the map's over the camera's range (lateral run within 8 m per 100 m + 1 m) for 1 s; fades in 0.5 s. Goes after 0.4 s of disagreement | `map_far_road` (on), `map_path_min_conf`, `map_far_disagree_m`, `map_far_max_m` |
+| lanes | `lanes` (`fwd`, `back`, `ego`, `onc_left`, `c`) | the lane boxes bottom-right from the map: one per lane of the own direction (at most 5) with the own one lit, oncoming lanes (at most 2) as violet boxes with a pointer towards the car, a 3 px gap between the directions. A neighbour lane the camera sees on the left is filled violet instead of blue when the map says it is oncoming | lanes confidence at least 0.5 (off under 0.35) and a known ego lane. With one lane per direction and no neighbour seen: no boxes, as before. When the camera sees a lane where the map has none (left of lane 0 on a one-way road, right of the rightmost lane) the map is ignored and the camera's boxes are drawn as before | `map_lanes` (on), `lane_indicator` |
+| tunnel exit | `tunnel` (`in`, `exit_m`, `src` containing `map`) | bottom-left, above the lamp chip / status: a portal pictogram and the distance in Terminus 14 (`640 m`, `1.8 km` from 1000 m). Within 100 m the tunnel frames end there and the mouth is drawn as a bright arch | only in a tunnel the map knows. On dead reckoning beyond 20 m position error the distance stays while the error is under 10 % of it (recorded 2.3 km tunnel: shown from 2.3 km down to about 350 m, then hidden) | `map_tunnel` (on) |
+| road number | `road` (`ref`, `cls`, `name`) | bottom-left: the first ref as a plate (white on red for motorway / trunk / primary, black on yellow for secondary, outline otherwise), with `name` also the street name (18 characters) | off by default. When on: 8 s after the ref (or name) changed and held for 2 s | `map_road_label` `off` / `ref` / `name`, `map_road_label_s` |
+
+When camera and map disagree: the limit sign follows roadsense's fusion (section 4); the far road hides; the
+lane boxes fall back to the camera's. The other elements have no camera counterpart.
+
+Deliberately not drawn:
+
+| Candidate | Why not |
+|---|---|
+| curve ahead (`ahead.curve`), junction, roundabout, crossings / signals / stop as pictograms with distances | warnings: the alerts lane (`feat/alerts`) owns them. The far road shows the shape and the roundabout without a symbol |
+| built-up state | the built-up sign is already a rule in the sign row when the camera read it; from the map alone it only explains the limit, which is shown |
+| road class, bridge, toll, one-way | no decision of the driver depends on them at a glance |
+| map state as text, match confidence, position source | a status display; the pin and its colour carry all of it. Numbers are on the dashboard's MAP tab |
+| distance to a tunnel entry | the tunnel is visible; only its end is not |
+| turn angle at the next junction, any arrow | would read as a navigation instruction; there is no route |
+| street name by default | 182 px for a long name in the quietest corner; the car's position is not something the driver needs told. Kept as a variant |
+| a second or third limit change | one is the next decision |
+
+Cost: section 10.3. Demo shots 55..71 and the recorded drives: section 11.
+
 ### 6.3 Signs (`scene/signs.py`)
 
 The sign row (section 2) shows `signs.on` (rules in effect that bind the car, without the speed
@@ -411,7 +461,8 @@ it on the Pi).
 roadsense's `fused` topic (roadsense docs/ARCHITECTURE.md "api-derived topic fused") combines its map
 layer (`mapd`: position filter, map matching on an OpenStreetMap pack) with the camera, one fact at a
 time with provenance. The scene carries a compact copy; the existing keys (`limit` = the camera-only
-speed-limit engine, `env`, `signs`, ...) are unchanged. The screen draws only `map.limit` (section 4).
+speed-limit engine, `env`, `signs`, ...) are unchanged. The screen draws `map.limit` (section 4) and the
+elements of section 6.5.
 
 ```
 "map": {"ok": true,                    # fused.map.available: the map layer is used (fresh, on a road, match >= 0.5)
@@ -422,14 +473,17 @@ speed-limit engine, `env`, `signs`, ...) are unchanged. The screen draws only `m
                   "agree": "agree|conflict|vision_only|map_only|none", "rule": "built_up", "sign": "B-33", "var": true} | null,
         "road": {"cls": "primary", "name": "Ozimska", "ref": "DK46",
                  "oneway": true, "rbt": true, "link": true, "expr": true, "mroad": true, "dual": true, "bridge": true, "toll": true},
-        "lanes": {"n": 2, "fwd": 1, "back": 1, "ego": 0, "onc_left": true, "src": "map:tagged+vision"},
+        "lanes": {"n": 2, "fwd": 1, "back": 1, "ego": 0, "onc_left": true, "src": "map:tagged+vision", "c": 0.8},
         "tunnel": {"in": false, "exit_m": 640, "entry_m": 840, "len_m": 2310, "src": "map|vision|map+vision|none"},
         "built_up": {"v": true, "src": "sign|map_tagged|map_class|map_landuse+env|map_landuse|env|none"},
-        "ahead": {"junction": {"m": 412, "kind": "junction|roundabout|roundabout_exit|dead_end|no_way_on", "turn": -2, "minor": true},
+        "ahead": {"pc": 0.62,
+                  "junction": {"m": 412, "kind": "junction|roundabout|roundabout_exit|dead_end|no_way_on", "turn": -2, "minor": true, "c": 0.9},
+                  "jn": [[412, 0.9, "j"], [655, 0.62, "r"]],
                   "curve": {"m": 300, "r": 150, "dir": "l|r"},
-                  "limit": {"m": 655, "kmh": 90},
+                  "limit": {"m": 655, "kmh": 90, "src": "maxspeed|implicit", "c": 0.81},
                   "feature": {"m": 230, "kind": "traffic_signals|crossing|stop|give_way|..."}},
         "pos": {"src": "gnss|dead_reckoning", "hacc": 2.1},
+        "shape": {"ds": 40, "x": [0, 40, 79, 115], "y": [0, 1, 10, 27]},
         "in": {"gnss": "headunit|synthetic", "fix": "3d|none|...", "fix_age": 0.4,
                "motion": "vehicle|vision|none", "tag": "prius-can|synthetic"},
         "syn": true}                   # only when set: mapd's position comes, or may still come, from a synthetic drive
@@ -440,10 +494,11 @@ speed-limit engine, `env`, `signs`, ...) are unchanged. The screen draws only `m
 | `ok`, `state`, `why`, `conf` | `fused.map.available`, `.state`, `.reason`, `.match_confidence` | `why` only when set |
 | `limit` | `fused.speed_limit`: `limit_kmh`, `source`, `confidence`, `agreement`, `rule`, `sign`, `variable` | null without a limit; `var` only when true |
 | `road` | `fused.road` (null without the map) | `cls` = `class`; flags only when true: `rbt` roundabout, `expr` expressway, `mroad` motorroad, `dual` dual carriageway |
-| `lanes` | `fused.lanes` | `n` count, `fwd` / `back` own / oncoming direction, `ego` 0 = leftmost lane of the own direction, `onc_left` the lane to the left is oncoming |
+| `lanes` | `fused.lanes` | `n` count, `fwd` / `back` own / oncoming direction, `ego` 0 = leftmost lane of the own direction (absent = unknown), `onc_left` the lane to the left is oncoming, `c` = `confidence` (lane tag quality x match confidence) |
 | `tunnel` | `fused.tunnel` | `exit_m` = `exit_in_m` (in a tunnel), `entry_m`, `len_m` |
 | `built_up` | `fused.built_up.value`, `.source` | |
-| `ahead` | `fused.ahead` (null without the map) | the nearest junction, curve (`start_m`, `min_radius_m`, first letter of `direction`), speed-limit change and feature; m rounded |
+| `ahead` | `fused.ahead` (null without the map) | `pc` = `path_confidence` (at the horizon); the nearest junction (`c` = its confidence), curve (`start_m`, `min_radius_m`, first letter of `direction`), speed-limit change (`src` = `source`, `c` = `confidence`: path up to it x the limit's own) and feature; m rounded. `jn`: up to 6 junctions within 700 m that have a side road which is not a service road, nearest first, as `[m, confidence, code]` with code `j` junction, `r` roundabout, `x` roundabout exit, `d` dead end, `n` no way on |
+| `shape` | mapd `map.ahead.shape` (`s`, `x`, `y`; `map_shape_to_scene`) | the road along the most likely path beyond camera range: every second point (`ds` = 40 m of path) up to 600 m, x forward along the matched bearing, y right, whole metres. Only while `ok` and the `map` topic is fresh. `fused` does not carry the shape, so it is taken from the `map` topic the feed already reads |
 | `pos` | `fused.position.source`, `.hacc_m` | no coordinates are passed on |
 | `in` | `map.input.gnss.source`, `.fix`, `.age_s`; `map.input.motion.source`, `.tag` | what mapd hears from the position feeders; `gnss: "synthetic"` marks a synthetic drive. Left out while the `map` topic is stale |
 | `syn` | the backend's `SyntheticTaint` over every `map` message | true from the first message whose `input.gnss.source` is `synthetic` until mapd reports `no_source` / `unknown` or `good` with a non-synthetic fix as the newest; covers the residue after a synthetic drive, when mapd still dead-reckons from the synthetic place while `in.gnss` already says `headunit` (no reset in the position API, [POSITION_FEEDER.md](POSITION_FEEDER.md) 5.1). Kept across WebSocket reconnects, lost on a backend restart |
@@ -451,7 +506,7 @@ speed-limit engine, `env`, `signs`, ...) are unchanged. The screen draws only `m
 Without a position source (no fix, no feeder, mapd absent) `ok` is false and every fact is roadsense's
 vision value (e.g. `limit.src` `sign` / `vision_default`, `tunnel.src` `vision`): the screen can keep
 using `limit` and treat `map` as absent. The position input itself is [POSITION_FEEDER.md](POSITION_FEEDER.md).
-Size (compact JSON): about 0.57 kB with the map available (test example `FUSED_MAP`, without `in`; `in` adds about 0.1 kB), 0.23 kB without.
+Size (compact JSON): about 0.65 kB with the map available (test example `FUSED_MAP`, without `in` and `shape`; `in` adds about 0.1 kB, a full `shape` up to 0.17 kB), 0.23 kB without.
 
 ## 8. Requests
 
@@ -486,13 +541,21 @@ The event `roadsense_scene` (section 7.1) and the health mirror (`RoadsenseState
 | Enclosed-place exit | `env.exit_in_m` for `tunnel` (portal light ahead), m, 1 Hz, so the tunnel can show its end |
 | Vulnerable road users | `objects[]` with `kind: "person" / "bike"`, 5..10 Hz |
 
-### 8.3 Map layer: further uses (proposals, not built)
+### 8.3 Map layer: the earlier proposals and what became of them
 
-The scene `map` block already carries more than the limit. Proposals, each a small layer in
-`render.py` fed by new `SceneInputs` fields, all subject to the same usability rule as the limit (`ok`,
-not `syn`); offline mock-ups `mapui_mfd_proposal_*.png` (filedrop gallery `set=mapui`):
+Proposals of the lane before (mock-ups `mapui_mfd_proposal_*.png`, filedrop gallery `set=mapui`). Built
+2026-11-15, in a different form: tunnel exit, lane layout, limit change ahead (section 6.5). Not built:
+curve and junction pictograms (warnings, the alerts lane).
 
-| Use | Field | Where on the screen |
+Open towards roadsense (nothing blocks the screen):
+
+| Item | Meaning |
+|---|---|
+| match confidence at side roads | `match.confidence` falls under 0.5 for one or two messages at many side roads although the matched road does not change (recorded synthetic drives, GNSS sigma 3 m: Opole 435 village street every 2..20 s, Krakow and Warsaw centre most of the time). `fused` then reports the map unavailable and the limit sign switches to the vision value for that moment. The screen's map elements bridge it (2.5 s hold, 3 s average); the limit sign of section 4 does not. A hysteresis in roadsense's fusion would fix it at the source |
+| `fused.ahead.shape` | `fused` leaves the shape out; the backend takes it from the `map` topic |
+| lane-level ego index | `ego_index` is known for one or two lanes per direction or the rightmost lane only; on three lanes in the middle it is null and the boxes are not drawn |
+
+| Use | Field | Where on the screen (as proposed) |
 |---|---|---|
 | curve ahead | `map.ahead.curve` (`m`, `r`, `dir`) | the warnings slot of the top line: the curve pictogram with `R150 300` in amber, a quiet 8 px `MAP` tag under it; only for radii under ~200 m within `warning_max_m`; a camera warning sign wins |
 | junction / roundabout ahead | `map.ahead.junction` (`m`, `kind`, `turn`, `minor`) | same slot, roundabout pictogram for `roundabout`; minor junctions never |
@@ -631,6 +694,21 @@ treat it as x50..x85). Averages assume 20 UI frames and 10 scene redraws a secon
 | first scene frame: mesh, 15 cameras, first car | 2.6 ms | about 0.2 s, once |
 | import of `ui/scene` | 4.1 ms | about 0.3 s, after the first frame is shown, not during start-up |
 
+### 10.3 Map layer cost
+
+Desktop (same machine, one core, best of 5 x 3000): scene redraw 0.221 ms without a map, 0.252 ms with
+next limit, far road, three lane boxes and pin (+0.031 ms); tunnel 0.295 -> 0.303 ms with exit distance
+and mouth; `SceneDirector.update` 0.009 -> 0.029 ms per loop pass (+0.019 ms); `parse_map` 0.004 ms per
+scene event for an unchanged block, 0.038 ms for a new one (2 per second). `tools/mfd_bench.py drive 15
+--map` against the commit before: within the run-to-run noise of the laptop (CPU 2.9..3.2 % before,
+3.3..3.6 % with the map; without a map 3.1 %).
+
+Pi Zero estimate at x70 (not measured on the Pi): redraw +2.2 ms x 18 frames/s = 4.0 %, director +1.3 ms
+x 19.5 passes/s = 2.6 %, parsing 0.25 ms x 10 + 2.7 ms x 2 = 0.8 %: about +7 % CPU while driving with a
+usable map (41 % -> about 48 %, budget 60 %). Without a usable map the added work is one attribute test
+per pass and one dictionary lookup per event. The signature of the scene gains `MapDirector.sig`
+(distances in 10 m steps), which adds no redraws while driving (the scene redraws every frame then).
+
 Rules that keep it there:
 
 * the scene surface is redrawn only when its signature changes or while something animates, and then
@@ -659,10 +737,10 @@ python -m cyberpunk_computer.ui.scene.demo --live --scale 3                  # t
 python -m cyberpunk_computer.ui.scene.demo --bench                           # frame cost incl. the simulation
 ```
 
-`--shots` writes `NN_name.png` (native 480 x 240) and `NN_name@4x.png` for 54 cases: the states of
+`--shots` writes `NN_name.png` (native 480 x 240) and `NN_name@4x.png` for 71 cases: the states of
 section 4, the five lamp states on the road and three parked, 18 scenery variants covering every
-place, light and weather label, four lane layouts, the top line with the speed switched back on, a full sign row, the cruise slot states, the three speed-limit provenance styles, and `signs_legend`
-with every pictogram. `--copy-to` also writes the 4x images there as `<prefix>NN_name.png`
+place, light and weather label, four lane layouts, the top line with the speed switched back on, a full sign row, the cruise slot states, the three speed-limit provenance styles, 17 map-layer cases (55..71: next limit in the top line, at the roadside and in the `beside` variant, far road with a roundabout and switched off, three lane layouts from the map, tunnel exit in metres, kilometres and with the mouth in view, dead reckoning, a poor position, the road-number variants, synthetic position = no map) and `signs_legend`
+with every pictogram. Shots 1..51 are byte-identical to the set before the map layer. `--copy-to` also writes the 4x images there as `<prefix>NN_name.png`
 (`--prefix`, default `final_`).
 
 Timeline (44 s): parked, doors open and close, READY and lamps, pull away, lead vehicle closing in,
@@ -670,6 +748,31 @@ limit sign and rules, left curve at night with street lamps, red light with the 
 the scene closes. Vehicle values go through the real state fields; the road goes in as
 `roadsense_scene` events; `mods` override labels, signs, lamps and cruise for the variant shots. The
 street lamps of the demo are simulated data for the `lamp` object kind (section 9).
+
+### 11.1 Recorded map drives (`tools/mfd_map_drive.py`)
+
+There is no GNSS source on the car yet, so the map elements are developed against roadsense's real map
+daemon on the laptop:
+
+```
+.venv/bin/python tools/mfd_map_drive.py record --demo opole-rural --dropout 600:690 --out /tmp/rural.jsonl.gz
+.venv-fe/bin/python tools/mfd_map_drive.py events /tmp/rural.jsonl.gz
+.venv-fe/bin/python tools/mfd_map_drive.py render /tmp/rural.jsonl.gz --at 100 --frames 6 --every 3 --out DIR --name seq
+```
+
+`record` starts roadsense's fake camera daemons, the real `mapd` on the Poland pack and the real api, runs
+roadsense's `tools/synth_drive.py` in real time and writes the api's `fused` and `map` WebSocket messages.
+`render` replays them through the backend's `SceneBuilder` into the real `MainScreen`. The recording is
+flagged synthetic, which the screen ignores, so `render` re-labels it as a real receiver (`--synthetic`
+leaves it flagged: the vision-only picture); the fake camera's constant 50 sign is taken out of the fused
+limit; the camera's lanes are derived from the map's own shape for the first 100 m (`--camera straight`:
+a straight camera road). `--drop T0:T1` withholds the map messages of a window, `--tuning` takes overrides.
+Drives recorded 2026-11-15: `warsaw-s2-tunnel` (S2 with the 2.3 km tunnel), `opole-rural` (30 km, fix
+lost 600..690 s), `warsaw-city`, `krakow-city`. Sequences from them: filedrop gallery `set=mfdmap`.
+
+What the recordings showed: on S2 and on the open road the map is steady (match 0.9..1.0); in the two
+city centres the match confidence is under 0.5 most of the time, so the map elements are mostly absent
+there; in the tunnel the position is dead-reckoned with the error growing to 43 m at the exit.
 
 ## 12. Tunables (`ui/scene/tuning.py`)
 
@@ -706,6 +809,22 @@ ignored and logged.
 | `path_chevrons` | false | the model's planned path as chevrons in the lane |
 | `lamp_chips` | `high` | `none`, `high` (only the high-beam chip), `all` (POS / LOW / HIGH / FOG) |
 | `map_limit` | true | the limit sign from the map layer's fused value when the map is usable (section 4); false = the camera-only limit |
+| `map_mark` | true | the map pin under the link LED (section 6.5) |
+| `map_next_limit` | `ahead` | the next speed limit with its distance: `ahead` (first in the top line), `beside` (left of the limit sign), `off` |
+| `map_next_limit_road` | true | the next limit also as a sign at the roadside within 100 m |
+| `map_far_road` | true | the road beyond camera range |
+| `map_tunnel` | true | tunnel exit distance and the tunnel's mouth |
+| `map_lanes` | true | lane boxes and the oncoming tint from the map |
+| `map_road_label` | `off` | road number after a change: `off`, `ref`, `name` |
+| `map_road_label_s` | 8.0 | how long it shows |
+| `map_ahead_s` / `map_ahead_min_m` / `map_ahead_max_m` | 12.0 / 150 / 400 | the next limit appears this many seconds of driving ahead, bounded in metres |
+| `map_min_match` | 0.7 | match confidence (3 s average) the map elements need; they go 0.15 below |
+| `map_hold_s` | 2.5 | elements stay this long through a map dropout |
+| `map_min_conf` | 0.5 | confidence from which the next limit and the lanes are shown |
+| `map_path_min_conf` | 0.6 | the far road ends at the first real junction below this |
+| `map_max_hacc_m` | 20.0 | position accuracy needed for distances and the far road |
+| `map_far_disagree_m` | 8.0 | camera / map difference per 100 m that hides the far road |
+| `map_far_max_m` | 600 | reach of the far road |
 | `cruise_chip` | true | `SET nn` beside the speed while cruise is engaged (with `show_speed`; the cruise slot of the strip shows it always) |
 | `side_ticks` | true | corner ticks on the six side panels |
 | `ambient_panel` | `plain` | `plain` or `level` (section 2) |

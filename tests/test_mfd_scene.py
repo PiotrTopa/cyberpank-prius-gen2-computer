@@ -929,3 +929,270 @@ def test_limit_provenance_styles_are_distinct():
     assert pics["sign"] == pics["sign_held"]
     assert pics["map_implicit"] == pics["default"]
     assert len({pics["sign"], pics["map"], pics["map_implicit"]}) == 3
+
+
+# ── map layer: ambient elements (ui/scene/mapinfo.py, maplayer.py; MFD_MAIN_SCREEN.md 6.5) ─
+
+def _map_full(**kw):
+    """A usable scene ``map`` block: a straight road with a right bend from 200 m."""
+    xs = list(range(0, 601, 40))
+    m = {"ok": True, "state": "good", "conf": 0.95,
+         "limit": {"kmh": 50, "src": "map", "conf": 0.9},
+         "road": {"cls": "primary", "ref": "DK46", "name": "Opolska"},
+         "lanes": {"n": 2, "fwd": 1, "back": 1, "ego": 0, "onc_left": True, "c": 0.8},
+         "tunnel": {"in": False, "src": "map"},
+         "ahead": {"pc": 0.9, "limit": {"m": 200, "kmh": 90, "src": "maxspeed", "c": 0.9},
+                   "jn": [[450, 0.9, "j"]]},
+         "pos": {"src": "gnss", "hacc": 3.0},
+         "in": {"gnss": "headunit", "fix": "3d"},
+         "shape": {"ds": 40, "x": xs, "y": [0 if x < 200 else int((x - 200) ** 2 / 400) for x in xs]}}
+    m.update(kw)
+    return m
+
+
+def map_inputs(m, **kw):
+    from cyberpunk_computer.ui.scene.mapinfo import parse_map
+    return drive_inputs(limit_kmh=50, limit_source="map", map=parse_map({"map": m}), **kw)
+
+
+def live_step(d, inp, seconds, dt=0.05):
+    """``step`` with a new road frame every pass (the road picture stays live)."""
+    for _ in range(int(round(seconds / dt))):
+        live_step.seq += 1
+        d.update(inp._replace(road=inp.road._replace(seq=live_step.seq)), dt)
+
+
+live_step.seq = 1000
+
+
+def map_director(m, seconds=3.0, speed=50, **tune):
+    from cyberpunk_computer.ui.scene.tuning import Tuning
+    d = SceneDirector(Tuning(tune))
+    inp = map_inputs(m, speed_kmh=speed, real_speed_kmh=speed)
+    live_step(d, inp, seconds)
+    return d, inp
+
+
+def mdrawn(inp, seconds=3.0, **tune):
+    from cyberpunk_computer.ui.scene.render import SceneRenderer
+    from cyberpunk_computer.ui.scene.tuning import Tuning
+    tuning = Tuning(tune)
+    r = SceneRenderer((238, 216), tuning=tuning)
+    d = SceneDirector(tuning)
+    live_step(d, inp, seconds)
+    r.render(d, inp, 10.0)
+    return pygame.image.tobytes(r.surface, "RGB"), r
+
+
+def test_map_block_is_parsed_only_while_usable():
+    from cyberpunk_computer.ui.scene.mapinfo import parse_map
+    mi = parse_map({"map": _map_full()})
+    assert mi.road_ref == "DK46" and mi.lanes == (1, 1, 0) and mi.onc_left is True
+    assert mi.next_limit.kmh == 90 and mi.next_limit.m == 200 and mi.junctions == ((450.0, 0.9, "j"),)
+    assert mi.shape[-1] == (600.0, -400.0)                       # wire y right -> left positive
+    assert parse_map({"map": _map_full()}) is mi                  # unchanged block: the same object
+    for bad in (_map_full(ok=False, why="no_position"), _map_full(syn=True),
+                _map_full(**{"in": {"gnss": "synthetic"}}), "garbage", None):
+        assert parse_map({"map": bad}) is None, bad
+    assert parse_map({}) is None
+    # a tunnel the map does not know (vision only) carries no exit distance
+    t = parse_map({"map": _map_full(tunnel={"in": True, "exit_m": 300, "src": "vision"})})
+    assert t.tunnel_in is False and t.tunnel_exit_m is None
+    # through read_inputs: only while roadsense runs
+    feed = SceneFeed()
+    feed.push(SCENE_EVENT, scene(map=_map_full()))
+    assert read_inputs(running(AppState()), feed).map is not None
+    assert read_inputs(AppState(), feed).map is None
+    feed.push(SCENE_EVENT, scene(map=_map_full(syn=True)))
+    assert read_inputs(running(AppState()), feed).map is None
+
+
+def test_without_a_usable_map_the_picture_is_the_vision_only_one():
+    base = mdrawn(drive_inputs(limit_kmh=50, limit_source="map"))[0]
+    from cyberpunk_computer.ui.scene.mapinfo import parse_map
+    for bad in (_map_full(ok=False), _map_full(syn=True), _map_full(**{"in": {"gnss": "synthetic"}})):
+        inp = drive_inputs(limit_kmh=50, limit_source="map", map=parse_map({"map": bad}))
+        assert mdrawn(inp)[0] == base
+    assert mdrawn(map_inputs(_map_full()), 3.0)[0] != mdrawn(drive_inputs(limit_kmh=50, limit_source="map"), 3.0)[0]
+    # all map elements switched off: the vision-only picture again
+    off = dict(map_mark=False, map_next_limit="off", map_far_road=False, map_tunnel=False, map_lanes=False)
+    assert mdrawn(map_inputs(_map_full()), 3.0, **off)[0] == mdrawn(
+        drive_inputs(limit_kmh=50, limit_source="map"), 3.0)[0]
+
+
+def test_next_limit_appears_by_distance_and_confidence_and_counts_down():
+    d, inp = map_director(_map_full())
+    nl = d.map.next_limit
+    assert nl is not None and nl.kmh == 90
+    assert 150 < nl.m < 165                       # 200 m, 3 s at 50 km/h driven since (no new message)
+    # too far for the speed: 12 s at 50 km/h = 167 m window
+    far = _map_full(ahead={"pc": 0.9, "limit": {"m": 380, "kmh": 90, "src": "maxspeed", "c": 0.9}})
+    assert map_director(far)[0].map.next_limit is None
+    assert map_director(far, speed=120)[0].map.next_limit is not None      # 400 m window at speed
+    # the same value as the limit in effect, a doubtful path, a poor position: nothing
+    same = _map_full(ahead={"limit": {"m": 100, "kmh": 50, "src": "maxspeed", "c": 0.9}})
+    weak = _map_full(ahead={"limit": {"m": 100, "kmh": 90, "src": "maxspeed", "c": 0.3}})
+    blind = _map_full(pos={"src": "dead_reckoning", "hacc": 45.0})
+    for m in (same, weak, blind):
+        assert map_director(m)[0].map.next_limit is None
+    assert map_director(_map_full(), map_next_limit="off")[0].map.next_limit is None
+    # not shown before it was reported for a second
+    assert map_director(_map_full(), seconds=0.5)[0].map.next_limit is None
+
+
+def test_map_elements_survive_a_short_dropout_and_go_after_the_hold():
+    near = _map_full(ahead={"limit": {"m": 160, "kmh": 90, "src": "maxspeed", "c": 0.9}})
+    d, inp = map_director(near, seconds=1.5)
+    assert d.map.mark == "good" and d.map.next_limit is not None
+    gone = inp._replace(map=None)
+    live_step(d, gone, 1.5)                            # a message or two missing at a side road
+    assert d.map.mark == "good" and d.map.next_limit is not None
+    assert d.map.next_limit.m < 125               # still counting down by odometry
+    live_step(d, gone, 1.5)                            # beyond map_hold_s: everything goes
+    m = d.map
+    assert (m.mark, m.next_limit, m.far, m.lanes, m.tunnel_exit_m, m.label, m.sig) == ("", None, None, None, None, None, ())
+    # a map block that stops changing while the car drives on is a stalled feed: gone after 3.5 s
+    d, inp = map_director(near, seconds=1.5)
+    live_step(d, inp, 2.5)
+    assert d.map.mark == "" and d.map.next_limit is None
+    live_step(d, inp, 1.0)
+    assert d.map.mark == ""                          # ... and the same block does not bring it back
+    # standing still the block legitimately repeats: it stays
+    d, inp = map_director(near, seconds=1.5)
+    live_step(d, inp._replace(speed_kmh=0, real_speed_kmh=0), 8.0)
+    assert d.map.mark == "good"
+    # road picture stale: map elements go at once
+    d, inp = map_director(_map_full())
+    d.vision = "stale"
+    d.map.update(inp, d, 0.05)
+    assert d.map.mark == "" and d.map.next_limit is None
+
+
+def test_low_match_confidence_hides_map_elements_with_hysteresis():
+    from cyberpunk_computer.ui.scene.mapinfo import parse_map
+    assert map_director(_map_full(conf=0.55), seconds=5.0)[0].map.mark == ""
+    d, inp = map_director(_map_full(conf=0.95))
+    # dips at side roads (one message in four at 0.5) do not hide it ...
+    for i in range(12):
+        m = _map_full(conf=0.5 if i % 4 == 0 else 0.9, pos={"src": "gnss", "hacc": 3.0 + i * 0.01})
+        live_step(d, inp._replace(map=parse_map({"map": m})), 0.5)
+        assert d.map.mark == "good", i
+    # ... a lasting low confidence does (after the hold)
+    for i in range(12):
+        m = _map_full(conf=0.5, pos={"src": "gnss", "hacc": 4.0 + i * 0.01})
+        live_step(d, inp._replace(map=parse_map({"map": m})), 0.5)
+    assert d.map.mark == "" and d.map.next_limit is None
+
+
+def test_dead_reckoning_marks_the_pin_and_a_poor_position_hides_distances():
+    d, _ = map_director(_map_full(state="dead_reckoning", pos={"src": "dead_reckoning", "hacc": 8.0}))
+    assert d.map.mark == "dr" and d.map.next_limit is not None
+    good = mdrawn(map_inputs(_map_full()), 3.0)[0]
+    dr = mdrawn(map_inputs(_map_full(state="dead_reckoning")), 3.0)[0]
+    assert good != dr
+    d, _ = map_director(_map_full(state="dead_reckoning", pos={"src": "dead_reckoning", "hacc": 30.0}))
+    assert d.map.mark == "dr" and d.map.next_limit is None and d.map.far is None
+
+
+def test_tunnel_exit_distance_only_inside_a_mapped_tunnel():
+    tun = _map_full(tunnel={"in": True, "exit_m": 640, "src": "map+vision"})
+    d, _ = map_director(tun)
+    assert 590 < d.map.tunnel_exit_m < 605
+    assert map_director(_map_full())[0].map.tunnel_exit_m is None
+    assert map_director(tun, map_tunnel=False)[0].map.tunnel_exit_m is None
+    # dead reckoning deep in a long tunnel: shown while the error is small against the distance
+    dr = dict(state="dead_reckoning", pos={"src": "dead_reckoning", "hacc": 35.0})
+    assert map_director(_map_full(tunnel={"in": True, "exit_m": 900, "src": "map"}, **dr))[0].map.tunnel_exit_m
+    assert map_director(_map_full(tunnel={"in": True, "exit_m": 250, "src": "map"}, **dr))[0].map.tunnel_exit_m is None
+    inp = map_inputs(tun, env_place="tunnel")
+    assert mdrawn(inp, 3.0)[0] != mdrawn(inp, 3.0, map_tunnel=False)[0]
+    from cyberpunk_computer.ui.scene.maplayer import dist_text
+    assert dist_text(644) == ("640", "m") and dist_text(1240) == ("1.2", "km") and dist_text(4) == ("0", "m")
+
+
+def test_far_road_is_cut_where_the_path_is_a_guess_and_needs_the_camera_to_agree():
+    from cyberpunk_computer.ui.scene.mapinfo import far_path, parse_map
+
+    def far(**ahead):
+        return far_path(parse_map({"map": _map_full(ahead=ahead)}), 0.6, 600)
+
+    assert far(jn=[])[0][-1][0] == 600.0
+    cut = far(jn=[[300, 0.4, "j"]])                      # a real junction, path uncertain beyond
+    assert cut.end == "" and 290 < cut.pts[-1][0] <= 300
+    assert far(jn=[[300, 0.9, "j"], [500, 0.9, "r"]]).end == "roundabout"
+    assert far(jn=[[260, 1.0, "d"]]).end == "dead_end"
+    assert far(jn=[[120, 0.3, "j"]]) is None             # nothing worth drawing beyond the camera
+    d, _ = map_director(_map_full())
+    assert d.map.far is not None and d.map.far_alpha == 1.0
+    assert map_director(_map_full(), map_far_road=False)[0].map.far is None
+    # the camera sees the road bend away from where the map says it goes: hidden
+    xs = list(range(0, 601, 40))
+    left = _map_full(shape={"ds": 40, "x": xs, "y": [-int(x * x / 300) for x in xs]})
+    assert map_director(left)[0].map.far is None
+    inp = map_inputs(_map_full())
+    assert mdrawn(inp, 3.0)[0] != mdrawn(inp, 3.0, map_far_road=False)[0]
+
+
+def test_map_lanes_give_the_boxes_and_mark_the_oncoming_lane():
+    from cyberpunk_computer.ui.scene.mapinfo import parse_map
+    three = _map_full(lanes={"n": 3, "fwd": 3, "back": 0, "ego": 2, "onc_left": False, "c": 0.8})
+    inp = map_inputs(three)
+    assert mdrawn(inp, 3.0)[0] != mdrawn(inp, 3.0, map_lanes=False)[0]      # boxes although no lane is seen
+    assert map_director(three)[0].map.lanes == (3, 0, 2)
+    low = _map_full(lanes={"n": 3, "fwd": 3, "back": 0, "ego": 2, "c": 0.3})
+    assert map_director(low)[0].map.lanes is None
+    unknown = _map_full(lanes={"n": 3, "fwd": 3, "back": 0, "c": 0.8})     # ego lane not known
+    assert map_director(unknown)[0].map.lanes is None
+    # one lane each way, nothing seen beside: no boxes, as without the map
+    one = map_inputs(_map_full())
+    assert mdrawn(one, 3.0, map_far_road=False)[0] == mdrawn(one, 3.0, map_far_road=False, map_lanes=False)[0]
+    # the camera sees the lane to the left; the map says it is oncoming: another tint
+    sc = scene(1)
+    sc["lanes"][0] = {"y": [-5.25] * 5, "prob": 0.9}
+    seen = drive_inputs(road=parse_scene(sc), limit_kmh=50, limit_source="map",
+                        map=parse_map({"map": _map_full()}))
+    assert mdrawn(seen, 3.0)[0] != mdrawn(seen, 3.0, map_lanes=False)[0]
+    # the camera sees a lane where the map has none: the camera's boxes, as before
+    right = scene(1)
+    right["lanes"][3] = {"y": [5.25] * 5, "prob": 0.9}
+    clash = drive_inputs(road=parse_scene(right), limit_kmh=50, limit_source="map",
+                         map=parse_map({"map": three}))
+    assert mdrawn(clash, 3.0, map_far_road=False, map_mark=False, map_next_limit="off")[0] == mdrawn(
+        clash._replace(map=None), 3.0)[0]
+
+
+def test_road_label_shows_for_a_while_after_the_road_changed():
+    d, inp = map_director(_map_full(), seconds=3.0, speed=0, map_road_label="ref")
+    assert d.map.label == ("DK46", "primary", "")
+    live_step(d, inp, 9.0)
+    assert d.map.label is None                      # shown for map_road_label_s, then quiet
+    from cyberpunk_computer.ui.scene.mapinfo import parse_map
+    other = inp._replace(map=parse_map({"map": _map_full(road={"cls": "secondary", "ref": "414;S1"})}))
+    live_step(d, other, 3.0)
+    assert d.map.label == ("414", "secondary", "")
+    assert map_director(_map_full(), map_road_label="name")[0].map.label.name == "Opolska"
+    assert map_director(_map_full())[0].map.label is None           # off by default
+    assert mdrawn(map_inputs(_map_full()), 3.0, map_road_label="name")[0] != mdrawn(map_inputs(_map_full()), 3.0)[0]
+
+
+def test_map_tunables_change_the_picture_and_redraws_stay_cached():
+    inp = map_inputs(_map_full(), env_place="rural_road")
+    base = mdrawn(inp, 3.0)[0]
+    for name, value in (("map_mark", False), ("map_next_limit", "off"), ("map_next_limit", "beside"),
+                        ("map_far_road", False), ("map_ahead_s", 5.0), ("map_far_max_m", 300)):
+        assert mdrawn(inp, 3.0, **{name: value})[0] != base, name
+    near = map_inputs(_map_full(ahead={"limit": {"m": 60, "kmh": 90, "src": "maxspeed", "c": 0.9}}))
+    assert mdrawn(near, 2.0, map_next_limit_road=False)[0] != mdrawn(near, 2.0)[0]     # the sign at the roadside
+    # standing still with the map: nothing animates, no redraw without a change
+    from cyberpunk_computer.ui.scene.render import SceneRenderer
+    from cyberpunk_computer.ui.scene.tuning import Tuning
+    t = Tuning()
+    r, d = SceneRenderer((238, 216), tuning=t), SceneDirector(t)
+    live_step(d, inp, 3.0)
+    still = inp._replace(speed_kmh=0, real_speed_kmh=0)
+    live_step(d, still, 1.0)
+    r.render(d, still, 1.0)
+    n = r.redraws
+    d.update(still, 0.05)
+    r.render(d, still, 2.0)
+    assert r.redraws == n

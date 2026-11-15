@@ -24,6 +24,7 @@ import math
 from typing import List, Optional, Tuple
 
 from .inputs import DOOR_KEYS, Lead, RoadScene, SceneInputs
+from .mapinfo import MapDirector
 
 VIEW_STEPS = 14            # camera positions between hero and chase (cache keys)
 VIEW_SECONDS = 1.3         # duration of the opening/closing move
@@ -52,6 +53,7 @@ class SceneDirector:
         self.signs_on: tuple = ()             # rules in effect as shown (held over feed gaps)
         self.signs_ahead: tuple = ()          # warnings as shown (within warning_max_m)
         self._signs_age = 0.0
+        self.map = MapDirector(tuning)        # map elements as shown (mapinfo.py)
         self.mode = "parked"            # parked | drive (the target view)
         self.view_raw = 0.0             # linear 0..1
         self.view = 0.0                 # eased
@@ -131,6 +133,7 @@ class SceneDirector:
 
         self._update_road(inp, dt)
         self._update_signs(inp, dt)
+        self.map.update(inp, self, dt)
 
         self.animating = (
             self.view_raw != target or moving_doors or self.moving

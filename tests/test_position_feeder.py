@@ -38,6 +38,7 @@ from cyberpunk_computer.backend.roadsense_scene import (
     SceneFeedConfig,
     fused_to_scene,
     map_input_to_scene,
+    map_shape_to_scene,
 )
 
 
@@ -383,11 +384,19 @@ FUSED_MAP = {
     "tunnel": {"in_tunnel": False, "exit_in_m": None, "entry_in_m": 840.0, "length_m": 2310.0, "source": "map"},
     "road": {"class": "primary", "name": "Ozimska", "ref": "DK46", "oneway": False, "roundabout": False,
              "link": False, "expressway": False},
-    "ahead": {"horizon_m": 1500, "features": [{"kind": "crossing", "dist_m": 400.0},
-                                              {"kind": "traffic_signals", "dist_m": 230.0}],
-              "junctions": [{"dist_m": 412.0, "kind": "junction", "turn_deg": -2.0, "minor": False}],
+    "ahead": {"horizon_m": 1500, "path_confidence": 0.62,
+              "features": [{"kind": "crossing", "dist_m": 400.0},
+                           {"kind": "traffic_signals", "dist_m": 230.0}],
+              "junctions": [{"dist_m": 120.0, "kind": "junction", "turn_deg": 0.0, "minor": True, "confidence": 1.0},
+                            {"dist_m": 412.0, "kind": "junction", "turn_deg": -2.0, "minor": False,
+                             "confidence": 0.9},
+                            {"dist_m": 655.4, "kind": "roundabout", "turn_deg": 10.0, "minor": False,
+                             "confidence": 0.62},
+                            {"dist_m": 910.0, "kind": "junction", "turn_deg": 0.0, "minor": False,
+                             "confidence": 0.5}],
               "curves": [{"start_m": 300.0, "min_radius_m": 150.0, "direction": "left"}],
-              "speed_limit_changes": [{"dist_m": 655.0, "limit_kmh": 90}]},
+              "speed_limit_changes": [{"dist_m": 655.0, "limit_kmh": 90, "source": "maxspeed",
+                                       "confidence": 0.81}]},
     "position": {"lat": 50.6, "lon": 17.9, "source": "gnss", "hacc_m": 2.13},
 }
 
@@ -410,15 +419,19 @@ def test_fused_to_scene_with_map():
     assert s["limit"] == {"kmh": 50, "src": "map_implicit", "conf": 0.5, "agree": "map_only",
                           "rule": "built_up"}
     assert s["road"] == {"cls": "primary", "name": "Ozimska", "ref": "DK46"}
-    assert s["lanes"] == {"n": 2, "fwd": 1, "back": 1, "ego": 0, "src": "map:tagged+vision", "onc_left": True}
+    assert s["lanes"] == {"n": 2, "fwd": 1, "back": 1, "ego": 0, "src": "map:tagged+vision", "c": 0.8,
+                          "onc_left": True}
     assert s["tunnel"] == {"in": False, "entry_m": 840, "len_m": 2310, "src": "map"}
     assert s["built_up"] == {"v": True, "src": "map_tagged"}
-    assert s["ahead"] == {"junction": {"m": 412, "kind": "junction", "turn": -2},
+    assert s["ahead"] == {"pc": 0.62,
+                          "junction": {"m": 120, "kind": "junction", "turn": 0, "minor": True, "c": 1.0},
+                          # the junctions that decide how far the path is trusted: no minor ones, within 700 m
+                          "jn": [[412, 0.9, "j"], [655, 0.62, "r"]],
                           "curve": {"m": 300, "r": 150, "dir": "l"},
-                          "limit": {"m": 655, "kmh": 90},
+                          "limit": {"m": 655, "kmh": 90, "src": "maxspeed", "c": 0.81},
                           "feature": {"m": 230, "kind": "traffic_signals"}}
     assert s["pos"] == {"src": "gnss", "hacc": 2.1}
-    assert len(json.dumps(s, separators=(",", ":"))) < 700
+    assert len(json.dumps(s, separators=(",", ":"))) < 800
 
 
 def test_fused_to_scene_without_map_keeps_vision_values():
@@ -438,15 +451,44 @@ def test_map_input_to_scene():
     assert map_input_to_scene({"type": "map", "input": {"gnss": None, "motion": None}}) is None
 
 
+MAP_SHAPE = {"s": [0.0, 20.0, 40.0, 60.0, 80.0, 100.0, 120.0],
+             "x": [0.0, 20.0, 39.9, 59.6, 78.9, 97.4, 114.6],
+             "y": [0.0, 0.2, 1.4, 4.6, 9.8, 17.3, 27.4],
+             "curvature": [0.0] * 7}
+
+
+def test_map_shape_to_scene():
+    m = {"type": "map", "ahead": {"shape": MAP_SHAPE}}
+    # every second point of mapd's 20 m grid, whole metres, y right as on the wire
+    assert map_shape_to_scene(m) == {"ds": 40, "x": [0, 40, 79, 115], "y": [0, 1, 10, 27]}
+    assert len(json.dumps(map_shape_to_scene(m), separators=(",", ":"))) < 60
+    for bad in ({"type": "map"}, {"type": "map", "ahead": None}, {"type": "map", "ahead": {"shape": None}},
+                {"type": "map", "ahead": {"shape": {"s": [0, 20], "x": [0, 20], "y": [0, 0]}}},
+                {"type": "map", "ahead": {"shape": dict(MAP_SHAPE, y=[0.0, 1, None, 2, 3, 4, 5])}}):
+        assert map_shape_to_scene(bad) is None, bad
+    # a full shape (600 m) stays small
+    full = {"s": [20.0 * i for i in range(31)], "x": [20.0 * i for i in range(31)], "y": [-123.4] * 31}
+    assert len(json.dumps(map_shape_to_scene({"ahead": {"shape": full}}), separators=(",", ":"))) < 170
+
+
 def test_builder_carries_map_key_with_staleness():
     b = SceneBuilder(SceneFeedConfig(max_hz=10.0))
     road = json.dumps({"type": "road", "seq": 1, "lane_lines": [], "road_edges": [], "leads": []})
     b.feed(json.dumps(FUSED_MAP), 10.0)
-    b.feed(json.dumps({"type": "map", "input": {"gnss": {"source": "headunit", "fix": "3d"}}}), 10.0)
+    b.feed(json.dumps({"type": "map", "input": {"gnss": {"source": "headunit", "fix": "3d"}},
+                       "ahead": {"shape": MAP_SHAPE}}), 10.0)
     b.feed(road, 10.1)
     s = b.build(10.1)
     assert s["map"]["ok"] and s["map"]["in"] == {"gnss": "headunit", "fix": "3d"}
-    assert "map_in" not in s
+    assert s["map"]["shape"] == {"ds": 40, "x": [0, 40, 79, 115], "y": [0, 1, 10, 27]}
+    assert "map_in" not in s and "map_shape" not in s
+    # the road shape rides only while the fused map layer is in use
+    b2 = SceneBuilder(SceneFeedConfig(max_hz=10.0))
+    b2.feed(json.dumps(FUSED_NOMAP), 10.0)
+    b2.feed(json.dumps({"type": "map", "ahead": {"shape": MAP_SHAPE}}), 10.0)
+    b2.feed(road, 10.1)
+    s2 = b2.build(10.1)
+    assert s2["map"]["ok"] is False and "shape" not in s2["map"] and "map_shape" not in s2
     b.feed(road.replace('"seq": 1', '"seq": 2'), 14.0)       # fused / map now 4 s old
     s = b.build(14.0)
     assert "map" not in s

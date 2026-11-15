@@ -14,12 +14,14 @@ Layers, back to front (each one a function, so new elements slot in):
     tunnel / car-park frames                Scenery.draw_enclosure
     headlamp beams on the road              _draw_beams
     planned path, lane lines, road edges    _draw_path, _draw_road
+    road beyond camera range (map)          maplayer.far_road
     roadside scenery by place               _draw_roadside
     fog band                                Scenery.draw_fog
     world objects, lead vehicle             _draw_objects    (far -> near)
     own car (cached sprite), lamp halos     CarCache, _draw_glows
     rain / snow                             Scenery.draw_precipitation
     HUD: speed, limit, signal, sign columns _draw_hud_drive / _draw_hud_parked
+    HUD from the map (next limit, lanes, tunnel exit, pin)   maplayer.py
 
 No anti-aliasing anywhere (analog MFD link): lines and text are 1-bit, the
 only soft pixels are the stepped lamp halos.
@@ -34,6 +36,7 @@ import pygame
 
 from ..colors import COLORS
 from ..fonts import get_mono_font, get_tiny_font
+from . import maplayer
 from .car import CarRenderer, car_palette
 from .director import DOOR_STEPS, VIEW_STEPS, SceneDirector
 from .inputs import DOOR_KEYS, SceneInputs
@@ -279,7 +282,7 @@ class SceneRenderer:
                 inp.high, inp.tail, inp.fog, inp.brake, inp.limit_kmh, inp.limit_source,
                 inp.light, inp.env_light, inp.env_place, inp.env_weather, inp.ice_running,
                 d.signs_on, d.signs_ahead, inp.cruise_active, inp.cruise_set_kmh,
-                inp.limit_conf is not None and inp.limit_conf < 0.35, blink, fall)
+                inp.limit_conf is not None and inp.limit_conf < 0.35, blink, fall, d.map.sig)
 
     # ── helpers ──────────────────────────────────────────────────────────────
 
@@ -435,12 +438,16 @@ class SceneRenderer:
             self._draw_lane_fill(s, lines, d, road_k)
         self._draw_floor(s, cam, d, v)
         if enclosed:
-            self.scenery.draw_enclosure(s, place, self._row, compress, d.odo, self.pal["grid_hi"])
+            end = maplayer.tunnel_end(d) if place == "tunnel" else 100.0
+            self.scenery.draw_enclosure(s, place, self._row, compress, d.odo, self.pal["grid_hi"], end)
+            maplayer.portal(self, s, d, end)
         self._draw_beams(s, cam, inp, v)
         if road:
             if self.tune.path_chevrons:
                 self._draw_path(s, cam, d, v, road_k)
             self._draw_road(s, cam, d, v, road_k, lines)
+            if fast and not enclosed:
+                maplayer.far_road(self, s, d)
         if fast and place and not enclosed and self.tune.roadside != "off":
             self._draw_roadside(s, d, place, inp.env_light)
         if fast and inp.env_weather == "fog" and self.tune.fog_band:
@@ -771,7 +778,8 @@ class SceneRenderer:
         nl, nr = self.lane_neighbours(d)
         side = _k(self.pal["lane_side"], k)
         if nl and len(lines[0]) >= 2 and len(left) >= 2:
-            pygame.draw.polygon(s, side, lines[0] + left[::-1])
+            onc = _k(maplayer.ONCOMING_FILL, k) if maplayer.left_is_oncoming(self, d) else side
+            pygame.draw.polygon(s, onc, lines[0] + left[::-1])
         if nr and len(lines[3]) >= 2 and len(right) >= 2:
             pygame.draw.polygon(s, side, right + lines[3][::-1])
         if len(left) >= 2 and len(right) >= 2:
@@ -779,6 +787,8 @@ class SceneRenderer:
 
     def _draw_lane_indicator(self, s: pygame.Surface, d: SceneDirector) -> None:
         """Which lane of the lanes seen: one box per lane, the own one lit."""
+        if maplayer.lane_boxes(self, s, d):
+            return
         nl, nr = self.lane_neighbours(d)
         if not (nl or nr) or not self.tune.lane_indicator:
             return
@@ -842,6 +852,7 @@ class SceneRenderer:
             items.append((lt.dist_m, lambda: self._draw_light_world(s, cam, lt, d, v)))
         if d.lead is not None and d.lead_alpha > 0.0:
             items.append((d.lead.dist_m, lambda: self._draw_lead(s, cam, d, inp, v, k)))
+        maplayer.world_items(self, s, d, items)
         items.sort(key=lambda t: -t[0])
         for _, fn in items:
             fn()
@@ -1130,16 +1141,17 @@ class SceneRenderer:
     SIGN_ROW_Y = 33         # the sign row under the speed line (show_speed on)
     TOP_ROW_Y = 7           # the signs in the top line (show_speed off)
 
-    def _draw_sign_row(self, s: pygame.Surface, d: SceneDirector, y: int, x_right: int) -> None:
-        """Warnings ahead from the left (each with its expected distance in
-        metres), rules in effect right-aligned at ``x_right``."""
+    def _draw_sign_row(self, s: pygame.Surface, d: SceneDirector, y: int, x_right: int,
+                       x_left: int = 4) -> None:
+        """Warnings ahead from the left (``x_left``; each with its expected
+        distance in metres), rules in effect right-aligned at ``x_right``."""
         pal = self.pal
         tune = self.tune
         on = d.signs_on
         shown = on[:max(0, int(tune.signs_max_on))]
         ahead = d.signs_ahead[:max(0, int(tune.signs_max_ahead))]
         # room: the warnings take what they need first, the rules the rest
-        need_ahead = 4
+        need_ahead = x_left
         for it in ahead:
             pic = sign_surface(it.id, it.code, it.unsure, self._plate_text)
             need_ahead += pic.get_width() + (self.text("%d" % it.m, 14, pal["warn"]).get_width() + 8
@@ -1174,7 +1186,7 @@ class SceneRenderer:
                 dx = -3 if it.side == "l" else 3
                 pygame.draw.polygon(s, pal["label"], [(mx - dx, y + 20), (mx - dx, y + 24), (mx + dx, y + 22)])
             x -= 3
-        x = 4
+        x = x_left
         for it in ahead:
             pic = sign_surface(it.id, it.code, it.unsure, self._plate_text)
             s.blit(pic, (x, y))
@@ -1216,10 +1228,13 @@ class SceneRenderer:
                 s.blit(t, (x_right - t.get_width(), 8))
                 x_right -= t.get_width() + 4
         if tune.show_speed:
-            self._draw_sign_row(s, d, self.SIGN_ROW_Y, self.w - 3)
+            xl, xr = maplayer.next_limit_top(self, s, d, self.SIGN_ROW_Y, 4, self.w - 3)
+            self._draw_sign_row(s, d, self.SIGN_ROW_Y, xr, xl)
         else:
             # the top line belongs to the signs: warnings, rules, the limit
-            self._draw_sign_row(s, d, self.TOP_ROW_Y, x_right - 2)
+            xl, xr = maplayer.next_limit_top(self, s, d, self.TOP_ROW_Y, 4, x_right - 2)
+            self._draw_sign_row(s, d, self.TOP_ROW_Y, xr, xl)
+        maplayer.mark(self, s, d)
         self._draw_lane_indicator(s, d)
         # bottom-left: lamps (tuning.lamp_chips), above them the perception status
         x = 4
@@ -1243,6 +1258,7 @@ class SceneRenderer:
             tag = ("SIGNAL LOST", pal["warn"] if int(d.clock * 2) % 2 else pal["orange"])
         if tag:
             self._chip(s, 4, y - 19 if x > 4 else y, tag[0], tag[1])
+        maplayer.corner(self, s, d, y - 19 * (int(x > 4) + int(tag is not None)))
 
     def _draw_hud_parked(self, s: pygame.Surface, d: SceneDirector, inp: SceneInputs) -> None:
         pal = self.pal

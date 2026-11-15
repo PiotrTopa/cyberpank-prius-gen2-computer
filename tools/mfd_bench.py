@@ -11,6 +11,8 @@ frame rates, per-part ms and frame-interval percentiles.
         ~/cyberpunk_computer/.venv/bin/python tools/mfd_bench.py drive 30 --hz 10 [--profile]
     sudo systemctl start mfd.service
 
+``--map`` adds a usable map block to the scene events (docs/MFD_MAIN_SCREEN.md 6.5).
+
 (``/tmp/t.json``: scene tuning overrides, e.g. ``{"fps_scene": 20}``.)
 Numbers: docs/MFD_MAIN_SCREEN.md section 10.1.
 """
@@ -20,12 +22,16 @@ os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 ap = argparse.ArgumentParser()
 ap.add_argument("mode"); ap.add_argument("seconds", type=float)
 ap.add_argument("--hz", type=float, default=10.0); ap.add_argument("--profile", action="store_true")
+ap.add_argument("--map", action="store_true", help="drive with a usable map block (the map elements drawn)")
 a = ap.parse_args()
 import pygame
 from cyberpunk_computer.config import Config
 from cyberpunk_computer.core.app import Application
 from cyberpunk_computer.ui.scene import demo
 from cyberpunk_computer.ui.scene.inputs import SCENE_EVENT
+
+# --map: next limit, far road, lane boxes (3 lanes) and the pin, all at once
+MODS = {"map": demo._map_drive(next_m=150.0, lanes=(3, 0, 1))} if a.map else None
 
 class Twin:
     def __init__(self):
@@ -51,7 +57,7 @@ class Twin:
         if a.mode == "drive" and now - self.last_scene >= 1.0 / a.hz:
             self.last_scene = now
             self.seq += 1
-            sc = demo.scene_at(self.t, self.seq)
+            sc = demo.scene_at(self.t, self.seq, MODS)
             if sc is not None:
                 for cb in self.cbs: cb(SCENE_EVENT, sc)
         return 0

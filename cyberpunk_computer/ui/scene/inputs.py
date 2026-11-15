@@ -27,6 +27,8 @@ import time
 from collections.abc import Mapping   # isinstance on typing.Mapping is several times slower
 from typing import Any, Callable, NamedTuple, Optional, Sequence, Tuple
 
+from .mapinfo import MapInfo, parse_map, usable_map
+
 # Default sample distances (metres ahead of the camera) of lane/edge/path
 # polylines when the scene mapping carries no "x".
 DEFAULT_XS: Tuple[float, ...] = (0.0, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 65.0, 80.0, 100.0)
@@ -125,6 +127,7 @@ class SceneInputs(NamedTuple):
     env_light: Optional[str] = None        # day | dusk_dawn | night
     env_place: Optional[str] = None
     env_weather: Optional[str] = None
+    map: Optional[MapInfo] = None          # roadsense's map layer when usable (mapinfo.py)
 
     @property
     def any_door_open(self) -> bool:
@@ -400,11 +403,8 @@ def fused_limit(raw_scene: Mapping) -> Optional[Mapping]:
     after one, while mapd still dead-reckons from the synthetic place -- or
     ``map.in.gnss == "synthetic"``), and a limit is there. Contract:
     docs/MFD_MAIN_SCREEN.md 7.2."""
-    mp = raw_scene.get("map")
-    if not isinstance(mp, Mapping) or mp.get("ok") is not True or mp.get("syn"):
-        return None
-    mi = mp.get("in")
-    if isinstance(mi, Mapping) and mi.get("gnss") == "synthetic":
+    mp = usable_map(raw_scene)
+    if mp is None:
         return None
     lim = mp.get("limit")
     if not isinstance(lim, Mapping):
@@ -477,4 +477,5 @@ def read_perception(state: Any, feed: Optional[SceneFeed] = None, map_limit: boo
         env_light=env.get("light") if rs_ok else None,
         env_place=env.get("place") if rs_ok else None,
         env_weather=env.get("weather") if rs_ok else None,
+        map=parse_map(raw_scene) if (rs_ok and raw_scene) else None,
     )

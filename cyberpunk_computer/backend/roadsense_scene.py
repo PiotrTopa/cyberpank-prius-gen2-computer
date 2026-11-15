@@ -362,7 +362,7 @@ def fused_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if isinstance(ln, dict):
         lanes = _drop_none({"n": _r(ln.get("count")), "fwd": _r(ln.get("forward")),
                             "back": _r(ln.get("backward")), "ego": _r(ln.get("ego_index")),
-                            "src": ln.get("source") or None})
+                            "src": ln.get("source") or None, "c": _r(ln.get("confidence"), 2)})
         if isinstance(ln.get("oncoming_left"), bool):
             lanes["onc_left"] = ln["oncoming_left"]
         out["lanes"] = lanes or None
@@ -376,12 +376,16 @@ def fused_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         out["built_up"] = _drop_none({"v": bu["value"], "src": bu.get("source") or None})
     ah = msg.get("ahead")
     if isinstance(ah, dict):
-        ahead: Dict[str, Any] = {}
+        ahead: Dict[str, Any] = _drop_none({"pc": _r(ah.get("path_confidence"), 2)})
         j = _nearest(ah.get("junctions"), "dist_m")
         if j:
             ahead["junction"] = _drop_none({"m": _r(j.get("dist_m")), "kind": j.get("kind") or None,
                                             "turn": _r(j.get("turn_deg")),
-                                            "minor": True if j.get("minor") else None})
+                                            "minor": True if j.get("minor") else None,
+                                            "c": _r(j.get("confidence"), 2)})
+        jn = _junction_list(ah.get("junctions"))
+        if jn:
+            ahead["jn"] = jn
         c = _nearest(ah.get("curves"), "start_m")
         if c:
             d = c.get("direction")
@@ -389,7 +393,8 @@ def fused_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                                          "dir": d[:1] if isinstance(d, str) and d else None})
         lc = _nearest(ah.get("speed_limit_changes"), "dist_m")
         if lc:
-            ahead["limit"] = _drop_none({"m": _r(lc.get("dist_m")), "kmh": _r(lc.get("limit_kmh"))})
+            ahead["limit"] = _drop_none({"m": _r(lc.get("dist_m")), "kmh": _r(lc.get("limit_kmh")),
+                                         "src": lc.get("source") or None, "c": _r(lc.get("confidence"), 2)})
         f = _nearest(ah.get("features"), "dist_m")
         if f:
             ahead["feature"] = _drop_none({"m": _r(f.get("dist_m")), "kind": f.get("kind") or None})
@@ -398,6 +403,59 @@ def fused_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if isinstance(pos, dict):
         out["pos"] = _drop_none({"src": pos.get("source") or None, "hacc": _r(pos.get("hacc_m"), 1)})
     return out
+
+
+JUNCTION_CODES = {"junction": "j", "roundabout": "r", "roundabout_exit": "x", "dead_end": "d",
+                  "no_way_on": "n"}
+JUNCTIONS_MAX = 6          # entries of ``ahead.jn``
+JUNCTIONS_MAX_M = 700.0    # ... within this distance (the road shape reaches 600 m)
+SHAPE_EVERY = 2            # mapd's road shape has a point every 20 m: every second one is passed on
+
+
+def _junction_list(items: Any) -> List[List[Any]]:
+    """``ahead.jn``: the junctions that decide how far the most likely path can be
+    trusted, nearest first, as ``[m, confidence, code]`` (codes: ``JUNCTION_CODES``).
+    Junctions whose side branches are all service roads (``minor``) are left out."""
+    out: List[List[Any]] = []
+    for j in items or ():
+        if not isinstance(j, dict) or j.get("minor"):
+            continue
+        m, c = _num(j.get("dist_m")), _num(j.get("confidence"))
+        code = JUNCTION_CODES.get(j.get("kind"))
+        if m is None or c is None or code is None or m > JUNCTIONS_MAX_M:
+            continue
+        out.append([int(round(m)), round(c, 2), code])
+    out.sort(key=lambda e: e[0])
+    return out[:JUNCTIONS_MAX]
+
+
+def map_shape_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """mapd ``map`` message -> scene ``map.shape``: the road ahead along the most
+    likely path beyond camera range, ``{"ds": 40, "x": [...], "y": [...]}``: a
+    point every ``ds`` metres of path from the matched position, x forward along
+    the matched bearing, y RIGHT (modeld's frame), whole metres. None without
+    a shape (no match, a path shorter than one step)."""
+    ah = msg.get("ahead")
+    sh = ah.get("shape") if isinstance(ah, dict) else None
+    if not isinstance(sh, dict):
+        return None
+    s, x, y = sh.get("s"), sh.get("x"), sh.get("y")
+    if not (isinstance(s, list) and isinstance(x, list) and isinstance(y, list)):
+        return None
+    n = min(len(s), len(x), len(y))
+    if n < 2 * SHAPE_EVERY + 1:
+        return None
+    xs, ys = [], []
+    for i in range(0, n, SHAPE_EVERY):
+        fx, fy = _num(x[i]), _num(y[i])
+        if fx is None or fy is None:
+            return None
+        xs.append(int(round(fx)))
+        ys.append(int(round(fy)))
+    ds = _num(s[SHAPE_EVERY])
+    if ds is None or ds <= 0:
+        return None
+    return {"ds": int(round(ds)), "x": xs, "y": ys}
 
 
 def map_input_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -514,6 +572,7 @@ class SceneBuilder:
         elif mtype == "map":
             self.taint.update(msg)
             self._slow["map_in"] = (now, map_input_to_scene(msg))
+            self._slow["map_shape"] = (now, map_shape_to_scene(msg))
 
     def time_to_due(self, now: float) -> Optional[float]:
         """Seconds until a pending road frame may be published; None if none."""
@@ -544,7 +603,8 @@ class SceneBuilder:
         self._last_pub = now
         ages = {"light": self.cfg.lights_max_age_s, "limit": self.cfg.limit_max_age_s,
                 "env": self.cfg.env_max_age_s, "signs": self.cfg.rules_max_age_s,
-                "map": self.cfg.map_max_age_s, "map_in": self.cfg.map_max_age_s}
+                "map": self.cfg.map_max_age_s, "map_in": self.cfg.map_max_age_s,
+                "map_shape": self.cfg.map_max_age_s}
         for key, (t, val) in self._slow.items():
             if now - t <= ages[key]:
                 scene[key] = val
@@ -552,6 +612,10 @@ class SceneBuilder:
         map_in = scene.pop("map_in", None)
         if map_in and isinstance(scene.get("map"), dict):
             scene["map"] = dict(scene["map"], **{"in": map_in})
+        # mapd's road shape ahead, only while the fused map layer is in use
+        shape = scene.pop("map_shape", None)
+        if shape and isinstance(scene.get("map"), dict) and scene["map"].get("ok"):
+            scene["map"] = dict(scene["map"], shape=shape)
         if self.taint.tainted and isinstance(scene.get("map"), dict):
             scene["map"] = dict(scene["map"], syn=True)
         return scene

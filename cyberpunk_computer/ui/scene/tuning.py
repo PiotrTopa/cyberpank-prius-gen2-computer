@@ -32,6 +32,8 @@ BEAM_STYLES = ("outline", "hatch_light", "hatch", "off")
 LAMP_CHIP_MODES = ("none", "high", "all")
 ROADSIDE_MODES = ("off", "sparse", "normal")
 AMBIENT_PANELS = ("plain", "level")
+NEXT_LIMIT_MODES = ("off", "ahead", "beside")
+ROAD_LABEL_MODES = ("off", "ref", "name")
 
 
 class Tuning:
@@ -84,6 +86,35 @@ class Tuning:
                                 # usable (camera sign held by the map, else the map's limit);
                                 # False = the camera-only limit as before
 
+    # ── map layer: ambient information from roadsense's map (docs/MFD_MAIN_SCREEN.md 6.5).
+    #    Needs a usable map (as map_limit); without one the scene is the vision-only picture ──
+    map_mark = True             # a small pin under the link LED while the map is in use
+                                # (amber while it dead-reckons)
+    map_next_limit = "ahead"    # the next speed-limit change with its distance: off | ahead (first
+                                # in the things-ahead list, top-left) | beside (left of the limit sign)
+    map_next_limit_road = True  # ... and as a sign at the roadside once within camera range
+    map_far_road = True         # the road beyond camera range (100..600 m) up to the horizon
+    map_tunnel = True           # distance to the tunnel's exit, the portal within 100 m
+    map_lanes = True            # lane boxes from the map's lane count (own direction >= 2 lanes),
+                                # an oncoming neighbour lane in its own tint
+    map_road_label = "off"      # the road's number plate for a while after it changed:
+                                # off | ref | name (number and street name)
+    map_road_label_s = 8.0      # ... this long
+    map_ahead_s = 12.0          # the next limit appears this many seconds of driving ahead,
+    map_ahead_min_m = 150       # ... but not later than this (m)
+    map_ahead_max_m = 400       # ... and not earlier than this (m)
+    map_min_match = 0.7         # map elements need this match confidence, averaged over ~3 s
+                                # (roadsense uses the map from 0.5; they go below 0.55)
+    map_hold_s = 2.5            # ... and stay this long when the map drops out (a message or two
+                                # at side roads), distances advanced by the distance driven
+    map_min_conf = 0.5          # a fact about the road ahead / the lanes is shown from this
+                                # confidence (path confidence up to it x its own)
+    map_path_min_conf = 0.6     # the far road ends at the first real junction below this
+    map_max_hacc_m = 20.0       # distances are shown while the position is this accurate (m)
+    map_far_disagree_m = 8.0    # the far road hides when camera and map differ by more than
+                                # this in the road's lateral run over 100 m
+    map_far_max_m = 600         # reach of the far road (m)
+
     # ── side panels ──
     side_ticks = True           # corner ticks on the six panels
     ambient_panel = "plain"     # plain (empty, as originally) | level (mode + level bar)
@@ -101,7 +132,8 @@ class Tuning:
     touch_hold_s = 2.0          # the touch rate holds this long after the last input
 
     _CHOICES = {"beam_style": BEAM_STYLES, "lamp_chips": LAMP_CHIP_MODES,
-                "roadside": ROADSIDE_MODES, "ambient_panel": AMBIENT_PANELS}
+                "roadside": ROADSIDE_MODES, "ambient_panel": AMBIENT_PANELS,
+                "map_next_limit": NEXT_LIMIT_MODES, "map_road_label": ROAD_LABEL_MODES}
 
     def __init__(self, overrides: Optional[Mapping[str, Any]] = None):
         if overrides:
