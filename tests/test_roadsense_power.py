@@ -446,6 +446,28 @@ class TestServicePowerProfileHold:
         assert svc.power_controller.modes[-1] == "low"
         assert svc._low_mode_deferred is False
 
+    def test_orphan_full_with_key_off_goes_low(self):
+        """Backend restarted during a roadsense grace: the flag still says
+        "full", the stack is off, the key is off -> low, once."""
+        svc, h = self._svc(acc=False, power_mode="full")
+        assert h.m.is_off()
+        svc._roadsense_power_tick()
+        assert svc.power_controller.modes == ["low"]
+        assert svc.twin.store.state.powerbox.power_mode == "low"
+        svc._roadsense_power_tick()
+        assert svc.power_controller.modes == ["low"]
+
+    def test_orphan_full_waits_for_the_first_acc_report(self):
+        svc, h = self._svc(acc=False, power_mode="full")
+        svc._acc_seen = False
+        svc._roadsense_power_tick()
+        assert svc.power_controller.modes == []
+
+    def test_full_with_key_on_is_left_alone(self):
+        svc, h = self._svc(acc=True, power_mode="full")
+        svc._roadsense_power_tick()
+        assert "low" not in svc.power_controller.modes
+
     def test_hold_hook_arms_deferral_only_when_active(self):
         svc, h = self._svc(acc=True, power_mode="full")
         assert svc._roadsense_holds_low() is False

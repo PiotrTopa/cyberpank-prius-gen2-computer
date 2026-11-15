@@ -1668,6 +1668,14 @@ class BackendService:
                     self._low_mode_deferred = True
             except Exception:
                 logger.exception("Full power profile for roadsense failed")
+        # A "full" profile with the key off and the stack down has no owner:
+        # the deferral is only in memory, so a backend restart during a
+        # roadsense grace used to leave the flag at "full" for good (CPU
+        # uncapped, prius-netwatch never armed). Treat it as a deferred low.
+        if (self._acc_seen and not acc and not self._low_mode_deferred
+                and self.roadsense_power.is_off()
+                and self.twin.store.state.powerbox.power_mode == "full"):
+            self._low_mode_deferred = True
         if self._low_mode_deferred and self.roadsense_power.is_off():
             self._low_mode_deferred = False
             if not acc and self.power_controller is not None:
