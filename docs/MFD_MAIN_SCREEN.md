@@ -11,7 +11,7 @@ parked and the road when it drives. Code: `cyberpunk_computer/ui/scene/`. Tests:
 | Panel | 480 x 240, 60 Hz progressive, analog RGBS through a VGA666 resistor DAC (`docs/MFD_VIDEO_TIMINGS.md`) | everything is laid out in native pixels |
 | Colour | RGB666 (64 levels per channel), per-channel skew on edges | no anti-aliasing: text, lines and polygons are 1-bit; the only soft pixels are stepped lamp halos |
 | Fonts | Terminus from 14 px (even sizes), 04B03 below (`ui/fonts.py`) | read-outs are Terminus 14/16/28, labels 04B03 8 px; sign pictograms are drawn, not typeset |
-| CPU | Pi Zero 1.3, one ARMv6 core, about 21 fps for the whole UI | the scene is a cached surface, re-drawn at most 10 times a second and only while it changes |
+| CPU | Pi Zero 1.3, one ARMv6 core; a full frame (all panels + push to the framebuffer) costs about 20 ms | frames are rendered only when something changed (section 10); the scene is a cached surface, re-drawn at most 10 times a second and only while it changes |
 | Start-up | UI start time is a known problem | `ui/scene` is imported and built after the first frame is on the glass (`MainScreen.scene_page`), not at start-up |
 
 ## 2. Layout (centre column, x 120..359)
@@ -451,6 +451,45 @@ function in `signs.py`, a new place a `_place_<label>` method in `scenery.py`.
 
 ## 10. Performance budget
 
+### 10.1 Frame pacing
+
+The UI loop (`core/app.py`) renders a frame only when the picture can have changed
+(`ui/scene/pacing.py`, rates in section 12):
+
+| Situation | Loop passes/s | Frames/s |
+|---|---|---|
+| nothing changes (parked, nobody touches) | `fps_scene` (10) | store snapshot (1 Hz from the backend) + power-history step (1 Hz) + `fps_idle` refresh: 1..2 |
+| scene animates (driving, camera swing, doors, rain) | `fps_scene` | the scene's redraws, at most `fps_scene` |
+| a panel pulses (focus shown, edit mode) | `fps_touch` (20) | `fps_pulse` (5) |
+| touch / MFD button / drag, for `touch_hold_s` after it | `fps_touch` | `fps_touch` |
+
+What each frame costs is kept small by caching:
+
+* `MainScreen` keeps the chrome (side panels, borders: everything drawn before the centre page) as
+  a surface. It is re-drawn on a store snapshot, input, page switch, while a panel animates and at
+  least every `1 / fps_idle` s; otherwise the frame is the cached chrome plus the centre column.
+* While the app draws no overlay (touch feedback, FPS counter), a frame that reuses the chrome
+  re-draws and pushes only the centre column (x 120..359, `present_rect`).
+* The framebuffer is mapped as a pygame surface (`pygame.image.frombuffer(mmap, size, "BGRA")`), so
+  a push is one SDL blit into it (alpha forced opaque; byte-identical to the old
+  `convert_alpha` + `tobytes` + write path, which stays for padded rows or equalizer gains).
+
+Measured on the Pi Zero (production loop, `Application` with a fake twin: state at 1 Hz,
+`roadsense_scene` at 10 Hz, real `/dev/fb0`, production service stopped):
+
+| Case | CPU | Frames/s | ms per frame (compose + push) | push |
+|---|---|---|---|---|
+| before pacing, parked | 95 % | 28 | 34 | 17 |
+| before pacing, driving | 95 % | 23 | 38 | 17 |
+| parked | 9 % | 1.9 | 20 (mostly chrome re-draws after a snapshot) | 3.6 |
+| driving, 10 Hz scene events | 26 % | 8.8 (scene redraws as before) | 20 | 2.4 |
+| driving, 5 Hz scene events | 24 % | 8.9 | 20 | 2.3 |
+
+Pieces on the Pi: chrome re-draw 18 ms, frame with cached chrome 4 ms + scene redraw 4.4 ms,
+`read_inputs` per scene event 2.9 ms, a full-surface fill or blit 1.1..1.3 ms.
+
+### 10.2 Desktop numbers
+
 Measured on a desktop (i7-8850H, pygame-ce 2.5.8, `SDL_VIDEODRIVER=dummy`), whole
 `MainScreen.update + render` per frame; the Pi estimate uses x70 (the Pi ran the first version of the
 screen, 0.56 ms here, at about 21 fps = 47 ms with roughly 7 ms of that in the framebuffer write;
@@ -474,7 +513,7 @@ treat it as x50..x85). Averages assume 20 UI frames and 10 scene redraws a secon
 Rules that keep it there:
 
 * the scene surface is redrawn only when its signature changes or while something animates, and then
-  at most every 95 ms; a parked car costs one opaque 238 x 216 blit per frame;
+  at most every `0.8 / fps_scene` s; a parked car costs one opaque 238 x 216 blit per frame;
 * the own car is a colour-keyed (RLE) sprite cached per (camera step, door steps, lamps), 64 entries;
   the 15 camera steps of the swing are pre-rendered one per 0.4 s while the scene is steady, for
   the current lamps with stop lamps off and on, so the swing itself renders no car;
@@ -548,6 +587,11 @@ ignored and logged.
 | `cruise_chip` | true | `SET nn` beside the speed while cruise is engaged (with `show_speed`; the cruise slot of the strip shows it always) |
 | `side_ticks` | true | corner ticks on the six side panels |
 | `ambient_panel` | `plain` | `plain` or `level` (section 2) |
+| `fps_scene` | 10.0 | scene redraws per second while it animates (driving, camera swing, doors); also the UI loop rate while nobody uses the screen (section 10) |
+| `fps_touch` | 20.0 | frames per second while the screen is used (touch, MFD buttons, drags) and the loop rate then |
+| `fps_pulse` | 5.0 | frames per second while a panel only pulses (focus shown, edit mode) |
+| `fps_idle` | 1.0 | refresh rate when nothing changed |
+| `touch_hold_s` | 2.0 | the touch rate holds this long after the last input |
 
 The fuller look of the earlier version is `{"show_speed": true, "signs_max_on": 6, "signs_max_ahead": 3,
 "gap_show_below_s": 99, "closing_show_kmh": 0, "scenery_brightness": 1, "scenery_band_px": 0,

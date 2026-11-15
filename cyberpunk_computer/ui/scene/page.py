@@ -9,8 +9,9 @@ ScenePage: the centre column of the main screen.
 
 ``update()`` steps the director every UI frame (cheap arithmetic);
 ``render_scene()`` and ``render_strip()`` blit cached surfaces that are
-re-drawn only when needed. The strip is shown on every page of the main
-screen, the scene on the home page.
+re-drawn only when needed; ``needs_frame()`` tells the frame pacer whether
+either would change. The strip is shown on every page of the main screen,
+the scene on the home page.
 """
 
 from __future__ import annotations
@@ -51,6 +52,7 @@ class ScenePage:
         self.scene: Optional[SceneRenderer] = None
         self.strip: Optional[StatusStrip] = None
         self._warm_t = 0.0
+        self._hist_seen = -1
 
     # -- data -------------------------------------------------------------------
 
@@ -86,6 +88,15 @@ class ScenePage:
             energy = getattr(self._state, "energy", None)
             self.history.add(getattr(energy, "battery_power_kw", None))
 
+    def needs_frame(self, home: bool = True) -> bool:
+        """Whether the next render would show something new: the scene would
+        re-draw (home page) or the power history moved on."""
+        if self.strip is None or self.history.version != self._hist_seen:
+            return True
+        if not home:
+            return False
+        return self.scene is None or self.scene.due(self.director, self.inputs, self._clock())
+
     def render_scene(self, surface: pygame.Surface) -> None:
         if self.scene is None:
             self.scene = SceneRenderer((self.width, SCENE_H), tuning=self.tuning)
@@ -97,6 +108,7 @@ class ScenePage:
             self.strip = StatusStrip((self.width - DOTS_W, STRIP_H), self.history)
         st = self._state
         inp = self.inputs
+        self._hist_seen = self.history.version
         sep_y = self.y + SCENE_H
         pygame.draw.line(surface, COLORS["border_normal"],
                          (self.x, sep_y), (self.x + self.width - 1, sep_y))

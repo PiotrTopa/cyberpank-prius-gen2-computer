@@ -85,6 +85,14 @@ class Tuning:
     side_ticks = True           # corner ticks on the six panels
     ambient_panel = "plain"     # plain (empty, as originally) | level (mode + level bar)
 
+    # ── frame pacing (ui/scene/pacing.py; the UI loop renders only when needed) ──
+    fps_scene = 10.0            # scene redraws/s while it animates (driving, camera move, doors);
+                                # also the loop rate while nobody touches the screen
+    fps_touch = 20.0            # frames/s while the screen is used (touch, buttons, drags)
+    fps_pulse = 5.0             # frames/s while a panel only pulses (focus shown, edit mode)
+    fps_idle = 1.0              # refresh when nothing changed (catches anything time-based)
+    touch_hold_s = 2.0          # the touch rate holds this long after the last input
+
     _CHOICES = {"beam_style": BEAM_STYLES, "lamp_chips": LAMP_CHIP_MODES,
                 "roadside": ROADSIDE_MODES, "ambient_panel": AMBIENT_PANELS}
 

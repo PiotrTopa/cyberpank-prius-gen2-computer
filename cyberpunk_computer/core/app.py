@@ -6,6 +6,7 @@ Uses Virtual Twin architecture for all communication.
 """
 
 import os
+import time
 import pygame
 import logging
 
@@ -16,6 +17,8 @@ from ..ui.screens.main_screen import MainScreen
 from ..input.manager import InputManager, InputEvent
 from ..ui.pointer import PointerController, TouchEventQueue
 from ..ui.hw_buttons import handle_hw_button
+from ..ui.scene.pacing import FramePacer
+from ..ui.scene.tuning import load as load_scene_tuning
 from .renderer import Renderer
 
 logger = logging.getLogger(__name__)
@@ -73,9 +76,16 @@ class Application:
         self.screen_stack: list = []
         self.current_screen = None
         
-        # Timing
+        # Timing. The loop renders only when the screen can have changed
+        # (ui/scene/pacing.py; rates are scene tunables, config.target_fps
+        # stays the upper bound of the loop rate).
         self.clock = pygame.time.Clock()
         self.delta_time = 0.0
+        self.pacer = FramePacer(load_scene_tuning())
+        self._feedback_drawn = False
+        self._pulsing = False
+        self._last_clean = False
+        self._last_screen = None
         
         # Debug info
         self.frame_count = 0
@@ -268,6 +278,7 @@ class Application:
         
         self.current_screen = screen
         self.current_screen.on_enter()
+        self.pacer.poke()
     
     def pop_screen(self) -> bool:
         """
@@ -282,6 +293,8 @@ class Application:
         if self.screen_stack:
             self.current_screen = self.screen_stack.pop()
             self.current_screen.on_resume()
+            self.current_screen.invalidate()
+            self.pacer.poke()
             return True
         
         return False
@@ -299,9 +312,12 @@ class Application:
         
         self.push_screen(main_screen)
         
+        pacer = self.pacer
         while self.running:
-            # Calculate delta time
-            self.delta_time = self.clock.tick(self.config.target_fps) / 1000.0
+            # Calculate delta time (the loop slows down while nothing is used)
+            fps = min(self.config.target_fps,
+                      pacer.loop_fps(time.monotonic(), self._pulsing))
+            self.delta_time = self.clock.tick(fps) / 1000.0
             self.frame_count += 1
             
             # Update Virtual Twin (process incoming messages)
@@ -313,6 +329,7 @@ class Application:
 
             # Touch / MFD buttons from the backend, then long-press timing
             if self.touch_queue or self.touch_queue.touch_active:
+                pacer.note_input()
                 self.touch_queue.drain(self.pointer, self._on_hw_button)
             self.pointer.update()
             
@@ -320,9 +337,35 @@ class Application:
             if self.current_screen:
                 self.current_screen.update(self.delta_time)
             
-            # Render
-            self._render()
+            # Render, if the picture can have changed
+            if self._frame_due():
+                self._render()
+                pacer.rendered(time.monotonic())
+
+    def _frame_due(self) -> bool:
+        """Ask the pacer, with the screen's (changed, animating, pulsing)."""
+        now = time.monotonic()
+        screen = self.current_screen
+        if screen is None:
+            return self.pacer.due(now, changed=True)
+        changed, animating, pulsing = screen.frame_state()
+        self._pulsing = pulsing
+        feedback = self.pointer.feedback_visible
+        if feedback != self._feedback_drawn:
+            changed = True
+        if self.config.show_fps or (self.config.dev_mode and self._virtual_twin):
+            animating = True
+        if not self.pacer.due(now, changed, animating, pulsing):
+            return False
+        if self.pacer.interacting(now):
+            # input can change anything on the screen
+            screen.invalidate()
+        self._feedback_drawn = feedback
+        return True
         
+    _INPUT_EVENTS = (pygame.KEYDOWN, pygame.KEYUP, pygame.MOUSEBUTTONDOWN,
+                     pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION, pygame.MOUSEWHEEL)
+
     def _process_events(self) -> None:
         """Process pygame events and convert to input events."""
         for event in pygame.event.get():
@@ -331,6 +374,9 @@ class Application:
                 return
             
             # Handle playback control keys for file input
+            if event.type in self._INPUT_EVENTS:
+                self.pacer.note_input()
+
             if self._virtual_twin and event.type == pygame.KEYDOWN:
                 from ..io import FileInputPort
                 input_port = self._virtual_twin.input_port
@@ -517,6 +563,7 @@ class Application:
     def inject_input(self, event: InputEvent) -> None:
         """Feed an encoder-equivalent event (used by pointer affordances such
         as the BACK chip); identical to a key/encoder event."""
+        self.pacer.note_input()
         self._handle_input(event)
 
     def _on_hw_button(self, key: str, pressed: bool) -> None:
@@ -558,14 +605,28 @@ class Application:
         """Render the current frame."""
         # Get the native surface to draw on
         surface = self.renderer.get_surface()
+        screen = self.current_screen
+        
+        # Overlays the app draws over the screen: while there are none (and
+        # there were none on the last frame) the screen may re-draw and
+        # present only what changed
+        clean = not (self.pointer.feedback_visible or self.config.show_fps
+                     or (self.config.dev_mode and self._virtual_twin))
         
         # Clear with background color
-        surface.fill(COLORS["bg_dark"])
+        if screen is None or not screen.covers_surface:
+            surface.fill(COLORS["bg_dark"])
         
         # Render current screen
-        if self.current_screen:
-            self.current_screen.render(surface)
-            self.current_screen.render_pointer_overlay(surface)
+        rect = None
+        if screen:
+            screen.partial_ok = clean and self._last_clean and screen is self._last_screen
+            screen.present_rect = None
+            screen.render(surface)
+            screen.render_pointer_overlay(surface)
+            rect = screen.present_rect if clean else None
+        self._last_clean = clean
+        self._last_screen = screen
 
         # Pressed feedback (1 px outline, pre-allocated rect)
         if self.pointer.feedback_visible:
@@ -580,7 +641,7 @@ class Application:
             self._render_playback_overlay(surface)
         
         # Present the frame (handles scaling)
-        self.renderer.present()
+        self.renderer.present(rect)
     
     def _render_fps(self, surface: pygame.Surface) -> None:
         """Render FPS counter."""

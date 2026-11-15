@@ -93,6 +93,27 @@ class Screen:
         for widget in self.widgets:
             widget.render(surface)
     
+    # -- frame pacing (core/app.py, ui/scene/pacing.py) ----------------------
+
+    # Set by the app before ``render()``: the surface still holds this
+    # screen's previous frame with nothing drawn over it, so a screen may
+    # re-draw only what changed. After ``render()`` the app pushes
+    # ``present_rect`` (None = the whole surface) to the display.
+    # ``covers_surface``: render() paints every pixel (no clear needed).
+    covers_surface = False
+    partial_ok = False
+    present_rect = None
+
+    def frame_state(self) -> Tuple[bool, bool, bool]:
+        """``(changed, animating, pulsing)`` for the frame pacer. A screen
+        without its own bookkeeping animates always: it is rendered at the
+        touch rate, as before pacing existed."""
+        return (False, True, False)
+
+    def invalidate(self) -> None:
+        """Something outside the screen's own bookkeeping may have changed
+        what it shows (input delivered, screen switch): redraw everything."""
+
     def handle_input(self, event: "InputEvent") -> bool:
         """
         Handle input event.

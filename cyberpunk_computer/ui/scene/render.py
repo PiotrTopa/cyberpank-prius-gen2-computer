@@ -3,8 +3,9 @@ Scene renderer (pygame): the car, the floor, the road, the scenery and the HUD.
 
 The whole scene is drawn into one cached surface (``SceneRenderer.surface``)
 that the main screen blits every frame. It is re-drawn only when something
-on it changed, and at most every ``MIN_REDRAW_S`` while it animates, so a
-parked car costs one opaque blit per UI frame.
+on it changed, and at most every ``0.8 / fps_scene`` s while it animates
+(tuning.py; ~10 fps), so a parked car costs one opaque blit per UI frame.
+``due()`` tells the frame pacer whether ``render()`` would draw.
 
 Layers, back to front (each one a function, so new elements slot in):
 
@@ -44,7 +45,6 @@ from .tuning import Tuning
 RGB = Tuple[int, int, int]
 
 KEY = (255, 0, 255)            # colour key of cached car sprites
-MIN_REDRAW_S = 0.095           # scene redraw cap while animating (~10 fps)
 CAM_X = 0.4                    # roadsense camera ahead of the car centre (m)
 CHASE_POS = (-8.5, 0.0, 5.2)   # chase camera
 CHASE_TARGET = (10.0, 0.0, 0.0)
@@ -218,6 +218,8 @@ class SceneRenderer:
         self._cen: List[float] = []
         self._cen_v = 0.0
         self._last_draw = -1.0
+        # 0.8: on time when the UI loop runs at about the same rate
+        self.min_redraw_s = 0.8 / max(0.1, tune.fps_scene)
         self.redraws = 0
 
     @staticmethod
@@ -230,11 +232,14 @@ class SceneRenderer:
 
     # ── public ───────────────────────────────────────────────────────────────
 
+    def due(self, d: SceneDirector, inp: SceneInputs, now: float) -> bool:
+        """Whether ``render()`` at ``now`` would re-draw the scene."""
+        return (self._signature(d, inp) != self._sig
+                or (d.animating and now - self._last_draw >= self.min_redraw_s))
+
     def render(self, d: SceneDirector, inp: SceneInputs, now: float) -> pygame.Surface:
         sig = self._signature(d, inp)
-        if sig != self._sig or (d.animating and now - self._last_draw >= MIN_REDRAW_S):
-            if sig == self._sig and now - self._last_draw < MIN_REDRAW_S:
-                return self.surface
+        if sig != self._sig or (d.animating and now - self._last_draw >= self.min_redraw_s):
             self._sig = sig
             self._last_draw = now
             self._draw(d, inp)

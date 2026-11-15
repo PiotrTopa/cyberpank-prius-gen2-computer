@@ -24,7 +24,8 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Callable, Mapping, NamedTuple, Optional, Sequence, Tuple
+from collections.abc import Mapping   # isinstance on typing.Mapping is several times slower
+from typing import Any, Callable, NamedTuple, Optional, Sequence, Tuple
 
 # Default sample distances (metres ahead of the camera) of lane/edge/path
 # polylines when the scene mapping carries no "x".
@@ -192,6 +193,8 @@ def _opt_bool(v: Any) -> Optional[bool]:
 
 
 def _num(v: Any) -> Optional[float]:
+    if type(v) is float:          # the common case, first (Pi Zero: ~20k calls/s)
+        return None if v != v else v
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return None
     if v != v:   # NaN

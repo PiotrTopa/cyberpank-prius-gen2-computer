@@ -136,6 +136,18 @@ class MainScreen(Screen):
         self._ambient_swatch_key = None
         self._ambient_swatch = None
 
+        # Chrome cache: everything drawn before the centre page (panels,
+        # borders), kept between frames and re-drawn only when it can have
+        # changed (store snapshot, input, page switch, a panel animating, or
+        # older than 1 / fps_idle). See render() and frame_state().
+        self._chrome = None
+        self._chrome_valid = False
+        self._chrome_t = float("-inf")
+        self._chrome_max_age = 1.0
+        self.covers_surface = True
+        self._centre_rect = pygame.Rect(self.SIDE_PANEL_WIDTH, 0,
+                                        self.width - 2 * self.SIDE_PANEL_WIDTH, self.height)
+
         # Pointer / touch wiring
         self._setup_pointer()
         
@@ -539,6 +551,8 @@ class MainScreen(Screen):
         return self._scene_page
 
     def _apply_tuning(self, tuning) -> None:
+        self._chrome_max_age = 1.0 / max(0.01, float(getattr(tuning, "fps_idle", 1.0)))
+        self._chrome_valid = False
         for frame in (self._audio_frame, self._ambient_frame, self._vehicle_frame,
                       self._climate_frame, self._lights_frame, self._battery_frame):
             frame.corner_ticks = bool(getattr(tuning, "side_ticks", True))
@@ -554,6 +568,7 @@ class MainScreen(Screen):
 
     def _on_page_change(self, page_index: int) -> None:
         """Handle page change."""
+        self._chrome_valid = False
         self._current_page = page_index
         # Verify page index valid (though control handles it)
         self._current_page = max(0, min(self._current_page, self._num_pages - 1))
@@ -679,6 +694,7 @@ class MainScreen(Screen):
             self._last_button_time = state.input.last_button_time
 
         self._dirty = True
+        self._chrome_valid = False
     
     def update(self, dt: float) -> None:
         """Update screen and check for focus timeout."""
@@ -709,6 +725,39 @@ class MainScreen(Screen):
             if time.time() - self._editing_start_time > editing_timeout:
                 self._exit_all_edit_modes()
     
+    # -- frame pacing (core/app.py, ui/scene/pacing.py) ----------------------
+
+    def _chrome_animating(self) -> bool:
+        """A panel moves on its own: focus pulse, edit mode, focus fade."""
+        if self.focus_manager.focus_visible or self._is_editing():
+            return True
+        for w in self.widgets:
+            if w._active or 0.0 < w._focus_anim < 1.0:
+                return True
+        return False
+
+    def invalidate(self) -> None:
+        self._chrome_valid = False
+
+    def on_resume(self) -> None:
+        super().on_resume()
+        self._chrome_valid = False
+
+    def frame_state(self):
+        """(changed, animating, pulsing): changed = the chrome needs a redraw;
+        animating = the centre would show something new (scene re-draw, power
+        history step) or a debug overlay runs; pulsing = a panel animates."""
+        pulsing = self._chrome_animating()
+        changed = not self._chrome_valid
+        page = self._scene_page
+        if page is None:
+            animating = True
+        else:
+            animating = page.needs_frame(home=self._current_page != 1)
+        if self.app and getattr(self.app, "config", None) and self.app.config.dev_mode:
+            animating = True
+        return (changed, animating, pulsing)
+
     def _is_editing(self) -> bool:
         """Check if any editing mode is active."""
         return (self._editing_volume or self._editing_target_temp or 
@@ -728,6 +777,7 @@ class MainScreen(Screen):
     def _reset_activity(self) -> None:
         """Reset activity timer and ensure focus is visible."""
         self._last_activity_time = time.time()
+        self._chrome_valid = False
         if not self.focus_manager.focus_visible:
             self.focus_manager.show_focus()
     
@@ -739,22 +789,45 @@ class MainScreen(Screen):
         self._gear_display.visible = not on_home
         self._speed_display.visible = not on_home
 
-        # Render all widgets
-        super().render(surface)
-
         center_x = self.SIDE_PANEL_WIDTH
         center_width = self.width - self.SIDE_PANEL_WIDTH * 2
 
-        # Subtle border for center area
-        pygame.draw.rect(
-            surface,
-            COLORS["border_normal"],
-            (center_x, 0, center_width, self.height),
-            1
-        )
+        now = time.monotonic()
+        chrome = self._chrome
+        if (self._chrome_valid and chrome is not None and chrome.get_size() == surface.get_size()
+                and now - self._chrome_t < self._chrome_max_age):
+            if self.partial_ok:
+                # the side panels on the surface are this chrome already:
+                # restore and push only the centre column
+                centre = self._centre_rect
+                surface.blit(chrome, centre, centre)
+                self.present_rect = centre
+            else:
+                surface.blit(chrome, (0, 0))
+                self.present_rect = None
+        else:
+            self.present_rect = None
+            surface.fill(COLORS["bg_dark"])
+            # Render all widgets
+            super().render(surface)
 
-        if self._ambient_level:
-            self._render_ambient_level(surface)
+            # Subtle border for center area
+            pygame.draw.rect(
+                surface,
+                COLORS["border_normal"],
+                (center_x, 0, center_width, self.height),
+                1
+            )
+
+            if self._ambient_level:
+                self._render_ambient_level(surface)
+
+            if chrome is None or chrome.get_size() != surface.get_size():
+                chrome = self._chrome = pygame.Surface(surface.get_size(), 0, surface)
+            chrome.blit(surface, (0, 0))
+            self._chrome_t = now
+            # drawn mid-animation it is stale on the next frame
+            self._chrome_valid = not self._chrome_animating()
 
         # Render page-specific content
         if self._current_page == 1:
@@ -1510,6 +1583,7 @@ class MainScreen(Screen):
 
     def show_page(self, page: int) -> None:
         page = max(0, min(page, self._num_pages - 1))
+        self._chrome_valid = False
         self._pagination_control.active_edit = False
         self._pagination_control.set_page(page)
         self._current_page = page

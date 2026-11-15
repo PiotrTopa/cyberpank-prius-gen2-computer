@@ -120,17 +120,22 @@ def main() -> int:
 
     def _stats_heartbeat() -> None:
         last_frames = 0
+        last_rendered = 0
         while True:
             _time.sleep(30)
             try:
+                # frames = loop passes; rendered = frames drawn (frame pacing)
                 frames = getattr(app, "frame_count", 0)
+                pacer = getattr(app, "pacer", None)
+                rendered = pacer.frames if pacer is not None else frames
                 fps = app.clock.get_fps() if getattr(app, "clock", None) else 0.0
                 logger.info(
-                    "FRONTEND ALIVE: frames=%d (+%d/30s, %.1f fps) link=%s %s",
-                    frames, frames - last_frames, fps,
+                    "FRONTEND ALIVE: frames=%d (+%d/30s, %.1f loops/s) rendered +%d/30s link=%s %s",
+                    frames, frames - last_frames, fps, rendered - last_rendered,
                     "UP" if twin.connected else "DOWN", twin.stats(),
                 )
                 last_frames = frames
+                last_rendered = rendered
             except Exception:
                 logger.exception("stats heartbeat failed")
 
