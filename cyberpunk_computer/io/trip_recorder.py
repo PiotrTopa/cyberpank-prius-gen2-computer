@@ -8,7 +8,10 @@ module adds two things the legacy :class:`CommLogger` lacked:
     * **Trip segmentation** — instead of one giant file, traffic is split into
       one file per *trip*. A trip is bounded by the ignition (powerbox ACC) when
       available, or by an idle gap in traffic otherwise. Long trips are further
-      split by size.
+      split by size. While the ignition is known to be OFF, traffic (powerbox
+      heartbeats, BEAN, satellites) does not open a trip: the car parked with
+      ACC off is not a trip. Traffic opens trips only while the ignition state
+      is unknown (no powerbox ACC report yet, or ``use_ignition`` off).
     * **Rotation** — the trip directory is pruned to stay within a configurable
       number of files, total size and age, so an always-on backend never fills
       the phone's storage.
@@ -101,6 +104,10 @@ class TripRecorder:
         self._last_activity: float = 0.0
         self._part_index: int = 0
         self._started = False
+        # Last powerbox ACC state seen by on_ignition(); None = unknown.
+        self._ignition: Optional[bool] = None
+        self.discarded = 0           # short trips dropped (whole run)
+        self._discarded_quiet = 0    # dropped since the last INFO line
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -136,7 +143,7 @@ class TripRecorder:
     def log_incoming(self, msg, direction: str = "IN") -> None:
         if not self._started or not self._should_log(msg.device_id):
             return
-        self._ensure_open()
+        self._open_for_traffic()
         if self._current is None:
             return
         self._last_activity = time.monotonic()
@@ -148,7 +155,7 @@ class TripRecorder:
             return
         if not self._should_log(msg.device_id):
             return
-        self._ensure_open()
+        self._open_for_traffic()
         if self._current is None:
             return
         self._last_activity = time.monotonic()
@@ -173,6 +180,11 @@ class TripRecorder:
             return
         if not self.config.use_ignition or self.config.segmentation != "trip":
             return
+        acc_on = bool(acc_on)
+        changed = acc_on != self._ignition
+        self._ignition = acc_on
+        if not changed:
+            return
         if acc_on:
             self._ensure_open(reason="ignition-on")
         else:
@@ -194,6 +206,16 @@ class TripRecorder:
             return cfg.include_satellite
         return True
 
+    def _open_for_traffic(self) -> None:
+        """Traffic opens a trip only in trip mode while the ignition is not
+        known to be off (session modes are always open)."""
+        if self._current is not None:
+            return
+        if self.config.segmentation == "trip" and self.config.use_ignition \
+                and self._ignition is False:
+            return
+        self._open(reason="traffic")
+
     def _ensure_open(self, reason: str = "traffic") -> None:
         if self._current is None:
             self._open(reason=reason)
@@ -213,7 +235,12 @@ class TripRecorder:
             return
         self._trip_start = time.monotonic()
         self._last_activity = self._trip_start
-        logger.info("Trip recorder: opened %s (%s)", path, reason)
+        if self._discarded_quiet:
+            logger.info("Trip recorder: opened %s (%s; %d short trip(s) discarded before)",
+                        path, reason, self._discarded_quiet)
+            self._discarded_quiet = 0
+        else:
+            logger.info("Trip recorder: opened %s (%s)", path, reason)
 
     def _close(self, reason: str) -> None:
         if self._current is None:
@@ -228,9 +255,12 @@ class TripRecorder:
         if duration < self.config.min_trip_seconds and self._part_index == 0:
             try:
                 path.unlink(missing_ok=True)
-                logger.info(
-                    "Trip recorder: discarded short trip %s (%.1fs < %.1fs)",
-                    path.name, duration, self.config.min_trip_seconds,
+                self.discarded += 1
+                self._discarded_quiet += 1
+                # DEBUG only: the count is reported with the next opened trip.
+                logger.debug(
+                    "Trip recorder: discarded short trip %s (%.1fs < %.1fs, %s)",
+                    path.name, duration, self.config.min_trip_seconds, reason,
                 )
             except OSError:
                 logger.exception("Trip recorder: failed to delete short trip %s", path)
