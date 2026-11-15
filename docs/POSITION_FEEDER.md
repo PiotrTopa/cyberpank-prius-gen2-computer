@@ -11,12 +11,13 @@ dev box, not deployed; no real GNSS source exists yet.
 |---|---|
 | position API client (copy of roadsense `tools/position_client.py`, MIT, with a partial-send fix) | `cyberpunk_computer/backend/position_client.py` |
 | CAN motion tap, GNSS sources, feeder thread | `cyberpunk_computer/backend/position_feeder.py` |
-| REST: status, head-unit ingest | `cyberpunk_computer/api/position_routes.py` |
+| REST: status (+ raw fix, pack file), head-unit ingest, synthetic session | `cyberpunk_computer/api/position_routes.py` |
 | synthetic route (5.6 km loop in Opole, OSM geometry, ODbL) | `cyberpunk_computer/backend/data/position_route_opole.json` |
 | wiring (panda tee, gating, status mirror) | `backend/service.py` (`_wire_position_feeder`, `_position_feeder_tick`) |
 | env | `backend/__main__.py` (`_build_position`) |
 | map / fused consumption (scene key `map`) | `backend/roadsense_scene.py`, contract [MFD_MAIN_SCREEN.md](MFD_MAIN_SCREEN.md) §7.2 |
-| tests | `tests/test_position_feeder.py`, `tests/test_position_mapd_e2e.py` |
+| dashboard MAP tab (section 10) | `dashboard/src/tabs/MapTab.tsx`, `components/MiniMap.tsx`, `lib/mapLayer.ts` |
+| tests | `tests/test_position_feeder.py`, `tests/test_position_synthetic_control.py`, `tests/test_position_mapd_e2e.py` |
 
 Nothing is imported from roadsense; the e2e test runs the roadsense checkout as external processes.
 
@@ -140,6 +141,31 @@ reports it in `map.input` and the scene shows `map.in.gnss = "synthetic"`. Fix d
 fresh and > 0.5 m/s) the synthetic drive sends nothing (`suspended: "car_moving"`) and resumes from
 standstill afterwards. A warning is logged at start.
 
+### 5.1 Synthetic session at run time (dashboard)
+
+`POST /api/v1/position/synthetic` with `{"on": true}` / `{"on": false}` (bearer token or the dashboard
+session, like every route) swaps the configured source for a synthetic drive while the backend runs
+(`PositionFeeder.start_synthetic` / `stop_synthetic`). For testing without GNSS, car parked.
+
+| Rule | Behaviour |
+|---|---|
+| start refused (409 `{"detail":{"reason":...}}`) | `roadsense_not_running` (feeder inactive), `car_moving` (fresh 0x0B4 above 0.5 m/s), `not_in_park` (fresh 0x120 gear other than P) |
+| start refused (403) | `control_disabled` (`BACKEND_POSITION_SYNTHETIC_CONTROL=0`), `configured` (the env source is already `synthetic`; that one is not switchable) |
+| CAN dark (car off, bench) | counts as parked: start allowed |
+| session ends | the real car moves (the session ends instead of suspending; the real CAN motion goes out in the same cycle), roadsense stops (feeder inactive), after `BACKEND_POSITION_SYNTHETIC_SESSION_S` (1800 s; a second start renews), or `{"on": false}` |
+| on the end | the configured source is back at once and sends `fix: none` (the head unit has no fix); `last_session_end` = `{reason, at}` |
+| while it runs | `POST /gnss` answers 503 `source_not_headunit` |
+
+Residue (fact, not fixable in the backend): mapd's position input API v1 has no reset. After a synthetic
+session mapd keeps dead-reckoning from the synthetic place (measured with the live harness: `dead_reckoning`,
+`available` true, `input.gnss.source` `headunit` 4 s after the stop) until a real fix arrives or dead reckoning
+runs out (vision odometry 120 s; vehicle motion up to 900 s / 25 km while CAN motion flows). The scene feed
+therefore marks the scene `map` block `syn: true` from the first synthetic fix until mapd reports
+`no_source` / `unknown` or a non-synthetic fix is in use (`roadsense_scene.SyntheticTaint`), and the MFD ignores
+a `syn` map ([MFD_MAIN_SCREEN.md](MFD_MAIN_SCREEN.md) 7.2). A backend restart during the residue forgets the
+taint. The same residue follows the env-configured synthetic source when it suspends for real motion.
+Request to roadsense: a `{"type":"reset"}` (or `fix:"none","reset":true`) input message that drops the position.
+
 ## 6. Status (`state.roadsense.position`, `GET /api/v1/position`)
 
 Mirrored on change, at most every 2 s; `null` while the feeder is off.
@@ -153,11 +179,18 @@ Mirrored on change, at most every 2 s; `null` while the feeder is off.
 | `sent`, `dropped` | messages written / dropped (mapd away or socket full) |
 | `motion_sent`, `gnss_sent`, `none_sent` | per kind |
 | `errors`, `last_error` | error replies from mapd |
+| `base_source`, `synthetic_control` | configured source; the run-time synthetic switch exists (5.1) |
+| `session`, `last_session_end` | running synthetic session `{by, started, until}` (wall-clock s) or null; `{reason, at}` of the last one |
 | `motion.yaw_input` | `wheels`, `steer`, `wheels+steer` or null in the last motion message |
 | `motion.can_age_s`, `motion.can_frames` | age of the newest 0x0B4, frames seen by the tap |
 | `gnss.has_fix`, `gnss.last_fix_age_s` | source has a usable fix; age of the newest fix |
 | `gnss.*` (head unit) | `received`, `accepted`, `rejected`, `none`, `time_age` / `time_utc` / `time_arrival`, `last_reject`, `fix`, `hacc_m`, `sats` (no coordinates) |
 | `gnss.*` (synthetic) | `fixes`, `route`, `route_m`, `along_m`, `laps`, `speed_mps`, `dropout` |
+
+`GET /api/v1/position` only (never in the state mirror) adds `raw_fix` (`lat`, `lon`, `hacc_m`, `age_s`,
+`source` of the newest raw fix of the current source; null before one) and `pack_file` (`path`, `file`,
+`size_bytes`, `mtime` of `BACKEND_ROADSENSE_MAP_PACK`, default `/var/lib/roadsense/maps/current.rsmap`, symlink
+resolved; null when absent): mapd's `map.pack` has region and OSM date but no size.
 
 The roadsense manager's unit mirror (`state.roadsense.units`) now includes `roadsense-mapd.service`.
 
@@ -173,6 +206,9 @@ The roadsense manager's unit mirror (`state.roadsense.units`) now includes `road
 | `BACKEND_POSITION_FIX_TIMEOUT_S` | `3` | head unit silent this long = no fix |
 | `BACKEND_POSITION_SYNTHETIC_ROUTE` | built-in | route file |
 | `BACKEND_POSITION_SYNTHETIC_DROPOUTS` | none | `t0:t1,...` |
+| `BACKEND_POSITION_SYNTHETIC_CONTROL` | `1` | `0` removes the run-time synthetic switch (5.1) |
+| `BACKEND_POSITION_SYNTHETIC_SESSION_S` | `1800` | 60..14400: a run-time session ends after this |
+| `BACKEND_ROADSENSE_MAP_PACK` | `/var/lib/roadsense/maps/current.rsmap` | pack file whose size `GET /api/v1/position` reports |
 
 Deploy (none of this was done):
 
@@ -212,7 +248,34 @@ Deploy (none of this was done):
 * Replay mode (`--replay`) has no panda, so no motion; the feeder is a live-car feature.
 * Steering ratio / wheelbase in mapd are nominal (19.1 / 2.70 m); this car's effective ratio is
   speed-dependent (21–29, §3).
-* The MFD screens do not draw the scene `map` key yet.
+* The MFD draws only the fused speed limit from the scene `map` key ([MFD_MAIN_SCREEN.md](MFD_MAIN_SCREEN.md) 4).
+* No raw-fix trail: the dashboard trail is of filtered positions, kept by the browser while the MAP tab is open.
 * roadsense reference client gap (reported, roadsense not changed): `tools/position_client.py`
   counts a short non-blocking `send` as sent and leaves a partial line in the stream; the copy here
   closes the connection instead.
+
+## 10. Dashboard MAP tab (`dashboard/src/tabs/MapTab.tsx`)
+
+Tab `#map` of the web dashboard, built 2026-11-15. Data: the roadsense front (`/api/v1/roadsense/map`,
+`/fused`, `/health`) polled once a second, `GET /api/v1/position` every 2 s, only while the tab is open,
+the page visible and the roadsense manager is `starting` / `running` / `grace`; otherwise nothing is
+fetched and the tab says `roadsense not running` (feeder panel from the state stream only).
+
+| Panel | Content |
+|---|---|
+| banners | `roadsense not running` / `api not answering`; `SYNTHETIC POSITION` (feeder synthetic or mapd hears `synthetic`); `synthetic residue` (dead reckoning within 15 min of a session end); `VISION ONLY` + roadsense's reason; `DEAD RECKONING` + distance; `MAP + CAMERA` + match confidence |
+| Position & Match (MAP-02) | heading-up sketch drawn only from roadsense output (no tiles, no map data in the page): origin = matched point, up = matched bearing (the frame of `ahead.shape`); road shape ahead, curves, tunnel, junctions (dim when minor), features, limit changes, built-up edge; filtered position as a chevron with its accuracy circle, raw fix (REST) as a cross with its accuracy, this browser's trail; ranges 60 / 250 / 600 m. Readouts: filtered (source, accuracy, heading, speed, fix age, DR distance, odometer, lat/lon), matched (road, class, confidence, offset, heading diff, candidates, ambiguous), raw fix (source, age, accuracy, raw->filtered and filtered->matched distances) |
+| Map Layer (MAP-01) | mapd unit state (manager mirror), mapd connected to the api, pack region + OSM date, pack file + size, availability + reason, match confidence; mapd input: GNSS source / fix / age / accuracy / sats, used / ignored / rejected, filter resets, motion source / tag / age, input errors, mapd CPU |
+| Fused Facts (FUS-01) | speed limit, built-up, place, lanes, tunnel: fused value, source, vision and map inputs, agreement (conflict rows tinted red). Lanes agreement is the tab's own check (own-direction lanes implied by the camera's lane flags against the map's forward count). While a camera sign is in force with the map: `sign` / `sign_held` and what releases it, with distances: next non-minor junction (none on motorways / expressways), next tagged limit change, built-up boundary (landuse marked inferred), 5 km |
+| Road Ahead (AHD-01) | current road (ref, name, class, flags, lane count, map limit), then junctions, curves (radius, angle, length), features, limit changes, tunnel entry / exit, built-up boundary, road change, nearest first, 12 shown, `+n more` |
+| Position Feeder (POS-01) | the status fields of section 6; synthetic test drive box: state, time left, route progress, last end reason, START (two taps: arm, confirm) / STOP; START disabled when the switch is off, the feeder idle or the state speed above 1 km/h; the backend decides (409/403 reasons are shown) |
+
+Overview tab: a `Map Layer` card (MAP-00) from the roadsense health mirror (`state.roadsense.health.map`
+/ `.fused`, now mirrored by `roadsense_power`), no polling.
+
+Checked on the dev box with the live harness (roadsense fake camera daemons + real mapd on
+`dev-opolskie.rsmap` + real api, the backend's real `create_app` with this feeder, a run-time synthetic
+session with a fix dropout, headless Chrome): states `no_source`, `good`, `dead_reckoning` (80 m DR in the
+dropout), residue after the stop, roadsense off. Not checked: a real head-unit fix, the phone browser
+itself, the car.
+

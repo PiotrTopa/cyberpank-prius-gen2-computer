@@ -119,6 +119,9 @@ class PositionFeederConfig:
     synthetic_hacc_m: float = 5.0
     synthetic_start_m: float = 0.0         # start this far along the route
     synthetic_moving_mps: float = 0.5      # real CAN speed above this suspends the synthetic drive
+    # runtime synthetic session (POST /api/v1/position/synthetic, dashboard)
+    synthetic_control: bool = True         # the command exists (BACKEND_POSITION_SYNTHETIC_CONTROL)
+    synthetic_session_s: float = 1800.0    # a session ends by itself after this long
 
 
 def _num(v: Any) -> Optional[float]:
@@ -247,6 +250,8 @@ class GnssSource:
     tag = ""
     reports_fix = False
     provides_motion = False
+    # newest raw fix (lat, lon, hacc_m or None, t_mono); REST only, never in the state mirror
+    last_raw: Optional[Tuple[float, float, Optional[float], float]] = None
 
     def drain(self, now: float) -> List[Dict[str, Any]]:
         return []
@@ -376,6 +381,7 @@ class HeadunitGnssSource(GnssSource):
         self._queue.append(msg)
         self._last_t = t
         self._last_meta = {"fix": fix, "hacc_m": msg.get("hacc_m"), "sats": msg.get("sats")}
+        self.last_raw = (msg["lat"], msg["lon"], msg.get("hacc_m"), t)
 
     # -- feeder thread --
     def drain(self, now: float) -> List[Dict[str, Any]]:
@@ -631,6 +637,7 @@ class SyntheticGnssSource(GnssSource):
             msg["course_deg"] = round(math.degrees(d.heading) % 360.0, 1)
         self.fixes += 1
         self._last_fix_t = now
+        self.last_raw = (msg["lat"], msg["lon"], msg["hacc_m"], now)
         return [msg]
 
     def has_fix(self, now: float) -> bool:
@@ -663,14 +670,31 @@ class PositionFeeder:
     :meth:`step` does one cycle and is what the thread calls at ``motion_hz``
     (tests call it directly with a fake clock). ``publish_status(dict)`` is
     called with the status on change, at most every ``status_s``.
+
+    Synthetic session (:meth:`start_synthetic` / :meth:`stop_synthetic`, the
+    authenticated ``POST /api/v1/position/synthetic``): replaces the configured
+    source by a synthetic drive at run time, for testing without GNSS. It is
+    refused unless the feeder is active and the car is parked (CAN speed at or
+    below ``synthetic_moving_mps`` and, when a fresh 0x120 gear exists, gear P);
+    it ends -- the configured source comes back and sends ``fix: none`` at
+    once -- when the real car moves, when roadsense stops (feeder inactive),
+    after ``synthetic_session_s``, or on stop. A source configured as
+    ``synthetic`` in the environment is not switchable here.
     """
 
     def __init__(self, cfg: PositionFeederConfig, source: GnssSource,
                  tap: Optional[CanMotionTap] = None, feed: Optional[PositionFeed] = None,
                  clock: Callable[[], float] = time.monotonic,
-                 publish_status: Optional[Callable[[Dict[str, Any]], None]] = None):
+                 publish_status: Optional[Callable[[Dict[str, Any]], None]] = None,
+                 wall: Callable[[], float] = time.time):
         self.cfg = cfg
         self.source = source
+        self.base_source = source
+        self._wall = wall
+        self._lock = threading.RLock()        # source swap (API thread) vs. step (feeder thread)
+        self.session: Optional[Dict[str, Any]] = None      # runtime synthetic session
+        self._session_until = 0.0                          # mono time it expires
+        self.last_session_end: Optional[Dict[str, Any]] = None
         self.tap = tap
         self.feed = feed or PositionFeed(cfg.rundir, name="prius-backend", retry_s=cfg.retry_s)
         self._clock = clock
@@ -702,8 +726,82 @@ class PositionFeeder:
         on = bool(on)
         if on != self._active:
             logger.info("position feeder %s (source %s)", "active" if on else "idle", self.source.name)
+            if not on:
+                self.stop_synthetic("roadsense_stopped")
             self._active = on
             self._wake.set()
+
+    # ── runtime synthetic session ────────────────────────────────────────
+
+    @property
+    def synthetic_control(self) -> bool:
+        """The run-time switch exists (enabled, and the configured source is
+        not itself synthetic)."""
+        return bool(self.cfg.synthetic_control) and self.base_source.name != "synthetic"
+
+    def parked_reason(self, now: Optional[float] = None) -> Optional[str]:
+        """None when the car counts as parked for a synthetic start, else why
+        not: ``car_moving`` (fresh CAN speed above ``synthetic_moving_mps``),
+        ``not_in_park`` (fresh 0x120 gear other than P). CAN dark (car off,
+        bench) counts as parked: nothing moves the car without its CAN."""
+        tap = self.tap
+        if tap is None:
+            return None
+        now = self._clock() if now is None else now
+        v = tap.speed_mps(now, self.cfg.stale_s)
+        if v is not None and v > self.cfg.synthetic_moving_mps:
+            return "car_moving"
+        g = tap.gear
+        if g is not None and now - g[1] <= self.cfg.gear_stale_s and g[0] != "P":
+            return "not_in_park"
+        return None
+
+    def start_synthetic(self, by: str = "api", now: Optional[float] = None) -> Tuple[bool, Optional[str]]:
+        """Start (or renew) a synthetic session. Returns ``(ok, reason)``;
+        reasons: ``control_disabled``, ``configured``, ``roadsense_not_running``,
+        ``car_moving``, ``not_in_park``."""
+        now = self._clock() if now is None else now
+        if not self.cfg.synthetic_control:
+            return False, "control_disabled"
+        if self.base_source.name == "synthetic":
+            return False, "configured"
+        if not self._active:
+            return False, "roadsense_not_running"
+        why = self.parked_reason(now)
+        if why is not None:
+            return False, why
+        with self._lock:
+            if self.session is None:
+                self.source = SyntheticGnssSource(self.cfg, wall=self._wall)
+                self.session = {"by": str(by)[:32], "started": round(self._wall(), 1)}
+                self._fix_ok = None
+                self._last_motion_ts = 0
+                self.suspended = None
+                logger.warning("position feeder: SYNTHETIC session started by %s (test only; tagged "
+                               "'synthetic'; ends when the car moves, roadsense stops or after %.0f s)",
+                               by, self.cfg.synthetic_session_s)
+            self._session_until = now + self.cfg.synthetic_session_s
+            self.session["until"] = round(self._wall() + self.cfg.synthetic_session_s, 1)
+        self._wake.set()
+        self._status(now, force=True)
+        return True, None
+
+    def stop_synthetic(self, reason: str = "stopped", now: Optional[float] = None) -> bool:
+        """End the synthetic session (False when none runs). The configured
+        source is back at once and reports ``fix: none`` until it has a fix."""
+        with self._lock:
+            if self.session is None:
+                return False
+            self.session = None
+            self.source = self.base_source
+            self._fix_ok = None                 # -> fix "none" on the next cycle (no usable fix yet)
+            self._last_motion_ts = 0
+            self.suspended = None
+            self.last_session_end = {"reason": reason, "at": round(self._wall(), 1)}
+        logger.warning("position feeder: synthetic session ended (%s); source %s again",
+                       reason, self.base_source.name)
+        self._status(self._clock() if now is None else now, force=True)
+        return True
 
     def start(self) -> None:
         if self._thread is not None:
@@ -732,6 +830,15 @@ class PositionFeeder:
         src = self.source
         if src.provides_motion:
             real = self.tap.speed_mps(now, self.cfg.stale_s) if self.tap is not None else None
+            if real is not None and real > self.cfg.synthetic_moving_mps and self.session is not None:
+                # a run-time session never survives real motion: end it, CAN motion takes over
+                logger.warning("position feeder: the real car moves (%.1f m/s on CAN)", real)
+                self.stop_synthetic("car_moving", now)
+                m = self.tap.sample(now, self.cfg) if self.tap is not None else None
+                if m is not None and m["ts_mono_ns"] > self._last_motion_ts:
+                    self._last_motion_ts = m["ts_mono_ns"]
+                    self._send(m, "motion")
+                return
             if real is not None and real > self.cfg.synthetic_moving_mps:
                 if self.suspended is None:
                     logger.warning("position feeder: synthetic drive suspended, the real car moves "
@@ -775,8 +882,11 @@ class PositionFeeder:
 
     def step(self, now: Optional[float] = None) -> None:
         now = self._clock() if now is None else now
-        self._motion(now)
-        self._gnss(now)
+        with self._lock:
+            if self.session is not None and now >= self._session_until:
+                self.stop_synthetic("expired", now)
+            self._motion(now)
+            self._gnss(now)
         conn = self.feed.connected
         if conn != self._was_connected:
             logger.info("position feeder: %s %s", "connected to" if conn else "lost", self.feed.path)
@@ -795,12 +905,25 @@ class PositionFeeder:
             motion["can_frames"] = self.tap.frames
         last_err = f.errors[-1].get("reason") if f.errors else None
         return {"enabled": True, "source": self.source.name, "synthetic": self.source.name == "synthetic",
+                "base_source": self.base_source.name, "synthetic_control": self.synthetic_control,
+                "session": dict(self.session) if self.session else None,
+                "last_session_end": self.last_session_end,
                 "active": self._active, "suspended": self.suspended,
                 "connected": f.connected, "socket": f.path,
                 "sent": f.sent, "dropped": f.dropped, "connects": f.connects,
                 "motion_sent": self.counts["motion"], "gnss_sent": self.counts["gnss"],
                 "none_sent": self.counts["none"], "errors": f.errors_total, "last_error": last_err,
                 "motion": motion, "gnss": self.source.status(now)}
+
+    def raw_fix(self, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+        """The newest raw fix of the current source (REST only: coordinates are
+        kept out of the state mirror)."""
+        now = self._clock() if now is None else now
+        r = self.source.last_raw
+        if r is None:
+            return None
+        return {"lat": r[0], "lon": r[1], "hacc_m": r[2], "age_s": round(now - r[3], 1),
+                "source": self.source.tag or self.source.name}
 
     def _status(self, now: float, force: bool = False) -> None:
         if self._publish_status is None:

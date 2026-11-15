@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import {
-  Activity, Bug, Car, Clock, Cpu, LayoutDashboard, Power, SatelliteDish, Stethoscope, Thermometer,
-  Wifi, WifiOff, Zap,
+  Activity, Bug, Car, Clock, Cpu, LayoutDashboard, Map as MapIcon, Power, SatelliteDish, Stethoscope,
+  Thermometer, Wifi, WifiOff, Zap,
 } from 'lucide-react';
 import type { Satellites, Tab, TimeRange } from './types';
 import { cx } from './lib/format';
@@ -14,10 +14,12 @@ import { TelemetryTab } from './tabs/TelemetryTab';
 import { ControlsTab } from './tabs/ControlsTab';
 import { SatellitesTab } from './tabs/SatellitesTab';
 import { DiagnosticsTab } from './tabs/DiagnosticsTab';
+import { MapTab } from './tabs/MapTab';
 import { transportOf } from './lib/satellites';
 
 const TABS: [Tab, string, typeof LayoutDashboard][] = [
   ['dashboard', 'Overview', LayoutDashboard],
+  ['map', 'Map', MapIcon],
   ['satellites', 'Satellites', SatelliteDish],
   ['charts', 'Telemetry', Activity],
   ['diagnostics', 'Diagnostics', Stethoscope],
@@ -166,8 +168,9 @@ export default function App() {
           {activeTab === 'dashboard' && (
             <OverviewTab state={state} hist={hist} now={serverNow}
               satNodes={satNodes} satHolders={satHolders} onOpenDebug={() => setDebugOpen(true)}
-              onOpenSatellites={() => setActiveTab('satellites')} />
+              onOpenSatellites={() => setActiveTab('satellites')} onOpenMap={() => setActiveTab('map')} />
           )}
+          {activeTab === 'map' && <MapTab state={state} now={serverNow} />}
           {activeTab === 'satellites' && (
             <SatellitesTab sats={sats} nodes={satNodes} holders={satHolders} rail={pb.rs485_power} now={serverNow} />
           )}

@@ -141,6 +141,8 @@ def _build_position():
         BACKEND_POSITION_FIX_TIMEOUT_S=3       # head unit silent this long -> fix "none"
         BACKEND_POSITION_SYNTHETIC_ROUTE=      # route JSON; empty = built-in Opole loop
         BACKEND_POSITION_SYNTHETIC_DROPOUTS=60:90,200:230   # s since start without a fix
+        BACKEND_POSITION_SYNTHETIC_CONTROL=1   # dashboard may start a synthetic drive while parked (0 = no)
+        BACKEND_POSITION_SYNTHETIC_SESSION_S=1800   # such a session ends by itself after this long
 
     Returns ``None`` when off.
     """
@@ -171,12 +173,19 @@ def _build_position():
     except ValueError:
         log.error("Bad BACKEND_POSITION_MOTION_HZ / _FIX_TIMEOUT_S: defaults used")
         hz, fix_timeout = 10.0, 3.0
+    try:
+        session_s = max(60.0, min(4 * 3600.0, float(env("BACKEND_POSITION_SYNTHETIC_SESSION_S") or 1800)))
+    except ValueError:
+        log.error("Bad BACKEND_POSITION_SYNTHETIC_SESSION_S: 1800 used")
+        session_s = 1800.0
     return PositionFeederConfig(
         enabled=True, source=source,
         rundir=(env("BACKEND_POSITION_RUNDIR") or "/run/roadsense").strip(),
         motion_hz=hz, yaw_inputs=yaw, fix_timeout_s=fix_timeout,
         synthetic_route=(env("BACKEND_POSITION_SYNTHETIC_ROUTE") or "").strip(),
         synthetic_dropouts=tuple(drops),
+        synthetic_control=_env_flag("BACKEND_POSITION_SYNTHETIC_CONTROL", "1"),
+        synthetic_session_s=session_s,
     )
 
 

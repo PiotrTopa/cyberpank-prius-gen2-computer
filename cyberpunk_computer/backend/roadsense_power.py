@@ -112,9 +112,11 @@ DEFAULT_UNITS = (
 )
 
 # /v1/health keys worth mirroring into the backend state (the rest stays in
-# the roadsense API; the dashboard links to it).
+# the roadsense API; the dashboard links to it). "map" / "fused" are roadsense's
+# short map-layer summaries (state, availability, pack date, road, limit and
+# source; ~0.4 kB together), shown on the dashboard overview without polling.
 _HEALTH_KEYS = ("fps", "camera_fps", "model_ms", "detect_ms", "env_ms",
-                "lights_ms", "env", "speed_limit", "lights", "cpu_temp_c")
+                "lights_ms", "env", "speed_limit", "lights", "cpu_temp_c", "map", "fused")
 
 
 @dataclass

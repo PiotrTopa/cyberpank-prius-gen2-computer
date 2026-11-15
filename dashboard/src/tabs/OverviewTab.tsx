@@ -8,8 +8,9 @@ import { DataRow, Meter, Panel, StatusRow } from '../components/ui';
 import { SatellitesPanel } from '../components/SatellitesPanel';
 import { UsbHubPanel } from '../components/UsbHubPanel';
 import { CameraPreviewPanel } from '../components/CameraPreviewPanel';
+import { MapSummaryPanel } from '../components/MapSummaryPanel';
 
-export function OverviewTab({ state, hist, now, satNodes, satHolders, onOpenDebug, onOpenSatellites }: {
+export function OverviewTab({ state, hist, now, satNodes, satHolders, onOpenDebug, onOpenSatellites, onOpenMap }: {
   state: AppState;
   hist: HistoryData;
   now: number;
@@ -17,6 +18,7 @@ export function OverviewTab({ state, hist, now, satNodes, satHolders, onOpenDebu
   satHolders: string[];
   onOpenDebug: () => void;
   onOpenSatellites?: () => void;
+  onOpenMap?: () => void;
 }) {
   const pb = state.powerbox;
   const veh = state.vehicle;
@@ -122,6 +124,8 @@ export function OverviewTab({ state, hist, now, satNodes, satHolders, onOpenDebu
       </Panel>
 
       <CameraPreviewPanel server={state.roadsense?.camera_preview} now={now} />
+
+      <MapSummaryPanel state={state} onOpen={onOpenMap} />
 
       <UsbHubPanel state={state} now={now} />
 

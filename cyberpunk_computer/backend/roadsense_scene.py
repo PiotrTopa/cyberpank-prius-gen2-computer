@@ -419,6 +419,39 @@ def map_input_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return out or None
 
 
+class SyntheticTaint:
+    """Is mapd's position (still) derived from a synthetic drive?
+
+    mapd keeps dead reckoning on the last position for up to 120 s (vision
+    odometry) or 900 s (vehicle motion) after the fixes stop, and the
+    position input API v1 has no reset. So when a synthetic drive ends (stop,
+    session expiry, the real car moves) mapd may go on serving the synthetic
+    place, matched road and map limit while ``input.gnss.source`` already says
+    ``headunit``. Fed with every ``map`` message: tainted once the receiver
+    tag was ``synthetic``; clean again when mapd has no position
+    (``no_source`` / ``unknown``) or a non-synthetic fix is in use (``good``
+    with a real fix as the newest gnss message). Survives WebSocket reconnects
+    (mapd keeps its state across them); a backend restart forgets it.
+    """
+
+    def __init__(self) -> None:
+        self.tainted = False
+
+    def update(self, msg: Dict[str, Any]) -> bool:
+        state = msg.get("state")
+        inp = msg.get("input")
+        g = inp.get("gnss") if isinstance(inp, dict) else None
+        src = g.get("source") if isinstance(g, dict) else None
+        fix = g.get("fix") if isinstance(g, dict) else None
+        if src == "synthetic":
+            self.tainted = True
+        elif state in ("no_source", "unknown"):
+            self.tainted = False
+        elif state == "good" and isinstance(g, dict) and fix not in (None, "none"):
+            self.tainted = False
+        return self.tainted
+
+
 def peek_type(line: str) -> Optional[str]:
     """``type`` of a roadsense JSON line without decoding it (every daemon
     message starts with ``{"type":"..."``); None if it does not."""
@@ -441,6 +474,7 @@ class SceneBuilder:
 
     def __init__(self, cfg: SceneFeedConfig):
         self.cfg = cfg
+        self.taint = SyntheticTaint()
         self.reset()
 
     def reset(self) -> None:
@@ -478,6 +512,7 @@ class SceneBuilder:
         elif mtype == "fused":
             self._slow["map"] = (now, fused_to_scene(msg))
         elif mtype == "map":
+            self.taint.update(msg)
             self._slow["map_in"] = (now, map_input_to_scene(msg))
 
     def time_to_due(self, now: float) -> Optional[float]:
@@ -517,6 +552,8 @@ class SceneBuilder:
         map_in = scene.pop("map_in", None)
         if map_in and isinstance(scene.get("map"), dict):
             scene["map"] = dict(scene["map"], **{"in": map_in})
+        if self.taint.tainted and isinstance(scene.get("map"), dict):
+            scene["map"] = dict(scene["map"], syn=True)
         return scene
 
 

@@ -1,4 +1,5 @@
 // Shape of the AppState stream from /api/v1/stream (subset used by the UI).
+import type { FeederStatus } from './lib/mapLayer';
 
 export interface Powerbox {
   connected?: boolean;
@@ -201,6 +202,8 @@ export interface Roadsense {
   last_error?: string | null;
   /** on-demand dashboard camera preview (backend.camera_preview) */
   camera_preview?: CameraPreview | null;
+  /** position feeder -> roadsense mapd (backend.position_feeder); null while the feeder is off */
+  position?: FeederStatus | null;
 }
 
 /** Camera preview lease status (roadsense.camera_preview). */
@@ -323,5 +326,5 @@ export interface Diagnostics {
 }
 
 export type TimeRange = '1h' | '24h' | '7d';
-export type Tab = 'dashboard' | 'satellites' | 'charts' | 'diagnostics' | 'controls';
+export type Tab = 'dashboard' | 'map' | 'satellites' | 'charts' | 'diagnostics' | 'controls';
 export type Series = { time: string; value: number }[];
