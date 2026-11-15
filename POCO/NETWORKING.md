@@ -131,9 +131,14 @@ backend's SNTP server for the MFD Pi (UDP 123 on `usb0`, `backend/ntp_server.py`
 pmOS loads nftables with input policy drop. `/etc/nftables.d/50_prius_backend.nft`
 accepts TCP 8080 (backend REST/WebSocket/dashboard) and 8081/8082 (ZeroMQ for the MFD
 frontend), and on `wlan*` only UDP 8787 / TCP 8788 (Wi-Fi satellites,
-[docs/SATELLITES.md](../docs/SATELLITES.md)). The roadsense API has its own
-`50_roadsense.nft` from the roadsense repo. Traffic from the MFD Pi arrives on `usb*`,
-accepted by the base ruleset.
+[docs/SATELLITES.md](../docs/SATELLITES.md)). Its `prius_guard` table (input hook,
+priority -10) drops 8080/8081/8082/8090 on every interface except `lo`, `wg*`, `usb*`
+and, for 8080/8090 only, the car AP address `10.42.0.1` (from `10.42.0.0/24`); so Wi-Fi
+client mode and LTE never reach them, and roadsense's own `50_roadsense.nft` (8090 accept
+everywhere, from the roadsense repo) is confined too. Details and the 8080 token/session
+auth: [docs/AUTH.md](../docs/AUTH.md). Traffic from the MFD Pi arrives on `usb*`,
+accepted by the base ruleset. `provision.sh` reloads nftables only after `nft -c` accepts
+the full ruleset.
 
 ## USB network lifeline (retired in host mode)
 

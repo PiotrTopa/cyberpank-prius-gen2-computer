@@ -1,0 +1,4 @@
+#!/bin/sh
+# prius-auth-link [--host <addr>] [--ttl 15m] - print a one-time pairing link
+# (shorthand for `prius-auth link`). Run as root.
+exec /usr/local/sbin/prius-auth link "$@"

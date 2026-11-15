@@ -113,8 +113,11 @@ BACKEND_API_HOST=0.0.0.0
 BACKEND_API_PORT=8080
 BACKEND_DB=/home/user/cyberpunk/data/metrics.db
 BACKEND_TICK_HZ=50
-# Bearer token required by the network API. Empty = open (LAN/VPN only!).
-BACKEND_AUTH_TOKEN=
+# API token: NOT here (this file is world-readable) but in
+# /etc/prius/backend-auth.env (root 0600), created below / `prius-auth token new`.
+# Peers let in without credentials (default loopback) and session state:
+#BACKEND_AUTH_TRUSTED=127.0.0.0/8,::1
+#BACKEND_AUTH_STATE_DIR=/var/lib/prius/auth
 BACKEND_EXTRA_ARGS=
 
 # Trip recording: rotating per-trip NDJSON logs (replay-compatible). 0=off.
@@ -171,6 +174,22 @@ EOF
     log "seeded /etc/prius/backend.env"
 fi
 
+# Network API token (docs/AUTH.md): generated once on the phone, root 0600,
+# never clobbered (an empty BACKEND_AUTH_TOKEN= line there turns auth off).
+# Copy it into the operator's vault from the dev box, e.g.
+#   ssh <phone> 'sudo sed -n "s/^BACKEND_AUTH_TOKEN=//p" /etc/prius/backend-auth.env' \
+#     | dotinfra vault set prius_backend_auth_token
+if [ ! -e /etc/prius/backend-auth.env ]; then
+    ( umask 077
+      tok=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))') || exit 1
+      printf '# prius-backend API token (root 0600; prius-auth token new). docs/AUTH.md\nBACKEND_AUTH_TOKEN=%s\n' \
+          "$tok" > /etc/prius/backend-auth.env ) \
+        && log "generated /etc/prius/backend-auth.env (API token; store it in the vault)" \
+        || log "  WARN: could not generate the API token"
+fi
+chmod 600 /etc/prius/backend-auth.env 2>/dev/null || true
+chown root:root /etc/prius/backend-auth.env 2>/dev/null || true
+
 # --- 4. activate systemd units + NetworkManager ------------------------------
 log "reloading systemd + enabling units"
 systemctl daemon-reload
@@ -178,10 +197,16 @@ systemctl daemon-reload
 # slices pick up AllowedCPUs on daemon-reload; services move into prius.slice
 # at their next (re)start.
 
-# Firewall: the overlay ships /etc/nftables.d/50_prius_backend.nft (8080-8082);
-# pmOS loads nftables with policy drop, so reload it when it is running.
+# Firewall: the overlay ships /etc/nftables.d/50_prius_backend.nft (8080-8082
+# accept + the prius_guard table limiting 8080/8081/8082/8090 to lo, wg*, usb*
+# and the AP address); pmOS loads nftables with policy drop, so reload it when
+# it is running. Validate first: a broken file would leave the old ruleset.
 if systemctl is-active --quiet nftables 2>/dev/null; then
-    systemctl try-restart nftables && log "reloaded nftables" || log "  (nftables reload failed)"
+    if nft -c -f /etc/nftables.nft >/dev/null 2>&1; then
+        systemctl try-restart nftables && log "reloaded nftables" || log "  (nftables reload failed)"
+    else
+        log "  WARN: nft -c rejects the ruleset; NOT reloading nftables"
+    fi
 fi
 
 # Reload udev so the RP2040 ModemManager-ignore rule (99-prius-rp2040-nomm)

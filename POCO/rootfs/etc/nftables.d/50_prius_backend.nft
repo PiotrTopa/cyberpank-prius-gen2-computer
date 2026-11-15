@@ -1,15 +1,50 @@
 # postmarketOS ships nftables with policy drop on input; /etc/nftables.d/*.nft
-# are included. Open the car computer backend: REST/WebSocket/dashboard on 8080
-# and the ZeroMQ PUB/REP pair (8081/8082) the MFD frontend subscribes to.
-# (Traffic from the MFD Pi arrives on usb*, which the base ruleset accepts
-# anyway; this rule covers Wi-Fi/WireGuard clients. The roadsense API has its
-# own file, 50_roadsense.nft, installed by the roadsense repo.)
+# are included after the base ruleset (/etc/nftables.nft starts with
+# `flush ruleset`, so every reload rebuilds this file's tables too).
+#
+# Car computer ports and where they are reachable (docs/AUTH.md):
+#   8080       backend REST/WebSocket/dashboard (token/session auth on top)
+#   8090       roadsense API (no auth of its own; browsers use /roadsense/ on 8080)
+#   8081/8082  ZeroMQ PUB/REP the MFD frontend uses (no auth: commands!)
+#
+# prius_guard runs before the pmOS filter chain (priority -10) and DROPS these
+# ports on every interface not listed, whatever accept rules other files add
+# (roadsense's own 50_roadsense.nft opens 8090 everywhere; the guard wins
+# because a drop in any input base chain is final). Allowed:
+#   lo           the phone itself (the backend's roadsense proxy, tooling)
+#   wg*          WireGuard (wg-homelab, 10.200.0.14): owner devices + laptop
+#   usb*         USB links: the MFD Pi gadget (usb0, 192.168.100.0/24) and the
+#                pmOS USB-network lifeline (device mode)
+#   wlan* -> 10.42.0.1 only: the car's own AP (NM shared, `prius-ap`); in
+#                Wi-Fi client mode (home/other network) the phone has another
+#                address, so 8080/8090 stay closed there. 8081/8082 are NOT
+#                offered on the AP (no auth on ZMQ).
+# Mobile data (qmapmux*/wwan*) is dropped by 01_wwan.nft already and is not
+# in the allow list either. IPv6 to these ports is dropped (no IPv6 clients).
+table inet prius_guard {
+	chain input {
+		type filter hook input priority -10; policy accept;
+		tcp dport { 8080, 8081, 8082, 8090 } jump prius_ports
+	}
+
+	chain prius_ports {
+		iifname "lo" return
+		iifname "wg*" return
+		iifname "usb*" return
+		# Gadget-subnet sources are only real on the USB cable.
+		ip saddr 192.168.100.0/24 drop
+		iifname "wlan*" ip saddr 10.42.0.0/24 ip daddr 10.42.0.1 tcp dport { 8080, 8090 } return
+		counter drop comment "prius ports: interface not allowed"
+	}
+}
+
+# Accept in the pmOS filter chain (the guard above already restricted them).
 # Wi-Fi satellites (docs/SATELLITES.md §4) on the prius AP: UDP 8787 beacons /
 # car probes and TCP 8788 NDJSON sessions, accepted on wlan* only (they carry
 # their own Ed25519 authentication on top).
 table inet filter {
 	chain input {
-		tcp dport { 8080, 8081, 8082 } accept comment "accept prius backend API + ZMQ"
+		tcp dport { 8080, 8081, 8082 } accept comment "accept prius backend API + ZMQ (prius_guard limits interfaces)"
 		iifname "wlan*" udp dport 8787 accept comment "accept prius Wi-Fi satellite beacons"
 		iifname "wlan*" tcp dport 8788 accept comment "accept prius Wi-Fi satellite sessions"
 	}

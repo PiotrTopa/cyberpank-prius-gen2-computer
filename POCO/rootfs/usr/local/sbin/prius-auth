@@ -1,0 +1,21 @@
+#!/bin/sh
+# prius-auth - network API access on the car computer: one-time pairing links
+# for browsers, session revoke, token rotation. Run as root.
+#
+#   sudo prius-auth link [--host <addr>] [--ttl 15m]
+#   sudo prius-auth sessions | revoke <id> | revoke-all
+#   sudo prius-auth token new [--stdout]      (then: systemctl restart prius-backend)
+#   prius-auth hosts | status
+#
+# Python side: cyberpunk_computer/api/auth_cli.py; docs/AUTH.md.
+set -u
+ENV_FILE=/etc/prius/backend.env
+BACKEND_REPO=/home/user/cyberpunk
+BACKEND_API_PORT=8080
+# shellcheck disable=SC1090
+if [ -f "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi
+# The token itself is never needed here (only whether one is set).
+unset BACKEND_AUTH_TOKEN
+export BACKEND_API_PORT
+cd "$BACKEND_REPO" || exit 1
+exec "$BACKEND_REPO/.venv/bin/python" -m cyberpunk_computer.api.auth_cli "$@"

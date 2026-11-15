@@ -11,10 +11,12 @@
 #   run         : exec the backend (used as the systemd ExecStart)
 #   status      : show service + listener state
 #
-# Config lives in /etc/prius/backend.env (seeded by provision.sh).
+# Config lives in /etc/prius/backend.env (seeded by provision.sh); the API
+# token in /etc/prius/backend-auth.env (root 0600, `prius-auth token new`).
 set -u
 
 ENV_FILE=/etc/prius/backend.env
+AUTH_ENV_FILE=/etc/prius/backend-auth.env
 
 # Defaults (overridden by ENV_FILE if present).
 BACKEND_REPO=/home/user/cyberpunk
@@ -49,6 +51,10 @@ BACKEND_RECORD_MAX_AGE_DAYS=30
 # set -a: exported so env-driven backend options (BACKEND_MFD_*, BACKEND_HUB,
 # BACKEND_USB_PORT_ROLES, ...) reach the Python process, not just this script.
 if [ -f "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi
+# The token reaches Python through the environment only (never argv: argv is
+# world-readable in /proc and echoed into the journal below).
+# shellcheck disable=SC1090
+if [ -r "$AUTH_ENV_FILE" ]; then set -a; . "$AUTH_ENV_FILE"; set +a; fi
 
 VENV="$BACKEND_REPO/.venv"
 PY="$VENV/bin/python"
@@ -87,7 +93,6 @@ run() {
         --db "$BACKEND_DB" \
         --tick-hz "$BACKEND_TICK_HZ"
     [ -n "$BACKEND_POWERBOX_PORT" ] && set -- "$@" --powerbox-port "$BACKEND_POWERBOX_PORT"
-    [ -n "$BACKEND_AUTH_TOKEN" ] && set -- "$@" --auth-token "$BACKEND_AUTH_TOKEN"
     { [ "$BACKEND_AUTO_DISCOVER" = "0" ] || [ "$BACKEND_AUTO_DISCOVER" = "false" ]; } && set -- "$@" --no-auto-discover
     { [ "$BACKEND_USB_HOTPLUG" = "0" ] || [ "$BACKEND_USB_HOTPLUG" = "false" ]; } && set -- "$@" --no-usb-hotplug
     { [ "$BACKEND_POWERBOX_AUTO_RECOVER" = "1" ] || [ "$BACKEND_POWERBOX_AUTO_RECOVER" = "true" ]; } && set -- "$@" --powerbox-auto-recover
@@ -120,6 +125,7 @@ status() {
     fi
     echo "api       : $BACKEND_API_HOST:$BACKEND_API_PORT"
     echo "db        : $BACKEND_DB"
+    echo "api auth  : $([ -n "$BACKEND_AUTH_TOKEN" ] && echo "token set" || { [ -e "$AUTH_ENV_FILE" ] && [ ! -r "$AUTH_ENV_FILE" ] && echo "(run as root to see)" || echo "OFF (no token)"; })"
     if [ "$BACKEND_RECORD" = "1" ] || [ "$BACKEND_RECORD" = "true" ]; then
         echo "recording : on -> $BACKEND_RECORD_DIR ($BACKEND_RECORD_SEGMENTATION, $BACKEND_RECORD_INCLUDE)"
     else
