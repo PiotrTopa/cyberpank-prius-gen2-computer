@@ -202,7 +202,9 @@ class FileInputPort(InputPort):
                     ts = data.get("ts", 0)
                     device_id = data.get("id", 0)
                     direction = data.get("dir", "IN")
-                    
+                    if direction not in ("IN", "OUT"):
+                        continue        # e.g. "POS": GNSS fixes recorded for analysis, not replayed
+
                     raw_msg = RawMessage.from_gateway_json(data)
                     raw_entries.append((ts, device_id, direction, line, data, raw_msg))
             

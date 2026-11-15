@@ -3,21 +3,24 @@
 The backend delivers raw GNSS fixes and vehicle motion to roadsense's map daemon `mapd` over its
 position input API v1 (roadsense docs/ARCHITECTURE.md, "mapd"). roadsense owns all position
 filtering, dead reckoning and map matching; the backend only feeds. Status: built 2026-11-15 on the
-dev box, not deployed; no real GNSS source exists yet.
+dev box, not deployed; no real GNSS source exists yet. The phone's own receiver (`phone`, section 11)
+is built and runs as a fallback behind the head unit, but in the car (phone in its box) it tracked no
+satellite in 20 min on 2026-11-15.
 
 ## 1. Parts
 
 | Part | File |
 |---|---|
 | position API client (copy of roadsense `tools/position_client.py`, MIT, with a partial-send fix) | `cyberpunk_computer/backend/position_client.py` |
-| CAN motion tap, GNSS sources, feeder thread | `cyberpunk_computer/backend/position_feeder.py` |
+| CAN motion tap, GNSS sources, source selector, feeder thread | `cyberpunk_computer/backend/position_feeder.py` |
+| phone GNSS source (ModemManager location, NMEA parser) | `cyberpunk_computer/backend/phone_gnss.py` |
 | REST: status (+ raw fix, pack file), head-unit ingest, synthetic session | `cyberpunk_computer/api/position_routes.py` |
 | synthetic route (5.6 km loop in Opole, OSM geometry, ODbL) | `cyberpunk_computer/backend/data/position_route_opole.json` |
 | wiring (panda tee, gating, status mirror) | `backend/service.py` (`_wire_position_feeder`, `_position_feeder_tick`) |
 | env | `backend/__main__.py` (`_build_position`) |
 | map / fused consumption (scene key `map`) | `backend/roadsense_scene.py`, contract [MFD_MAIN_SCREEN.md](MFD_MAIN_SCREEN.md) §7.2 |
 | dashboard MAP tab (section 10) | `dashboard/src/tabs/MapTab.tsx`, `components/MiniMap.tsx`, `lib/mapLayer.ts` |
-| tests | `tests/test_position_feeder.py`, `tests/test_position_synthetic_control.py`, `tests/test_position_mapd_e2e.py` |
+| tests | `tests/test_position_feeder.py`, `tests/test_position_synthetic_control.py`, `tests/test_position_mapd_e2e.py`, `tests/test_phone_gnss.py` |
 
 Nothing is imported from roadsense; the e2e test runs the roadsense checkout as external processes.
 
@@ -26,9 +29,11 @@ Nothing is imported from roadsense; the e2e test runs the roadsense checkout as 
 ```
 panda reader thread ─on_frame tee─▶ CanMotionTap (latest 0x0B4, 0x120, 0x0B1, 0x0B3, 0x025 + receipt time)
                     └────────────▶ ingress (unchanged)
-head unit ─POST /api/v1/position/gnss─▶ HeadunitGnssSource (validate, time -> CLOCK_MONOTONIC, queue)
-                                              │
-PositionFeeder thread, motion_hz (10) ────────┴──▶ PositionFeed ──▶ /run/roadsense/position.sock (mapd)
+head unit ─POST /api/v1/position/gnss─▶ HeadunitGnssSource (validate, time -> CLOCK_MONOTONIC, queue) ─┐
+ModemManager ─GetLocation (NMEA)─▶ phone-gnss thread ─▶ PhoneGnssSource (queue) ─────────────────────┤
+                                                       SourceSelector (priority, hysteresis) ◀────────┘
+                                                              │
+PositionFeeder thread, motion_hz (10) ────────────────────────┴──▶ PositionFeed ──▶ /run/roadsense/position.sock (mapd)
 ```
 
 * Off unless `BACKEND_POSITION_FEEDER=1`. Off = no thread, no tap on the panda callback, no routes.
@@ -125,7 +130,8 @@ Clock (phone CLOCK_MONOTONIC), best first:
 Rejected: a fix older than 2.5 s on arrival, one not newer than the previous fix, out-of-range
 values. Answer: `200 {"accepted": n, "rejected": [{"index": i, "reason": "..."}], "has_fix": bool}`;
 `400` body not JSON / more than 20 fixes; `401` token; `413` body over 64 kB; `503`
-`{"detail":{"reason":"source_not_headunit"}}` when the feeder runs another source. The route exists
+`{"detail":{"reason":"source_not_headunit"}}` when the feeder runs no head-unit source (a list
+`headunit,phone` accepts the POST; `phone` alone does not). The route exists
 only with the feeder on. Every fix goes to mapd with `"source": "headunit"`.
 
 ## 5. Synthetic source (test / demo only)
@@ -172,7 +178,8 @@ Mirrored on change, at most every 2 s; `null` while the feeder is off.
 
 | Field | Meaning |
 |---|---|
-| `enabled`, `source`, `synthetic` | feeder on; `headunit` / `synthetic` / `none` |
+| `enabled`, `source`, `synthetic` | feeder on; the configured source (`headunit`, `phone`, `headunit,phone`, `synthetic`, `none`) |
+| `gnss_source` | the source whose fixes go to mapd now (`headunit` / `phone` / `synthetic`), null without a fix |
 | `active` | running now (roadsense up) |
 | `suspended` | `car_moving` (synthetic only) or null |
 | `connected`, `socket`, `connects` | connected to mapd's `position.sock` |
@@ -186,6 +193,8 @@ Mirrored on change, at most every 2 s; `null` while the feeder is off.
 | `gnss.has_fix`, `gnss.last_fix_age_s` | source has a usable fix; age of the newest fix |
 | `gnss.*` (head unit) | `received`, `accepted`, `rejected`, `none`, `time_age` / `time_utc` / `time_arrival`, `last_reject`, `fix`, `hacc_m`, `sats` (no coordinates) |
 | `gnss.*` (synthetic) | `fixes`, `route`, `route_m`, `along_m`, `laps`, `speed_mps`, `dropout` |
+| `gnss.*` (phone) | `wanted`, `gnss_on`, `modem` (MM object path), `backend` (`dbus` / `mmcli`), `ttff_s`, `fix`, `searching`, `sats`, `sats_view`, `hdop`, `hacc_m`, `cn0_max`, `cn0_top4`, `tracked`, counts `polls` / `epochs` / `fixes` / `no_fix_epochs` / `searching` / `malformed` / `errors` / `setups` / `resetups` / `time_utc` / `time_rx`, `last_error` |
+| `gnss.*` (list) | `selected`, `order`, `switches`, `last_switch` `{from, to}`, `last_fix_age_s`, `sources` = `{name: that source's fields}` |
 
 `GET /api/v1/position` only (never in the state mirror) adds `raw_fix` (`lat`, `lon`, `hacc_m`, `age_s`,
 `source` of the newest raw fix of the current source; null before one) and `pack_file` (`path`, `file`,
@@ -199,7 +208,13 @@ The roadsense manager's unit mirror (`state.roadsense.units`) now includes `road
 | Env (`/etc/prius/backend.env`) | Default | Meaning |
 |---|---|---|
 | `BACKEND_POSITION_FEEDER` | `0` | `1` turns the feeder on |
-| `BACKEND_POSITION_SOURCE` | `headunit` | `headunit`, `synthetic`, `none`; an unknown value keeps the feeder off (logged) |
+| `BACKEND_POSITION_GNSS` | (unset) | GNSS sources in priority order: `headunit`, `phone` or a list `headunit,phone`; `synthetic` / `none` only alone. An invalid value keeps the feeder off (logged) |
+| `BACKEND_POSITION_SOURCE` | `headunit` | older name, used when `BACKEND_POSITION_GNSS` is unset |
+| `BACKEND_POSITION_SWITCH_UP_S` | `5` | a higher-priority source needs a fix this long before it takes over |
+| `BACKEND_POSITION_PHONE_UERE_M` | `4` | phone: `hacc_m` = HDOP × this (not calibrated) |
+| `BACKEND_POSITION_PHONE_LINGER_S` | `120` | phone: GNSS stays on this long after roadsense stops |
+| `BACKEND_POSITION_PHONE_POLL_HZ` | `4` | phone: ModemManager `GetLocation` calls per second |
+| `BACKEND_RECORD_INCLUDE` token `position` | not set | trip files also get the fixes sent to mapd (section 12); `all` does not include it |
 | `BACKEND_POSITION_RUNDIR` | `/run/roadsense` | where `position.sock` is |
 | `BACKEND_POSITION_MOTION_HZ` | `10` | 5..50 |
 | `BACKEND_POSITION_YAW` | `wheels` | comma list of `wheels`, `steer`; empty = speed and gear only |
@@ -223,6 +238,10 @@ Deploy (none of this was done):
    `none_sent` > 0, `motion.can_age_s` < 0.3 with the car on; roadsense `GET /v1/map` →
    `input.motion.tag` `prius-can`, `input.gnss.fix` `none`, `state` `no_source`.
 4. Demo only, car parked: `BACKEND_POSITION_SOURCE=synthetic` (map output shows `synthetic`).
+5. Phone GNSS as fallback (section 11.5): add `BACKEND_POSITION_GNSS=headunit,phone`; restart
+   `prius-backend.service`. Check with the stack running: `gnss.sources.phone.gnss_on` true,
+   `mmcli -m any --location-status` shows `gps-nmea` enabled; 120 s after roadsense stops it is
+   off again (`3gpp-lac-ci` only).
 
 ## 8. Tests (2026-11-15, dev box)
 
@@ -231,12 +250,15 @@ Deploy (none of this was done):
 | `tests/test_position_feeder.py`: decoders on real frames, tap freshness / pairing / field order, head-unit validation and clock, feeder cycle (no fix → `none`, repeats, fix forwarded, silent with CAN dark, quiet drop without mapd, synthetic suspension), synthetic drive consistency, PositionFeed on a Unix socket (hello, error replies, reconnect), `fused` → scene, REST routes with a token, env parsing, service wiring / gating | 23 passed |
 | `tests/test_position_mapd_e2e.py` with roadsense `.venv-models` (fake camera daemons `--no-mapd` + real mapd + real api) and `dev-opolskie.rsmap`: no fix | mapd `no_source`, `available` false, `reason` `no_position`, `input.gnss` `headunit`/`none`, motion `vehicle`/`prius-can`; api `fused.map.available` false, limit source `sign` (vision); scene `map.ok` false, `why` `no_position`, `map.limit` = scene `limit` (50 km/h B-33 from the fake signs) |
 | same, synthetic drive with a fix dropout at 15–20 s | `good` + matched; position error against the synthetic truth after 8 s: max 4.1 m, mean 2.5 m; `dead_reckoning` exactly in the dropout, `available` throughout (13/13 samples), `good` again after it; `input.gnss.source` `synthetic`, motion tag `synthetic`; scene `map.ok` true, `map.in.gnss` `synthetic`, road `Mały Rynek` (living street) |
+| `tests/test_phone_gnss.py` (2026-11-15): NMEA checksum, full epoch (position, speed, course, date, DOPs, GSV C/N0), searching trace as the modem sends it, malformed input (bad checksum, minutes ≥ 60, hemisphere, hour 25, 0,0, truncated, junk), GGA/RMC of different epochs, talker preference, `hacc_m`; phone lifecycle with a fake ModemManager (setup keeps other sources, linger, restore only what was added, owner-enabled GNSS left on, MM restart with a new path, silent setup loss, no capability), fix time from UTC / receipt, epoch dedupe, thread start / stop, mmcli fallback; selector fallback / hysteresis / old-fix drop / flicker; feeder with `headunit,phone` incl. REST ingest forwarding; env list parsing. `tests/test_trip_recorder.py`: position off by default, recorded with the token, skipped by replay | 18 + 3 passed |
+| full suite after the phone source (worktree, fixture copied in) | 1266 passed, 9 skipped |
 | full suite `pytest tests --ignore=tests/test_pointer_ui.py` | 1155 passed, 9 skipped, 5 failed: the 5 (`test_bean_rx`, `test_bean_tx`) need `tests/fixtures/bean_nhw20_frames.txt.gz`, which exists only untracked in the main checkout; with that file copied in, both files pass (162) |
 
 ## 9. Open gaps
 
 * No real GNSS source: the head-unit side (agent app sending §4) does not exist; its fix latency,
-  `age_ms` availability and accuracy fields are untested.
+  `age_ms` availability and accuracy fields are untested. The phone's receiver got no fix in the car
+  (section 11.3); a fix, its accuracy, latency and the UERE factor are unmeasured.
 * Motion is untested against a running mapd on the car; timestamps are panda receipt times (bus
   delay assumed a few ms, not measured).
 * Absolute sign of 0x025 and the left/right labels of 0x0B1/0x0B3 rest on third-party conventions
@@ -279,3 +301,97 @@ session with a fix dropout, headless Chrome): states `no_source`, `good`, `dead_
 dropout), residue after the stop, roadsense off. Not checked: a real head-unit fix, the phone browser
 itself, the car.
 
+
+## 11. Phone GNSS source (`phone`, `backend/phone_gnss.py`)
+
+Built 2026-11-15. The phone's own receiver as a stop-gap until the head unit sends fixes.
+
+### 11.1 What the phone offers (read on the phone 2026-11-15, mainline kernel, ModemManager 1.25.95)
+
+| Item | Finding |
+|---|---|
+| Mechanism | GNSS engine inside the modem, reached by QMI LOC; ModemManager (`qcom-soc` plugin, `qrtr0`) owns the LOC client and offers it as `Modem.Location`. No `/dev/gnss*`, no gpsd / geoclue / gnss-share installed, no `gps-unmanaged` capability |
+| MM capabilities | `3gpp-lac-ci, gps-raw, gps-nmea, agps-msa, agps-msb`; enabled by default: `3gpp-lac-ci` only; GPS refresh rate 30 s (MM default) |
+| Engine (qmicli, read-only gets) | engine lock `none`; operation mode `standalone`; NMEA types `gga rmc gsv gsa vtg pqxfi pstis glgsv gngsa gngns garmc gagsv gagsa gavtg gagga pqgsa pqgsv` (GPS, GLONASS, Galileo; no GST, so no receiver accuracy figure) |
+| Assistance | XTRA: the modem knows three `xtra3grcej.bin` servers, its XTRA data is invalid (1980-01-06, 0 h); ModemManager reports `SupportedAssistanceData` = 0, so `--location-inject-assistance-data` is not available. SUPL server empty (MSB A-GPS would need one written into the modem: a modem configuration change, not made). Time injection (`qmicli --loc-inject-time`) works |
+| Rate | the engine sends one NMEA burst per second (1 Hz) while searching; whether it can do more is unknown (no fix) |
+
+### 11.2 Mechanism chosen
+
+ModemManager over D-Bus (dbus-python, system package `py3-dbus`, already in `POCO/packages.txt`;
+the backend venv has system site-packages). It is the only path that does not compete with
+ModemManager for the modem that also carries LTE: gpsd or qmicli would need their own LOC client and
+a session of their own. In-process D-Bus calls cost far less than forking `mmcli` per poll; `mmcli`
+subprocesses are the fallback when dbus-python is missing (1 Hz).
+
+| Rule | Behaviour |
+|---|---|
+| on | when the feeder becomes active (roadsense `starting`, ≈ 13 s after key-on, see [POCO/POWER.md](../POCO/POWER.md)): `Location.Setup(enabled \| gps-nmea)` keeping the other sources, `SetGpsRefreshRate(0)` |
+| off | `BACKEND_POSITION_PHONE_LINGER_S` (120 s) after the feeder goes idle: only the bits this source added are cleared, the refresh rate is restored. A GNSS the owner enabled by hand stays on |
+| poll | `GetLocation` at 4 Hz on the `phone-gnss` thread; one epoch per GGA time (repeats ignored) |
+| time | fix time = receipt − (wall clock − NMEA UTC) when the clock is NTP-synced and the difference is −0.2..2.5 s (`time_utc`), else receipt − 0.5 s (`time_rx`) |
+| `hacc_m` | GST sigmas when present (never on this modem), else HDOP × 4 m, floor 2 m |
+| course | sent only from 1 m/s (receiver course at walking pace is noise) |
+| no fix | `has_fix` false 3 s after the last fix; the feeder sends `fix: none`, roadsense runs on vision |
+| MM restart / modem reset (netwatch) | every error resets the D-Bus connection, re-finds the modem (its path changes) after 5 s and sets up again (`resetups`); the setup is re-checked every 30 s |
+| never | modem reset / enable / disable, bearers, SIM, restarting ModemManager or NetworkManager; positions in logs above DEBUG |
+| backend never blocks | all D-Bus I/O on the `phone-gnss` thread; the feeder only reads a queue |
+
+### 11.3 Measured in the car (2026-11-15, 19:18–19:46 CET, parked outdoors, phone in its box, car off)
+
+GNSS on (gps-nmea + gps-raw, refresh rate 0) for 20 min, polled at 1 Hz, with 3 min off before and
+after.
+
+| Item | Result |
+|---|---|
+| satellites | none tracked in 20 min: no GSV sentence at all (GSV is in the enabled type list), GSA mode 1, GGA quality 0 |
+| receiver time | no time from the sky; the GGA time appeared only after a UTC time injection (`qmicli --loc-inject-time`) at 9.6 min, then 1 Hz epochs (609 in 10.4 min), still quality 0 |
+| C/N0, sats in view, accuracy, scatter, TTFF, latency | not measurable (no satellite) |
+| LTE / tunnel | unaffected: 120/120 pings to the hub (every 10 s) with GNSS on, 18/18 before, 15/15 after; MM `connected` / `lte` throughout |
+| power (`powerbox.poco_power_w`, profile `low`) | median 0.58 W before, 0.735 W with GNSS searching, 0.58 W after: ≈ +0.15 W (mean 0.65 → 0.79 W) |
+| left as found | `gps-nmea` / `gps-raw` disabled, refresh rate 30 s, enabled `3gpp-lac-ci` only; the injected time is engine state only |
+
+Unresolved: whether the box blocks the sky (the car is outdoors; LTE is fine) or the modem's GNSS RF
+path does not work on this kernel (reports for SDM845 phones differ by device). One test settles
+it: the phone out of the box with sky view, GNSS on for 5 min (`mmcli -m any
+--location-enable-gps-nmea`, `mmcli -m any --location-get` shows `GSV` with C/N0 if anything is
+tracked). Without any satellite, XTRA data would not help.
+
+### 11.4 Source selection (`SourceSelector`)
+
+`BACKEND_POSITION_GNSS=headunit,phone`: both run; every cycle both are drained and only the selected
+one's fixes go to mapd, with `"source"` = `headunit` / `phone`.
+
+* nothing selected or the selected source lost its fix (3 s silence, or head unit `fix: none`): the
+  first source in the list with a fix, at once;
+* a higher-priority source takes over a working one only after `BACKEND_POSITION_SWITCH_UP_S` (5 s)
+  of continuous fix (a flickering head unit does not toggle);
+* a fix not newer than the last one sent is dropped (receivers with different latencies);
+* `synthetic` and `none` never take part; the run-time synthetic session replaces the whole list and
+  gives it back on the end; `POST /gnss` keeps working with the list.
+
+Status: `gnss_source` (section 6) and `gnss.selected`, `gnss.sources.<name>`; `GET /api/v1/position`
+`raw_fix` is the selected source's.
+
+### 11.5 With the head unit later
+
+Keep `headunit,phone`: the head unit (better antenna) wins whenever it delivers fresh fixes; the phone
+covers head-unit gaps (app restart, USB link) if it ever gets a fix in its mounting place. If the
+phone never gets a sky view, `BACKEND_POSITION_GNSS=headunit` saves the ≈ 0.15 W of a GNSS that
+searches for nothing. Other receivers (USB u-blox on the phone's hub, a GNSS satellite) would be one
+more source in the list; `phone_gnss.parse_trace` parses their NMEA as is.
+
+## 12. Location in recordings
+
+What the trip recorder stores (`io/trip_recorder.py`): the bytes of the gateway, satellites,
+powerbox and CAN through the ingress / egress callbacks (`BACKEND_RECORD_INCLUDE=all` on the car).
+The feeder's GNSS (head-unit POSTs, phone, synthetic) never passed through the ingress, so before this
+change no trip file held a position, and the state mirror holds none either (the feeder status has no
+coordinates; `raw_fix` is REST only).
+
+Now an explicit option: the token `position` in `BACKEND_RECORD_INCLUDE` (e.g. `all,position`) writes
+every fix sent to mapd into the open trip file as `{"ts":…,"dir":"POS","id":0,"d":{<gnss message>}}`.
+It is never part of `all`, never opens a trip and does not keep one alive; replay
+(`FileInputPort`) skips `POS` lines. Default: off. Reason: `all` was chosen when trips held bus
+traffic only, and a location track is personal data of a different kind; recording it should be a
+decision, not a side effect of a new source.

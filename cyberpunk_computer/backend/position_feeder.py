@@ -26,9 +26,13 @@ Rules:
   ``stale_s`` (car off, CAN dark, panda gone); a yaw field rides along only
   when its frames are within ``pair_s`` of the speed frame.
 * GNSS sources: ``headunit`` (real; pushed by the head unit, see
-  docs/POSITION_FEEDER.md for the exact contract), ``synthetic`` (test/demo
-  only, never the default, suspends itself while the real car moves),
-  ``none`` (motion only). Without a usable fix the feeder sends
+  docs/POSITION_FEEDER.md for the exact contract), ``phone`` (the phone's own
+  modem GNSS through ModemManager, backend/phone_gnss.py), ``synthetic``
+  (test/demo only, never the default, suspends itself while the real car
+  moves), ``none`` (motion only). An ordered list (``headunit,phone``) runs
+  the real sources side by side behind a :class:`SourceSelector`: the first
+  one with a fresh fix wins, with hysteresis; ``synthetic`` and ``none`` only
+  stand alone. Without a usable fix the feeder sends
   ``{"type":"gnss","fix":"none"}`` (on the change and every ``none_repeat_s``)
   so mapd stays without position and roadsense runs on vision alone.
 
@@ -69,7 +73,8 @@ from .position_client import PositionFeed
 
 logger = logging.getLogger(__name__)
 
-SOURCES = ("headunit", "synthetic", "none")
+SOURCES = ("headunit", "phone", "synthetic", "none")
+REAL_SOURCES = ("headunit", "phone")        # may be combined in a priority list
 YAW_INPUTS = ("wheels", "steer")
 # Default: wheel speeds only. mapd prefers them anyway; steering_wheel_deg is
 # used by mapd only without wheel speeds, and its kinematic model (ratio 19.1,
@@ -96,7 +101,7 @@ STEERING_RATIO = 19.1
 class PositionFeederConfig:
     """Knobs of the position feeder (BACKEND_POSITION_*, backend.__main__)."""
     enabled: bool = False
-    source: str = "headunit"               # headunit | synthetic | none
+    source: str = "headunit"               # headunit | phone | synthetic | none, or a priority list "headunit,phone"
     rundir: str = "/run/roadsense"         # mapd's position.sock lives here
     motion_hz: float = 10.0                # motion messages per second (contract 5..50, 10..20 recommended)
     yaw_inputs: Tuple[str, ...] = DEFAULT_YAW_INPUTS   # yaw fields with motion: wheels, steer
@@ -110,6 +115,17 @@ class PositionFeederConfig:
     max_batch: int = 20                    # fixes per POST
     status_s: float = 2.0                  # status mirror cadence (on change)
     retry_s: float = 2.0                   # mapd reconnect period
+    # source selection (priority list)
+    switch_up_s: float = 5.0               # a higher-priority source needs a fix this long before it takes over
+    # phone source (backend/phone_gnss.py; ModemManager location)
+    phone_poll_hz: float = 4.0             # GetLocation polls per second (the receiver gives 1 Hz)
+    phone_refresh_rate: int = 0            # MM GpsRefreshRate while on (0 = pass every NMEA burst on)
+    phone_uere_m: float = 4.0              # hacc_m = HDOP x this (no GST from the modem; typical value, not calibrated)
+    phone_latency_s: float = 0.5           # fix age at receipt when the wall clock is not synced
+    phone_linger_s: float = 120.0          # GNSS stays on this long after roadsense stops
+    phone_retry_s: float = 5.0             # ModemManager away / error -> next try
+    phone_check_s: float = 30.0            # re-check the location setup (MM restart, modem reset)
+    phone_course_min_mps: float = 1.0      # receiver course left out below this speed
     # synthetic source (test/demo only)
     synthetic_route: str = ""              # route file; "" = built-in Opole loop
     synthetic_dropouts: Tuple[Tuple[float, float], ...] = ()   # (t0, t1) s since start: fix lost
@@ -652,14 +668,146 @@ class SyntheticGnssSource(GnssSource):
                 "speed_mps": round(self.drive.v, 1), "dropout": self._in_dropout(now)}
 
 
-def make_source(cfg: PositionFeederConfig) -> GnssSource:
-    if cfg.source == "headunit":
+class SourceSelector(GnssSource):
+    """Several real sources in priority order (``headunit,phone``), one used.
+
+    Every child is drained every cycle (their queues stay short); only the
+    fixes of the selected child go to mapd. Selection, evaluated per cycle:
+
+    * nothing selected, or the selected child lost its fix (its own
+      ``fix_timeout_s`` / explicit ``fix: none``): the highest-priority child
+      with a fix now, at once (fallback without delay);
+    * a higher-priority child takes over from a working one only after it has
+      had a fix for ``switch_up_s`` without a break (hysteresis: a head unit
+      that flickers does not toggle the source every second).
+
+    A fix not newer than the last one sent (a switch between receivers with
+    different latencies) is dropped. ``synthetic`` / ``none`` never take part.
+    """
+
+    reports_fix = True
+
+    def __init__(self, cfg: PositionFeederConfig, children: Sequence[GnssSource]):
+        if len(children) < 2:
+            raise ValueError("a selector needs at least two sources")
+        self.cfg = cfg
+        self.children = list(children)
+        self.name = ",".join(c.name for c in self.children)
+        self.selected: Optional[GnssSource] = None
+        self._fix_since: Dict[str, Optional[float]] = {c.name: None for c in self.children}
+        self._last_ts = 0
+        self.switches = 0
+        self.last_switch: Optional[Dict[str, Any]] = None
+        hu = next((c for c in self.children if hasattr(c, "ingest")), None)
+        if hu is not None:
+            self.ingest = hu.ingest           # POST /api/v1/position/gnss keeps working
+
+    @property
+    def tag(self) -> str:                    # type: ignore[override]
+        return (self.selected or self.children[0]).tag
+
+    @property
+    def last_raw(self):                      # type: ignore[override]
+        return self.selected.last_raw if self.selected is not None else None
+
+    def set_wanted(self, on: bool) -> None:
+        for c in self.children:
+            if hasattr(c, "set_wanted"):
+                c.set_wanted(on)
+
+    def close(self) -> None:
+        for c in self.children:
+            if hasattr(c, "close"):
+                c.close()
+
+    def _select(self, now: float) -> None:
+        for c in self.children:
+            if c.has_fix(now):
+                if self._fix_since[c.name] is None:
+                    self._fix_since[c.name] = now
+            else:
+                self._fix_since[c.name] = None
+        cur = self.selected
+        pick = cur
+        if cur is None or self._fix_since[cur.name] is None:
+            pick = next((c for c in self.children if self._fix_since[c.name] is not None), None)
+        else:
+            for c in self.children:
+                if c is cur:
+                    break
+                since = self._fix_since[c.name]
+                if since is not None and now - since >= self.cfg.switch_up_s:
+                    pick = c
+                    break
+        if pick is not cur:
+            self.switches += 1
+            self.last_switch = {"from": cur.name if cur else None, "to": pick.name if pick else None}
+            if pick is not None:
+                logger.info("position feeder: GNSS source %s -> %s", cur.name if cur else "-", pick.name)
+            elif cur is not None:
+                logger.info("position feeder: GNSS source %s lost, no source has a fix", cur.name)
+            self.selected = pick
+
+    def drain(self, now: float) -> List[Dict[str, Any]]:
+        batches = {c.name: c.drain(now) for c in self.children}
+        self._select(now)
+        if self.selected is None:
+            return []
+        out = []
+        for m in batches[self.selected.name]:
+            ts = m.get("ts_mono_ns", 0)
+            if ts <= self._last_ts:
+                continue
+            self._last_ts = ts
+            out.append(m)
+        return out
+
+    def has_fix(self, now: float) -> bool:
+        return self.selected is not None and self.selected.has_fix(now)
+
+    def status(self, now: float) -> Dict[str, Any]:
+        sel = self.selected
+        return {"has_fix": self.has_fix(now), "selected": sel.name if sel else None,
+                "order": [c.name for c in self.children], "switches": self.switches,
+                "last_switch": self.last_switch,
+                "last_fix_age_s": sel.status(now).get("last_fix_age_s") if sel else None,
+                "sources": {c.name: c.status(now) for c in self.children}}
+
+
+def parse_source_list(value: str) -> Tuple[str, ...]:
+    """``"headunit, phone"`` -> ("headunit", "phone"); ValueError for unknown
+    names, duplicates, or synthetic / none inside a list."""
+    names = tuple(t.strip().lower() for t in (value or "").split(",") if t.strip())
+    if not names:
+        raise ValueError("no position source given")
+    for n in names:
+        if n not in SOURCES:
+            raise ValueError("position source %r unknown (%s)" % (n, ", ".join(SOURCES)))
+    if len(set(names)) != len(names):
+        raise ValueError("position source listed twice")
+    if len(names) > 1 and any(n not in REAL_SOURCES for n in names):
+        raise ValueError("only %s can be combined; synthetic and none stand alone" % ", ".join(REAL_SOURCES))
+    return names
+
+
+def _make_one(cfg: PositionFeederConfig, name: str) -> GnssSource:
+    if name == "headunit":
         return HeadunitGnssSource(cfg)
-    if cfg.source == "synthetic":
+    if name == "phone":
+        from .phone_gnss import PhoneGnssSource
+        return PhoneGnssSource(cfg)          # type: ignore[return-value]
+    if name == "synthetic":
         return SyntheticGnssSource(cfg)
-    if cfg.source == "none":
+    if name == "none":
         return NoGnssSource()
     raise ValueError("position source must be one of " + ", ".join(SOURCES))
+
+
+def make_source(cfg: PositionFeederConfig) -> GnssSource:
+    names = parse_source_list(cfg.source)
+    if len(names) == 1:
+        return _make_one(cfg, names[0])
+    return SourceSelector(cfg, [_make_one(cfg, n) for n in names])
 
 
 # ── the feeder ───────────────────────────────────────────────────────────────
@@ -686,8 +834,10 @@ class PositionFeeder:
                  tap: Optional[CanMotionTap] = None, feed: Optional[PositionFeed] = None,
                  clock: Callable[[], float] = time.monotonic,
                  publish_status: Optional[Callable[[Dict[str, Any]], None]] = None,
-                 wall: Callable[[], float] = time.time):
+                 wall: Callable[[], float] = time.time,
+                 on_gnss: Optional[Callable[[Dict[str, Any]], None]] = None):
         self.cfg = cfg
+        self._on_gnss = on_gnss                # every fix sent to mapd (trip recorder, opt-in)
         self.source = source
         self.base_source = source
         self._wall = wall
@@ -730,6 +880,8 @@ class PositionFeeder:
                 self.stop_synthetic("roadsense_stopped")
             self._active = on
             self._wake.set()
+        if hasattr(self.base_source, "set_wanted"):      # phone GNSS: on while roadsense runs
+            self.base_source.set_wanted(on)
 
     # ── runtime synthetic session ────────────────────────────────────────
 
@@ -816,6 +968,11 @@ class PositionFeeder:
         if self._thread is not None:
             self._thread.join(timeout)
             self._thread = None
+        if hasattr(self.base_source, "close"):
+            try:
+                self.base_source.close()
+            except Exception:  # noqa: BLE001
+                logger.exception("position feeder: closing the GNSS source failed")
         self.feed.close()
 
     # ── one cycle ────────────────────────────────────────────────────────
@@ -869,6 +1026,11 @@ class PositionFeeder:
             return
         for g in src.drain(now):
             self._send(g, "gnss")
+            if self._on_gnss is not None:
+                try:
+                    self._on_gnss(g)
+                except Exception:  # noqa: BLE001 - never kill the feeder
+                    logger.exception("position feeder: on_gnss hook failed")
         if not src.reports_fix:
             return
         ok = src.has_fix(now)
@@ -904,7 +1066,13 @@ class PositionFeeder:
             motion["can_age_s"] = None if sp is None else round(now - sp[1], 1)
             motion["can_frames"] = self.tap.frames
         last_err = f.errors[-1].get("reason") if f.errors else None
+        src = self.source
+        if isinstance(src, SourceSelector):
+            gnss_source = src.selected.name if src.selected is not None else None
+        else:
+            gnss_source = src.name if src.reports_fix and src.has_fix(now) else None
         return {"enabled": True, "source": self.source.name, "synthetic": self.source.name == "synthetic",
+                "gnss_source": gnss_source,
                 "base_source": self.base_source.name, "synthetic_control": self.synthetic_control,
                 "session": dict(self.session) if self.session else None,
                 "last_session_end": self.last_session_end,

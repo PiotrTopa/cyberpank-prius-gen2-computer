@@ -799,8 +799,13 @@ class BackendService:
             def _publish_position(status: dict) -> None:
                 twin.store.dispatch(SetRoadsenseStateAction(position=status))
 
+            def _record_fix(fix: dict) -> None:       # trip recorder, only with include "position"
+                if self.recorder is not None:
+                    self.recorder.log_position(fix)
+
             self.position_feeder = PositionFeeder(pcfg, source, tap=tap,
-                                                  publish_status=_publish_position)
+                                                  publish_status=_publish_position,
+                                                  on_gnss=_record_fix)
             twin.store.dispatch(SetRoadsenseStateAction(position=self.position_feeder.status()))
             logger.info("position feeder wired (source=%s, %s/position.sock, motion %.0f Hz, yaw %s)",
                         source.name, pcfg.rundir, pcfg.motion_hz, ",".join(pcfg.yaw_inputs) or "-")
