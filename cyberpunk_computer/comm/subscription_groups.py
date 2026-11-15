@@ -104,7 +104,10 @@ BATTERY_CELLS_GROUP = SubscriptionGroup(
                 "a": "sub", "slot": 4,
                 "i": "0x7E3",
                 "d": [0x02, 0x21, 0xCF, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "int": 2000, "t": 200, "r": ["0x7EB"],
+                # The answer is 18 bytes (first frame 10 12 61 CF ...): without
+                # ISO-TP the gateway returned the first frame only and nothing
+                # after the intake temperature was ever decoded.
+                "int": 2000, "t": 500, "r": ["0x7EB"], "isotp": True,
             },
         ),
         SubscriptionSlot(
