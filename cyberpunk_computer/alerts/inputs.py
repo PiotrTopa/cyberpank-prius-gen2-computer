@@ -231,10 +231,27 @@ def _scene_limit(scene: Mapping, map_limit: bool = True) -> Tuple[Optional[Limit
 
 
 def _scene_lead(scene: Mapping) -> Tuple[Optional[Lead], bool]:
-    """The tracked lead (roadsense fused ``lead``, carried as scene
-    ``map.lead``) when present, else modeld's ``leads[0]`` (scene ``lead``)."""
+    """The tracked lead, else modeld's ``leads[0]``.
+
+    1. roadsense's ``lead`` topic (10-14/s): scene ``lead`` with
+       ``lead_src: "tracked"`` (null = the tracker has no lead);
+    2. the same tracker's copy in ``fused`` (about 2/s), scene ``map.lead``;
+    3. modeld's raw ``leads[0]`` (scene ``lead`` without ``lead_src``).
+    """
     mp = scene.get("map") if isinstance(scene.get("map"), Mapping) else None
     tl = mp.get("lead") if mp else None
+    if scene.get("lead_src") == "tracked":
+        ld = scene.get("lead")
+        if isinstance(ld, Mapping) and _num(ld.get("d")):
+            return Lead(d=float(ld["d"]), y=_num(ld.get("y")) or 0.0, v_rel=_num(ld.get("v_rel")),
+                        a=_num(ld.get("a")), prob=None, src="tracked",
+                        standing=bool(ld.get("standing")), departed=bool(ld.get("departed")),
+                        ttc_s=_num(ld.get("ttc")), gap_s=_num(ld.get("gap")),
+                        track_id=ld.get("id") if isinstance(ld.get("id"), int) else None), True
+        if scene.get("lead_departed") is True:
+            # lead gone from the tracker but the departed cue is still up
+            return Lead(d=0.0, src="tracked", departed=True, standing=False), True
+        return None, True
     tracked_avail = isinstance(tl, Mapping)
     if tracked_avail and tl.get("present") and _num(tl.get("d")):
         return Lead(d=float(tl["d"]), y=_num(tl.get("y")) or 0.0, v_rel=_num(tl.get("v_rel")),

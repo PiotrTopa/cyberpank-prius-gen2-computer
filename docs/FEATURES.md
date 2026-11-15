@@ -18,7 +18,7 @@ accelerates.
 | Speed-limit preview ("90 in 650 m") | planned | GNSS (map `ahead.limit`) | — | first step: chip in `render.py` from scene `map.ahead.limit` (MFD_MAIN_SCREEN 8.3) |
 | Forward collision / closing-speed warning (advisory) | built, shadow | lead `d`, `v_rel`, true speed, brake, steering | `alerts/functions/headway.py` (`distance_warning`) | not a certified FCW |
 | Headway / tailgating coach | built, shadow | lead, true speed | `headway.py` (`headway_coach`) | ≥ 50 km/h only |
-| Lead-vehicle departure | built, shadow | lead (tracked or vision), true speed, gear | `alerts/functions/stop_go.py` | uses roadsense `fused.lead.departed` when present |
+| Lead-vehicle departure | built, shadow | lead (tracked or vision), true speed, gear | `alerts/functions/stop_go.py` | uses roadsense's tracked lead (topic `lead`, else `fused.lead`) and its `departed` cue when present |
 | Traffic-light green reminder | built, disabled: waiting for validated traffic-light reliability | ego light with relevance | `stop_go.py` (`green_light`, shadow only) | first step: review its shadow log against dashcam |
 | Red-light / stop ahead highlight | planned | ego light, `stop_ahead` | — | first step: alert type on approach speed vs distance (visual only) |
 | Lane departure warning | built, disabled: waiting for turn-signal state | turn signal, lanes | `alerts/functions/lane.py` | refuses `on`; shadow for data |

@@ -172,6 +172,25 @@ def test_lead_departure_uses_the_tracked_cue_when_present():
     assert len(f) == 1 and f[0]["evidence"]["src"] == "tracked"
 
 
+def test_departed_cue_without_a_lead_fires_departure_and_never_headway_or_blocks_green():
+    # roadsense's tracker lost the lead after it pulled away: scene lead null + lead_departed
+    # -> Lead(d=0, departed) (alerts.inputs._scene_lead)
+    gone = Lead(d=0.0, src="tracked", departed=True, standing=False)
+    r = Rig(StopGoFunction)
+    r.run(4.0, real_kmh=0.0, lead=Lead(d=4.0, src="tracked", standing=True), lead_tracked_available=True)
+    r.run(0.5, real_kmh=0.0, lead=gone, lead_tracked_available=True)
+    assert len(r.fires("lead_departure")) == 1
+    r2 = Rig(StopGoFunction)
+    r2.run(3.0, real_kmh=0.0, lead=gone, lead_tracked_available=True,
+           light={"state": "red", "d": 20.0, "rel": 0.7, "agree": 2})
+    r2.run(3.0, real_kmh=0.0, lead=gone, lead_tracked_available=True,
+           light={"state": "green", "d": 20.0, "rel": 0.7, "agree": 2})
+    assert len(r2.fires("green_light")) == 1
+    r3 = Rig(HeadwayFunction)
+    r3.run(10.0, real_kmh=70.0, lead=gone, lead_tracked_available=True)
+    assert r3.fires() == []
+
+
 def test_green_light_cannot_be_switched_on_but_logs_in_shadow():
     r = Rig(StopGoFunction)
     ok, why = r.m.set_mode("green_light", "on")

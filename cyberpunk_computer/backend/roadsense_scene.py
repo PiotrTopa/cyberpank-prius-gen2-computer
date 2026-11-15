@@ -8,9 +8,9 @@ docs/MFD_MAIN_SCREEN.md section 7; consumer: ``ui/scene/inputs.SceneFeed``).
 This module builds that mapping from what the roadsense stack already
 publishes and hands it to the ZMQ event channel:
 
-    roadsense api  ws://127.0.0.1:8090/ws?topics=road,lights,speed_limit,env,rules,fused,map
+    roadsense api  ws://127.0.0.1:8090/ws?topics=road,lights,speed_limit,env,rules,fused,map,lead
          │  (road 10-14/s ~16 kB, lights ~3/s, speed_limit and rules >= 1/s, env ~1/s,
-         │   fused ~2/s, map 2/s ~4 kB)
+         │   fused ~2/s, map 2/s ~4 kB, lead 10-14/s ~0.7 kB)
          ▼
     RoadsenseSceneFeed (own thread)  ──SceneBuilder──▶  publish(scene)  <= 10/s, ~0.7 kB
 
@@ -57,7 +57,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 logger = logging.getLogger(__name__)
 
 EVENT_NAME = "roadsense_scene"
-TOPICS = ("road", "lights", "speed_limit", "env", "rules", "fused", "map")
+TOPICS = ("road", "lights", "speed_limit", "env", "rules", "fused", "map", "lead")
 
 # Caps of the sign lists (payload and screen room: the MFD shows this many).
 MAX_SIGNS_ON = 6
@@ -82,6 +82,7 @@ class SceneFeedConfig:
     env_max_age_s: float = 5.0         # env ~1/s
     rules_max_age_s: float = 3.0       # rules: on change and >= 1/s
     map_max_age_s: float = 3.0         # fused / map: ~2/s (roadsense's own map staleness is 3 s)
+    lead_max_age_s: float = 0.5        # lead (tracker): one per road frame, 10-14/s; older -> road.leads[0]
     lane_min_prob: float = 0.2         # below this a lane line goes out as null (UI draws >= 0.3)
     lead_min_prob: float = 0.3         # below this the lead goes out as null (UI draws >= 0.5)
     connect_timeout_s: float = 3.0
@@ -194,6 +195,45 @@ def road_to_scene(road: Dict[str, Any], cfg: SceneFeedConfig) -> Dict[str, Any]:
            "lanes": lanes, "edges": edges, "lead": lead}
     if path is not None:
         out["path"] = path
+    return out
+
+
+def lead_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """roadsense ``lead`` topic (the api's lead tracker) -> scene ``lead``.
+
+    d = dist_m, y = lateral_m, v_rel = v_rel_mps, a = a_lead_mps2, prob (the
+    frame's vision probability; left out when the tracker coasts without one,
+    the UI then treats it as 1), src = "tracked"; only when set: standing /
+    departed (true), gap = time_gap_s, d_std = dist_std_m, ttc = ttc_s,
+    id = track_id. None when ``present`` is false (no lead tracked).
+    """
+    if not msg.get("present"):
+        return None
+    d = _num(msg.get("dist_m"))
+    if d is None or d <= 0:
+        return None
+    out: Dict[str, Any] = {"d": round(d, 1), "y": round(_num(msg.get("lateral_m")) or 0.0, 2)}
+    v_rel = _num(msg.get("v_rel_mps"))
+    if v_rel is not None:
+        out["v_rel"] = round(v_rel, 1)
+    a = _num(msg.get("a_lead_mps2"))
+    if a is not None:
+        out["a"] = round(a, 1)
+    p = _num(msg.get("prob"))
+    if p is not None:
+        out["prob"] = round(p, 2)
+    out["src"] = "tracked"
+    if msg.get("standing") is True:
+        out["standing"] = True
+    if msg.get("departed") is True:
+        out["departed"] = True
+    for key, src, nd in (("gap", "time_gap_s", 2), ("d_std", "dist_std_m", 2), ("ttc", "ttc_s", 2)):
+        v = _num(msg.get(src))
+        if v is not None:
+            out[key] = round(v, nd)
+    tid = msg.get("track_id")
+    if isinstance(tid, int) and not isinstance(tid, bool):
+        out["id"] = tid
     return out
 
 
@@ -560,6 +600,7 @@ class SceneBuilder:
         self._last_seq: Optional[int] = None
         self._last_pub = -1e9
         self._slow: Dict[str, Tuple[float, Optional[Dict[str, Any]]]] = {}
+        self._lead: Optional[Tuple[float, Optional[Dict[str, Any]], bool]] = None
         self.decode_errors = 0
 
     def feed(self, line: str, now: float) -> None:
@@ -587,6 +628,8 @@ class SceneBuilder:
             self._slow["signs"] = (now, rules_to_scene(msg))
         elif mtype == "fused":
             self._slow["map"] = (now, fused_to_scene(msg))
+        elif mtype == "lead":
+            self._lead = (now, lead_to_scene(msg), msg.get("departed") is True)
         elif mtype == "map":
             self.taint.update(msg)
             self._slow["map_in"] = (now, map_input_to_scene(msg))
@@ -619,6 +662,15 @@ class SceneBuilder:
             return None
         self._last_seq = scene["seq"]
         self._last_pub = now
+        # the tracked lead (roadsense >= 2026-11-15) replaces modeld's leads[0]
+        # while its topic is fresh, including "no lead" (null); an older
+        # roadsense never sends it and the raw leads[0] stays
+        if self._lead is not None and now - self._lead[0] <= self.cfg.lead_max_age_s:
+            scene["lead"] = self._lead[1]
+            scene["lead_src"] = "tracked"
+            if self._lead[1] is None and self._lead[2]:
+                # the lead was lost after it pulled away; the cue outlives it
+                scene["lead_departed"] = True
         ages = {"light": self.cfg.lights_max_age_s, "limit": self.cfg.limit_max_age_s,
                 "env": self.cfg.env_max_age_s, "signs": self.cfg.rules_max_age_s,
                 "map": self.cfg.map_max_age_s, "map_in": self.cfg.map_max_age_s,

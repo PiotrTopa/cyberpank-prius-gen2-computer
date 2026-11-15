@@ -5,8 +5,9 @@ Lead departure (``lead_departure``): the car stands (true speed < 0.5 km/h for
 2 s, READY, gear D/B), a lead was close (<= 10 m) and standing, and it moves
 off while the car still stands -> one notice per stop.
 
-* With roadsense's tracked lead (``fused.lead`` -> scene ``map.lead``; lane in
-  roadsense today) its ``departed`` cue is used: the tracker freezes the gap
+* With roadsense's tracked lead (topic ``lead`` -> scene ``lead`` with
+  ``lead_src: "tracked"``, else its copy ``fused.lead`` -> scene ``map.lead``;
+  a lead lost after pulling away -> scene ``lead_departed``) its ``departed`` cue is used: the tracker freezes the gap
   while both stand and runs a change detector on the lead's speed.
 * Otherwise the vision lead (modeld ``leads[0]``, probability >= 0.6) is used:
   the gap while both stood is the reference; the lead counts as gone when it is
@@ -48,7 +49,7 @@ class StopGoFunction(AlertFunction):
                       description="Car stands behind a standing lead and the lead moves off. Uses "
                                   "roadsense's tracked lead + departed cue when present, else own "
                                   "logic on the vision lead.",
-                      needs=("vehicle.real_speed_kmh", "vehicle.gear", "scene map.lead (tracked) / scene lead")),
+                      needs=("vehicle.real_speed_kmh", "vehicle.gear", "scene lead (tracked, lead_src) / map.lead / scene lead (vision)")),
             AlertSpec(id=GREEN, title="Green light, nothing ahead", text="GREEN LIGHT",
                       severity="info", priority=50, icon="light", sound="soft", clear_after_s=2.0,
                       min_show_s=3.0, max_show_s=5.0, cooldown_s=20.0, gears=DRIVE_GEARS,
@@ -129,7 +130,7 @@ class StopGoFunction(AlertFunction):
             self.green_since = None
         elif (t.green_enabled and st == "green" and self.last_red is not None
               and now - self.last_red <= t.green_after_red_s and standing_s >= t.stopped_min_s
-              and (ld is None or ld.d > t.green_no_lead_m)):
+              and (ld is None or ld.d <= 0.0 or ld.d > t.green_no_lead_m)):   # d 0: departed cue only
             if self.green_since is None:
                 self.green_since = now
             if now - self.green_since >= t.green_hold_s:

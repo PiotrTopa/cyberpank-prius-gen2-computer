@@ -27,6 +27,7 @@ from cyberpunk_computer.backend.roadsense_scene import (
     SceneBuilder,
     SceneFeedConfig,
     env_to_scene,
+    lead_to_scene,
     lights_to_scene,
     limit_to_scene,
     peek_type,
@@ -252,6 +253,54 @@ def rules_msg():
              "category": "warning", "expected_in_m": 140.0}]}
 
 
+LEAD_MSG = {"type": "lead", "seq": 1, "present": True, "mode": "hold", "track_id": 12, "age_s": 31.4,
+            "source": "vision+ego", "dist_m": 3.61, "dist_std_m": 0.62, "dist_filter_std_m": 0.021,
+            "lateral_m": -0.07, "v_rel_mps": 0.0, "v_rel_std_mps": 0.0, "v_lead_mps": 0.0,
+            "a_lead_mps2": 0.0, "time_gap_s": None, "ttc_s": None, "standing": True,
+            "pending_change": False, "prob": 0.99, "departed": False, "departure": None, "event": None,
+            "ego": {"speed_mps": 0.0, "standstill": True, "source": "vehicle"},
+            "vision": {"dist_m": 3.58, "lateral_m": -0.07, "prob": 0.99}}
+
+
+def test_lead_to_scene():
+    assert lead_to_scene(LEAD_MSG) == {"d": 3.6, "y": -0.07, "v_rel": 0.0, "a": 0.0, "prob": 0.99,
+                                       "src": "tracked", "standing": True, "d_std": 0.62, "id": 12}
+    moving = dict(LEAD_MSG, mode="track", standing=False, dist_m=24.3, v_rel_mps=-2.34, a_lead_mps2=-1.04,
+                  time_gap_s=1.62, ttc_s=10.4, prob=None)
+    assert lead_to_scene(moving) == {"d": 24.3, "y": -0.07, "v_rel": -2.3, "a": -1.0, "src": "tracked",
+                                     "gap": 1.62, "d_std": 0.62, "ttc": 10.4, "id": 12}
+    gone = dict(LEAD_MSG, present=False, mode="none", dist_m=None, lateral_m=None, v_rel_mps=None,
+                a_lead_mps2=None, dist_std_m=None, standing=False, departed=True, track_id=None)
+    assert lead_to_scene(gone) is None
+    assert lead_to_scene(dict(LEAD_MSG, departed=True))["departed"] is True
+
+
+def test_builder_prefers_the_tracked_lead_and_falls_back():
+    c = cfg()
+    b = SceneBuilder(c)
+    rl = [ln for ln in load_lines() if peek_type(ln) == "road"]   # warsaw-city frames: raw lead ~95 m
+    # older roadsense: no lead topic -> modeld's leads[0]
+    b.feed(rl[0], 0.0)
+    s = b.build(0.0)
+    raw_d = s["lead"]["d"]
+    assert raw_d > 50 and "lead_src" not in s and "src" not in s["lead"]
+    # the tracker's lead replaces it while fresh
+    b.feed(json.dumps(dict(LEAD_MSG, dist_m=94.2, standing=False)), 0.2)
+    b.feed(rl[1], 0.2)
+    s = b.build(0.2)
+    assert s["lead_src"] == "tracked" and s["lead"]["d"] == 94.2 and s["lead"]["src"] == "tracked"
+    # tracker says no lead: null, not the raw value
+    b.feed(json.dumps(dict(LEAD_MSG, present=False, dist_m=None, departed=True)), 0.4)
+    b.feed(rl[2], 0.4)
+    s = b.build(0.4)
+    assert s["lead"] is None and s["lead_src"] == "tracked" and s["lead_departed"] is True
+    # lead topic stops (older than lead_max_age_s): back to leads[0]
+    b.feed(rl[3], 0.4 + c.lead_max_age_s + 0.1)
+    s = b.build(0.4 + c.lead_max_age_s + 0.1)
+    assert "lead_src" not in s and "lead_departed" not in s
+    assert s["lead"] is None or "src" not in s["lead"]
+
+
 def test_rules_become_the_sign_lists():
     s = rules_to_scene(rules_msg())
     assert [e["id"] for e in s["on"]] == ["built_up_area", "no_stopping", "living_street",
@@ -422,7 +471,7 @@ def test_feed_publishes_while_active_and_reconnects(server):
         assert server.accepted == 0 and not got        # idle: no connection at all
         feed.set_active(True)
         assert wait_for(lambda: len(got) >= 3)
-        assert server.paths[0] == "/ws?topics=road,lights,speed_limit,env,rules,fused,map"
+        assert server.paths[0] == "/ws?topics=road,lights,speed_limit,env,rules,fused,map,lead"
         assert all(set(s) >= {"seq", "lanes", "edges", "lead"} for s in got)
         # roadsense restarts: the stream drops, the feed reconnects on its own
         n = len(got)

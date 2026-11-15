@@ -395,7 +395,7 @@ Every key is optional; a missing key means "not known" and nothing is drawn for 
 
 ### 7.1 Backend feed (`cyberpunk_computer/backend/roadsense_scene.py`)
 
-The backend reads roadsense's WebSocket `ws://127.0.0.1:8090/ws?topics=road,lights,speed_limit,env,rules,fused,map`
+The backend reads roadsense's WebSocket `ws://127.0.0.1:8090/ws?topics=road,lights,speed_limit,env,rules,fused,map,lead`
 (roadsense's own API on loopback, not the backend's `/api/v1/roadsense/ws` front) with a stdlib
 RFC 6455 client in its own thread and publishes `roadsense_scene` on the ZMQ PUB channel only (not
 on the dashboard websocket, whose latest-only queue would let scenes displace state snapshots),
@@ -408,10 +408,13 @@ through a latest-only slot per event name (`ZmqServer.enqueue_latest_event`, com
 | `lanes[i].y` | `road.lane_lines[i].y` at `road.lane_lines[i].x` (33 points, 0..192 m) | linear interpolation at the 11 distances, 0.01 m; null when a needed point is null (invalid model output) |
 | `lanes[i].prob` | `road.lane_lines[i].prob` | 0.01; the whole lane is null below 0.2 (the screen draws from 0.3) |
 | `edges[i].y` | `road.road_edges[i].y` at `.x` | as lanes; no probability in roadsense |
-| `lead.d`, `lead.y` | `road.leads[0].x[0]`, `.y[0]` (the "now" hypothesis; m from the camera, y right) | 0.1 m / 0.01 m |
-| `lead.v_rel` | `road.leads[0].v[0] - road.v_ego` (else `- road.pose.vx`) | 0.1 m/s; both are the model's own estimates, so the car's speed is not mixed in |
-| `lead.a` | `road.leads[0].a[0]` | 0.1 m/s2, the model's estimate; the screen lights the lead's stop lamps at -1.5 or below |
-| `lead.prob` | `road.leads[0].prob` | 0.01; `lead` is null below 0.3 (the screen draws from 0.5) |
+| `lead` (tracked) | roadsense's api-derived topic `lead` (lead tracker, roadsense since 2026-11-15; one message per road frame) while its last message is younger than 0.5 s: `d` = `dist_m`, `y` = `lateral_m`, `v_rel` = `v_rel_mps`, `a` = `a_lead_mps2`, `prob`, `src: "tracked"`; only when set: `standing`, `departed` (true), `gap` = `time_gap_s`, `d_std` = `dist_std_m`, `ttc` = `ttc_s`, `id` = `track_id` | 0.1 m / 0.01 m / 0.1 m/s / 0.1 m/s2 / 0.01; `lead` is **null** when `present` is false (the tracker has no lead), not the raw value; `prob` is left out while the tracker coasts without a frame (the screen then takes 1). In a hold (`standing`) `d` is frozen by the tracker: the 2-3 m flip of the raw value behind a standing car is gone. `v_rel` is the rate of change of the tracked distance with the car's own speed (vehicle motion through mapd's `ego`, else the model's) |
+| `lead_src` | `"tracked"` while the tracked lead is used | left out on the raw path below; the alert functions read it to know that a null `lead` means "no lead" |
+| `lead_departed` | `lead.departed` while `present` is false | true only then: the lead pulled away and was lost while the car stood; the cue outlives the track (up to 8 s in roadsense). For the alerts' lead departure |
+| `lead.d`, `lead.y` (raw, fallback) | `road.leads[0].x[0]`, `.y[0]` (the "now" hypothesis; m from the camera, y right), only while no fresh `lead` message exists (an older roadsense, or its tracker stalled) | 0.1 m / 0.01 m |
+| `lead.v_rel` (raw) | `road.leads[0].v[0] - road.v_ego` (else `- road.pose.vx`) | 0.1 m/s; both are the model's own estimates, so the car's speed is not mixed in |
+| `lead.a` (raw) | `road.leads[0].a[0]` | 0.1 m/s2, the model's estimate; the screen lights the lead's stop lamps at -1.5 or below |
+| `lead.prob` (raw) | `road.leads[0].prob` | 0.01; `lead` is null below 0.3 (the screen draws from 0.5) |
 | `path.y` | `road.plan.y` at `road.plan.x` (33 points along the planned trajectory) | linear interpolation at the 11 distances, cut where the plan ends (short at low speed); left out when the plan is unusable |
 | `lead.kind` | not provided | not sent: the screen draws a car |
 | `objects` | not provided | not sent |
@@ -502,7 +505,7 @@ elements of section 6.5.
 | `ahead` | `fused.ahead` (null without the map) | `pc` = `path_confidence` (at the horizon); the nearest junction (`c` = its confidence), curve (`start_m`, `min_radius_m`, first letter of `direction`), speed-limit change (`src` = `source`, `c` = `confidence`: path up to it x the limit's own) and feature; m rounded. `jn`: up to 6 junctions within 700 m that have a side road which is not a service road, nearest first, as `[m, confidence, code]` with code `j` junction, `r` roundabout, `x` roundabout exit, `d` dead end, `n` no way on |
 | `shape` | mapd `map.ahead.shape` (`s`, `x`, `y`; `map_shape_to_scene`) | the road along the most likely path beyond camera range: every second point (`ds` = 40 m of path) up to 600 m, x forward along the matched bearing, y right, whole metres. Only while `ok` and the `map` topic is fresh. `fused` does not carry the shape, so it is taken from the `map` topic the feed already reads |
 | `pos` | `fused.position.source`, `.hacc_m` | no coordinates are passed on |
-| `lead` | `fused.lead` (roadsense lead tracker: `dist_m`, `lateral_m`, `v_rel_mps`, `v_lead_mps`, `a_lead_mps2`, `time_gap_s`, `ttc_s`, `standing`, `departed`, `mode`, `track_id`) | only when fused carries it; flags only when true. Read by the alert functions (stop-and-go), not drawn |
+| `lead` | `fused.lead` (roadsense lead tracker: `dist_m`, `lateral_m`, `v_rel_mps`, `v_lead_mps`, `a_lead_mps2`, `time_gap_s`, `ttc_s`, `standing`, `departed`, `mode`, `track_id`) | only when fused carries it; flags only when true. Not drawn. The same tracker's value at about 2/s: the alert functions read the top-level scene `lead` first when `lead_src` is `tracked` (section 7.1), this copy only without it, the raw `leads[0]` last |
 | `in` | `map.input.gnss.source`, `.fix`, `.age_s`; `map.input.motion.source`, `.tag` | what mapd hears from the position feeders; `gnss: "synthetic"` marks a synthetic drive. Left out while the `map` topic is stale |
 | `syn` | the backend's `SyntheticTaint` over every `map` message | true from the first message whose `input.gnss.source` is `synthetic` until mapd reports `no_source` / `unknown` or `good` with a non-synthetic fix as the newest; covers the residue after a synthetic drive, when mapd still dead-reckons from the synthetic place while `in.gnss` already says `headunit` (no reset in the position API, [POSITION_FEEDER.md](POSITION_FEEDER.md) 5.1). Kept across WebSocket reconnects, lost on a backend restart |
 

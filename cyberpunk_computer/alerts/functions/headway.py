@@ -45,7 +45,7 @@ class HeadwayFunction(AlertFunction):
                       min_kmh=t.gap_min_kmh, gears=DRIVE_GEARS, advisory=True,
                       description="Time gap to the lead below %.1f s for %.0f s above %.0f km/h."
                                   % (t.gap_s, t.gap_hold_s, t.gap_min_kmh),
-                      needs=("scene lead / map.lead", "vehicle.real_speed_kmh", "dynamics.steering_angle")),
+                      needs=("scene lead (tracked or vision) / map.lead", "vehicle.real_speed_kmh", "dynamics.steering_angle")),
             AlertSpec(id=TTC, title="Distance warning, closing fast (advisory)", text="CLOSING",
                       severity="warning", priority=90, icon="lead", sound="warning",
                       debounce_s=t.ttc_debounce_s, clear_after_s=0.8, min_show_s=2.0, max_show_s=5.0,
@@ -54,7 +54,7 @@ class HeadwayFunction(AlertFunction):
                       description="Time to collision below %.1f s at >= %.0f km/h closing speed; suppressed "
                                   "while braking and in curves. Advisory: the car never brakes."
                                   % (t.ttc_s, t.ttc_closing_kmh),
-                      needs=("scene lead / map.lead (d, v_rel)", "vehicle.real_speed_kmh",
+                      needs=("scene lead (tracked or vision) / map.lead (d, v_rel)", "vehicle.real_speed_kmh",
                              "vehicle.brake_switch / brake_pressed", "dynamics.steering_angle")),
         )
         self.last: Dict[str, object] = {}
@@ -62,6 +62,8 @@ class HeadwayFunction(AlertFunction):
     def _lead_ok(self, inp: AlertInputs, max_y: float):
         ld = inp.lead
         if ld is None or inp.scene_age is None or inp.scene_age > self.t.max_scene_age_s:
+            return None
+        if ld.d <= 0.0:          # the tracker's departed cue without a lead (no distance)
             return None
         if ld.src == "vision" and (ld.prob or 0.0) < self.t.lead_min_prob:
             return None

@@ -136,7 +136,7 @@ null (21C3 not in it).
 | Type | Function file | Kind, severity | Trigger (defaults) | Inputs (verified in code) | Gating / suppression |
 |---|---|---|---|---|---|
 | `speed_limit` | `speed_limit.py` | alert, notice, sound `notice` | true speed > limit + 6 km/h (10 % above 100) for 5 s | `vehicle.real_speed_kmh` (CAN 0x0B4); scene `map.limit` (fused, map usable and not synthetic) else scene `limit` (camera) | ≥ 20 km/h, D/B; weak sources (`map_implicit`, `vision_default`, `default`): +15 km/h for 10 s, conf ≥ 0.6; `conflict` / unknown: never; first 150 m after a change: never; re-arm after 3 s at/below the limit |
-| `lead_departure` | `stop_go.py` | alert, notice | car stands ≥ 2 s behind a standing lead ≤ 10 m that moves off | scene `map.lead` (roadsense tracked lead, `departed` cue) when present, else scene `lead` (prob ≥ 0.6, +3.5 m for 1 s) | READY, D/B, once per stop; a vanishing lead never fires |
+| `lead_departure` | `stop_go.py` | alert, notice | car stands ≥ 2 s behind a standing lead ≤ 10 m that moves off | roadsense's tracked lead (`departed` cue): scene `lead` with `lead_src: "tracked"` (topic `lead`; `lead_departed` when the lead was lost after pulling away), else `map.lead` (its copy in `fused`), else the vision scene `lead` (prob ≥ 0.6, +3.5 m for 1 s) | READY, D/B, once per stop; a vanishing lead never fires |
 | `green_light` | `stop_go.py` | alert, info | ego light red → green while standing, no lead ≤ 15 m for 2 s | scene `light` (`state`, `rel`, `agree`) | **cannot be on** (traffic-light reliability unvalidated) |
 | `headway_coach` | `headway.py` | alert, notice, advisory | time gap < 1.0 s for 5 s | lead `d` (minus 1.8 m camera-to-bumper), true speed, steering | ≥ 50 km/h, lead ≤ 1.3 m lateral, steering ≤ 25°; 2 min cooldown, 6 per drive |
 | `distance_warning` | `headway.py` | alert, warning, advisory | TTC < 2.0 s with ≥ 15 km/h closing | lead `d`, `v_rel`, true speed, brake (`brake_switch` / `brake_pressed`), steering | 30..150 km/h, lead prob ≥ 0.8 (vision), ≤ 1 m lateral, not braking, steering ≤ 25°, scene ≤ 0.6 s old; 10 s cooldown |
@@ -157,8 +157,9 @@ null (21C3 not in it).
 * Speed limit: the fused limit's real accuracy (no GNSS on the car yet; camera engine only); the
   owner's tolerance preference.
 * Lead departure / distance: modeld lead behaviour at a standstill and in cut-ins on this car; the
-  1.8 m camera-to-bumper offset is an estimate; roadsense's tracked lead is in development in its
-  own lane (consumed when `fused.lead` is present).
+  1.8 m camera-to-bumper offset is an estimate; roadsense's tracked lead (topic `lead`, roadsense
+  2026-11-15) is consumed when roadsense sends it (headway reads its distance and closing speed; time gap
+  and TTC are still computed here from the true speed and the camera-to-bumper offset); not checked on the car.
 * Curve and eco: only on the synthetic Opole drive (real mapd): every curve seen there starts at a
   junction, so no curve notice fired; eco targets were too close at the test speed. Needs a GNSS
   source and real drives.

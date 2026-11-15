@@ -457,6 +457,24 @@ def test_build_inputs_lead_tracked_first():
     assert i.lead.src == "vision" and i.lead.prob == 0.9 and not i.lead_tracked_available
 
 
+def test_build_inputs_reads_the_lead_topic_first():
+    # roadsense's lead topic (scene lead + lead_src) beats fused's slower copy in map.lead
+    scene = {"lead": {"d": 5.4, "y": 0.1, "v_rel": 0.0, "a": 0.0, "src": "tracked", "standing": True,
+                      "gap": None, "id": 7},
+             "lead_src": "tracked",
+             "map": {"ok": False, "lead": {"present": True, "d": 6.0, "standing": False}}}
+    i = build_inputs(_state(), scene, 0.1, 10.0, 10.0, {})
+    assert i.lead.src == "tracked" and i.lead.d == 5.4 and i.lead.standing and i.lead.track_id == 7
+    assert i.lead_tracked_available
+    # the tracker has no lead: none, even with a vision-looking value elsewhere
+    gone = dict(scene, lead=None)
+    i = build_inputs(_state(), gone, 0.1, 10.0, 10.0, {})
+    assert i.lead is None and i.lead_tracked_available
+    # lost after pulling away: the departed cue survives without a distance
+    i = build_inputs(_state(), dict(gone, lead_departed=True), 0.1, 10.0, 10.0, {})
+    assert i.lead.departed and i.lead.src == "tracked" and i.lead.d == 0.0
+
+
 def test_build_inputs_on_the_recorded_roadsense_scene():
     """Scenes built by the backend feed from the recorded roadsense messages."""
     import gzip
