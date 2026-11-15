@@ -54,6 +54,23 @@ Every `low` re-arms the full period; `full` cancels both and stops netwatch. A b
 with the flag at `low` also gets the grace. Netwatch is never enabled at boot: an
 always-on netwatch rebooted the phone mid-drive. See [NETWORKING.md](NETWORKING.md).
 
+A `systemctl daemon-reload` re-arms both transient timers to a full period from the
+reload (observed 2026-11-15: suspend and netwatch-arm moved from 17:14:37 to 17:28:04
+by a reload at 17:08:04), so a `provision.sh` run while parked delays the Wi-Fi
+suspend and netwatch by up to 20 min.
+
+**AP lifeline override.** While `prius-lifeline` is ON (hub unreachable over the tunnel,
+[NETWORKING.md](NETWORKING.md#wi-fi-ap-lifeline-prius-lifeline)) the Wi-Fi suspend is a
+no-op and the AP is kept up in either profile; after the uplink has been back for
+`/etc/prius/lifeline-hold` (10 min) `low` suspends Wi-Fi at once if its grace already
+ran out.
+
+AP cost, `powerbox.poco_power_w` (REST, ~2 s samples, parked, `low`, 12.1 V,
+2026-11-15): AP up with no client **0.98 W** (n = 109, sd 0.11) vs Wi-Fi suspended
+**0.65 W** (n = 80, sd 0.10), i.e. **≈ +0.33 W (≈ 28 mA at 12 V, ≈ 0.7 Ah/day)**. With
+one client: not measured (no Wi-Fi client available). The lifeline only holds the AP up
+while the uplink is down (plus the 10 min hold).
+
 ## Display blanking (opt-in)
 
 The phone is headless; the backlight is held at 0 (`backlight-off.service`,
@@ -386,3 +403,5 @@ For heat-management work (fan policy for `low` / `full`, report in
 | Draw saved by `low` never measured. | INA219 A/B, `low` vs `full`, idle. |
 | Whether blanking (opt-in) still saves ~0.19 W on kernel 7.1 without the labibb unbind, and the reboot-hang link. | A/B on the car POCO with `/etc/prius/blank-display`; repeated `systemctl reboot`. |
 | Camera preview downscale time and frame-read cost on the phone. | Measure on the POCO. |
+| AP draw with a client joined; the AP-vs-off 0.33 W (`poco_power_w`) disagrees with the older "Wi-Fi off saved only ~37 mW" (INA219 A/B, Wi-Fi mode then unrecorded). | INA219 A/B: AP idle, AP + one client, radio off. |
+| `daemon-reload` re-arms the key-off Wi-Fi suspend / netwatch-arm transient timers. | Arm them with `--on-calendar` (absolute time) instead of `--on-active`, or re-check after reloads. |

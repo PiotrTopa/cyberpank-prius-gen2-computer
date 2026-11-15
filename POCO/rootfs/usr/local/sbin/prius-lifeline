@@ -1,0 +1,174 @@
+#!/bin/sh
+# prius-lifeline - uplink down => the car's own Wi-Fi AP (`prius`, 10.42.0.1) is up.
+#
+# The phone is normally reached over LTE + WireGuard only. When that uplink is
+# gone (LTE internet dropped, bearer wedged, hub unreachable), the owner must
+# still be able to reach the phone over the car AP. This daemon is the light,
+# always-on half of that: it runs in EVERY power profile (prius-netwatch only
+# runs with the car off) and it never bounces links or reboots; recovery stays
+# with prius-netwatch. Incident 2026-11-15: profile stuck at `full` while parked,
+# netwatch off, LTE internet gone 15:05-16:42 CET, Wi-Fi suspended -> no way in.
+#
+# Detection: every INTERVAL s, ping the WG hub through the tunnel. After
+# /etc/prius/lifeline-fails (default 3, ~1-1.5 min) consecutive failures the
+# lifeline turns ON:
+#   - marker /run/prius-lifeline/active: `prius-wifi suspend` (the key-off Wi-Fi
+#     grace timer) becomes a no-op and `prius-wifi apply` keeps the AP for `off`;
+#   - `prius-wifi lifeline` brings the AP up without touching /etc/prius/wifi-mode,
+#     unless wlan0 is a client that is associated AND holds a default route
+#     (bench client mode is left alone then). Re-asserted on every check.
+# Release: once the hub has answered without a miss for /etc/prius/lifeline-hold
+# (default 10min), the normal policy returns: `low` -> Wi-Fi suspended right away
+# if its key-off grace already ran out (a still-pending grace timer is left to
+# fire), `full` -> `prius-wifi apply` (the flag's mode, e.g. back to client).
+# State lives in /run (tmpfs): after a reboot without uplink the lifeline turns
+# ON again within the detection time, and prius-wifi.service already brings the
+# AP up at boot (flag `ap`), so the AP stays up across netwatch's reboot.
+#
+# Test hook (never touches the real uplink): `prius-lifeline simulate-down <s>`
+# makes the check fail until a deadline (max 1800 s, kept in /run).
+set -u
+
+ETC=${PRIUS_ETC:-/etc/prius}
+RUN=${LIFELINE_RUN:-/run/prius-lifeline}
+WIFI=${PRIUS_WIFI:-/usr/local/sbin/prius-wifi}
+PEER_IP=${LIFELINE_PEER:-10.200.0.1}   # WG hub, reachable only through tunnel + WAN
+INTERVAL=${LIFELINE_INTERVAL:-30}
+SUSPEND_UNIT=prius-wifi-suspend         # transient timer armed by `prius-power low`
+AP_CON=prius-ap
+CLIENT_CON=prius-home-wifi
+DEF_FAILS=3
+DEF_HOLD=600
+
+log() { echo "prius-lifeline: $*"; }
+now() { echo "${LIFELINE_NOW:-$(date +%s)}"; }
+rd() { [ -r "$1" ] && tr -d ' \t\n' < "$1" 2>/dev/null || true; }
+put() { echo "$2" > "$RUN/$1"; }
+get() { v=$(rd "$RUN/$1"); echo "${v:-$2}"; }
+isnum() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; return 0; }
+
+# systemd-ish span -> seconds: 600, 90s, 10min, 10m, 1h. Bad -> default.
+span_s() {
+    v=$1
+    case "$v" in
+        *min) n=${v%min}; m=60 ;;
+        *h)   n=${v%h};   m=3600 ;;
+        *m)   n=${v%m};   m=60 ;;
+        *s)   n=${v%s};   m=1 ;;
+        *)    n=$v;       m=1 ;;
+    esac
+    if isnum "$n"; then echo $((n * m)); else echo "$2"; fi
+}
+fails_needed() { v=$(rd "$ETC/lifeline-fails"); isnum "$v" && [ "$v" -ge 1 ] && echo "$v" || echo "$DEF_FAILS"; }
+hold_s() { span_s "$(rd "$ETC/lifeline-hold")" "$DEF_HOLD"; }
+
+simulated_down() {
+    d=$(get simulate-down "")
+    [ -n "$d" ] || return 1
+    isnum "$d" && [ "$(now)" -lt "$d" ] && return 0
+    rm -f "$RUN/simulate-down"; return 1
+}
+uplink_ok() {
+    simulated_down && return 1
+    ping -c 2 -W 3 "$PEER_IP" >/dev/null 2>&1
+}
+
+active_wifi() {
+    timeout 10 nmcli -t -f NAME,TYPE con show --active 2>/dev/null \
+        | awk -F: '$2=="802-11-wireless"{print $1; exit}'
+}
+client_has_route() { [ -n "$(ip route show default dev wlan0 2>/dev/null)" ]; }
+
+# AP up unless a usable client link is there; returns quietly when already fine.
+ensure_ap() {
+    aw=$(active_wifi)
+    [ "$aw" = "$AP_CON" ] && return 0
+    if [ "$aw" = "$CLIENT_CON" ] && client_has_route; then
+        [ "$(get client-kept 0)" = 1 ] || log "wlan0 is an associated client with a route; client mode left alone"
+        put client-kept 1
+        return 0
+    fi
+    put client-kept 0
+    log "bringing up the car AP ($AP_CON, 10.42.0.1) [was: ${aw:-none}]"
+    timeout -k 5 120 "$WIFI" lifeline || log "prius-wifi lifeline failed (rc $?); retry next check"
+}
+
+release() {
+    rm -f "$RUN/active" "$RUN/client-kept"
+    pm=$(rd "$ETC/power-mode")
+    if [ "$pm" = low ]; then
+        if systemctl is-active --quiet "$SUSPEND_UNIT.timer" 2>/dev/null; then
+            log "lifeline OFF: uplink back for $(hold_s)s; key-off Wi-Fi grace still pending, left to fire"
+        else
+            log "lifeline OFF: uplink back for $(hold_s)s; profile low, grace over -> Wi-Fi suspend"
+            timeout -k 5 120 "$WIFI" suspend || log "prius-wifi suspend failed (rc $?)"
+        fi
+    else
+        log "lifeline OFF: uplink back for $(hold_s)s; profile ${pm:-?} -> prius-wifi apply"
+        timeout -k 5 120 "$WIFI" apply || log "prius-wifi apply failed (rc $?)"
+    fi
+}
+
+tick() {
+    mkdir -p "$RUN"
+    t=$(now)
+    if uplink_ok; then
+        f=$(get fails 0); put fails 0
+        s=$(get ok-since "")
+        [ -n "$s" ] || { s=$t; put ok-since "$t"; }
+        if [ -e "$RUN/active" ]; then
+            [ "$f" -gt 0 ] && log "uplink back ($PEER_IP answers); holding the AP for $(hold_s)s"
+            if [ $((t - s)) -ge "$(hold_s)" ]; then release; else ensure_ap; fi
+        elif [ "$f" -gt 0 ]; then
+            log "uplink OK again after $f failed check(s)"
+        fi
+        return 0
+    fi
+    rm -f "$RUN/ok-since"
+    f=$(get fails 0); isnum "$f" || f=0; f=$((f + 1)); put fails "$f"
+    n=$(fails_needed)
+    if [ -e "$RUN/active" ]; then
+        [ "$f" = 1 ] && log "uplink lost again during the hold; lifeline stays ON"
+        ensure_ap
+    elif [ "$f" -ge "$n" ]; then
+        put active "$t"
+        log "lifeline ON: $PEER_IP unreachable for $f checks; Wi-Fi suspend blocked, AP kept up"
+        ensure_ap
+    else
+        log "$PEER_IP unreachable ($f/$n)"
+    fi
+}
+
+status() {
+    if [ -e "$RUN/active" ]; then
+        a=$(get active 0); echo "lifeline   : ON since $(date -d "@$a" '+%F %T %Z' 2>/dev/null || echo "$a")"
+        s=$(get ok-since "")
+        [ -n "$s" ] && echo "release    : uplink OK for $(( $(now) - s ))s of $(hold_s)s hold"
+    else
+        echo "lifeline   : off"
+    fi
+    echo "fail count : $(get fails 0) (ON at $(fails_needed)), check every ${INTERVAL}s"
+    d=$(get simulate-down ""); [ -n "$d" ] && simulated_down && echo "simulation : uplink forced DOWN for $((d - $(now)))s more"
+    if uplink_ok; then echo "uplink     : OK ($PEER_IP reachable)"; else echo "uplink     : DOWN ($PEER_IP unreachable)"; fi
+    echo "power-mode : $(rd "$ETC/power-mode")   wifi-mode: $(rd "$ETC/wifi-mode")"
+    echo "wifi       : radio $(nmcli radio wifi 2>/dev/null), active con $(active_wifi || true)"
+    echo "wlan0      : $(nmcli -t -f GENERAL.STATE dev show wlan0 2>/dev/null | cut -d: -f2) $(ip -4 -o addr show dev wlan0 2>/dev/null | awk '{print $4}')"
+    systemctl is-active --quiet "$SUSPEND_UNIT.timer" 2>/dev/null && echo "suspend    : key-off grace timer pending"
+    return 0
+}
+
+case "${1:-status}" in
+    run)
+        log "started (peer $PEER_IP, every ${INTERVAL}s, ON after $(fails_needed) misses, hold $(hold_s)s)"
+        while :; do tick; sleep "$INTERVAL"; done ;;
+    tick) tick ;;
+    status) status ;;
+    state) [ -e "$RUN/active" ] && echo on || echo off ;;
+    simulate-down)
+        s=${2:-}; isnum "$s" && [ "$s" -ge 1 ] && [ "$s" -le 1800 ] \
+            || { echo "usage: prius-lifeline simulate-down <1..1800 s>" >&2; exit 2; }
+        mkdir -p "$RUN"; put simulate-down $(( $(now) + s ))
+        log "TEST: uplink check forced DOWN for ${s}s (real links untouched)" ;;
+    simulate-clear) rm -f "$RUN/simulate-down"; log "TEST: simulation cleared" ;;
+    *) echo "usage: prius-lifeline {run|tick|status|state|simulate-down <s>|simulate-clear}" >&2; exit 2 ;;
+esac

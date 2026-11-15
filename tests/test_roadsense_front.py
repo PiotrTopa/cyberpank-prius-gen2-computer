@@ -410,7 +410,7 @@ def test_backend_core_survives_low_profile_and_is_exclusive():
 
 
 def test_helpers_in_prius_slice():
-    for svc in ("prius-power", "prius-netwatch", "prius-clock-fallback", "prius-wifi",
+    for svc in ("prius-power", "prius-netwatch", "prius-clock-fallback", "prius-wifi", "prius-lifeline",
                 "prius-sim-unlock"):
         assert _unit("etc/systemd/system/%s.service" % svc).get("Slice") == "prius.slice", svc
 

@@ -45,6 +45,7 @@ is_noncore() {
         etc/NetworkManager/*|etc/resolv.conf|etc/prius/sim-pin) return 0 ;;
         etc/systemd/system/prius-sim-unlock.service|usr/local/sbin/prius-sim-unlock) return 0 ;;
         etc/systemd/system/prius-wifi.*|etc/systemd/system/prius-clock-fallback.*) return 0 ;;
+        etc/systemd/system/prius-lifeline.*|usr/local/sbin/prius-lifeline) return 0 ;;
         etc/systemd/system/prius-blank.service|etc/systemd/system/backlight-off.service) return 0 ;;
         usr/local/sbin/prius-wifi|usr/local/sbin/prius-clock-fallback|usr/local/sbin/prius-blankd) return 0 ;;
     esac
@@ -94,7 +95,8 @@ done
 
 # --- 3. seed flag files (create-if-missing; never clobber live state) ---------
 mkdir -p /etc/prius
-for kv in power-mode:full wifi-mode:ap usb-mode:host wifi-grace:20min netwatch-grace:20min; do
+for kv in power-mode:full wifi-mode:ap usb-mode:host wifi-grace:20min netwatch-grace:20min \
+          lifeline-hold:10min lifeline-fails:3; do
     k=${kv%%:*}; v=${kv#*:}
     if [ ! -f "/etc/prius/$k" ]; then
         echo "$v" > "/etc/prius/$k"
@@ -223,7 +225,7 @@ if [ "$CORE" = 1 ]; then
 else
     UNITS="prius-power.service prius-power.path prius-wifi.service prius-wifi.path \
            prius-backend.service prius-bled.service backlight-off.service \
-           prius-clock-fallback.timer prius-sim-unlock.service"
+           prius-clock-fallback.timer prius-sim-unlock.service prius-lifeline.service"
     PATHS="prius-power.path prius-wifi.path prius-clock-fallback.timer"
 fi
 # netwatch is owned by prius-power (ACC off + grace); never enabled at boot.
@@ -233,6 +235,9 @@ for u in $UNITS; do
 done
 # shellcheck disable=SC2086
 systemctl start $PATHS >/dev/null 2>&1 || true
+# prius-lifeline (uplink down => car AP up) is always on, not owned by prius-power;
+# restart so a running loop picks up a new script.
+[ "$CORE" = 1 ] || systemctl restart prius-lifeline.service >/dev/null 2>&1 || log "  (prius-lifeline start skipped)"
 
 if [ "$CORE" = 0 ] && command -v nmcli >/dev/null 2>&1; then
     log "reloading NetworkManager connections"

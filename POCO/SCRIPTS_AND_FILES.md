@@ -13,6 +13,8 @@ and installed with `sync.sh` / `provision.sh` ([PROVISIONING.md](PROVISIONING.md
 | `usb-mode` | `host` \| `device` | `host` | `prius-usb` |
 | `wifi-grace` | systemd time span | `20min` | `prius-power` (Wi-Fi suspend after key-off) |
 | `netwatch-grace` | systemd time span | `20min` | `prius-power` (netwatch arm after key-off) |
+| `lifeline-fails` | integer ≥ 1 | `3` | `prius-lifeline` (misses at 30 s before the AP lifeline turns ON) |
+| `lifeline-hold` | span (`600`, `90s`, `10min`, `1h`) | `10min` | `prius-lifeline` (uplink back this long → lifeline OFF) |
 | `blank-display` | presence | absent | `prius-power` (opt-in DSI blanking) |
 | `sim-pin` | PIN (root-only) | rendered from `secrets.env` | `prius-sim-unlock` |
 | `backend.env` | `BACKEND_*` env | seeded by `provision.sh` | `prius-backend` |
@@ -26,7 +28,8 @@ and installed with `sync.sh` / `provision.sh` ([PROVISIONING.md](PROVISIONING.md
 | `prius-backend` | `ensure-venv` \| `run` \| `status` | backend venv + launcher (`prius-backend.service`); config `/etc/prius/backend.env` |
 | `prius-power` | `low` \| `full` \| `apply` \| `status` | CPU profiles, key-off timers, opt-in blanking ([POWER.md](POWER.md)) |
 | `prius-blankd` | daemon | DRM modeset-off of the DSI pipeline (`prius-blank.service`) |
-| `prius-wifi` | `client` \| `ap` \| `off` \| `apply` \| `suspend` \| `resume` \| `status` | Wi-Fi modes; `suspend`/`resume` leave the flag; never touches WAN/VPN |
+| `prius-wifi` | `client` \| `ap` \| `off` \| `apply` \| `suspend` \| `resume` \| `lifeline` \| `status` | Wi-Fi modes; `suspend`/`resume`/`lifeline` leave the flag; while the lifeline is ON `suspend` is a no-op and `off` keeps the AP; never touches WAN/VPN |
+| `prius-lifeline` | `run` \| `tick` \| `status` \| `state` \| `simulate-down <s>` \| `simulate-clear` | AP lifeline: hub unreachable 3 checks → car AP up until the uplink has been back 10 min; never bounces links ([NETWORKING.md](NETWORKING.md#wi-fi-ap-lifeline-prius-lifeline)); state `/run/prius-lifeline/` |
 | `prius-netwatch` | `once` \| `status` \| `check` | VPN-over-SIM watchdog, ACC-off only ([NETWORKING.md](NETWORKING.md)) |
 | `prius-sim-unlock` | — | one-shot QMI PIN1 verify per boot |
 | `prius-clock-fallback` | — | HTTPS `Date` clock step while NTP is unsynchronized; touches `/run/prius-clock-synced` |
@@ -51,6 +54,7 @@ and installed with `sync.sh` / `provision.sh` ([PROVISIONING.md](PROVISIONING.md
 | `prius-blank.service` | simple | no | `prius-blankd`; started by `prius-power` only with `blank-display` |
 | `prius-wifi.service` / `.path` | oneshot / path | yes | apply `wifi-mode` at boot and on change |
 | `prius-netwatch.service` / `.timer` | oneshot / timer | **never** | timer started by `prius-power` 20 min after key-off, stopped at key-on |
+| `prius-lifeline.service` | simple (loop, `Restart=always`) | yes | uplink down ⇒ car AP up, every profile |
 | `prius-sim-unlock.service` | oneshot | yes | SIM PIN over QMI |
 | `prius-clock-fallback.service` / `.timer` | oneshot / timer | timer yes | 2 min after boot, every 5 min |
 | `prius-bled.service` | simple | yes | BLE satellites |
@@ -89,5 +93,6 @@ and installed with `sync.sh` / `provision.sh` ([PROVISIONING.md](PROVISIONING.md
 systemctl list-unit-files | grep -E 'prius|backlight-off|roadsense'
 cat /etc/prius/power-mode /etc/prius/wifi-mode /etc/prius/usb-mode
 sudo prius-power status; sudo prius-wifi status; sudo prius-usb status; sudo prius-netwatch status
+prius-lifeline status; journalctl -u prius-lifeline -n 20
 nmcli -t -f NAME,DEVICE,STATE c show; sudo wg show wg-homelab; mmcli -m any
 ```

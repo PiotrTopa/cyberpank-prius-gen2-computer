@@ -1,0 +1,17 @@
+[Unit]
+Description=Prius Wi-Fi AP lifeline (uplink down => car AP up, every power profile)
+After=NetworkManager.service prius-wifi.service
+Wants=NetworkManager.service
+
+[Service]
+# small helper: runs with the backend on its dedicated core
+Slice=prius.slice
+Type=simple
+ExecStart=/usr/local/sbin/prius-lifeline run
+# Never bounces links or reboots (that is prius-netwatch); a crash just restarts
+# the loop. State is in /run/prius-lifeline and survives a restart.
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

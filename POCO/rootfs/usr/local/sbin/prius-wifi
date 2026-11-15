@@ -3,6 +3,8 @@
 # Invariants: NEVER touch the SIM WAN (prius-wan) or WireGuard (wg-homelab);
 # those stay up so SSH-over-cellular + VPN always survive a wifi switch.
 # Modes (flag /etc/prius/wifi-mode): client | ap | off
+# Lifeline (prius-lifeline, uplink down): `suspend` is a no-op, `off` keeps the
+# AP, and `lifeline` brings the AP up without rewriting the flag.
 # The power profile (prius-power) does NOT rewrite the flag: `suspend` turns the
 # radio off for the key-off `low` profile, `resume` re-applies the flag for
 # `full`. Every verb is idempotent (an already-active mode is left alone) and
@@ -10,10 +12,13 @@
 # `prius-wifi apply` on every flag write — two concurrent activations of the
 # AP used to race ("base network connection was interrupted", 2026-11-04).
 set -eu
-FLAG=/etc/prius/wifi-mode
+FLAG=${PRIUS_WIFI_FLAG:-/etc/prius/wifi-mode}   # env overrides: tests only
 CLIENT_CON=prius-home-wifi
 AP_CON=prius-ap
-LOCK=/run/lock/prius-wifi.lock
+LOCK=${PRIUS_WIFI_LOCK:-/run/lock/prius-wifi.lock}
+# prius-lifeline marker: uplink (LTE/WireGuard) is down, the car AP must stay up.
+LIFELINE=${LIFELINE_RUN:-/run/prius-lifeline}/active
+lifeline_on() { [ -e "$LIFELINE" ]; }
 
 read_flag() { [ -r "$FLAG" ] && tr -d ' \t\n' < "$FLAG" || echo off; }
 active_wifi() {
@@ -44,12 +49,19 @@ apply() {
   case "$(read_flag)" in
     client) set_client ;;
     ap)     set_ap ;;
-    off|*)  set_off ;;
+    off|*)
+      if lifeline_on; then
+        echo "prius-wifi: flag off, but the lifeline is ON (uplink down): keeping the AP" >&2
+        set_ap
+      else
+        set_off
+      fi ;;
   esac
 }
 
 status() {
   echo "wifi-mode flag : $(read_flag)"
+  echo "lifeline       : $(lifeline_on && echo 'ON (uplink down: AP kept up, suspend blocked)' || echo off)"
   echo "radio          : $(nmcli radio wifi 2>/dev/null)"
   echo "wlan0          : $(nmcli -t -f GENERAL.STATE dev show wlan0 2>/dev/null | cut -d: -f2)"
   echo "wlan0 ip       : $(nmcli -t -f IP4.ADDRESS dev show wlan0 2>/dev/null | cut -d: -f2 | head -1)"
@@ -65,8 +77,8 @@ write_flag() { [ "$(read_flag)" = "$1" ] && return 0; echo "$1" | tee "$FLAG" >/
 verb="${1:-status}"
 case "$verb" in
   status) status; exit 0 ;;
-  client|ap|off|apply|suspend|resume) ;;
-  *) echo "usage: prius-wifi {client|ap|off|apply|suspend|resume|status}" >&2; exit 2 ;;
+  client|ap|off|apply|suspend|resume|lifeline) ;;
+  *) echo "usage: prius-wifi {client|ap|off|apply|suspend|resume|lifeline|status}" >&2; exit 2 ;;
 esac
 
 # Serialise with the path-unit re-run (and with prius-power).
@@ -80,5 +92,11 @@ case "$verb" in
   ap)     write_flag ap;     apply ;;
   off)    write_flag off;    apply ;;
   apply|resume) apply ;;        # resume: power profile 'full' -> whatever the flag says
-  suspend) set_off ;;           # power profile 'low': radio off, flag untouched
+  suspend)                      # power profile 'low': radio off, flag untouched
+    if lifeline_on; then
+      echo "prius-wifi: suspend skipped: lifeline ON (uplink down), the AP stays up"
+    else
+      set_off
+    fi ;;
+  lifeline) set_ap ;;           # prius-lifeline: AP up, flag untouched
 esac

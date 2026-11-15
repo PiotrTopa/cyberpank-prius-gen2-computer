@@ -126,6 +126,48 @@ backend's SNTP server for the MFD Pi (UDP 123 on `usb0`, `backend/ntp_server.py`
   three modes).
 - AP PSK: generated on the device; `nmcli -s -t -f 802-11-wireless-security.psk con show prius-ap`.
 
+## Wi-Fi AP lifeline (`prius-lifeline`)
+
+Rule: **uplink down ⇒ car AP up**, in every power profile and regardless of the key-off
+Wi-Fi suspend, so the phone is always reachable over the `prius` Wi-Fi at `10.42.0.1`
+(ssh 22; 8080 with a pairing link for `--host 10.42.0.1`, [docs/AUTH.md](../docs/AUTH.md)).
+Added after 2026-11-15: the profile was stuck at `full` while parked (netwatch off), LTE
+internet dropped at 15:05 CET, Wi-Fi was suspended, and the phone was unreachable until a
+manual reboot at 16:42.
+
+`prius-lifeline.service` (enabled, `Type=simple`, `Restart=always`, `prius.slice`) runs
+a loop every 30 s, independent of `prius-power` and of the netwatch ladder:
+
+| Step | Condition | Action |
+|---|---|---|
+| check | `ping -c 2 -W 3 10.200.0.1` (hub through the tunnel) | — |
+| ON | `/etc/prius/lifeline-fails` (default `3`) consecutive misses, i.e. 60–90 s after the loss | marker `/run/prius-lifeline/active`; `prius-wifi lifeline` (radio on, `prius-ap` up, `wifi-mode` flag untouched); journal line `lifeline ON` |
+| while ON | every check | AP re-asserted if anything took it down; `prius-wifi suspend` is a no-op (journal `suspend skipped`), `prius-wifi apply` with flag `off` keeps the AP |
+| hold | hub answers again | journal `uplink back … holding`; one miss restarts the hold |
+| OFF | hub answered without a miss for `/etc/prius/lifeline-hold` (default `10min`) | marker removed; `low`: Wi-Fi suspended now if the key-off grace already ran out (a still-pending grace timer is left to fire), `full`: `prius-wifi apply` (flag mode); journal `lifeline OFF` |
+
+- It never bounces links or reboots; recovery stays with `prius-netwatch` (unchanged). The
+  lifeline's ON comes before netwatch's first WireGuard bounce (2 misses at 60 s).
+- Client mode (`wifi-mode` = `client`): an associated `prius-home-wifi` that holds a
+  default route on `wlan0` is left alone (bench use unchanged); a client without a route,
+  or a radio that is off, is switched to the AP for the lifeline. The flag is never
+  rewritten, so OFF in `full` returns to client mode. Flag `off` is overridden while ON.
+- Reboot (e.g. netwatch's last resort): state is in `/run` (tmpfs), the AP comes up at boot
+  through `prius-wifi.service` (flag `ap`), and with the uplink still down the lifeline turns
+  ON again 60–90 s after the service starts, before the key-off grace (20 min) can
+  suspend Wi-Fi.
+- A hub outage (home internet down) with LTE fine also turns the AP on: harmless, costs
+  the AP's draw ([POWER.md](POWER.md#key-off-timers-owned-by-prius-power)).
+- `prius-lifeline status` (state, fail count, hold progress, uplink, Wi-Fi);
+  `prius-lifeline state` prints `on|off`; `prius-wifi status` shows the lifeline line too.
+- Test hook (real links untouched): `sudo prius-lifeline simulate-down <1..1800 s>` makes
+  the check fail until a deadline kept in `/run/prius-lifeline/simulate-down`;
+  `simulate-clear` ends it.
+- Installed by `provision.sh` with the car network layer (not with `--core`); `provision.sh`
+  seeds `lifeline-hold` / `lifeline-fails` and restarts the service.
+- AP up is verified from the phone side only (NM `prius-ap` state 100, `10.42.0.1/24`,
+  `wpa_cli -i wlan0 status` mode=AP); no client has joined it in a lifeline test yet.
+
 ## Firewall
 
 pmOS loads nftables with input policy drop. `/etc/nftables.d/50_prius_backend.nft`
@@ -158,4 +200,5 @@ WireGuard over LTE.
 |---|---|
 | Identity of the car POCO. `secrets.env.example`, `ARCHITECTURE` and `scripts/diag_cli.py` use `10.200.0.14` (and `sync.sh` calls `10.200.0.5` "the old car POCO"), but `sync.sh` still defaults `PHONE=user@10.200.0.5` and `WG_ADDRESS=10.200.0.5/32`; `PROVISIONING.md` calls the `192.168.0.86` phone (sudo with password) the bench POCO while `sync.sh` calls it the car POCO. Hostname and sudo mode of the current car phone are therefore unconfirmed. | `ssh` to 10.200.0.14: `hostname`, `sudo -n true`, `wg show`; then fix the `sync.sh` defaults. |
 | Public key of the current car POCO's tunnel. | `sudo wg show wg-homelab public-key`. |
-| A wedged bearer with the key on is not auto-healed (netwatch is ACC-off only). | Decide on an ACC-on recovery tier that cannot reboot mid-drive. |
+| A wedged bearer with the key on is not auto-healed (netwatch is ACC-off only); the AP lifeline makes the phone reachable over the `prius` Wi-Fi meanwhile. | Decide on an ACC-on recovery tier that cannot reboot mid-drive. |
+| A client joining the AP while the lifeline is ON (DHCP lease, ssh to `10.42.0.1`) has not been tested. | Join `prius` from a phone/laptop during `prius-lifeline simulate-down 300`. |
