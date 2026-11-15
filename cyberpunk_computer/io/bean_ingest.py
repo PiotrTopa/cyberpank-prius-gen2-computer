@@ -23,6 +23,12 @@ state (docs/BEAN_SIGNALS.md §4, survey 2026-11-14):
   62:20 per-injection word to the ingress fuel-flow computation;
 * raw 62:C8 (cruise, no known bit meanings) is recorded on every change
   (:class:`CruiseRawLog`) so the next drive with cruise in use yields data.
+
+Freshness is judged on the frame's true time, not its arrival: a frame is
+offered to the arbiter as seen at ``now - age`` (age = wall receive time -
+frame ``ts``, i.e. firmware batching + link latency, ~0.1-0.5 s measured on
+the 2026-11-13 drive), and an arbitrated value older than
+:data:`MAX_FRAME_AGE_S` is not dispatched (the next source takes over).
 """
 
 from __future__ import annotations
@@ -91,6 +97,10 @@ DISPLAY_SPEED_STALE_S = 3.0
 #: instantaneous consumption is unknown (None) and ours is shown instead.
 METER_CONSUMPTION_STALE_S = 3.0
 
+#: Arbitrated BEAN values older than this (frame ``ts`` vs now) are not
+#: dispatched: a better-than-nothing source must also be current.
+MAX_FRAME_AGE_S = 2.0
+
 
 class CruiseRawLog:
     """Raw cruise-control frames, recorded on change (PLACEHOLDER decode).
@@ -121,8 +131,10 @@ class BeanIngest:
     def __init__(self, sources: SourceArbiter, cruise_log: Optional[CruiseRawLog] = None,
                  clock: Callable[[], float] = time.monotonic,
                  engine_gate: Optional[Any] = None,
-                 fuel_word_sink: Optional[Callable[[int], List[Action]]] = None) -> None:
+                 fuel_word_sink: Optional[Callable[[int], List[Action]]] = None,
+                 wall: Callable[[], float] = time.time) -> None:
         self.sources = sources
+        self._wall = wall
         self.cruise = cruise_log or CruiseRawLog()
         self._clock = clock
         self.engine_gate = engine_gate
@@ -141,7 +153,8 @@ class BeanIngest:
 
     def process(self, frames: List[dict]) -> List[Action]:
         """CRC-good, not-our-own frames of one BEAN line -> actions."""
-        now = self._clock()
+        mono = self._clock()
+        wall = self._wall()
         vehicle: Dict[str, Any] = {}
         climate: Dict[str, Any] = {}
         dynamics: Dict[str, Any] = {}
@@ -150,6 +163,10 @@ class BeanIngest:
         for f in frames:
             if not f.get("ok") or f.get("own"):
                 continue
+            ts = f.get("ts")
+            age = max(0.0, wall - ts) if isinstance(ts, (int, float)) else 0.0
+            now = mono - age               # the frame's time on the monotonic clock
+            current = age <= MAX_FRAME_AGE_S
             self.frames += 1
             dst, mes, data = f.get("dst", ""), f.get("mes", ""), f.get("data", "")
             v = decode_known(mes, data, dst)
@@ -179,34 +196,34 @@ class BeanIngest:
 
             # ── arbitrated signals (always dispatched when BEAN is the
             #    active source, so a hand-over from a stale source lands) ──
-            if "engine_rpm" in v and self.sources.offer("rpm", SRC, now):
+            if "engine_rpm" in v and current and self.sources.offer("rpm", SRC, now):
                 out.append(SetRPMAction(int(v["engine_rpm"]), ActionSource.GATEWAY))
                 if gate is not None:
                     gate.observe_rpm(v["engine_rpm"], now)
-            if "coolant_c" in v and self.sources.offer("coolant", SRC, now):
+            if "coolant_c" in v and current and self.sources.offer("coolant", SRC, now):
                 # the 16 °C floor (raw 0x20) is not offered: not a measurement
                 out.append(SetICECoolantTempAction(v["coolant_c"], ActionSource.GATEWAY))
-            if "outside_temp_c" in v and self.sources.offer("outside_temp", SRC, now):
+            if "outside_temp_c" in v and current and self.sources.offer("outside_temp", SRC, now):
                 out.append(SetOutsideTempAction(float(v["outside_temp_c"]), ActionSource.GATEWAY))
-            if v.get("shift") in GEAR_MAP and self.sources.offer("gear", SRC, now):
+            if v.get("shift") in GEAR_MAP and current and self.sources.offer("gear", SRC, now):
                 out.append(SetGearAction(GEAR_MAP[v["shift"]], ActionSource.GATEWAY))
-            if "lamp_tail" in v and "door_open" in v and self.sources.offer("lights", SRC, now):
+            if "lamp_tail" in v and "door_open" in v and current and self.sources.offer("lights", SRC, now):
                 raw = int(data[:2], 16)
                 out.append(SetHeadlightStatusAction(
                     headlight_state=headlight_state(raw),
                     parking_lights=v["lamp_tail"], low_beam=v["lamp_head"],
                     high_beam=v["lamp_high_beam"], fog_front=v["lamp_fog_front"],
                     door_open=v["door_open"], source=ActionSource.GATEWAY))
-            if "soc_bars" in v and self.sources.offer("soc_bars", SRC, now):
+            if "soc_bars" in v and current and self.sources.offer("soc_bars", SRC, now):
                 dynamics["soc_bars"] = v["soc_bars"]
-            if "climate_fan" in v and self.sources.offer("climate", SRC, now):
+            if "climate_fan" in v and current and self.sources.offer("climate", SRC, now):
                 out.append(SetAvcClimateAction(
                     fan_speed=v["climate_fan"], ac_on=v["climate_ac"],
                     auto_mode=v["climate_auto"], recirculation=v["climate_recirc"],
                     fresh_air=v["climate_fresh_air"], defrost=v["climate_front_defrost"],
                     rear_defogger=v["climate_rear_defogger"], air_direction=v["climate_vent"],
                     system_on=v["climate_on"], status_source=SRC))
-            if "climate_target_raw" in v and self.sources.offer("climate", SRC, now):
+            if "climate_target_raw" in v and current and self.sources.offer("climate", SRC, now):
                 t = v["climate_target_c"]
                 out.append(SetAvcClimateAction(system_on=False, status_source=SRC) if t is None
                            else SetAvcClimateAction(target_temp=t, status_source=SRC))

@@ -16,12 +16,16 @@ after MES that arrived (it may include the CRC byte). An 8th element 1 (fw >=
 powerbox's own transmitter (``"own": True`` in the frame dict); such frames
 stay in the frame ring and the capture log but not in the message table.
 
-Frame clock (2026-11-14 survey): on fw 2.4.0 the frame ``t_ms`` is NOT on the
-``ticks_ms`` time base of ``t``: it runs ~236.7 s ahead and ~380 ppm slow, so
-``t - t_ms`` is negative and useless. :class:`BeanClock` maps ``t_ms`` onto
-the receive clock with a drift-tracking lower-envelope estimate of
-``recv_ts - t_ms`` instead (no firmware change needed); the ``t`` based age is
-still used whenever it is plausible (a firmware that fixes the clock).
+Frame clock: fw <= 2.4.0 accumulated the frame clock from decoded run
+lengths, which lost the length of every bus sleep longer than ~9 min (an
+OverflowError at the first edge after it, see powerbox/README.md) and 0.5 us
+per dominant run. Its ``t_ms`` therefore jumps by an arbitrary amount
+(mod 2^30 us) at a wake-up and runs slow while the bus is busy; on the
+2026-11-13 drive it was 236.4 s ahead of ``t``. fw >= 2.4.1 anchors frame
+times to the edge stamps, so ``t - t_ms`` is the frame's real age (well
+under a second) and :func:`frame_from_wire` uses it directly. For older
+firmware :class:`BeanClock` maps ``t_ms`` onto the monotonic receive clock
+with a drift-tracking lower-envelope estimate of ``recv - t_ms``.
 
 Known IDs (:func:`decode_known`), per docs/BEAN_SIGNALS.md §4 (ID map;
 survey 2026-11-14). Keys starting with ``prov_`` are PROBABLE decodes
@@ -40,25 +44,33 @@ TICKS_PERIOD_MS = 1 << 30
 MAX_MESSAGES = 256            # message-table cap (oldest-seen dropped beyond)
 
 #: An age from the firmware's line time ``t`` is trusted only in this range
-#: (seconds). fw 2.4.0's frame clock is ~236 s ahead of ``t``, so the age
-#: there is "negative" (wraps to ~12 days) and the estimator takes over.
+#: (seconds). A pre-2.4.1 frame clock can be minutes off ``t`` (the age then
+#: wraps to ~12 days) and the estimator takes over.
 MAX_LINE_AGE_S = 5.0
 
 
 class BeanClock:
     """Maps the firmware frame clock (``t_ms``) onto the receive clock.
 
-    Every frame satisfies ``recv_ts >= T_true + min_latency`` and
+    Every frame satisfies ``recv >= T_true + min_latency`` and
     ``T_true = t_ms/1000 + offset(t)`` with a slowly drifting offset. The
-    lower envelope of ``recv_ts - t_ms/1000`` therefore tracks
+    lower envelope of ``recv - t_ms/1000`` therefore tracks
     ``offset + min_latency``. The estimator keeps the minimum per
-    ``bucket_s`` bucket (the last ``keep`` buckets), fits a line through the
-    minima for the drift (the frame clock loses ~0.38 ms/s), and lowers the
-    line until it touches the lowest minimum, so it is a lower envelope, not
-    an average. A frame then gets ``min(recv_ts, t_ms/1000 + offset(recv_ts))``.
+    ``bucket_s`` bucket (the last ``keep`` buckets, none older than
+    ``keep * bucket_s``), fits a line through the minima for the drift, and
+    lowers the line until it touches the lowest minimum, so it is a lower
+    envelope, not an average. A frame then gets
+    ``min(recv, t_ms/1000 + offset(recv))``.
 
-    ``t_ms`` wrap-around (2^30 ms) is unwrapped; a jump of the offset by more
-    than ``reset_s`` (firmware reboot, clock reset) restarts the estimate.
+    The receive clock must be MONOTONIC (``time.monotonic()``): a wall-clock
+    step (NTP after the RTC-less phone boots) would otherwise look like a
+    frame-clock jump. ``t_ms`` wrap-around (2^30 ms) is unwrapped. The
+    estimate restarts when a batch's offset leaves the estimate by more than
+    ``reset_s`` in either direction (firmware reboot, or a pre-2.4.1 frame
+    clock jumping at a bus wake-up): keeping the old, lower buckets after an
+    upward jump would date every frame too early by the jump. Buckets older
+    than ``keep * bucket_s`` are dropped, so the drift line is never
+    extrapolated across a parked gap.
     """
 
     def __init__(self, bucket_s: float = 10.0, keep: int = 12, reset_s: float = 5.0) -> None:
@@ -85,16 +97,21 @@ class BeanClock:
         self.resets += 1
 
     def observe(self, recv_ts: float, t_ms_list: List[int]) -> List[float]:
-        """Feed one received batch; returns the frame times (unwrapped s) of
-        ``t_ms_list`` for :meth:`to_wall`."""
+        """Feed one received batch (``recv_ts`` on the monotonic receive
+        clock); returns the frame times (unwrapped s) of ``t_ms_list`` for
+        :meth:`to_wall`."""
         tf = [self._unwrap(t) for t in t_ms_list]
         if not tf:
             return tf
         off = min(recv_ts - x for x in tf)
+        window = self.keep * self.bucket_s
+        while self._buckets and recv_ts - self._buckets[0][1] > window:
+            self._buckets.popleft()
         est = self.offset(recv_ts)
-        if est is not None and (off < est - self.reset_s or off > est + 60.0):
-            # The frame clock jumped (firmware restart): start over, keeping
-            # this batch's frame times in the new epoch.
+        if est is not None and abs(off - est) > self.reset_s:
+            # The frame clock jumped (firmware restart, pre-2.4.1 wake-up
+            # jump): start over, keeping this batch's frame times in the
+            # new epoch.
             self.reset()
             tf = [self._unwrap(t) for t in t_ms_list]
             off = min(recv_ts - x for x in tf)
@@ -136,15 +153,16 @@ class BeanClock:
 
 def frame_from_wire(rec: list, line_t: Optional[int], recv_ts: float,
                     frame_s: Optional[float] = None,
-                    clock: Optional[BeanClock] = None) -> Optional[Dict[str, Any]]:
+                    clock: Optional[BeanClock] = None,
+                    recv_mono: Optional[float] = None) -> Optional[Dict[str, Any]]:
     """Firmware record -> frame dict with a wall-clock ``ts`` (seconds).
 
     The wall time is ``recv_ts`` minus the age the firmware reports
     (``line_t - t_ms`` modulo the 2^30 ms tick period) when that age is
     plausible (0..:data:`MAX_LINE_AGE_S`); otherwise ``clock`` (a
-    :class:`BeanClock` that has already observed this batch, ``frame_s`` =
-    its unwrapped frame time) maps ``t_ms``; without either it is
-    ``recv_ts``."""
+    :class:`BeanClock` that has already observed this batch on the receive
+    clock ``recv_mono`` (default ``recv_ts``), ``frame_s`` = its unwrapped
+    frame time) maps ``t_ms``; without either it is ``recv_ts``."""
     if not isinstance(rec, (list, tuple)) or len(rec) < 7:
         return None
     t_ms, pri, dst, mes, data, rsp, code = rec[:7]
@@ -156,7 +174,8 @@ def frame_from_wire(rec: list, line_t: Optional[int], recv_ts: float,
         if age is not None and age <= MAX_LINE_AGE_S * 1000:
             ts = recv_ts - age / 1000.0
         elif clock is not None and frame_s is not None:
-            ts = clock.to_wall(frame_s, recv_ts)
+            rc = recv_ts if recv_mono is None else recv_mono
+            ts = recv_ts - (rc - clock.to_wall(frame_s, rc))
     except (TypeError, ValueError):
         pass
     try:
@@ -180,21 +199,24 @@ def frame_from_wire(rec: list, line_t: Optional[int], recv_ts: float,
 
 
 def frames_from_batch(recs: List[list], line_t: Optional[int], recv_ts: float,
-                      clock: Optional[BeanClock] = None) -> List[Dict[str, Any]]:
-    """All frames of one firmware line, timed through ``clock``."""
+                      clock: Optional[BeanClock] = None,
+                      recv_mono: Optional[float] = None) -> List[Dict[str, Any]]:
+    """All frames of one firmware line, timed through ``clock`` (fed on the
+    monotonic receive clock ``recv_mono``; ``ts`` stays wall clock)."""
+    rc = recv_ts if recv_mono is None else recv_mono
     good = [r for r in recs if isinstance(r, (list, tuple)) and len(r) >= 7]
     frame_s: List[Optional[float]] = [None] * len(good)
     if clock is not None:
         idx = [i for i, r in enumerate(good) if isinstance(r[0], int)]
         try:
-            tf = clock.observe(recv_ts, [good[i][0] for i in idx])
+            tf = clock.observe(rc, [good[i][0] for i in idx])
             for i, x in zip(idx, tf):
                 frame_s[i] = x
         except (TypeError, ValueError):
             pass
     out = []
     for r, fs in zip(good, frame_s):
-        f = frame_from_wire(r, line_t, recv_ts, frame_s=fs, clock=clock)
+        f = frame_from_wire(r, line_t, recv_ts, frame_s=fs, clock=clock, recv_mono=rc)
         if f is not None:
             out.append(f)
     return out

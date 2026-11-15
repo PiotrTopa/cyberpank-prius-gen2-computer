@@ -418,9 +418,10 @@ def parse_bean_message(data: dict, recv_ts: Optional[float] = None) -> List[Acti
     dominant, - = recessive); the chunks are joined and published once
     complete (powerbox.bean_rx.raw).
 
-    Frame times: the firmware's frame clock is not on its ``t`` time base
-    (fw 2.4.0), so frames are timed by the lower-envelope estimator
-    :func:`bean_clock` unless the ``t`` based age is plausible."""
+    Frame times: ``recv - (t - t_ms)`` when that age is plausible (fw >=
+    2.4.1); a pre-2.4.1 frame clock is not on the ``t`` time base, so those
+    frames are timed by the lower-envelope estimator :func:`bean_clock` on
+    the monotonic clock (immune to wall-clock steps)."""
     from ..comm.bean import frames_from_batch
     global _bean_raw
     now = time.time() if recv_ts is None else recv_ts
@@ -435,7 +436,8 @@ def parse_bean_message(data: dict, recv_ts: Optional[float] = None) -> List[Acti
             logger.info("Powerbox BEAN raw runs (%d): %s", len(raw), raw)
             return [SetBeanRxAction(raw=raw, recv_ts=now)]
         return []
-    frames = frames_from_batch(data.get("bf") or [], data.get("t"), now, clock=bean_clock())
+    frames = frames_from_batch(data.get("bf") or [], data.get("t"), now, clock=bean_clock(),
+                               recv_mono=time.monotonic())
     stats = data.get("st") if isinstance(data.get("st"), dict) else None
     if not frames and stats is None:
         return []

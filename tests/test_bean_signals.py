@@ -365,6 +365,17 @@ class TestIngressBean:
         assert [(c["src"], c["data"]) for c in v.cruise_raw_changes] == [
             ("bean:62C8", "0000"), ("bean:62C8", "0010"), ("can:5C8", "24 00 00")]
 
+    def test_stale_frames_not_arbitrated(self):
+        """Freshness is the frame's true age, not its arrival time."""
+        store, ing, clk = make_ingress()
+        bi = BeanIngest(ing.sources, clock=clk, wall=lambda: 5000.0)
+        old = fr("FE", "26", "2800")
+        old["ts"] = 5000.0 - 3.0
+        assert not any(type(a).__name__ == "SetRPMAction" for a in bi.process([old]))
+        new = fr("FE", "26", "2800")
+        new["ts"] = 5000.0 - 0.3
+        assert any(type(a).__name__ == "SetRPMAction" for a in bi.process([new]))
+
     def test_own_and_bad_frames_ignored(self):
         store, ing, clk = make_ingress()
         bi = BeanIngest(ing.sources, clock=clk)
@@ -461,6 +472,45 @@ class TestBeanClock:
         clk.observe(101.0, [900])
         clk.observe(102.0, [5_000_000])                    # firmware restart: jump
         assert clk.resets == 1
+
+    def test_wall_clock_step_does_not_shift_frames(self):
+        """2026-11-15: a wall step (NTP after the RTC-less phone boots) or an
+        upward frame-clock jump left the old, lower buckets in the envelope
+        and dated ~2 min of frames ~24 s too early. The estimator now runs on
+        the monotonic clock and restarts on a jump in either direction."""
+        clk = BeanClock()
+        worst = 0.0
+        for k in range(2400):                     # 10 min, batches every 0.25 s
+            mono = 1000.0 + k * 0.25
+            wall = mono + (24.0 if k > 1200 else 0.0)
+            t_ms = 7_000_000 + int((mono - 1000.0 - 0.05) * 1000)
+            (f,) = frames_from_batch([[t_ms, 6, "FE", "24", "00", 1, 0]], 10, wall,
+                                     clock=clk, recv_mono=mono)
+            # constant latency: the lower envelope dates frames at receipt
+            worst = max(worst, abs(f["ts"] - wall))
+        assert worst < 0.01
+
+    def test_upward_frame_clock_jump_restarts(self):
+        clk = BeanClock()
+        errs = []
+        for k in range(2400):
+            recv = 1000.0 + k * 0.25
+            jump = 24_000 if k > 1200 else 0      # pre-2.4.1 wake-up jump: t_ms falls behind
+            t_ms = 7_000_000 + int((recv - 1000.0 - 0.05) * 1000) - jump
+            (f,) = frames_from_batch([[t_ms, 6, "FE", "24", "00", 1, 0]], 10, recv,
+                                     clock=clk, recv_mono=recv)
+            errs.append(f["ts"] - recv)
+        assert sum(1 for e in errs if abs(e) > 1.0) <= 1
+        assert clk.resets >= 1
+
+    def test_no_extrapolation_across_a_parked_gap(self):
+        clk = BeanClock()
+        for k in range(400):                      # drive 1: frame clock slow 1 %
+            recv = 1000.0 + k * 0.25
+            clk.observe(recv, [int((recv - 1000.0) * 990)])
+        recv = 1000.0 + 122_400.0                 # 34 h later, same clock base
+        clk.observe(recv, [int((recv - 1000.0) * 990)])
+        assert clk.offset(recv) == pytest.approx(recv - (recv - 1000.0) * 0.990, abs=0.01)
 
     def test_plausible_line_age_still_used(self):
         (f,) = frames_from_batch([[10_000, 6, "FE", "2C", "64", 1, 0]], 10_500, 50.0,
