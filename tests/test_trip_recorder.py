@@ -79,3 +79,52 @@ def test_without_ignition_bounding_traffic_opens(tmp_path):
     r.log_incoming(_msg())
     assert r.recording
     r.stop()
+
+
+# ── GNSS fixes (position feeder): explicit opt-in only ───────────────────────
+
+def _fix():
+    # synthetic test-loop coordinates, not a real place
+    return {"type": "gnss", "fix": "3d", "lat": 50.66, "lon": 17.92, "hacc_m": 6.0,
+            "ts_mono_ns": 1, "source": "phone"}
+
+
+def test_position_not_recorded_by_default(tmp_path):
+    r = _rec(tmp_path, min_trip_seconds=0)    # include_position default False ("all" never implies it)
+    r.on_ignition(True)
+    r.log_position(_fix())
+    r.log_incoming(_msg(DEVICE_CAN))
+    time.sleep(0.4)                           # CommLogger writes on its own thread
+    path = r.current_file
+    r.stop()
+    assert '"POS"' not in path.read_text()
+
+
+def test_position_recorded_when_named_and_skipped_by_replay(tmp_path):
+    from cyberpunk_computer.io.file_io import FileInputPort
+    r = _rec(tmp_path, include_position=True, min_trip_seconds=0)
+    r.log_position(_fix())                    # no trip open: dropped, does not open one
+    assert not r.recording
+    r.on_ignition(True)
+    r.log_incoming(_msg(DEVICE_CAN))
+    r.log_position(_fix())
+    r.log_incoming(_msg(DEVICE_CAN))
+    time.sleep(0.4)                           # CommLogger writes on its own thread
+    path = r.current_file
+    r.stop()
+    lines = [l for l in path.read_text().splitlines() if '"POS"' in l]
+    assert len(lines) == 1 and '"source":"phone"' in lines[0]
+    port = FileInputPort(str(path))
+    assert port.load()
+    assert all('"POS"' not in e.raw_line for e in port._entries)
+
+
+def test_record_include_position_token():
+    import argparse
+    from cyberpunk_computer.backend.__main__ import _build_recording
+    base = dict(record=True, record_dir="x", record_segmentation="trip", record_idle_timeout=120.0,
+                record_min_trip=15.0, record_max_file_mb=64.0, record_no_ignition=False,
+                record_max_files=60, record_max_total_mb=512.0, record_max_age_days=30.0)
+    assert not _build_recording(argparse.Namespace(record_include="all", **base)).include_position
+    c = _build_recording(argparse.Namespace(record_include="all,position", **base))
+    assert c.include_position and c.include_can

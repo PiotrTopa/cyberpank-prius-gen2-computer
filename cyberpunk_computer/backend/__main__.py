@@ -134,7 +134,13 @@ def _build_position():
     """Position feeder -> roadsense mapd (backend.position_feeder); off unless enabled::
 
         BACKEND_POSITION_FEEDER=1              # 0 (default) = no feeder, no thread, no CAN tap
-        BACKEND_POSITION_SOURCE=headunit       # headunit | synthetic (test/demo only) | none (motion only)
+        BACKEND_POSITION_GNSS=headunit,phone   # GNSS sources in priority order: headunit, phone; or
+                                               # synthetic (test/demo only) / none (motion only) alone
+        BACKEND_POSITION_SOURCE=headunit       # older name of BACKEND_POSITION_GNSS (used when that is unset)
+        BACKEND_POSITION_SWITCH_UP_S=5         # a higher-priority source needs a fix this long to take over
+        BACKEND_POSITION_PHONE_UERE_M=4        # phone: hacc_m = HDOP x this
+        BACKEND_POSITION_PHONE_LINGER_S=120    # phone: GNSS stays on this long after roadsense stops
+        BACKEND_POSITION_PHONE_POLL_HZ=4       # phone: ModemManager polls per second
         BACKEND_POSITION_RUNDIR=/run/roadsense # mapd's position.sock
         BACKEND_POSITION_MOTION_HZ=10          # 5..50
         BACKEND_POSITION_YAW=wheels            # yaw fields with motion: wheels, steer (comma list; empty = none)
@@ -148,14 +154,22 @@ def _build_position():
     """
     if not _env_flag("BACKEND_POSITION_FEEDER"):
         return None
-    from .position_feeder import DEFAULT_YAW_INPUTS, SOURCES, YAW_INPUTS, PositionFeederConfig
+    from .position_feeder import DEFAULT_YAW_INPUTS, YAW_INPUTS, PositionFeederConfig, parse_source_list
     env = os.environ.get
     log = logging.getLogger(__name__)
-    source = (env("BACKEND_POSITION_SOURCE") or "headunit").strip().lower()
-    if source not in SOURCES:
-        log.error("BACKEND_POSITION_SOURCE=%r unknown (%s): position feeder off",
-                  source, ", ".join(SOURCES))
+    var = "BACKEND_POSITION_GNSS" if (env("BACKEND_POSITION_GNSS") or "").strip() else "BACKEND_POSITION_SOURCE"
+    try:
+        source = ",".join(parse_source_list(env(var) or "headunit"))
+    except ValueError as exc:
+        log.error("%s=%r: %s: position feeder off", var, env(var), exc)
         return None
+
+    def _num(name: str, default: float, lo: float, hi: float) -> float:
+        try:
+            return max(lo, min(hi, float(env(name) or default)))
+        except ValueError:
+            log.error("Bad %s: %s used", name, default)
+            return default
     yaw_raw = env("BACKEND_POSITION_YAW")
     yaw = DEFAULT_YAW_INPUTS if yaw_raw is None else tuple(
         t.strip().lower() for t in yaw_raw.split(",") if t.strip().lower() in YAW_INPUTS)
@@ -186,6 +200,10 @@ def _build_position():
         synthetic_dropouts=tuple(drops),
         synthetic_control=_env_flag("BACKEND_POSITION_SYNTHETIC_CONTROL", "1"),
         synthetic_session_s=session_s,
+        switch_up_s=_num("BACKEND_POSITION_SWITCH_UP_S", 5.0, 0.0, 120.0),
+        phone_uere_m=_num("BACKEND_POSITION_PHONE_UERE_M", 4.0, 0.5, 50.0),
+        phone_linger_s=_num("BACKEND_POSITION_PHONE_LINGER_S", 120.0, 0.0, 3600.0),
+        phone_poll_hz=_num("BACKEND_POSITION_PHONE_POLL_HZ", 4.0, 0.2, 10.0),
     )
 
 
@@ -263,6 +281,8 @@ def _build_recording(args: argparse.Namespace) -> RecordingConfig:
         inc_sat = "satellite" in include or "sat" in include
         inc_pbox = "powerbox" in include or "pbox" in include
         inc_out = "outgoing" in include or "out" in include
+    # location track: never implied by "all", only when named
+    inc_pos = "position" in include
     return RecordingConfig(
         enabled=args.record,
         directory=args.record_dir,
@@ -277,6 +297,7 @@ def _build_recording(args: argparse.Namespace) -> RecordingConfig:
         include_satellite=inc_sat,
         include_powerbox=inc_pbox,
         include_outgoing=inc_out,
+        include_position=inc_pos,
         rotation=RotationPolicy(
             max_files=args.record_max_files,
             max_total_mb=args.record_max_total_mb,
@@ -517,7 +538,8 @@ def main() -> None:
     )
     rec.add_argument(
         "--record-include", default="all",
-        help="comma list of what to log: all|system,can,avc,satellite,powerbox,outgoing",
+        help="comma list of what to log: all|system,can,avc,satellite,powerbox,outgoing; "
+             "plus 'position' (GNSS fixes sent to roadsense; never implied by 'all')",
     )
     rec.add_argument(
         "--record-idle-timeout", type=float, default=120.0,

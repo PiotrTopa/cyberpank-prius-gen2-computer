@@ -82,6 +82,10 @@ class RecordingConfig:
     include_satellite: bool = True
     include_powerbox: bool = True
     include_outgoing: bool = True
+    # GNSS fixes the position feeder sends to roadsense mapd (lat/lon, i.e. a
+    # location track). Explicit only: not part of "all" (BACKEND_RECORD_INCLUDE
+    # must name "position"). docs/POSITION_FEEDER.md section 11.
+    include_position: bool = False
 
     rotation: RotationPolicy = field(default_factory=RotationPolicy)
 
@@ -161,6 +165,20 @@ class TripRecorder:
         self._last_activity = time.monotonic()
         self._current.log_outgoing(msg, "OUT")
         self._maybe_split()
+
+    def log_position(self, fix: dict) -> None:
+        """A GNSS fix sent to mapd (position feeder thread), only with
+        ``include_position``. Written as ``{"dir": "POS", "id": 0, "d": fix}``
+        into the trip file that is open; never opens a trip and does not count
+        as traffic (a parked car with a fix does not keep a trip alive).
+        Replay skips ``POS`` lines. CommLogger queues the write, so this is
+        safe from another thread (a trip closing at the same moment drops it)."""
+        if not self._started or not self.config.include_position:
+            return
+        cur = self._current
+        if cur is None:
+            return
+        cur.log_raw("POS", DEVICE_SYSTEM, dict(fix))
 
     # ── periodic + event-driven segmentation ─────────────────────────────────
 
