@@ -481,7 +481,10 @@ bits reported raw. Tested tolerance (CPython): ±20 µs jitter per edge without 
   the frame ring and capture log (`"own":1`) but out of the message table and the
   error count.
 - `t_ms` = firmware `ticks_ms` of the SOF (±~1 ms); `t` = `ticks_ms` at send time
-  (frame age = `t − t_ms`, 0.1–0.5 s with 200 ms batching). Frame times come from
+  (frame age = `t − t_ms`). Batches leave every `BATCH_MS` (200 ms) or, fw ≥ 2.4.1, at
+  once when 16 frames are queued: on fw 2.4.0 at ~52 frames/s (IG on) lines went out
+  every ~254 ms and frames were 347/531/647 ms old at send (p50/p90/p99, 2026-11-13
+  drive); the host test of that load gives 95/170 ms (p50/p90) on 2.4.1. Frame times come from
   the edge stamps of the word-time cursor (fw ≥ 2.4.1); fw ≤ 2.4.0 summed run lengths
   instead and its `t_ms` jumped by an arbitrary amount (mod 2^30 µs) at every wake
   after a bus sleep > 537 s, and ran slow by 0.5 µs per dominant run beyond what the
@@ -749,7 +752,7 @@ Preconditions: fw 2.4.0 flashed (`status` answers), receiver healthy
 | 2.2.5 | `acc_sim` |
 | 2.3.0 | `bean_rx.py`, id 3, TX guard; new OTA file name (one extra reboot) |
 | 2.4.0 | `bean_tx.py`; bench ops need the bench override; receiver idle fast path |
-| 2.4.1 | wrap-safe ticks (no OverflowError after a > 537 s bus sleep, frame `t_ms` on the `ticks_ms` base, `idle_ms`/`age_ms`/`up` do not stick or wrap, dead-phone/boot-grace/TX-arm stamps cannot wrap after 6.2 days); `exn` counter |
+| 2.4.1 | full BEAN batches sent at once (no standing backlog); wrap-safe ticks (no OverflowError after a > 537 s bus sleep, frame `t_ms` on the `ticks_ms` base, `idle_ms`/`age_ms`/`up` do not stick or wrap, dead-phone/boot-grace/TX-arm stamps cannot wrap after 6.2 days); `exn` counter |
 
 Tests: `tests/test_powerbox_firmware.py` (firmware on CPython with stubs),
 `tests/test_powerbox_io.py`, `tests/test_port_power.py`, `tests/test_bean_rx.py`

@@ -636,11 +636,25 @@ class TestReporting:
         rig.drain(3000)
         lines = [(t, m) for t, m in rig.lines if "bf" in m]
         assert all(len(m["bf"]) <= brx.BATCH_MAX for _, m in lines)
-        gaps = [b[0] - a[0] for a, b in zip(lines, lines[1:])]
+        # a full batch goes out at once; a partial one waits BATCH_MS
+        gaps = [b[0] - a[0] for a, b in zip(lines, lines[1:]) if len(b[1]["bf"]) < brx.BATCH_MAX]
         assert min(gaps) >= brx.BATCH_MS * 1000
         got = rig.frames()
         assert rig.rx.qdrop == 0 and len(got) == 120
         assert [g[3] for g in got] == ["%02X" % f[2] for f in frames]
+
+    def test_no_standing_backlog_under_load(self, brx, monkeypatch):
+        """fw 2.4.1: full batches leave at once. 2026-11-13 drive (fw 2.4.0,
+        ~52 frames/s, one line per ~254 ms): frames 347/531/647 ms old at
+        send (p50/p90/p99). This load gives 309/520/634 ms on 2.4.0."""
+        rng = random.Random(21)
+        frames = [W.random_frame(rng) for _ in range(400)]
+        rig = Rig(brx, monkeypatch)
+        rig.feed_runs(_stream(frames, gap_us=1500), poll_ms=5)
+        rig.drain(2000)
+        ages = sorted(m["t"] - f[0] for _, m in rig.lines for f in m.get("bf", []))
+        assert len(ages) == 400 and rig.rx.qdrop == 0
+        assert ages[len(ages) * 9 // 10] < 250, ages[len(ages) * 9 // 10]
 
     def test_failed_frames_rate_limited_but_counted(self, brx, monkeypatch):
         bad = [(6, 0xFE, 0x2C, [0x64])] * 40

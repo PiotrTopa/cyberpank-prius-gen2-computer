@@ -24,7 +24,8 @@ MAX_WORDS words per call: run -> bit count with an adaptive bit time (and a
 dominant/recessive skew estimate), glitch filter, destuffing at run level,
 frame state machine, CRC check, EOM search (tolerant of the unresolved stuff
 bit before EOM), two raw RSP bits. Decoded frames are batched to the host on
-the BEAN id (3 -> backend 203) at most every BATCH_MS:
+the BEAN id (3 -> backend 203) every BATCH_MS, or at once when BATCH_MAX are
+queued:
     {"t":ms,"bf":[[t_ms,pri,"DST","MES","DATAHEX",rsp,code],...],"st":{...}}
 A frame sent by our own transmitter (bean_tx.py sets ``own``) carries an
 8th element 1.
@@ -989,11 +990,15 @@ class BeanRx:
                 self.raw = None
             return
         due = ticks_diff(now, self.t_st) >= STATS_MS
-        if not due and (not self.q or ticks_diff(now, self.t_tx) < BATCH_MS):
+        q = self.q
+        # A full batch goes out at once: at ~52 frames/s (IG on) one 16-frame
+        # line per BATCH_MS + main-loop jitter (~254 ms) left a standing
+        # backlog, frames 0.35 s old at send (median, 2026-11-13 drive).
+        if not due and (not q or (len(q) < BATCH_MAX and
+                                  ticks_diff(now, self.t_tx) < BATCH_MS)):
             return
         self.t_tx = now
         msg = {"t": now}
-        q = self.q
         batch = None
         if q:
             batch = q[:BATCH_MAX]
