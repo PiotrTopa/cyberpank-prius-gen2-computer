@@ -8,8 +8,9 @@ docs/MFD_MAIN_SCREEN.md section 7; consumer: ``ui/scene/inputs.SceneFeed``).
 This module builds that mapping from what the roadsense stack already
 publishes and hands it to the ZMQ event channel:
 
-    roadsense api  ws://127.0.0.1:8090/ws?topics=road,lights,speed_limit,env,rules
-         │  (road 10-14/s ~16 kB, lights ~3/s, speed_limit and rules >= 1/s, env ~1/s)
+    roadsense api  ws://127.0.0.1:8090/ws?topics=road,lights,speed_limit,env,rules,fused,map
+         │  (road 10-14/s ~16 kB, lights ~3/s, speed_limit and rules >= 1/s, env ~1/s,
+         │   fused ~2/s, map 2/s ~4 kB)
          ▼
     RoadsenseSceneFeed (own thread)  ──SceneBuilder──▶  publish(scene)  <= 10/s, ~0.7 kB
 
@@ -56,7 +57,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 logger = logging.getLogger(__name__)
 
 EVENT_NAME = "roadsense_scene"
-TOPICS = ("road", "lights", "speed_limit", "env", "rules")
+TOPICS = ("road", "lights", "speed_limit", "env", "rules", "fused", "map")
 
 # Caps of the sign lists (payload and screen room: the MFD shows this many).
 MAX_SIGNS_ON = 6
@@ -80,6 +81,7 @@ class SceneFeedConfig:
     limit_max_age_s: float = 3.0       # speed_limit: on change and >= 1/s
     env_max_age_s: float = 5.0         # env ~1/s
     rules_max_age_s: float = 3.0       # rules: on change and >= 1/s
+    map_max_age_s: float = 3.0         # fused / map: ~2/s (roadsense's own map staleness is 3 s)
     lane_min_prob: float = 0.2         # below this a lane line goes out as null (UI draws >= 0.3)
     lead_min_prob: float = 0.3         # below this the lead goes out as null (UI draws >= 0.5)
     connect_timeout_s: float = 3.0
@@ -300,6 +302,123 @@ def env_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return out or None
 
 
+def _r(v: Any, nd: int = 0) -> Optional[float]:
+    f = _num(v)
+    if f is None:
+        return None
+    return int(round(f)) if nd == 0 else round(f, nd)
+
+
+def _nearest(items: Any, key: str) -> Optional[Dict[str, Any]]:
+    best = None
+    for it in items or ():
+        if isinstance(it, dict) and _num(it.get(key)) is not None:
+            if best is None or it[key] < best[key]:
+                best = it
+    return best
+
+
+def _drop_none(d: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: v for k, v in d.items() if v is not None}
+
+
+def fused_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """api ``fused`` message -> scene ``map`` (map-backed facts with provenance).
+
+    Always a dict when the message is usable: ``ok`` false means the map layer
+    is not used (``why`` = roadsense's reason, e.g. ``no_position``) and every
+    fact below is roadsense's vision value. Field list: docs/MFD_MAIN_SCREEN.md 7.2.
+    """
+    mp = msg.get("map")
+    if not isinstance(mp, dict):
+        return None
+    out: Dict[str, Any] = {"ok": bool(mp.get("available"))}
+    for dst, src in (("state", "state"), ("why", "reason")):
+        v = mp.get(src)
+        if isinstance(v, str) and v:
+            out[dst] = v
+    conf = _r(mp.get("match_confidence"), 2)
+    if conf is not None:
+        out["conf"] = conf
+    sl = msg.get("speed_limit")
+    if isinstance(sl, dict):
+        lim = _drop_none({"kmh": _r(sl.get("limit_kmh")), "src": sl.get("source") or None,
+                          "conf": _r(sl.get("confidence"), 2), "agree": sl.get("agreement") or None,
+                          "rule": sl.get("rule") or None, "sign": sl.get("sign") or None})
+        if sl.get("variable"):
+            lim["var"] = True
+        out["limit"] = lim if lim.get("kmh") else None
+    rd = msg.get("road")
+    if isinstance(rd, dict):
+        road = _drop_none({"cls": rd.get("class") or None, "name": rd.get("name") or None,
+                           "ref": rd.get("ref") or None})
+        for dst, src in (("oneway", "oneway"), ("rbt", "roundabout"), ("link", "link"),
+                         ("expr", "expressway"), ("mroad", "motorroad"), ("dual", "dual_carriageway"),
+                         ("bridge", "bridge"), ("toll", "toll")):
+            if rd.get(src):
+                road[dst] = True
+        out["road"] = road
+    ln = msg.get("lanes")
+    if isinstance(ln, dict):
+        lanes = _drop_none({"n": _r(ln.get("count")), "fwd": _r(ln.get("forward")),
+                            "back": _r(ln.get("backward")), "ego": _r(ln.get("ego_index")),
+                            "src": ln.get("source") or None})
+        if isinstance(ln.get("oncoming_left"), bool):
+            lanes["onc_left"] = ln["oncoming_left"]
+        out["lanes"] = lanes or None
+    tn = msg.get("tunnel")
+    if isinstance(tn, dict):
+        out["tunnel"] = _drop_none({"in": bool(tn.get("in_tunnel")), "exit_m": _r(tn.get("exit_in_m")),
+                                    "entry_m": _r(tn.get("entry_in_m")), "len_m": _r(tn.get("length_m")),
+                                    "src": tn.get("source") or None})
+    bu = msg.get("built_up")
+    if isinstance(bu, dict) and isinstance(bu.get("value"), bool):
+        out["built_up"] = _drop_none({"v": bu["value"], "src": bu.get("source") or None})
+    ah = msg.get("ahead")
+    if isinstance(ah, dict):
+        ahead: Dict[str, Any] = {}
+        j = _nearest(ah.get("junctions"), "dist_m")
+        if j:
+            ahead["junction"] = _drop_none({"m": _r(j.get("dist_m")), "kind": j.get("kind") or None,
+                                            "turn": _r(j.get("turn_deg")),
+                                            "minor": True if j.get("minor") else None})
+        c = _nearest(ah.get("curves"), "start_m")
+        if c:
+            d = c.get("direction")
+            ahead["curve"] = _drop_none({"m": _r(c.get("start_m")), "r": _r(c.get("min_radius_m")),
+                                         "dir": d[:1] if isinstance(d, str) and d else None})
+        lc = _nearest(ah.get("speed_limit_changes"), "dist_m")
+        if lc:
+            ahead["limit"] = _drop_none({"m": _r(lc.get("dist_m")), "kmh": _r(lc.get("limit_kmh"))})
+        f = _nearest(ah.get("features"), "dist_m")
+        if f:
+            ahead["feature"] = _drop_none({"m": _r(f.get("dist_m")), "kind": f.get("kind") or None})
+        out["ahead"] = ahead or None
+    pos = msg.get("position")
+    if isinstance(pos, dict):
+        out["pos"] = _drop_none({"src": pos.get("source") or None, "hacc": _r(pos.get("hacc_m"), 1)})
+    return out
+
+
+def map_input_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """mapd ``map`` message -> scene ``map.in``: what mapd hears from the
+    position feeders (``gnss`` = the receiver's ``source`` tag, e.g.
+    ``headunit`` / ``synthetic``; ``motion`` = vehicle|vision|none; ``tag`` =
+    the motion message's ``source``)."""
+    inp = msg.get("input")
+    if not isinstance(inp, dict):
+        return None
+    out: Dict[str, Any] = {}
+    g = inp.get("gnss")
+    if isinstance(g, dict):
+        out.update(_drop_none({"gnss": g.get("source") or None, "fix": g.get("fix") or None,
+                               "fix_age": _r(g.get("age_s"), 1)}))
+    m = inp.get("motion")
+    if isinstance(m, dict):
+        out.update(_drop_none({"motion": m.get("source") or None, "tag": m.get("tag") or None}))
+    return out or None
+
+
 def peek_type(line: str) -> Optional[str]:
     """``type`` of a roadsense JSON line without decoding it (every daemon
     message starts with ``{"type":"..."``); None if it does not."""
@@ -356,6 +475,10 @@ class SceneBuilder:
             self._slow["env"] = (now, env_to_scene(msg))
         elif mtype == "rules":
             self._slow["signs"] = (now, rules_to_scene(msg))
+        elif mtype == "fused":
+            self._slow["map"] = (now, fused_to_scene(msg))
+        elif mtype == "map":
+            self._slow["map_in"] = (now, map_input_to_scene(msg))
 
     def time_to_due(self, now: float) -> Optional[float]:
         """Seconds until a pending road frame may be published; None if none."""
@@ -385,10 +508,15 @@ class SceneBuilder:
         self._last_seq = scene["seq"]
         self._last_pub = now
         ages = {"light": self.cfg.lights_max_age_s, "limit": self.cfg.limit_max_age_s,
-                "env": self.cfg.env_max_age_s, "signs": self.cfg.rules_max_age_s}
+                "env": self.cfg.env_max_age_s, "signs": self.cfg.rules_max_age_s,
+                "map": self.cfg.map_max_age_s, "map_in": self.cfg.map_max_age_s}
         for key, (t, val) in self._slow.items():
             if now - t <= ages[key]:
                 scene[key] = val
+        # mapd's input echo rides inside "map" (only when fused is fresh too)
+        map_in = scene.pop("map_in", None)
+        if map_in and isinstance(scene.get("map"), dict):
+            scene["map"] = dict(scene["map"], **{"in": map_in})
         return scene
 
 

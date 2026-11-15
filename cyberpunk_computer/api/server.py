@@ -36,11 +36,13 @@ class ApiServer:
         roadsense_url: Optional[str] = None,
         bean_frames=None,
         camera_preview=None,
+        position_feeder=None,
     ) -> None:
         self._app = create_app(bridge, db, auth_token=auth_token,
                                roadsense_url=roadsense_url,
                                bean_frames=bean_frames,
-                               camera_preview=camera_preview)
+                               camera_preview=camera_preview,
+                               position_feeder=position_feeder)
         config = uvicorn.Config(
             self._app,
             host=host,

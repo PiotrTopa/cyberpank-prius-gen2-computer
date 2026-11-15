@@ -23,7 +23,9 @@ The UI code is identical in the frontend and the standalone app; only the data s
 | metrics | `MetricsSink`: samples store snapshots into SQLite (`BACKEND_DB`) |
 | api-server | uvicorn/FastAPI: REST + WebSocket |
 | zmq | `ZmqServer` socket IO |
-| panda reader | broadcast CAN frames → `IngressController.ingest_broadcast_can` → `Store.dispatch` (the store holds a re-entrant lock for this path) |
+| panda reader | broadcast CAN frames → `IngressController.ingest_broadcast_can` → `Store.dispatch` (the store holds a re-entrant lock for this path); with the position feeder on, `CanMotionTap.on_frame` sees each frame first |
+| roadsense-scene | roadsense `/ws` reader → ZMQ event `roadsense_scene` (`backend/roadsense_scene.py`) |
+| position-feeder | only with `BACKEND_POSITION_FEEDER=1`: CAN motion + GNSS → roadsense mapd `position.sock` (`backend/position_feeder.py`, [POSITION_FEEDER.md](POSITION_FEEDER.md)) |
 
 `api/bridge.py::StoreBridge` is the boundary: API/ZMQ commands are queued and dispatched on the
 engine thread; snapshots go out latest-only so a slow client never blocks the engine.
@@ -32,7 +34,7 @@ engine thread; snapshots go out latest-only so a slow client never blocks the en
 
 | Interface | Port | Content |
 |---|---|---|
-| REST | 8080 | `GET /health`; under `/api/v1`: `state`, `metrics/catalog`, `metrics`, `events`, `commands` (list), `POST commands/{name}`, `bean/frames`, `diag/*`, `camera/preview*`, roadsense proxy. Auth: `BACKEND_AUTH_TOKEN` when set |
+| REST | 8080 | `GET /health`; under `/api/v1`: `state`, `metrics/catalog`, `metrics`, `events`, `commands` (list), `POST commands/{name}`, `bean/frames`, `diag/*`, `camera/preview*`, `position` + `POST position/gnss` (feeder on only), roadsense proxy. Auth: `BACKEND_AUTH_TOKEN` when set |
 | WebSocket | 8080 `/api/v1/stream` | state snapshots (dashboard) |
 | ZMQ PUB | 8081 | `{"type":"state","ts","state"}` (latest-only, throttled) and `{"type":"event","ts","name","data"}` (FIFO, never displaced by state) |
 | ZMQ REP | 8082 | `{"command": name, "params": {...}}` → `{"status":"ok"}` on acceptance (execution is asynchronous) or `{"status":"error","reason"}` |
@@ -50,6 +52,7 @@ about 1 Hz).
 | comma.ai panda | libusb-1.0 via ctypes (`bbaa:ddcc`) | `io/panda_can.py` | broadcast CAN only, see §3 |
 | MFD Pi | USB gadget `usb0`, ZMQ | `backend/mfd_power.py` | the backend powers the Pi via the hub port (uhubctl) and manages its boot/shutdown (`BACKEND_MFD_*`) |
 | roadsense | systemd + HTTP :8090 | `backend/roadsense_power.py`, `api/roadsense_proxy.py` | started/stopped on ACC |
+| roadsense mapd | Unix socket `/run/roadsense/position.sock` (position input API v1) | `backend/position_feeder.py`, `backend/position_client.py` | off by default; [POSITION_FEEDER.md](POSITION_FEEDER.md) |
 | satellites | RS485 (gateway), BLE (`prius-bled`), Wi-Fi | `backend/satellite_registry.py`, `io/*_transport.py` | [SATELLITES.md](SATELLITES.md) |
 
 Gateway and powerbox are told apart by `{"id":0,"d":{"a":"whoami"}}` → `IDENT` with `role`

@@ -22,12 +22,12 @@ CAN 0x5xx: [`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §5.
 |---|---|---|---|---|
 | 0x022 | 13 | lateral / longitudinal acceleration | (256A + B) − 0x200 and (256C + D) − 0x200, uncalibrated | G |
 | 0x023 | 13 | longitudinal acceleration | (256A + B) − 0x200, uncalibrated | G |
-| 0x025 | 13 | steering angle | 256A + B, 12-bit signed; straight-ahead offset vehicle-specific | G |
+| 0x025 | 13 | steering angle | 12-bit signed (low nibble of A, then B) × 1.5°, positive = left; E high nibble = a fraction (list: × 0.1°, unused) | Car (2026-11-13 drive): scale from the range (±650–660° at the stops); correlation 0.95 with the rear wheel-speed yaw, same sign as (right − left). Absolute sign = Toyota convention (G). `can_decoder.py` still scales × 0.1 (15× too small) |
 | 0x030 | 6 | brake pedal | E, 0–127; may read 0x7F at start-up with the brake held | Car: E > 8 edges match BEAN `FE:29` brake bit (74/79 within 1 s) |
 | 0x038 | 8 | engine status | B > 0 seen only with the ICE turning (not an rpm), but B = 0 for 32 % of the time the ICE turns at low load (e.g. 1300 rpm warm-up): NOT an engine-running flag | Car (2026-11-13 drive against OBD 010C) |
 | 0x039 | 8 | ICE coolant | A °C, no offset; 254/255 = sensor not ready | Car: within 1 °C of BEAN `FE:2C` (r = 0.995) |
 | 0x03B | 8 | HV battery current, voltage | current = low 12 bits of A,B signed × 0.1 A (> 0 discharge); voltage = 256C + D V | Car: voltage is 16-bit (byte D alone wraps at 256 V; the pack reaches ~260 V under hard regen) |
-| 0x0B1 / 0x0B3 | 13 | front / rear wheels (right A,B; left C,D) | list: wheel pulses (~185 per revolution); code: speed × 0.01 km/h | contradiction, see §8 |
+| 0x0B1 / 0x0B3 | 13 | front / rear wheels (right A,B; left C,D) | (256A + B), (256C + D) × 0.01 km/h; E,F not decoded | Car (2026-11-13 drive): speed, not pulses: wheel mean = 0.978 (rear) / 0.981 (front) × 0x0B4; front and rear (right − left) correlate 0.97. Right/left labels G (consistent with 0x025's sign) |
 | 0x0B4 | 14 | vehicle speed | (256F + G) × 0.01 km/h | Car: true speed; the meter's trip distance agrees with it; the speedometer (`FE:24`) reads 12 % higher |
 | 0x120 | 17 | gear | byte F low nibble: 0 P, 1 R, 2 N, 3 D, 4 B (observed F = 0x20–0x23) | Car: P/R/N/D on 20 shifts, BEAN `FE:40` follows 45–110 ms later; B not observed. (The list's `{D:0-1}` does not match this car) |
 | 0x244 | 25 | accelerator pedal | G, 0–0xC8 | G |
@@ -81,7 +81,7 @@ All gateway copies 0x5xx have byte 0 = header and bytes 1… = the BEAN data
 ([`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §5): 0x520/521/526/527/529/52C/540/591/5B2/5C8/5CC/5D4/5EC/5F8
 (CAN → BEAN) and 0x53F/553/554/56D/57F/5A4/5B6/5ED (BEAN → CAN).
 
-No decode (period in ms): 0x020 (12), 0x03A (8; yaw rate? `can_decoder.py`), 0x03E (8), 0x230 (28),
+No decode (period in ms): 0x020 (12), 0x03A (8; NOT a yaw rate in the `can_decoder.py` reading: correlation 0.01 with the wheel-speed yaw on the 2026-11-13 drive, byte A only 0/1), 0x03E (8), 0x230 (28),
 0x262 (21), 0x348 (44), 0x3C9 (106), 0x3CF (139), 0x423 (1075), 0x484 (1120), 0x4C1 (971), 0x4C3
 (1042), 0x4C6 (1018), 0x4C7 (1028), 0x4C8 (1058), 0x4D0 (1118), 0x4D1 (1135), 0x602 (73009).
 
@@ -216,13 +216,19 @@ Battery power = current × sum of block voltages.
 * **0x5xx cadence:** the list gives about 1 s for most gateway copies; own CAN logs contain far fewer
   frames (e.g. 58 × 0x5C8 in 53 min). Whether the gateway sends them on change only or the logs drop
   them: compare a CAN log with a simultaneous BEAN capture (BEAN side is 1 s).
-* **0x0B1/0x0B3:** wheel pulses (list) or speed × 0.01 km/h (code). Resolves by comparing with 0x0B4 at
-  a steady speed.
+* **0x025 / 0x0B1 / 0x0B3 absolute sign:** steering and wheel left/right agree with each other on the
+  2026-11-13 drive, but both rest on third-party labels. Indirect support: tight turns (|curvature| >
+  0.08 /m at 2–8 m/s) come out right-handed 131 times against 87 left (right turns are the tighter ones
+  in right-hand traffic). Resolves with one deliberate left turn logged, or a GNSS course.
+* **0x0B1/0x0B3 scale:** the wheels read 2.2 % below 0x0B4 (tyre size / ECU scaling); not corrected.
+* **0x025:** the backend's `dynamics.steering_angle` (× 0.1) is not corrected yet; the position feeder
+  decodes 0x025 itself (`backend/position_feeder.py`, [POSITION_FEEDER.md](POSITION_FEEDER.md)).
 * **0x348:** decoded as a pack temperature (byte C − 40) in `can_decoder.py`, while a comment there
   reports byte C × 25 tracking ICE rpm (r = 0.986). Resolves with a log covering ICE start/stop at a
   steady pack temperature.
 * **0x120 B position** and **0x3B6 bits**: not observed / unvalidated.
-* **0x3CA, 0x3C8, 0x244, 0x022/0x023/0x025 scalings**: third-party, unchecked.
+* **0x3CA, 0x3C8, 0x244, 0x022/0x023 scalings**: third-party, unchecked. No yaw-rate sensor frame is
+  decoded (0x03A is not one in the current reading).
 * **Fuel figures:**
   * Absolute scale unverified: K is fitted to the combination meter, and the meter reads 14 % above
     the fuel derived from MAF and lambda (0.55 L against 0.48 L on the 2026-11-13 drive). Resolves

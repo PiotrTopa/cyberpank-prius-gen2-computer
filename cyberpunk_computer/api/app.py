@@ -15,6 +15,8 @@ Surface (versioned under /api/v1), designed for the future Android dashboard:
                                       api.roadsense_proxy; only when wired)
     *    /api/v1/camera/preview[/...]  on-demand camera preview: lease + frame.jpg
                                       (api.camera_preview_routes; only when wired)
+    GET  /api/v1/position             position feeder status (api.position_routes;
+    POST /api/v1/position/gnss        head-unit GNSS fixes; only when the feeder is on)
 
 All /api/v1 routes (and the WS) require a Bearer token when one is configured.
 Blocking SQLite reads run in a thread pool (per-thread connections) so the event
@@ -75,6 +77,7 @@ def create_app(
     roadsense_url: Optional[str] = None,
     bean_frames=None,
     camera_preview=None,
+    position_feeder=None,
 ) -> FastAPI:
     """Build the FastAPI app wired to the bridge and metrics database."""
     app = FastAPI(title="CyberPunk Prius Backend", version="1.0.0")
@@ -256,6 +259,13 @@ def create_app(
         from .camera_preview_routes import register as register_camera_preview
 
         register_camera_preview(app, camera_preview, API_PREFIX + "/camera/preview", require_auth)
+
+    # ── position feeder -> roadsense mapd (backend.position_feeder) ─────────
+
+    if position_feeder is not None:
+        from .position_routes import register as register_position
+
+        register_position(app, position_feeder, API_PREFIX + "/position", require_auth)
 
     # ── all-ECU diagnostics (scan reports, clear log, ECU registry) ─────────
 

@@ -316,7 +316,8 @@ not changing, on the frontend clock.
  "limit": {"kmh": 50, "src": "sign|default", "conf": 0.71} | null,
  "signs": {"on":    [{"id": "no_stopping", "s": "B-36", "v": 20, "side": "l|r", "q": true}],   # <= 6
            "ahead": [{"id": "roundabout_ahead", "s": "A-8", "m": 60}]},                         # <= 3
- "env": {"light": "day|dusk_dawn|night", "place": "...", "weather": "..."}}
+ "env": {"light": "day|dusk_dawn|night", "place": "...", "weather": "..."},
+ "map": {"ok": true, "state": "good", "conf": 0.97, ...}}     # roadsense map layer + fusion, section 7.2
 ```
 
 Units and frame as roadsense: metres, x forward, **y right** (the frontend flips it), origin at the
@@ -328,7 +329,7 @@ Every key is optional; a missing key means "not known" and nothing is drawn for 
 
 ### 7.1 Backend feed (`cyberpunk_computer/backend/roadsense_scene.py`)
 
-The backend reads roadsense's WebSocket `ws://127.0.0.1:8090/ws?topics=road,lights,speed_limit,env,rules`
+The backend reads roadsense's WebSocket `ws://127.0.0.1:8090/ws?topics=road,lights,speed_limit,env,rules,fused,map`
 (roadsense's own API on loopback, not the backend's `/api/v1/roadsense/ws` front) with a stdlib
 RFC 6455 client in its own thread and publishes `roadsense_scene` on the ZMQ PUB channel only (not
 on the dashboard websocket, whose latest-only queue would let scenes displace state snapshots),
@@ -353,15 +354,16 @@ through a latest-only slot per event name (`ZmqServer.enqueue_latest_event`, com
 | `signs.on` | `rules.in_effect[]` with `applies_to_car` not false, without `id: speed_limit` | `id`, `s` = `sign` (8 characters), `v` = `value`, `side` = first letter of `side`, `q` when `uncertain` is not empty; first 6 |
 | `signs.ahead` | `rules.ahead[]` (already nearest first) | `id`, `s`, `m` = `expected_in_m` rounded; first 3; `signs` is null when both lists are empty |
 | `env` | `env.light/place/weather.label` | the labels as roadsense sends them, no mapping (vocabulary: section 6.2) |
+| `map` | `fused` (api-derived, ~2/s) plus `map.input` (mapd, 2/s) | section 7.2 |
 
 Rate and staleness:
 
 * one scene per new road frame, at most 10 per second (`BACKEND_ROADSENSE_SCENE_HZ`, 1..10); modeld
   runs 10..14 times a second (fewer when it throttles), so the scene comes at 7..10 Hz;
 * a road frame is published only once (same `seq` never twice) and only within 1 s of its arrival;
-* `light`, `limit`, `signs`, `env` ride along only while their last message is younger than 2 s,
-  3 s, 3 s and 5 s (roadsense sends them about 3/s, at least 1/s, at least 1/s and 1/s); otherwise
-  the key is left out and the screen falls back to the health mirror (which has no rules);
+* `light`, `limit`, `signs`, `env`, `map` ride along only while their last message is younger than 2 s,
+  3 s, 3 s, 5 s and 3 s (roadsense sends them about 3/s, at least 1/s, at least 1/s, 1/s and 2/s);
+  otherwise the key is left out and the screen falls back to the health mirror (which has no rules);
 * publishing runs only while the roadsense manager is `running` and the MFD manager is `on` or
   `grace` (without an MFD manager: roadsense alone decides); otherwise the socket is closed. When
   roadsense stops or stalls nothing is sent and the screen's own staleness applies (section 4).
@@ -387,6 +389,51 @@ Budget, measured on the recorded roadsense messages of `tests/fixtures/roadsense
 
 The frontend client does not log `roadsense_scene` events (formatting one costs more than decoding
 it on the Pi).
+
+### 7.2 Map layer key `map` (`roadsense_scene.fused_to_scene`, `map_input_to_scene`)
+
+roadsense's `fused` topic (roadsense docs/ARCHITECTURE.md "api-derived topic fused") combines its map
+layer (`mapd`: position filter, map matching on an OpenStreetMap pack) with the camera, one fact at a
+time with provenance. The scene carries a compact copy; the existing keys (`limit` = the camera-only
+speed-limit engine, `env`, `signs`, ...) are unchanged. The screens do not draw `map` yet.
+
+```
+"map": {"ok": true,                    # fused.map.available: the map layer is used (fresh, on a road, match >= 0.5)
+        "state": "good",               # mapd position state: no_source | good | dead_reckoning | unknown
+        "why": "no_position",          # only when ok is false: no_mapd | stale | no_pack | no_position | position_unknown | off_road | low_match_confidence
+        "conf": 0.97,                  # match confidence
+        "limit": {"kmh": 50, "src": "sign|sign_held|map|map_implicit|vision_default|unknown", "conf": 0.8,
+                  "agree": "agree|conflict|vision_only|map_only|none", "rule": "built_up", "sign": "B-33", "var": true} | null,
+        "road": {"cls": "primary", "name": "Ozimska", "ref": "DK46",
+                 "oneway": true, "rbt": true, "link": true, "expr": true, "mroad": true, "dual": true, "bridge": true, "toll": true},
+        "lanes": {"n": 2, "fwd": 1, "back": 1, "ego": 0, "onc_left": true, "src": "map:tagged+vision"},
+        "tunnel": {"in": false, "exit_m": 640, "entry_m": 840, "len_m": 2310, "src": "map|vision|map+vision|none"},
+        "built_up": {"v": true, "src": "sign|map_tagged|map_class|map_landuse+env|map_landuse|env|none"},
+        "ahead": {"junction": {"m": 412, "kind": "junction|roundabout|roundabout_exit|dead_end|no_way_on", "turn": -2, "minor": true},
+                  "curve": {"m": 300, "r": 150, "dir": "l|r"},
+                  "limit": {"m": 655, "kmh": 90},
+                  "feature": {"m": 230, "kind": "traffic_signals|crossing|stop|give_way|..."}},
+        "pos": {"src": "gnss|dead_reckoning", "hacc": 2.1},
+        "in": {"gnss": "headunit|synthetic", "fix": "3d|none|...", "fix_age": 0.4,
+               "motion": "vehicle|vision|none", "tag": "prius-can|synthetic"}}
+```
+
+| Field | roadsense source | Conversion |
+|---|---|---|
+| `ok`, `state`, `why`, `conf` | `fused.map.available`, `.state`, `.reason`, `.match_confidence` | `why` only when set |
+| `limit` | `fused.speed_limit`: `limit_kmh`, `source`, `confidence`, `agreement`, `rule`, `sign`, `variable` | null without a limit; `var` only when true |
+| `road` | `fused.road` (null without the map) | `cls` = `class`; flags only when true: `rbt` roundabout, `expr` expressway, `mroad` motorroad, `dual` dual carriageway |
+| `lanes` | `fused.lanes` | `n` count, `fwd` / `back` own / oncoming direction, `ego` 0 = leftmost lane of the own direction, `onc_left` the lane to the left is oncoming |
+| `tunnel` | `fused.tunnel` | `exit_m` = `exit_in_m` (in a tunnel), `entry_m`, `len_m` |
+| `built_up` | `fused.built_up.value`, `.source` | |
+| `ahead` | `fused.ahead` (null without the map) | the nearest junction, curve (`start_m`, `min_radius_m`, first letter of `direction`), speed-limit change and feature; m rounded |
+| `pos` | `fused.position.source`, `.hacc_m` | no coordinates are passed on |
+| `in` | `map.input.gnss.source`, `.fix`, `.age_s`; `map.input.motion.source`, `.tag` | what mapd hears from the position feeders; `gnss: "synthetic"` marks a synthetic drive. Left out while the `map` topic is stale |
+
+Without a position source (no fix, no feeder, mapd absent) `ok` is false and every fact is roadsense's
+vision value (e.g. `limit.src` `sign` / `vision_default`, `tunnel.src` `vision`): the screen can keep
+using `limit` and treat `map` as absent. The position input itself is [POSITION_FEEDER.md](POSITION_FEEDER.md).
+Size (compact JSON): about 0.57 kB with the map available (test example `FUSED_MAP`, without `in`; `in` adds about 0.1 kB), 0.23 kB without.
 
 ## 8. Requests
 
