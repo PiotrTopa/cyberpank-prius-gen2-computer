@@ -575,3 +575,22 @@ def test_routes_over_http(tmp_path):
         server.should_exit = True
         t.join(5)
         svc.stop()
+
+
+# ── scene keys added for the alert functions (backend/roadsense_scene.py) ────
+
+def test_scene_carries_tracked_lead_and_light_relevance():
+    from cyberpunk_computer.backend.roadsense_scene import fused_to_scene, lights_to_scene
+    fused = {"map": {"available": False, "reason": "no_position"},
+             "lead": {"present": True, "mode": "hold", "track_id": 7, "dist_m": 5.43, "lateral_m": 0.12,
+                      "v_rel_mps": 0.0, "v_lead_mps": 0.0, "a_lead_mps2": 0.0, "time_gap_s": None,
+                      "ttc_s": None, "standing": True, "departed": False, "source": "vision+vehicle"}}
+    sc = fused_to_scene(fused)
+    assert sc["lead"] == {"present": True, "d": 5.4, "y": 0.12, "v_rel": 0.0, "v": 0.0, "a": 0.0,
+                          "standing": True, "mode": "hold", "id": 7}
+    assert "lead" not in fused_to_scene({"map": {"available": False}, "lead": None})
+    lt = lights_to_scene({"ego": {"state": "green", "dist_m": 22.4, "lateral_m": -0.2, "relevance": 0.644,
+                                  "agree": 1}})
+    assert lt["rel"] == 0.64 and lt["agree"] == 1
+    i = build_inputs(_state(), {"map": sc}, 0.1, 10.0, 10.0, {})
+    assert i.lead.src == "tracked" and i.lead.standing and i.lead.d == 5.4

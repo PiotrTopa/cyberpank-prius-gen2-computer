@@ -8,8 +8,9 @@ import os
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 
-import pygame  # noqa: E402
 import pytest  # noqa: E402
+
+pygame = pytest.importorskip("pygame")
 
 from cyberpunk_computer.ui.scene.alerts import EVENT, AlertBanner, AlertFeed, attach  # noqa: E402
 

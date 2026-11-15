@@ -24,7 +24,7 @@ SHOTS: List[tuple] = [
      {"limit": {"kmh": 50, "src": "sign", "conf": 0.8}}, 0),
     ("distance_warning", 21.0, {"id": "distance_warning", "text": "CLOSING 1.6s",
                                 "severity": "warning", "icon": "lead", "advisory": True}, {}, 0),
-    ("headway_coach", 26.0, {"id": "headway_coach", "text": "GAP 0.8s - KEEP 2s", "severity": "notice",
+    ("headway_coach", 26.0, {"id": "headway_coach", "text": "GAP 0.8s", "severity": "notice", "advisory": True,
                              "icon": "lead"}, {}, 0),
     ("lead_departure", 39.0, {"id": "lead_departure", "text": "LEAD MOVED OFF", "severity": "notice",
                               "icon": "go"}, {}, 0),

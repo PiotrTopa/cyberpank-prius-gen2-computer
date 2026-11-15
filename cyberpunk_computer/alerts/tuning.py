@@ -73,6 +73,7 @@ class HeadwayTuning:
     max_steer_deg: float = 25.0         # suppress in curves (steering wheel angle)
     suppress_when_braking: bool = True
     max_scene_age_s: float = 0.6
+    camera_to_bumper_m: float = 1.8     # lead distances are from the camera; our bumper is this far ahead
 
 
 @dataclass

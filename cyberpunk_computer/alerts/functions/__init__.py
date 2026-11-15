@@ -18,5 +18,18 @@ def default_functions(tuning, settings) -> List[AlertFunction]:
     return fns
 
 
-# (tuning, settings) -> AlertFunction, in priority-irrelevant order
-_FACTORIES: list = []
+from .curve import CurveFunction  # noqa: E402
+from .eco import EcoCoachFunction  # noqa: E402
+from .guardian import GuardianFunction  # noqa: E402
+from .headway import HeadwayFunction  # noqa: E402
+from .lane import LaneDepartureFunction  # noqa: E402
+from .maintenance import MaintenanceFunction  # noqa: E402
+from .speed_limit import SpeedLimitFunction  # noqa: E402
+from .stop_go import StopGoFunction  # noqa: E402
+from .tunnel import TunnelRecircFunction  # noqa: E402
+from .winter import WinterFunction  # noqa: E402
+
+# (tuning, settings) -> AlertFunction
+_FACTORIES: list = [SpeedLimitFunction, StopGoFunction, HeadwayFunction, CurveFunction,
+                    TunnelRecircFunction, EcoCoachFunction, WinterFunction, MaintenanceFunction,
+                    GuardianFunction, LaneDepartureFunction]
