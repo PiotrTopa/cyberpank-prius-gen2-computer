@@ -123,7 +123,7 @@ def scene_at(t: float, seq: int, mods: Optional[Dict[str, Any]] = None) -> Optio
     if t >= 13.5:
         out["limit"] = {"kmh": 50, "src": "sign", "conf": 0.8}
         out["signs"] = SIGNS_DEMO
-    for key in ("env", "signs", "limit"):
+    for key in ("env", "signs", "limit", "map"):
         if key in mods:
             if mods[key] is None:
                 out.pop(key, None)
@@ -270,6 +270,14 @@ def _env(place: Optional[str], light: Optional[str], weather: Optional[str] = "c
 _NO_LAMPS = {"tail": False, "head": False, "high": False, "fog": False}
 _OPEN_ROAD = {"lead": False, "objects": False, "signs": None, "straight": True}
 
+
+
+def _MAP_DEMO(src: str, kmh: int) -> Dict[str, Any]:
+    """A scene ``map`` block with a usable map and the given fused limit."""
+    return {"ok": True, "state": "good", "conf": 0.93, "limit": {"kmh": kmh, "src": src, "conf": 0.8},
+            "in": {"gnss": "headunit", "fix": "3d", "motion": "vehicle", "tag": "prius-can"}}
+
+
 # (file name, time, vision variant, stale from, caption, mods)
 SHOTS = (
     # ── states ──
@@ -356,6 +364,13 @@ SHOTS = (
      {"cruise": {"cruise_main_switch": True, "cruise_memory_speed": 70}}),
     ("cruise_active", 19.5, "live", None, "cruise engaged, set speed",
      {"cruise": {"cruise_main_switch": True, "cruise_active": True, "cruise_set_speed": 50}}),
+    # ── speed limit from the map layer (fused value, docs/MFD_MAIN_SCREEN.md 4 / 7.2) ──
+    ("limit_sign_held", 19.5, "live", None, "camera sign held by the map: thick ring",
+     {"limit": {"kmh": 90, "src": "default"}, "map": _MAP_DEMO("sign_held", 40)}),
+    ("limit_map_tagged", 19.5, "live", None, "the map's tagged limit, no sign seen: thin double ring",
+     {"limit": {"kmh": 50, "src": "default"}, "map": _MAP_DEMO("map", 70)}),
+    ("limit_map_implicit", 19.5, "live", None, "implicit (statutory) map limit: thin dim ring",
+     {"limit": None, "map": _MAP_DEMO("map_implicit", 50)}),
 )
 
 

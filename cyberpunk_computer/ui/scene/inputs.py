@@ -115,8 +115,10 @@ class SceneInputs(NamedTuple):
     rs_ok: bool = False                    # stack running and API answering
     road: Optional[RoadScene] = None
     limit_kmh: Optional[int] = None
-    limit_source: str = ""                 # sign | default | ...
+    limit_source: str = ""                 # vision: sign | default | unknown; from the map layer
+                                           # (fused): sign | sign_held | map | map_implicit | vision_default
     limit_conf: Optional[float] = None     # roadsense's 0..1 heuristic
+    limit_fused: bool = False              # limit taken from the scene's map block (fused value)
     signs_on: Tuple[SignItem, ...] = ()    # rules in effect (without the speed limit)
     signs_ahead: Tuple[SignItem, ...] = () # warning signs, nearest first
     light: Optional[TrafficLight] = None
@@ -304,8 +306,9 @@ def _traffic_light(raw: Any) -> Optional[TrafficLight]:
 _GEAR = {"PARK": "P", "REVERSE": "R", "NEUTRAL": "N", "DRIVE": "D", "B": "B"}
 
 
-def read_inputs(state: Any, feed: Optional[SceneFeed] = None) -> SceneInputs:
-    """AppState (or anything shaped like it) -> SceneInputs."""
+def read_inputs(state: Any, feed: Optional[SceneFeed] = None, map_limit: bool = True) -> SceneInputs:
+    """AppState (or anything shaped like it) -> SceneInputs. ``map_limit``:
+    take the speed limit from the map layer when it is usable (tuning.map_limit)."""
     veh = getattr(state, "vehicle", None)
     dyn = getattr(state, "dynamics", None)
     body = getattr(state, "body", None)
@@ -384,14 +387,40 @@ def read_inputs(state: Any, feed: Optional[SceneFeed] = None) -> SceneInputs:
         cruise_set_kmh=int(cs) if cs else None,
         cruise_mem_kmh=int(cm) if cm else None,
         cruise_gap=int(cg) if cg else None,
-        **read_perception(state, feed),
+        **read_perception(state, feed, map_limit),
     )
 
 
-def read_perception(state: Any, feed: Optional[SceneFeed] = None) -> dict:
+def fused_limit(raw_scene: Mapping) -> Optional[Mapping]:
+    """The map layer's fused speed limit (scene ``map.limit``) when the map is
+    usable for it, else None (the caller keeps the vision value, ``limit``).
+
+    Usable: ``map.ok`` (roadsense uses the map: fresh, on a road, match >= 0.5),
+    the position does not come from a synthetic drive (``map.syn`` -- also
+    after one, while mapd still dead-reckons from the synthetic place -- or
+    ``map.in.gnss == "synthetic"``), and a limit is there. Contract:
+    docs/MFD_MAIN_SCREEN.md 7.2."""
+    mp = raw_scene.get("map")
+    if not isinstance(mp, Mapping) or mp.get("ok") is not True or mp.get("syn"):
+        return None
+    mi = mp.get("in")
+    if isinstance(mi, Mapping) and mi.get("gnss") == "synthetic":
+        return None
+    lim = mp.get("limit")
+    if not isinstance(lim, Mapping):
+        return None
+    kmh = _num(lim.get("kmh"))
+    return lim if kmh is not None and kmh > 0 else None
+
+
+def read_perception(state: Any, feed: Optional[SceneFeed] = None, map_limit: bool = True) -> dict:
     """The perception fields of ``SceneInputs`` (road scene, limit, signs,
     light, environment) from the state and the newest feed event. A new feed
-    event changes only these: ``inputs._replace(**read_perception(...))``."""
+    event changes only these: ``inputs._replace(**read_perception(...))``.
+
+    Speed limit: the map layer's fused value when usable (``fused_limit``),
+    else the vision value exactly as before (scene ``limit``, then the
+    health mirror)."""
     rs = getattr(state, "roadsense", None)
     rs_state = str(getattr(rs, "state", "") or "")
     rs_ok = rs_state == "running" and getattr(rs, "api_ok", None) is not False
@@ -410,7 +439,10 @@ def read_perception(state: Any, feed: Optional[SceneFeed] = None) -> dict:
             and road.path is None):
         road = None
 
-    limit = raw_scene.get("limit") if raw_scene else None
+    limit = fused_limit(raw_scene) if (raw_scene and map_limit) else None
+    limit_fused = limit is not None
+    if limit is None:
+        limit = raw_scene.get("limit") if raw_scene else None
     if not isinstance(limit, Mapping):
         limit = health.get("speed_limit")
     limit_kmh = None
@@ -438,6 +470,7 @@ def read_perception(state: Any, feed: Optional[SceneFeed] = None) -> dict:
         limit_kmh=limit_kmh if rs_ok else None,
         limit_source=limit_src,
         limit_conf=limit_conf,
+        limit_fused=limit_fused and rs_ok,
         signs_on=signs_on if rs_ok else (),
         signs_ahead=signs_ahead if rs_ok else (),
         light=light if rs_ok else None,

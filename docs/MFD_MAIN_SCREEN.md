@@ -138,8 +138,24 @@ use the real speed.
 Lead vehicle colour: cyan at a time gap >= 1.5 s, amber below, red below 0.8 s (information only;
 nothing acts on it). The limit digits turn amber more than 3 km/h above the limit.
 
-The limit sign has a thick red ring when a sign was seen; a limit that follows from a default rule
-(`src: default`) or has a confidence below 0.35 gets a thin dim ring and dim digits.
+Speed limit source (2026-11-15): the map layer's fused limit (scene `map.limit`, section 7.2) when the
+map is usable: `map.ok` true, not `map.syn` (synthetic drive or its residue) and `map.in.gnss` not
+`synthetic`, and a limit is there. Otherwise the vision limit exactly as before (scene `limit`, then the
+health mirror). roadsense's fusion order is: a sign the camera reads (`sign`), held by the map until the
+next real junction, a third tagged limit, a built-up boundary or 5 km (`sign_held`); then the tagged map
+limit (`map`); then the implicit statutory limit (`map_implicit`); then the vision default
+(`vision_default`). Tunable `map_limit` (default true; false = the camera-only limit).
+
+The limit sign shows where the value comes from (`SceneRenderer.limit_style`):
+
+| Source | Ring | Digits |
+|---|---|---|
+| `sign`, `sign_held` (a sign the camera read), and every vision source other than `default` | thick red, 3 px | normal |
+| `map` (tagged `maxspeed`, no sign seen) | two thin red rings, 1 px with a 1 px gap | normal |
+| `map_implicit`, `vision_default`, `default`, `unknown`, or confidence below 0.35 | thin dim red, 1 px | dim |
+
+Digits turn amber more than 3 km/h above the limit whatever the source. Demo shots `limit_sign_held`,
+`limit_map_tagged`, `limit_map_implicit` (section 11).
 
 ## 5. Chase-view geometry
 
@@ -395,7 +411,7 @@ it on the Pi).
 roadsense's `fused` topic (roadsense docs/ARCHITECTURE.md "api-derived topic fused") combines its map
 layer (`mapd`: position filter, map matching on an OpenStreetMap pack) with the camera, one fact at a
 time with provenance. The scene carries a compact copy; the existing keys (`limit` = the camera-only
-speed-limit engine, `env`, `signs`, ...) are unchanged. The screens do not draw `map` yet.
+speed-limit engine, `env`, `signs`, ...) are unchanged. The screen draws only `map.limit` (section 4).
 
 ```
 "map": {"ok": true,                    # fused.map.available: the map layer is used (fresh, on a road, match >= 0.5)
@@ -415,7 +431,8 @@ speed-limit engine, `env`, `signs`, ...) are unchanged. The screens do not draw 
                   "feature": {"m": 230, "kind": "traffic_signals|crossing|stop|give_way|..."}},
         "pos": {"src": "gnss|dead_reckoning", "hacc": 2.1},
         "in": {"gnss": "headunit|synthetic", "fix": "3d|none|...", "fix_age": 0.4,
-               "motion": "vehicle|vision|none", "tag": "prius-can|synthetic"}}
+               "motion": "vehicle|vision|none", "tag": "prius-can|synthetic"},
+        "syn": true}                   # only when set: mapd's position comes, or may still come, from a synthetic drive
 ```
 
 | Field | roadsense source | Conversion |
@@ -429,6 +446,7 @@ speed-limit engine, `env`, `signs`, ...) are unchanged. The screens do not draw 
 | `ahead` | `fused.ahead` (null without the map) | the nearest junction, curve (`start_m`, `min_radius_m`, first letter of `direction`), speed-limit change and feature; m rounded |
 | `pos` | `fused.position.source`, `.hacc_m` | no coordinates are passed on |
 | `in` | `map.input.gnss.source`, `.fix`, `.age_s`; `map.input.motion.source`, `.tag` | what mapd hears from the position feeders; `gnss: "synthetic"` marks a synthetic drive. Left out while the `map` topic is stale |
+| `syn` | the backend's `SyntheticTaint` over every `map` message | true from the first message whose `input.gnss.source` is `synthetic` until mapd reports `no_source` / `unknown` or `good` with a non-synthetic fix as the newest; covers the residue after a synthetic drive, when mapd still dead-reckons from the synthetic place while `in.gnss` already says `headunit` (no reset in the position API, [POSITION_FEEDER.md](POSITION_FEEDER.md) 5.1). Kept across WebSocket reconnects, lost on a backend restart |
 
 Without a position source (no fix, no feeder, mapd absent) `ok` is false and every fact is roadsense's
 vision value (e.g. `limit.src` `sign` / `vision_default`, `tunnel.src` `vision`): the screen can keep
@@ -468,6 +486,20 @@ The event `roadsense_scene` (section 7.1) and the health mirror (`RoadsenseState
 | Enclosed-place exit | `env.exit_in_m` for `tunnel` (portal light ahead), m, 1 Hz, so the tunnel can show its end |
 | Vulnerable road users | `objects[]` with `kind: "person" / "bike"`, 5..10 Hz |
 
+### 8.3 Map layer: further uses (proposals, not built)
+
+The scene `map` block already carries more than the limit. Proposals, each a small layer in
+`render.py` fed by new `SceneInputs` fields, all subject to the same usability rule as the limit (`ok`,
+not `syn`); offline mock-ups `mapui_mfd_proposal_*.png` (filedrop gallery `set=mapui`):
+
+| Use | Field | Where on the screen |
+|---|---|---|
+| curve ahead | `map.ahead.curve` (`m`, `r`, `dir`) | the warnings slot of the top line: the curve pictogram with `R150 300` in amber, a quiet 8 px `MAP` tag under it; only for radii under ~200 m within `warning_max_m`; a camera warning sign wins |
+| junction / roundabout ahead | `map.ahead.junction` (`m`, `kind`, `turn`, `minor`) | same slot, roundabout pictogram for `roundabout`; minor junctions never |
+| tunnel exit | `map.tunnel.in`, `.exit_m` | bottom-left corner (the perception status place, empty when live): `TUNNEL EXIT` caption + distance in Terminus 14; answers 8.2 "enclosed-place exit" from the map |
+| lane layout | `map.lanes` (`n`, `fwd`, `back`, `ego`, `onc_left`) | the lane boxes bottom-right, also when the camera sees no neighbouring lane: own-direction boxes as today, oncoming boxes dimmer, ego lit; answers 8.2 "lane layout" from the map |
+| limit change ahead | `map.ahead.limit` (`m`, `kmh`) | a small limit ring with the distance left of the limit sign, within 300 m |
+
 ## 9. Future data / sensors
 
 Wanted by the design, not available from the car or roadsense today, and therefore not drawn:
@@ -490,7 +522,7 @@ Wanted by the design, not available from the car or roadsense today, and therefo
 | traffic behind | a rear camera in roadsense |
 | parking distance arcs in the parked view | ultrasonic sensors |
 | steered front wheels in the parked view | a layer fed by `dynamics.steering_angle` (steering wheel degrees, + = left, CAN 0x025 × 1.5°); road-wheel angle = that / steering ratio (19.1 nominal, 21–29 effective, [POSITION_FEEDER.md](POSITION_FEEDER.md) §3) |
-| speed-limit source by map | GPS + the OSM speed-limit service |
+| speed-limit source by map | done through roadsense's map layer (section 4); needs a real GNSS source on the car (the head unit, [POSITION_FEEDER.md](POSITION_FEEDER.md) 4) |
 
 New elements go in as a layer function in `scene/render.py` (the layer list is in its docstring) fed
 by a field of `SceneInputs`; world objects only need a `kind` branch in `_draw_object`, a new sign a
@@ -627,9 +659,9 @@ python -m cyberpunk_computer.ui.scene.demo --live --scale 3                  # t
 python -m cyberpunk_computer.ui.scene.demo --bench                           # frame cost incl. the simulation
 ```
 
-`--shots` writes `NN_name.png` (native 480 x 240) and `NN_name@4x.png` for 51 cases: the states of
+`--shots` writes `NN_name.png` (native 480 x 240) and `NN_name@4x.png` for 54 cases: the states of
 section 4, the five lamp states on the road and three parked, 18 scenery variants covering every
-place, light and weather label, four lane layouts, the top line with the speed switched back on, a full sign row, the cruise slot states, and `signs_legend`
+place, light and weather label, four lane layouts, the top line with the speed switched back on, a full sign row, the cruise slot states, the three speed-limit provenance styles, and `signs_legend`
 with every pictogram. `--copy-to` also writes the 4x images there as `<prefix>NN_name.png`
 (`--prefix`, default `final_`).
 
@@ -673,6 +705,7 @@ ignored and logged.
 | `beam_style` | `outline` | `outline`, `hatch_light`, `hatch`, `off` (section 6.1) |
 | `path_chevrons` | false | the model's planned path as chevrons in the lane |
 | `lamp_chips` | `high` | `none`, `high` (only the high-beam chip), `all` (POS / LOW / HIGH / FOG) |
+| `map_limit` | true | the limit sign from the map layer's fused value when the map is usable (section 4); false = the camera-only limit |
 | `cruise_chip` | true | `SET nn` beside the speed while cruise is engaged (with `show_speed`; the cruise slot of the strip shows it always) |
 | `side_ticks` | true | corner ticks on the six side panels |
 | `ambient_panel` | `plain` | `plain` or `level` (section 2) |

@@ -68,12 +68,13 @@ class ScenePage:
             self._inputs_for = self._state
             self._feed_seen = feed_n
             if self._state is not None:
-                self.inputs = read_inputs(self._state, self.feed)
+                self.inputs = read_inputs(self._state, self.feed, self.tuning.map_limit)
         elif feed_n != self._feed_seen:
             # a road event alone (5-10/s): only the perception fields change
             self._feed_seen = feed_n
             if self._state is not None:
-                self.inputs = self.inputs._replace(**read_perception(self._state, self.feed))
+                self.inputs = self.inputs._replace(
+                    **read_perception(self._state, self.feed, self.tuning.map_limit))
 
     # -- frame --------------------------------------------------------------------
 

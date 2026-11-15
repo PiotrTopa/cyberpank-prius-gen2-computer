@@ -875,3 +875,57 @@ def test_feed_event_updates_only_the_perception_fields():
     page.update(0.05)
     assert page.inputs == read_inputs(st, page.feed)
     assert set(read_perception(st, page.feed)) < set(SceneInputs._fields)
+
+
+# ── speed limit from the map layer (scene "map" block, MFD_MAIN_SCREEN.md 7.2) ─
+
+def _map_block(src="sign_held", kmh=50, ok=True, **kw):
+    m = {"ok": ok, "state": "good", "conf": 0.9, "limit": {"kmh": kmh, "src": src, "conf": 0.8},
+         "in": {"gnss": "headunit", "fix": "3d"}}
+    m.update(kw)
+    return m
+
+
+def test_fused_limit_replaces_the_vision_limit_only_while_the_map_is_usable():
+    st = running(AppState())
+
+    def inp_for(**kw):
+        feed = SceneFeed()
+        feed.push(SCENE_EVENT, scene(**kw))
+        return read_inputs(st, feed)
+
+    vision = {"kmh": 70, "src": "sign", "conf": 0.7}
+    # sign held by the map after the camera engine dropped it
+    i = inp_for(limit={"kmh": 90, "src": "default"}, map=_map_block("sign_held", 50))
+    assert (i.limit_kmh, i.limit_source, i.limit_fused) == (50, "sign_held", True)
+    i = inp_for(limit=vision, map=_map_block("map", 40))
+    assert (i.limit_kmh, i.limit_source) == (40, "map")
+    # map not usable -> the vision value, exactly as before
+    for m in (_map_block(ok=False, why="no_position"),
+              _map_block(syn=True),                                     # synthetic residue
+              _map_block(**{"in": {"gnss": "synthetic", "fix": "3d"}}),   # synthetic drive
+              _map_block(limit=None), "garbage"):
+        i = inp_for(limit=vision, map=m)
+        assert (i.limit_kmh, i.limit_source, i.limit_conf, i.limit_fused) == (70, "sign", 0.7, False), m
+    i = inp_for(limit=vision)                                         # no map key at all
+    assert (i.limit_kmh, i.limit_fused) == (70, False)
+    # the tunable switches it off
+    feed = SceneFeed()
+    feed.push(SCENE_EVENT, scene(limit=vision, map=_map_block("map", 40)))
+    assert read_inputs(st, feed, map_limit=False).limit_kmh == 70
+    # stack not running: no limit at all (as before)
+    assert read_inputs(AppState(), feed).limit_kmh is None
+
+
+def test_limit_provenance_styles_are_distinct():
+    from cyberpunk_computer.ui.scene.render import SceneRenderer
+    style = SceneRenderer.limit_style
+    assert style("sign", 0.8) == style("sign_held", 0.8) == style("", None) == "sign"
+    assert style("map", 0.9) == "map"
+    assert style("map_implicit", 0.6) == style("vision_default", None) == style("default", None) == "weak"
+    assert style("map", 0.2) == style("sign", 0.3) == "weak"
+    pics = {src: drawn(drive_inputs(limit_kmh=50, limit_source=src, limit_conf=0.8))[0]
+            for src in ("sign", "sign_held", "map", "map_implicit", "default")}
+    assert pics["sign"] == pics["sign_held"]
+    assert pics["map_implicit"] == pics["default"]
+    assert len({pics["sign"], pics["map"], pics["map_implicit"]}) == 3

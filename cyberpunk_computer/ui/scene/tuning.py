@@ -80,6 +80,9 @@ class Tuning:
     path_chevrons = False       # the model's planned path in the lane
     lamp_chips = "high"         # none | high (only the high-beam chip) | all
     cruise_chip = True          # "SET nn" under the speed while cruise is engaged
+    map_limit = True            # limit sign from the map layer's fused value when the map is
+                                # usable (camera sign held by the map, else the map's limit);
+                                # False = the camera-only limit as before
 
     # ── side panels ──
     side_ticks = True           # corner ticks on the six panels

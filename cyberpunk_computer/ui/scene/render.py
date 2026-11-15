@@ -1091,17 +1091,36 @@ class SceneRenderer:
         pygame.draw.rect(s, self.pal["lane_mid"], (x, y, 15, 19), 1)
         s.blit(g, (x + (15 - g.get_width()) // 2 + 1, y + 2))
 
+    @staticmethod
+    def limit_style(src: str, conf: Optional[float]) -> str:
+        """How assertive the limit sign is: ``sign`` (a sign the camera read,
+        also while the map holds it), ``map`` (the map's tagged limit) or
+        ``weak`` (a limit from a rule: vision default, implicit map limit,
+        unknown kind, or confidence below 0.35)."""
+        if conf is not None and conf < 0.35:
+            return "weak"
+        if src == "map":
+            return "map"
+        if src in ("default", "vision_default", "map_implicit", "unknown"):
+            return "weak"
+        return "sign"
+
     def _draw_limit(self, s: pygame.Surface, cx: int, cy: int, kmh: int, over: bool,
-                    seen: bool = True) -> None:
-        """European limit sign as a neon ring. A limit that follows from a
-        default rule (no sign seen) gets a thin dim ring."""
+                    style: str = "sign") -> None:
+        """European limit sign as a neon ring: thick for a sign the camera
+        read, a thin double ring for the map's tagged limit (no sign seen,
+        but on record), a thin dim ring and dim digits for a limit that only
+        follows from a rule."""
         r = 13
         pygame.draw.circle(s, (0, 0, 0), (cx, cy), r)
-        if seen:
+        if style == "sign":
             pygame.draw.circle(s, self.pal["red"], (cx, cy), r, 3)
+        elif style == "map":
+            pygame.draw.circle(s, self.pal["red"], (cx, cy), r, 1)
+            pygame.draw.circle(s, self.pal["red"], (cx, cy), r - 2, 1)
         else:
             pygame.draw.circle(s, (150, 30, 34), (cx, cy), r, 1)
-        col = self.pal["warn"] if over else self.pal["text"] if seen else self.pal["dim"]
+        col = self.pal["warn"] if over else self.pal["dim"] if style == "weak" else self.pal["text"]
         txt = self.text(str(kmh), 14, col)
         s.blit(txt, (cx - txt.get_width() // 2 + (1 if kmh < 100 else 0), cy - txt.get_height() // 2))
 
@@ -1185,8 +1204,8 @@ class SceneRenderer:
         x_right = self.w - 20
         if inp.limit_kmh:
             over = inp.speed_kmh > inp.limit_kmh + 3
-            seen = inp.limit_source != "default" and (inp.limit_conf is None or inp.limit_conf >= 0.35)
-            self._draw_limit(s, x_right - 14, 16, inp.limit_kmh, over, seen)
+            self._draw_limit(s, x_right - 14, 16, inp.limit_kmh, over,
+                             self.limit_style(inp.limit_source, inp.limit_conf))
             x_right -= 32
         if inp.light is not None and inp.light.state in self.LIGHT_COLORS:
             self._draw_signal(s, x_right - 12, 3, 3, inp.light, d.clock)
