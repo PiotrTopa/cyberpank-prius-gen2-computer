@@ -459,6 +459,11 @@ class RoadsenseState:
     # off|powering|enumerating|waiting_for_frame|live|error, reason, source
     # stack|direct, leases, started_at, ttl_s, max_session_s, scaling.
     camera_preview: Optional[dict] = None
+    # Position feeder -> roadsense mapd (backend.position_feeder; None while
+    # BACKEND_POSITION_FEEDER is off): source, active, connected, sent /
+    # dropped counts, motion (yaw_input, can_age_s), gnss (has_fix,
+    # last_fix_age_s, counts). Field list: docs/POSITION_FEEDER.md section 6.
+    position: Optional[dict] = None
 
 
 @dataclass(frozen=True)

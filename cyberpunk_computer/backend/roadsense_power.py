@@ -97,6 +97,7 @@ DEFAULT_UNITS = (
     "roadsense-camerad-dvr.service",
     "roadsense-modeld.service",
     "roadsense-envd.service",
+    "roadsense-mapd.service",       # position filter + map matching (needs no camera)
     "roadsense-api.service",
     "roadsense-signd.service",
 )

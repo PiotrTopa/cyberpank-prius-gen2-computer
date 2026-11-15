@@ -55,6 +55,11 @@ image backups are kept outside the repo).
    and `66` give reverse; `07 05/06` can force the reverse view from the computer.
 7. **Health reporting.** Agent heartbeat, ZLink status, current source, volume and MCU state as a
    `headunit` section of the backend state.
+8. **GNSS for the map layer.** The unit's GPS is the car's position source: the agent posts every
+   raw fix to `POST /api/v1/position/gnss` on the backend, which feeds roadsense mapd. The backend
+   side is built (off by default); contract, fields and clock handling:
+   [POSITION_FEEDER.md](POSITION_FEEDER.md) §4. Not measured yet: whether the unit has a GNSS
+   receiver with a usable antenna, its fix rate and accuracy fields.
 
 ## 3. Architecture (design)
 

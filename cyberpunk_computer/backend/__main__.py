@@ -130,6 +130,56 @@ def _build_roadsense_scene():
     )
 
 
+def _build_position():
+    """Position feeder -> roadsense mapd (backend.position_feeder); off unless enabled::
+
+        BACKEND_POSITION_FEEDER=1              # 0 (default) = no feeder, no thread, no CAN tap
+        BACKEND_POSITION_SOURCE=headunit       # headunit | synthetic (test/demo only) | none (motion only)
+        BACKEND_POSITION_RUNDIR=/run/roadsense # mapd's position.sock
+        BACKEND_POSITION_MOTION_HZ=10          # 5..50
+        BACKEND_POSITION_YAW=wheels            # yaw fields with motion: wheels, steer (comma list; empty = none)
+        BACKEND_POSITION_FIX_TIMEOUT_S=3       # head unit silent this long -> fix "none"
+        BACKEND_POSITION_SYNTHETIC_ROUTE=      # route JSON; empty = built-in Opole loop
+        BACKEND_POSITION_SYNTHETIC_DROPOUTS=60:90,200:230   # s since start without a fix
+
+    Returns ``None`` when off.
+    """
+    if not _env_flag("BACKEND_POSITION_FEEDER"):
+        return None
+    from .position_feeder import DEFAULT_YAW_INPUTS, SOURCES, YAW_INPUTS, PositionFeederConfig
+    env = os.environ.get
+    log = logging.getLogger(__name__)
+    source = (env("BACKEND_POSITION_SOURCE") or "headunit").strip().lower()
+    if source not in SOURCES:
+        log.error("BACKEND_POSITION_SOURCE=%r unknown (%s): position feeder off",
+                  source, ", ".join(SOURCES))
+        return None
+    yaw_raw = env("BACKEND_POSITION_YAW")
+    yaw = DEFAULT_YAW_INPUTS if yaw_raw is None else tuple(
+        t.strip().lower() for t in yaw_raw.split(",") if t.strip().lower() in YAW_INPUTS)
+    drops = []
+    for tok in (env("BACKEND_POSITION_SYNTHETIC_DROPOUTS") or "").split(","):
+        if ":" in tok:
+            try:
+                t0, t1 = (float(x) for x in tok.split(":", 1))
+                drops.append((t0, t1))
+            except ValueError:
+                log.error("Bad BACKEND_POSITION_SYNTHETIC_DROPOUTS entry %r ignored", tok)
+    try:
+        hz = max(5.0, min(50.0, float(env("BACKEND_POSITION_MOTION_HZ") or 10)))
+        fix_timeout = float(env("BACKEND_POSITION_FIX_TIMEOUT_S") or 3)
+    except ValueError:
+        log.error("Bad BACKEND_POSITION_MOTION_HZ / _FIX_TIMEOUT_S: defaults used")
+        hz, fix_timeout = 10.0, 3.0
+    return PositionFeederConfig(
+        enabled=True, source=source,
+        rundir=(env("BACKEND_POSITION_RUNDIR") or "/run/roadsense").strip(),
+        motion_hz=hz, yaw_inputs=yaw, fix_timeout_s=fix_timeout,
+        synthetic_route=(env("BACKEND_POSITION_SYNTHETIC_ROUTE") or "").strip(),
+        synthetic_dropouts=tuple(drops),
+    )
+
+
 def _env_flag(name: str, default: str = "0") -> bool:
     return (os.environ.get(name, default) or "").strip().lower() in ("1", "true", "yes", "on")
 
@@ -340,6 +390,7 @@ def _build_config(args: argparse.Namespace) -> BackendConfig:
         roadsense_enabled=roadsense_enabled,
         roadsense_config=roadsense_config,
         roadsense_scene_config=_build_roadsense_scene(),
+        position_config=_build_position(),
         acc_off_debounce_s=float(os.environ.get("BACKEND_ACC_OFF_DEBOUNCE_S", "3")),
         panda_enabled=(not args.no_panda) and _env_flag("BACKEND_PANDA_ENABLED", "1"),
         panda_bus=args.panda_bus if args.panda_bus is not None

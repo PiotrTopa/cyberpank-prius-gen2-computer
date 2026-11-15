@@ -259,6 +259,10 @@ class BackendConfig:
     # stack's /ws while it runs and the MFD is on, publishes the ZMQ event
     # "roadsense_scene" (<= 10 Hz). Needs roadsense_enabled. BACKEND_ROADSENSE_SCENE*.
     roadsense_scene_config: Optional[object] = None  # SceneFeedConfig; None -> defaults (on)
+    # Position feeder (backend.position_feeder): CAN motion + GNSS (head unit /
+    # synthetic / none) -> roadsense mapd's position.sock. Off unless
+    # BACKEND_POSITION_FEEDER=1. PositionFeederConfig; None -> off.
+    position_config: Optional[object] = None
 
     # ── USB hub port power (backend.port_power) ──────────────────────────────
     # Topology of hub port power control: the powerbox's socket has native PPPS
@@ -445,6 +449,8 @@ class BackendService:
         self.roadsense_power = None
         # roadsense -> MFD road scene feed (backend.roadsense_scene).
         self.roadsense_scene = None
+        # Position feeder -> roadsense mapd (backend.position_feeder).
+        self.position_feeder = None
         # On-demand dashboard camera preview (backend.camera_preview).
         self.camera_preview = None
         # Key-off "low" CPU profile deferred until roadsense has stopped
@@ -554,12 +560,25 @@ class BackendService:
         if self._gateway_serial is not None and cfg.nav_emulation:
             self._wire_nav_emulator(self._gateway_serial)
 
+        # Position feeder (off by default). Built before the panda so its CAN
+        # motion tap can sit on the panda frame callback.
+        motion_tap = self._wire_position_feeder(twin)
+
         # Broadcast CAN from the panda (live mode only; a replay already holds
         # the frames). Reader thread -> ingress.ingest_broadcast_can -> store.
         if cfg.panda_enabled and not cfg.replay_file:
             twin.ingress.set_broadcast_dedupe(cfg.panda_dedupe_s)
+            on_frame = twin.ingress.ingest_broadcast_can
+            if motion_tap is not None:
+                # Tee: the tap sees every frame before the ingress dedupe
+                # (a few integer ops for 5 ids, a set lookup otherwise).
+                _ingest, _tap = on_frame, motion_tap.on_frame
+
+                def on_frame(can_id, data, bus, t_wall, t_mono):
+                    _tap(can_id, data, bus, t_wall, t_mono)
+                    return _ingest(can_id, data, bus, t_wall, t_mono)
             self.panda = PandaCanSource(
-                on_frame=twin.ingress.ingest_broadcast_can,
+                on_frame=on_frame,
                 config=PandaCanConfig(bus=cfg.panda_bus, safety_mode=cfg.panda_safety_mode),
             )
             twin.store.add_middleware(self._panda_bench_middleware)
@@ -675,6 +694,7 @@ class BackendService:
             roadsense_url=roadsense_url,
             bean_frames=self.bean_monitor.frames_since if self.bean_monitor else None,
             camera_preview=self.camera_preview,
+            position_feeder=self.position_feeder,
         )
         
         zmq_srv = ZmqServer(
@@ -749,6 +769,45 @@ class BackendService:
         self.bridge = bridge
         self.api = api
         self.zmq = zmq_srv
+
+    def _wire_position_feeder(self, twin: VirtualTwin):
+        """Position feeder -> roadsense mapd (backend.position_feeder).
+
+        Returns the CAN motion tap for the panda callback, or None when the
+        feeder is off. Every source gets the tap: the synthetic one uses it
+        only to suspend itself while the real car moves.
+        """
+        pcfg = self.config.position_config
+        if pcfg is None or not getattr(pcfg, "enabled", False):
+            return None
+        try:
+            from .position_feeder import CanMotionTap, PositionFeeder, make_source
+            from ..state.actions import SetRoadsenseStateAction
+            source = make_source(pcfg)
+            tap = CanMotionTap()
+
+            def _publish_position(status: dict) -> None:
+                twin.store.dispatch(SetRoadsenseStateAction(position=status))
+
+            self.position_feeder = PositionFeeder(pcfg, source, tap=tap,
+                                                  publish_status=_publish_position)
+            twin.store.dispatch(SetRoadsenseStateAction(position=self.position_feeder.status()))
+            logger.info("position feeder wired (source=%s, %s/position.sock, motion %.0f Hz, yaw %s)",
+                        source.name, pcfg.rundir, pcfg.motion_hz, ",".join(pcfg.yaw_inputs) or "-")
+            return tap
+        except Exception:
+            logger.exception("Position feeder could not be wired; disabled")
+            self.position_feeder = None
+            return None
+
+    def _position_feeder_tick(self) -> None:
+        """The feeder runs while the roadsense stack is meant to be up (mapd
+        is one of its units); without a roadsense manager it always runs."""
+        feeder = self.position_feeder
+        if feeder is None:
+            return
+        rs = self.roadsense_power
+        feeder.set_active(rs is None or rs.state in ("starting", "running", "grace"))
 
     def _wire_bean(self, twin: VirtualTwin) -> None:
         """BEAN monitor: frame ring for GET /api/v1/bean/frames + capture log
@@ -1471,6 +1530,8 @@ class BackendService:
                 self.ntp = srv
         if self.roadsense_scene is not None:
             self.roadsense_scene.start()
+        if self.position_feeder is not None:
+            self.position_feeder.start()
         if self.dashcam is not None:
             try:
                 self.dashcam.start()
@@ -1507,6 +1568,7 @@ class BackendService:
                     self._camera_preview_tick()
                     self._roadsense_power_tick()
                     self._roadsense_scene_tick()
+                    self._position_feeder_tick()
                     self._poco_power_tick()
                     self._chassis_fan_tick()
                     self._vfd_clock_tick()
@@ -2248,6 +2310,11 @@ class BackendService:
                 self.roadsense_scene.stop()
             except Exception:
                 logger.exception("Error stopping the roadsense scene feed")
+        if self.position_feeder is not None:
+            try:
+                self.position_feeder.stop()
+            except Exception:
+                logger.exception("Error stopping the position feeder")
         if self.api is not None:
             self.api.stop()
         if self.zmq:

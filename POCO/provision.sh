@@ -150,6 +150,10 @@ BACKEND_ROADSENSE_MODE=auto
 # the stack's /ws while it runs and the MFD is on; docs/MFD_MAIN_SCREEN.md 7).
 BACKEND_ROADSENSE_SCENE=1
 BACKEND_ROADSENSE_SCENE_HZ=10
+# Position feeder -> roadsense mapd (CAN motion + head-unit GNSS; docs/POSITION_FEEDER.md).
+# Off until mapd and a map pack are installed. SOURCE: headunit | none | synthetic (demo only).
+BACKEND_POSITION_FEEDER=0
+BACKEND_POSITION_SOURCE=headunit
 
 # USB topology (main hub 1-1 = Terminus 1a40:0101, 4 ports, cabled 2026-11-04):
 # port 1 powerbox, port 2 MFD Pi (relay ch2), port 3 CAN hub with the gateway +
