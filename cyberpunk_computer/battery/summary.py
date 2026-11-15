@@ -17,7 +17,7 @@ from . import stats as S
 from .analysis import arrhenius_factor, pair_rest
 from .model import (
     ANALYSIS_VERSION, COLD_C, I_REF, MIN_REST_SD_H, MIN_STEPS_R, N_BLOCKS, NOMINAL_AH,
-    R_ARRHENIUS_B_PRIOR, SCHEMA_VERSION, T_REF_C,
+    R_ARRHENIUS_B_PRIOR, SCHEMA_VERSION, T_REF_C, V12_LOW,
 )
 from .trends import analyse_trend, DAY
 
@@ -29,19 +29,21 @@ THRESHOLDS: Dict[str, dict] = {
     "balance_rest": {"trend_min": 10.0, "watch": 200.0, "act": 300.0, "dir": "high", "unit": "mV",
                      "origin": "own; scale of the 0.3 V block-difference figure reported for DTC P0A80/P3011-P3024 (forum-reported, not confirmed by a manual excerpt)"},
     "weak_block": {"trend_min": 10.0, "watch": -200.0, "act": -300.0, "dir": "low", "unit": "mV",
-                   "origin": "own; same 0.3 V scale, at 50 A and 25 degC"},
+                   "origin": "own; same 0.3 V scale, at 50 A and 25 °C"},
     "r_spread": {"trend_min": 1.0, "watch": 20.0, "act": 35.0, "dir": "high", "unit": "%",
-                 "origin": "own; 0.3 V at 50-100 A on a ~20-30 mOhm block is 10-30 %"},
+                 "origin": "own; 0.3 V at 50-100 A on a ~20-30 mΩ block is 10-30 %"},
     "r_pack": {"trend_min": 0.03, "watch": 25.0, "act": 50.0, "dir": "high", "unit": "% over own baseline",
                "origin": "own"},
     "soc_stability": {"trend_min": 0.3, "watch": 20.0, "act": 26.0, "dir": "high", "unit": "% SOC per Ah",
                       "origin": "own; nominal 15.4 %/Ah (6.5 Ah); 20 / 26 %/Ah = 5.0 / 3.8 Ah apparent"},
     "self_discharge": {"trend_min": 2.0, "watch": -15.0, "act": -40.0, "dir": "low", "unit": "mV/day",
                        "origin": "own"},
-    "thermal": {"watch": 45.0, "act": 55.0, "dir": "high", "unit": "degC",
+    "thermal": {"watch": 45.0, "act": 55.0, "dir": "high", "unit": "°C",
                 "origin": "own; the ECU derates and runs the fan at full speed in this range"},
     "aux_rest": {"trend_min": 0.01, "watch": 12.2, "act": 11.9, "dir": "low", "unit": "V",
                  "origin": "general lead-acid open-circuit figures (about 50 % / 25 % charge); Toyota bulletins expect 12.8 V when charged"},
+    "aux_low": {"watch": 11.8, "act": 11.5, "dir": "low", "unit": "V",
+                "origin": "own; general lead-acid figures: below about 11.8 V under a light load the battery is nearly empty"},
     "aux_charge": {"watch": 13.5, "act": 13.0, "dir": "low", "unit": "V", "origin": "own"},
 }
 
@@ -70,7 +72,7 @@ def arr_x(t_c: float) -> float:
 
 
 def block_view(f: dict, b: float = R_ARRHENIUS_B_PRIOR) -> Optional[dict]:
-    """Per-block figures of one ride, normalised to 25 degC where it applies
+    """Per-block figures of one ride, normalised to 25 °C where it applies
     (``b`` = Arrhenius coefficient of the resistance, K)."""
     fit = _g(f, "bal", "fit")
     r = f.get("r") or {}
@@ -152,14 +154,28 @@ def build_summary(store, now: Optional[float] = None) -> dict:
                 p["worst_mv_per_day"] = p["sd_rel_mv_per_day"][k]
             pairs.append(p)
     long_pairs = [p for p in pairs if p["rest_h"] >= MIN_REST_SD_H and p["sd_rel_mv_per_day"]]
-    tr_sd = trend("self_discharge", [(p["ts"], p["worst_mv_per_day"], None) for p in long_pairs])
+    # Charge-imbalance drift: Theil-Sen slope of each block's zero-current
+    # offset over the last 90 days. Only a real divergence accumulates; the
+    # ride-to-ride differences above also carry a temperature-dependent fit
+    # artefact of a high-resistance block (cold start after a long rest), so
+    # they serve only until there is enough history for the slope.
+    recent_v = [(r, v) for r, f, v in views if r["start_ts"] >= now - 90 * DAY]
+    drift = [analyse_trend([(r["start_ts"], v["dev0_mv"][k], None) for r, v in recent_v], series_max=1)
+             for k in range(N_BLOCKS)]
     sd_block = None
-    if long_pairs:
+    if all(d["slope_30d"] is not None for d in drift):
+        per = [d["slope_30d"] / 30.0 for d in drift]
+        kmin = min(range(N_BLOCKS), key=lambda k: per[k])
+        sd_block = {"block": kmin + 1, "mv_per_day": rnd(per[kmin], 2), "per_block": [rnd(x, 2) for x in per],
+                    "n": len(recent_v), "method": "drift", "significant": drift[kmin]["significant"],
+                    "lo": rnd(drift[kmin]["lo_30d"] / 30.0, 2), "hi": rnd(drift[kmin]["hi_30d"] / 30.0, 2)}
+    elif long_pairs:
         recent = long_pairs[-10:]
         sd_med = [S.median([p["sd_rel_mv_per_day"][k] for p in recent]) for k in range(N_BLOCKS)]
         kmin = min(range(N_BLOCKS), key=lambda k: sd_med[k])
         sd_block = {"block": kmin + 1, "mv_per_day": rnd(sd_med[kmin], 2),
-                    "per_block": [rnd(x, 2) for x in sd_med], "n": len(recent)}
+                    "per_block": [rnd(x, 2) for x in sd_med], "n": len(recent), "method": "pairs"}
+    tr_sd = trend("self_discharge", [(p["ts"], p["worst_mv_per_day"], None) for p in long_pairs])
 
     # ── 12 V trends ──────────────────────────────────────────────────────────
     rest_rows = []
@@ -221,7 +237,7 @@ def build_summary(store, now: Optional[float] = None) -> dict:
     pers = blocks.get("persistent")
     add("weak_block", "Weakest block under load", tr_weak["value"], "mV",
         level("weak_block", tr_weak["value"]),
-        "lowest block against the pack median at 50 A discharge, 25 degC; median of the last 5 graded rides",
+        "lowest block against the pack median at 50 A discharge, 25 °C; median of the last 5 graded rides",
         "a module pair that sags under load: the Gen2 failure pattern. A persistent block here is the one to watch"
         + ("; block %d was the weakest in %d of the last %d rides" % (pers["block"], pers["count"], pers["of"]) if pers else ""),
         "says nothing about which of the two modules of the block is weak; a few tens of mV between blocks are normal",
@@ -234,9 +250,9 @@ def build_summary(store, now: Optional[float] = None) -> dict:
         tr_rspread, {"block": blocks.get("r_max_block")})
     r_base, r_val = tr_rsum.get("baseline"), tr_rsum.get("value")
     r_rise = 100.0 * (r_val / r_base - 1.0) if r_val and r_base and tr_rsum["n"] >= 10 else None
-    add("r_pack", "Pack resistance at 25 degC", r_val, "mOhm",
+    add("r_pack", "Pack resistance at 25 °C", r_val, "mΩ",
         level("r_pack", r_rise) if r_rise is not None else ("unknown" if r_val is None else "ok"),
-        "sum of the 14 block resistances from current steps over 2 s, normalised to 25 degC (%s temperature coefficient); level = rise over this pack's own first rides" % (
+        "sum of the 14 block resistances from current steps over 2 s, normalised to 25 °C (%s temperature coefficient); level = rise over this pack's own first rides" % (
             _g(tr_rsum, "coef", "source", default="prior")),
         "ageing of the whole pack (power capability); read the trend, not the single value",
         "a 2 s value includes polarisation, so it is higher than the ECU's own figure; until a full temperature range is seen the normalisation rests on a prior and winter may still show as a rise",
@@ -257,17 +273,20 @@ def build_summary(store, now: Optional[float] = None) -> dict:
         "state-of-charge imbalance between blocks (unequal self-discharge or capacity)",
         "12-cell blocks hide a single weak cell until it is far gone",
         tr_bal)
-    add("self_discharge", "Self-discharge imbalance", sd_block["mv_per_day"] if sd_block else None, "mV/day",
+    add("self_discharge", "Charge imbalance drift", sd_block["mv_per_day"] if sd_block else None, "mV/day",
         level("self_discharge", sd_block["mv_per_day"] if sd_block else None),
-        "change of a block's zero-current voltage offset (against the pack median) from one ride to the next, per day, over rests of at least %g h; worst block, median of the last 10 such rests" % MIN_REST_SD_H,
-        "a block that loses charge faster than the others while parked (internal leakage)",
-        "relative between blocks only: the whole pack's self-discharge is not measured (the pack voltage after a rest is dominated by relaxation and temperature)",
-        tr_sd, {"block": sd_block["block"] if sd_block else None}, n=len(long_pairs))
-    add("thermal", "Battery temperature", tr_tmax["value"], "degC",
+        ("slope of each block's zero-current voltage offset (against the pack median) over the last 90 days; the fastest-falling block"
+         if sd_block and sd_block["method"] == "drift" else
+         "provisional (under 3 weeks of history): change of the zero-current offset from one ride to the next over rests of at least %g h, median of the last 10" % MIN_REST_SD_H),
+        "a block that keeps losing charge against the others: higher self-discharge (internal leakage) or lower capacity",
+        "does not separate loss while parked from divergence while driving; the whole pack's self-discharge is not measured (the pack voltage after a rest is dominated by relaxation and temperature)",
+        None, {"block": sd_block["block"] if sd_block else None, "method": sd_block["method"] if sd_block else None,
+               "trend_key": "self_discharge"}, n=sd_block["n"] if sd_block else 0)
+    add("thermal", "Battery temperature", tr_tmax["value"], "°C",
         level("thermal", tr_tmax["value"]),
         "highest battery temperature of a ride; median of the last 5 rides",
         "heat stress and cooling problems (fan, intake filter): compare with the intake temperature and the gradient",
-        "without the full 21CF answer only two coarse sensors (1 degC) are read; module-level hot spots are invisible",
+        "without the full 21CF answer only two coarse sensors (1 °C) are read; module-level hot spots are invisible",
         None, {"grad": rnd(S.median([f["temp"]["grad_max"] for _, f in feats[-5:] if _g(f, "temp", "grad_max") is not None]), 1),
                "trend_key": "t_max"}, n=tr_tmax["n"])
     v_rest = tr_aux_rest["value"]
@@ -279,6 +298,14 @@ def build_summary(store, now: Optional[float] = None) -> dict:
         "not an open-circuit voltage (0.1-0.4 A load); cold lowers it; a short drive before leaves a surface charge",
         tr_aux_rest, {"trend_key": "aux_rest_v", "pb_offset": rnd(pb_offset, 3),
                       "v_min_recent": rnd(min([x["v_min"] for x in rest_rows[-10:] if x["v_min"] is not None], default=None), 2)})
+    lows = [x for x in rest_rows if x["v_min"] is not None and x["end_ts"] >= now - 14 * DAY]
+    v_low = min((x["v_min"] for x in lows), default=None)
+    add("aux_low", "12 V lowest voltage, 14 days", v_low, "V", level("aux_low", v_low),
+        "lowest one-minute minimum at the powerbox between rides in the last 14 days (includes ACC-on time without READY)",
+        "how close the 12 V battery came to not starting the car; %d min below %.1f V in that time" % (
+            sum(x["low_min"] or 0 for x in lows), V12_LOW),
+        "a dip under a brief load (ACC accessories, the computer booting) counts like a slow sag: open the rest to see which",
+        None, {"trend_key": "aux_min_v"}, n=len(lows))
     add("aux_charge", "12 V charge voltage in READY", tr_aux_chg["value"], "V",
         level("aux_charge", tr_aux_chg["value"]),
         "ECM supply voltage (OBD 0142), median over READY",

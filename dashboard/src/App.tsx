@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import {
-  Activity, Bug, Car, Clock, Cpu, LayoutDashboard, Map as MapIcon, Power, SatelliteDish, Stethoscope,
+  Activity, BatteryCharging, Bug, Car, Clock, Cpu, LayoutDashboard, Map as MapIcon, Power, SatelliteDish, Stethoscope,
   Thermometer, Wifi, WifiOff, Zap,
 } from 'lucide-react';
 import type { Satellites, Tab, TimeRange } from './types';
@@ -15,6 +15,7 @@ import { ControlsTab } from './tabs/ControlsTab';
 import { SatellitesTab } from './tabs/SatellitesTab';
 import { DiagnosticsTab } from './tabs/DiagnosticsTab';
 import { MapTab } from './tabs/MapTab';
+import { BatteryTab } from './tabs/BatteryTab';
 import { transportOf } from './lib/satellites';
 
 const TABS: [Tab, string, typeof LayoutDashboard][] = [
@@ -22,6 +23,7 @@ const TABS: [Tab, string, typeof LayoutDashboard][] = [
   ['map', 'Map', MapIcon],
   ['satellites', 'Satellites', SatelliteDish],
   ['charts', 'Telemetry', Activity],
+  ['battery', 'Battery', BatteryCharging],
   ['diagnostics', 'Diagnostics', Stethoscope],
   ['controls', 'Controls', Power],
 ];
@@ -34,7 +36,7 @@ export default function App() {
   const serverNow = now - clockOffsetMs;
   // Tab mirrors the URL hash (#satellites) so a view can be linked/reloaded.
   const [activeTab, setActiveTabState] = useState<Tab>(() => {
-    const h = window.location.hash.replace('#', '');
+    const h = window.location.hash.replace('#', '').split('/')[0];
     return TABS.some(([id]) => id === h) ? (h as Tab) : 'dashboard';
   });
   const setActiveTab = (t: Tab) => {
@@ -177,6 +179,7 @@ export default function App() {
           {activeTab === 'charts' && (
             <TelemetryTab hist={hist} timeRange={timeRange} onTimeRange={setTimeRange} />
           )}
+          {activeTab === 'battery' && <BatteryTab />}
           {activeTab === 'diagnostics' && (
             <DiagnosticsTab diag={state.diagnostics} connected={connected} now={serverNow} />
           )}

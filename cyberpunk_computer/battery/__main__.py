@@ -119,7 +119,7 @@ def cmd_synth(a) -> int:
         print("refusing to write synthetic data into an existing database: %s" % a.db, file=sys.stderr)
         return 1
     store = BatteryStore(a.db)
-    cfg = synth.SynthConfig(seed=a.seed, days=a.days, weak_block=a.weak_block, weak_start_day=a.weak_start_day,
+    cfg = synth.SynthConfig(seed=a.seed, days=a.days, start_ts=time.time() - a.days * 86400.0, weak_block=a.weak_block, weak_start_day=a.weak_start_day,
                             leaky_block=a.leaky_block, leak_soc_per_day=a.leak, pack_r_growth_per_year=a.r_growth,
                             aux_fade_per_year=a.aux_fade, full_21cf=not a.first_frame_cf)
     col = Collector(lambda r: store.put_ride(r), lambda r: store.put_rest(r), source="synth")

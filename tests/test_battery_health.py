@@ -174,7 +174,7 @@ def test_block_resistance_estimate_matches_model(faulty):
 def test_planted_self_discharge_is_found(faulty):
     store, s, car = faulty
     sd = s["self_discharge"]
-    assert sd is not None and sd["block"] == 3 and sd["mv_per_day"] < -3.0
+    assert sd is not None and sd["method"] == "drift" and sd["block"] == 3 and sd["mv_per_day"] < -3.0
     others = [x for k, x in enumerate(sd["per_block"]) if k not in (2, 6)]
     assert max(abs(x) for x in others) < abs(sd["mv_per_day"]) / 2
     # and it accumulates as an offset at zero current
@@ -467,7 +467,7 @@ def test_api_routes(tmp_path):
         svc.store.set_cache("summary", summary.build_summary(svc.store))
         svcmod.set_active(svc)
         s = json.loads(_http(port, "/api/v1/battery/summary")[2])
-        assert s["rides"][0]["id"] == rid and len(s["indicators"]) == 10
+        assert s["rides"][0]["id"] == rid and len(s["indicators"]) == 11
         d = json.loads(_http(port, "/api/v1/battery/rides/%d" % rid)[2])
         assert d["view"]["weak_block"] == 12 and len(d["series"]["dev_mv"]) == 180
         assert _http(port, "/api/v1/battery/rides/999")[0] == 404

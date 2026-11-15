@@ -326,5 +326,5 @@ export interface Diagnostics {
 }
 
 export type TimeRange = '1h' | '24h' | '7d';
-export type Tab = 'dashboard' | 'map' | 'satellites' | 'charts' | 'diagnostics' | 'controls';
+export type Tab = 'dashboard' | 'map' | 'satellites' | 'charts' | 'battery' | 'diagnostics' | 'controls';
 export type Series = { time: string; value: number }[];
