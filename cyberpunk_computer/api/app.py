@@ -306,6 +306,12 @@ def create_app(
     for add_routes in extra_routes or ():
         add_routes(app, API_PREFIX, require_auth)
 
+    # ── battery health (cyberpunk_computer/battery; 503 until wired) ────────
+
+    from ..battery.api import register as register_battery
+
+    register_battery(app, API_PREFIX + "/battery", require_auth)
+
     # ── dashboard ────────────────────────────────────────────────────────────
 
     dashboard_path = Path(__file__).parent.parent.parent / "dashboard" / "dist"

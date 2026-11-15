@@ -9,7 +9,7 @@ npm ci
 npm run dev       # dev server; talks to the backend at the address in src/lib/api.ts
 npm run build     # tsc + vite build -> dist/
 npm run lint
-npm test          # unit tests (camera preview)
+npm test          # unit tests (camera preview, map layer, battery view model)
 ```
 
 Data: one WebSocket to `/api/v1/stream` (state snapshots, `hooks/useAppStream.ts`) and REST
@@ -17,6 +17,7 @@ Data: one WebSocket to `/api/v1/stream` (state snapshots, `hooks/useAppStream.ts
 in dev mode the backend address is hard-coded in `src/lib/api.ts`. Ages are computed against the
 backend clock (the POCO has no reliable RTC).
 
-Tabs (`src/tabs/`): Overview, Satellites, Telemetry (metrics history charts), Diagnostics (all-ECU
+Tabs (`src/tabs/`): Overview, Satellites, Telemetry (metrics history charts), Battery (long-run health of
+the HV pack and the 12 V battery from `/api/v1/battery/*`, [docs/BATTERY_HEALTH.md](../docs/BATTERY_HEALTH.md)), Diagnostics (all-ECU
 diagnostics, [docs/TOYOTA_DIAGNOSTICS.md](../docs/TOYOTA_DIAGNOSTICS.md)), Controls. The header shows aux
 voltage, computer draw, power mode and cabin temperature from the powerbox state.

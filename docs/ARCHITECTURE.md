@@ -21,6 +21,7 @@ The UI code is identical in the frontend and the standalone app; only the data s
 |---|---|
 | main (engine) | `vt.update()` + `bridge.drain_commands()` at `BACKEND_TICK_HZ` (default 50); the only thread that dispatches UI/API commands |
 | metrics | `MetricsSink`: samples store snapshots into SQLite (`BACKEND_DB`) |
+| battery-health | `battery/service.py`: per-ride and per-rest battery records into `battery.db`, nice +10 ([BATTERY_HEALTH.md](BATTERY_HEALTH.md)) |
 | api-server | uvicorn/FastAPI: REST + WebSocket |
 | zmq | `ZmqServer` socket IO |
 | panda reader | broadcast CAN frames → `IngressController.ingest_broadcast_can` → `Store.dispatch` (the store holds a re-entrant lock for this path); with the position feeder on, `CanMotionTap.on_frame` sees each frame first |
@@ -34,7 +35,7 @@ engine thread; snapshots go out latest-only so a slow client never blocks the en
 
 | Interface | Port | Content |
 |---|---|---|
-| REST | 8080 | `GET /health`; under `/api/v1`: `state`, `metrics/catalog`, `metrics`, `events`, `commands` (list), `POST commands/{name}`, `bean/frames`, `diag/*`, `camera/preview*`, `position` + `POST position/gnss` (feeder on only), `alerts` ([ALERTS.md](ALERTS.md)), roadsense proxy; `/roadsense/` (roadsense status page), `/login`, `/logout`, `/auth/*` (sessions, pairing). Auth with `BACKEND_AUTH_TOKEN` set: loopback trusted, else bearer token or session cookie ([AUTH.md](AUTH.md)) |
+| REST | 8080 | `GET /health`; under `/api/v1`: `state`, `metrics/catalog`, `metrics`, `events`, `commands` (list), `POST commands/{name}`, `bean/frames`, `diag/*`, `battery/*` ([BATTERY_HEALTH.md](BATTERY_HEALTH.md)), `camera/preview*`, `position` + `POST position/gnss` (feeder on only), `alerts` ([ALERTS.md](ALERTS.md)), roadsense proxy; `/roadsense/` (roadsense status page), `/login`, `/logout`, `/auth/*` (sessions, pairing). Auth with `BACKEND_AUTH_TOKEN` set: loopback trusted, else bearer token or session cookie ([AUTH.md](AUTH.md)) |
 | WebSocket | 8080 `/api/v1/stream` | state snapshots (dashboard); same auth as REST |
 | ZMQ PUB | 8081 | `{"type":"state","ts","state"}` (latest-only, throttled) and `{"type":"event","ts","name","data"}` (FIFO, never displaced by state) |
 | ZMQ REP | 8082 (no auth; firewalled to lo/usb*/wg*) | `{"command": name, "params": {...}}` → `{"status":"ok"}` on acceptance (execution is asynchronous) or `{"status":"error","reason"}` |
@@ -180,7 +181,7 @@ request + 8).
 | core | 2 | hybrid comprehensive | 0x7E2 | `21 C3` | 1000 | 500 / yes |
 | core | 6 | cruise control | 0x7E2 | `21 D3` | 1000 | 200 |
 | battery_cells | 3 | block voltages | 0x7E3 | `21 CE` | 2000 | 500 / yes |
-| battery_cells | 4 | battery temps / fan / delta SOC | 0x7E3 | `21 CF` | 2000 | 200 |
+| battery_cells | 4 | battery temps / fan / delta SOC | 0x7E3 | `21 CF` | 2000 | 500 / yes |
 | battery_cells | 5 | block resistances | 0x7E3 | `21 D0` | 5000 | 500 / yes |
 | hybrid_extended | 8 | hybrid additional | 0x7E2 | `21 C4` | 2000 | 500 / yes |
 | engine_sensors | 9 / 10 / 11 | intake air temp / MAF / lambda | 0x7E0 | `01 0F` / `01 10` / `01 24` | 5000 / 2000 / 2000 | 200 |
@@ -216,8 +217,8 @@ Protocol: [VFD_SATELLITE_PROTOCOL.md](VFD_SATELLITE_PROTOCOL.md).
 
 ## Open gaps
 
-- `battery_cells` slot 4 (`21 CF`) is subscribed with a 200 ms timeout and without ISO-TP, while the
-  21CF answer is longer than one frame (`PIDDefinition.byte_count` 12); the gateway then returns only
-  the first frame (probable, from the firmware's ISO-TP rules in [PROTOCOL.md](PROTOCOL.md)). Whether
-  `delta_soc` ever reaches the state on the car is unverified; check a trip recording for slot-4
-  responses and their length.
+- `battery_cells` slot 4 (`21 CF`): until 2026-11-15 it was subscribed without ISO-TP and the gateway
+  returned only the first frame of the 18-byte answer (confirmed on the 2026-11-13 recording: 550 of
+  550 answers `10 12 61 CF …`; `delta_soc`, fan speed and intake temperature never reached the state).
+  The subscription now sets `isotp` with a 500 ms timeout; not yet verified on the car
+  ([BATTERY_HEALTH.md](BATTERY_HEALTH.md) §11).

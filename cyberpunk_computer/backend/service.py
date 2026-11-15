@@ -389,6 +389,7 @@ class BackendService:
         self.satellite_registry: Optional[SatelliteRegistry] = None
         self._satellite_sup_last: float = 0.0
         self.recorder: Optional[TripRecorder] = None
+        self.battery = None         # battery.service.BatteryHealthService
         self.diag = None            # diag.wiring.Diagnostics (all-ECU diagnostics engine)
         self._unsubscribe = None
         self._unsubscribe_powerbox = None
@@ -637,6 +638,17 @@ class BackendService:
         # Trip recording: tap ingress/egress and write rotating per-trip logs.
         if cfg.recording.enabled:
             self._wire_recording(twin)
+
+        # Battery-health collector (docs/BATTERY_HEALTH.md): live data only.
+        if not cfg.replay_file:
+            try:
+                import os as _os
+                from ..battery.service import wire_battery_health
+                self.battery = wire_battery_health(
+                    twin, _os.environ.get("BACKEND_BATTERY_DB")
+                    or _os.path.join(_os.path.dirname(cfg.db_path) or ".", "battery.db"))
+            except Exception:
+                logger.exception("Battery-health module could not be wired; disabled")
 
         # All-ECU diagnostics engine (diag_* commands, state.diagnostics.ecus,
         # scan reports next to the metrics database, auto-clear monitor).
@@ -1573,6 +1585,8 @@ class BackendService:
                 self.panda = None
         if self.recorder is not None:
             self.recorder.start()
+        if self.battery is not None:
+            self.battery.start()
         self.sink.start()
         self.api.start()
         self.zmq.start()
@@ -2389,6 +2403,11 @@ class BackendService:
                 self.recorder.stop()
             except Exception:
                 logger.exception("Error stopping trip recorder")
+        if self.battery is not None:
+            try:
+                self.battery.stop()
+            except Exception:
+                logger.exception("Error stopping the battery-health collector")
         if self.satellite_registry is not None:
             try:
                 self.satellite_registry.stop()
