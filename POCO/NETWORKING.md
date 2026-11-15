@@ -165,8 +165,12 @@ a loop every 30 s, independent of `prius-power` and of the netwatch ladder:
   `simulate-clear` ends it.
 - Installed by `provision.sh` with the car network layer (not with `--core`); `provision.sh`
   seeds `lifeline-hold` / `lifeline-fails` and restarts the service.
-- AP up is verified from the phone side only (NM `prius-ap` state 100, `10.42.0.1/24`,
-  `wpa_cli -i wlan0 status` mode=AP); no client has joined it in a lifeline test yet.
+- Verified 2026-11-15 on the car phone: simulated loss (hook) → ON 80 s after the start,
+  AP `10.42.0.1/24`, OFF 2 min after the end (test hold) with Wi-Fi suspended again; real
+  WireGuard drop (`nmcli con down wg-homelab`, time-boxed) → ON after 83 s (wpa_supplicant
+  `AP-ENABLED`), netwatch bounced WireGuard at its 2nd miss as before, OFF 10 min after
+  the uplink returned. The AP's beacons were received by a laptop; no client has joined
+  it yet (open gaps).
 
 ## Firewall
 
@@ -201,4 +205,4 @@ WireGuard over LTE.
 | Identity of the car POCO. `secrets.env.example`, `ARCHITECTURE` and `scripts/diag_cli.py` use `10.200.0.14` (and `sync.sh` calls `10.200.0.5` "the old car POCO"), but `sync.sh` still defaults `PHONE=user@10.200.0.5` and `WG_ADDRESS=10.200.0.5/32`; `PROVISIONING.md` calls the `192.168.0.86` phone (sudo with password) the bench POCO while `sync.sh` calls it the car POCO. Hostname and sudo mode of the current car phone are therefore unconfirmed. | `ssh` to 10.200.0.14: `hostname`, `sudo -n true`, `wg show`; then fix the `sync.sh` defaults. |
 | Public key of the current car POCO's tunnel. | `sudo wg show wg-homelab public-key`. |
 | A wedged bearer with the key on is not auto-healed (netwatch is ACC-off only); the AP lifeline makes the phone reachable over the `prius` Wi-Fi meanwhile. | Decide on an ACC-on recovery tier that cannot reboot mid-drive. |
-| A client joining the AP while the lifeline is ON (DHCP lease, ssh to `10.42.0.1`) has not been tested. | Join `prius` from a phone/laptop during `prius-lifeline simulate-down 300`. |
+| No client has joined the AP during a lifeline yet. 2026-11-15 (real WireGuard drop, car parked outside): the P52's USB card saw the AP beaconing (BSSID = the phone's `wlan0` MAC, channel 1, signal 34–60) but every WPA2 attempt ended in a 4-way-handshake timeout (reason 15, PSK verified identical). | Join `prius` from closer range (in or next to the car) during `prius-lifeline simulate-down 300`; check ping/ssh/8080 over `10.42.0.1`. |
