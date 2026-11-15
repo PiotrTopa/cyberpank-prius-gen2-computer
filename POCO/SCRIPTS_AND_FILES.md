@@ -28,12 +28,12 @@ and installed with `sync.sh` / `provision.sh` ([PROVISIONING.md](PROVISIONING.md
 | `prius-wifi` | `client` \| `ap` \| `off` \| `apply` \| `suspend` \| `resume` \| `status` | Wi-Fi modes; `suspend`/`resume` leave the flag; never touches WAN/VPN |
 | `prius-netwatch` | `once` \| `status` \| `check` | VPN-over-SIM watchdog, ACC-off only ([NETWORKING.md](NETWORKING.md)) |
 | `prius-sim-unlock` | — | one-shot QMI PIN1 verify per boot |
-| `prius-clock-fallback` | — | HTTPS `Date` clock step while NTP is unsynchronized |
+| `prius-clock-fallback` | — | HTTPS `Date` clock step while NTP is unsynchronized; touches `/run/prius-clock-synced` |
 | `prius-usb` | `host` \| `device` \| `status` `[--reboot]` | USB role via DTB `dr_mode` + `mkinitfs` |
 | `prius-vbus` | `apply` \| `revert` \| `status` `[--reboot]` | PMI8998 VBUS regulator node ([ARCHITECTURE.md](ARCHITECTURE.md)) |
 | `prius-usb-power` | `status` \| `locate` \| `cycle` \| `off` \| `on` `[TARGET]` | hub port power via `uhubctl -f` ([POWER.md](POWER.md#usb-hub-and-port-power)) |
 | `prius-flash-powerbox` | `[FILE ...]` | powerbox firmware update over NDJSON via `pb_flash.py` (default main.py + boot.py + bean_rx.py + bean_tx.py); stops and restarts `prius-backend` ([powerbox/README.md](../powerbox/README.md#flashing-firmware)) |
-| `prius-deploy-mfd` | `[--dry-run]` | rsync the frontend to the MFD Pi over `usb0` and restart `mfd.service` (as root) |
+| `prius-deploy-mfd` | `[--dry-run]` | rsync the frontend to the MFD Pi over `usb0`, install the Pi's timesyncd config (time from the phone), restart `mfd.service` (as root) |
 | `prius-bled` | daemon | BLE satellite daemon on `hci0` (`prius-bled.service`, socket `/run/prius/bled.sock`) |
 | `prius-satkey` | `init` \| `list` \| `new` \| `sign` \| `add-rs485` \| `show` \| `revoke` \| `forget` \| `export-pub` | satellite keychain CLI |
 

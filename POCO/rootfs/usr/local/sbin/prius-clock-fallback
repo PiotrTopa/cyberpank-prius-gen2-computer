@@ -17,4 +17,6 @@ if [ "$synced" = "yes" ]; then
     exit 0
 fi
 
-exec htpdate -s https://www.google.com https://www.cloudflare.com
+# /run/prius-clock-synced tells the backend's SNTP server for the MFD Pi
+# (cyberpunk_computer/backend/ntp_server.py) that the clock is usable.
+htpdate -s https://www.google.com https://www.cloudflare.com && touch /run/prius-clock-synced

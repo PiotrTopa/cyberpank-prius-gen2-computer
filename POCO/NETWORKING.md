@@ -98,7 +98,14 @@ The PMIC RTC is not persisted (1970 at boot). `systemd-timesyncd` restores an
 approximate time and steps via NTP; some APNs block UDP 123, which would leave the
 clock stale and WireGuard down. `prius-clock-fallback` (`.timer`: 2 min after boot,
 then every 5 min) is a no-op once NTP is synchronized; otherwise it steps the clock
-from HTTPS `Date` headers (`htpdate`, ~1 s accuracy).
+from HTTPS `Date` headers (`htpdate`, ~1 s accuracy) and touches `/run/prius-clock-synced`.
+
+At boot the clock starts at the time timesyncd saved last (2026-11-15: booted at
+2026-11-14 03:09, NTP stepped it ~23 h forward 102 s after boot). Everything that ages
+data uses the monotonic clock; wall-clock consumers wait for a synchronized clock: the
+backend's SNTP server for the MFD Pi (UDP 123 on `usb0`, `backend/ntp_server.py`) answers
+"not synchronized" and the VFD satellite's RTC is not set until
+`/run/systemd/timesync/synchronized` or `/run/prius-clock-synced` exists.
 
 ## Wi-Fi (`prius-wifi`)
 

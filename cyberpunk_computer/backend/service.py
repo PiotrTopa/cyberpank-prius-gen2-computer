@@ -283,6 +283,10 @@ class BackendConfig:
     # physical rail control; without a powerbox link it still tracks presence
     # and runs jobs (rail assumed up).
     satellites_enabled: bool = True
+    # SNTP for the MFD Pi (no RTC, no internet) on the gadget link; see
+    # backend/ntp_server.py. Needs root (UDP 123).
+    ntp_serve: bool = False
+    ntp_allow: str = "192.168.100.0/24"
     # Linger before the rail is actually dropped after the last wake-lock releases.
     # Absorbs bursts (queued jobs arriving back-to-back) and key-off bounce.
     satellite_linger_s: float = 10.0
@@ -416,6 +420,7 @@ class BackendService:
         # Chassis fan controller state.
         self._fan_last_tick: float = 0.0
         self._vfd_clock_last: float = 0.0
+        self.ntp = None  # backend.ntp_server.SntpServer when serving the MFD Pi
         self.fan_policy = ChassisFanPolicy(config.fan_policy)
         self._fan_last_pct: float = -1.0    # last sent speed (avoid re-sending same value)
         self._fan_last_log_pct: float = -1.0  # edge-triggered logging
@@ -1357,6 +1362,11 @@ class BackendService:
         if now - self._vfd_clock_last < 60.0:
             return
         self._vfd_clock_last = now
+        from .ntp_server import clock_quality
+        if clock_quality() is None:
+            # RTC-less phone not synchronized yet: the satellite's own RTC
+            # is better than a stale phone clock.
+            return
         lt = time.localtime()
         self.twin.egress.send_command(OutgoingCommand(
             device_id=DEVICE_VFD,
@@ -1454,6 +1464,11 @@ class BackendService:
         self.sink.start()
         self.api.start()
         self.zmq.start()
+        if self.config.ntp_serve and self.ntp is None:
+            from .ntp_server import SntpServer
+            srv = SntpServer(allow_net=self.config.ntp_allow)
+            if srv.start():
+                self.ntp = srv
         if self.roadsense_scene is not None:
             self.roadsense_scene.start()
         if self.dashcam is not None:
@@ -2237,6 +2252,8 @@ class BackendService:
             self.api.stop()
         if self.zmq:
             self.zmq.stop()
+        if self.ntp is not None:
+            self.ntp.stop()
         if self.recorder is not None:
             try:
                 self.recorder.stop()

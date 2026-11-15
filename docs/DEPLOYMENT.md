@@ -32,6 +32,15 @@ gadget link up. New Python dependencies go into the Pi's `.venv` (apt-provided
 
 Proof of life: `journalctl -u mfd.service -n 20 --no-pager` on the Pi.
 
+Wall clock: the Pi has no RTC and no internet. `prius-deploy-mfd` also installs
+`/etc/systemd/timesyncd.conf.d/prius.conf` on the Pi (`NTP=192.168.100.1`, no fallback servers,
+`SaveIntervalSec=60`) and enables `systemd-timesyncd` (Raspbian ships it disabled). The backend
+answers on UDP 123 of the gadget link (`cyberpunk_computer/backend/ntp_server.py`,
+`BACKEND_NTP_SERVE`, default on with the MFD manager) and only with a synchronized phone clock
+(leap indicator 3 otherwise, which timesyncd ignores). Without the phone a cold boot starts at the
+time saved last (`/var/lib/systemd/timesync/clock`). Check on the Pi: `timedatectl timesync-status`.
+The frontend ages its link on the monotonic clock, so the step at sync does not flap it.
+
 The Pi image (config.txt with the DPI timings, cmdline.txt, gadget units, `mfd.service`,
 framebuffer udev rule, zram) is maintained in `cyberpunk-prius-gateway/raspberry_pi_config/zero13-image/`;
 its README is the reference for the board. Video timings: [MFD_VIDEO_TIMINGS.md](MFD_VIDEO_TIMINGS.md).

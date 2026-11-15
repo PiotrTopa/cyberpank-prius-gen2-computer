@@ -35,6 +35,37 @@ $SSH "$PI" true || { echo "prius-deploy-mfd: Pi unreachable at 192.168.100.2 (po
 rsync -az --delete --exclude __pycache__ $DRY -e "$SSH" "$SRC" "$PI:$DST"
 [ -n "$DRY" ] && { echo "(dry run - nothing restarted)"; exit 0; }
 
+# Wall clock: the Pi has no RTC and no internet. systemd-timesyncd syncs from
+# the backend's SNTP server on the gadget link (cyberpunk_computer/backend/
+# ntp_server.py) and saves the time every 60 s, so a cold boot without the
+# phone starts at the last saved time instead of a weeks-old one. Idempotent.
+$SSH "$PI" 'sudo sh -s' <<'TIMECONF' || echo "prius-deploy-mfd: WARNING: Pi time config failed" >&2
+set -e
+mkdir -p /etc/systemd/timesyncd.conf.d
+cat > /tmp/prius-time.conf <<'X'
+# installed by prius-deploy-mfd (POCO): time from the phone over usb0
+[Time]
+NTP=192.168.100.1
+FallbackNTP=
+PollIntervalMinSec=32
+PollIntervalMaxSec=1024
+SaveIntervalSec=60
+X
+changed=0
+if ! cmp -s /tmp/prius-time.conf /etc/systemd/timesyncd.conf.d/prius.conf; then
+    mv /tmp/prius-time.conf /etc/systemd/timesyncd.conf.d/prius.conf
+    changed=1
+fi
+rm -f /tmp/prius-time.conf
+if ! systemctl is-enabled --quiet systemd-timesyncd; then
+    systemctl enable systemd-timesyncd
+    changed=1
+fi
+if [ "$changed" = 1 ] || ! systemctl is-active --quiet systemd-timesyncd; then
+    systemctl restart systemd-timesyncd
+fi
+TIMECONF
+
 $SSH "$PI" "sudo systemctl restart mfd.service"
 echo "deployed; mfd.service restarted. Proof-of-life:"
 echo "  $SSH $PI 'journalctl -u mfd.service -n 20 --no-pager | grep -E \"ALIVE|link\"'"

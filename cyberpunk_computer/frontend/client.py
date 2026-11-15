@@ -83,14 +83,16 @@ class BackendClient:
 
     @property
     def connected(self) -> bool:
-        """True only while envelopes are actually arriving."""
-        return (time.time() - self._last_rx) < self._stale_after
+        """True only while envelopes are actually arriving (monotonic clock:
+        the Pi has no RTC and its wall clock is stepped when the backend sets
+        it after boot)."""
+        return bool(self._last_rx) and (time.monotonic() - self._last_rx) < self._stale_after
 
     def stats(self) -> dict:
         return {
             **self.counters,
             "connected": self.connected,
-            "last_rx_age_s": round(time.time() - self._last_rx, 1)
+            "last_rx_age_s": round(time.monotonic() - self._last_rx, 1)
             if self._last_rx else None,
         }
 
@@ -142,11 +144,11 @@ class BackendClient:
         sub_sock.setsockopt(zmq.RCVTIMEO, 1000)
         sub_sock.connect(f"tcp://{self._host}:{self._pub_port}")
 
-        last_summary = time.time()
+        last_summary = time.monotonic()
         while not self._stop.is_set():
             try:
                 raw = sub_sock.recv_string()
-                self._last_rx = time.time()
+                self._last_rx = time.monotonic()
                 self._handle_raw(raw)
             except zmq.error.Again:
                 pass  # timeout — fall through to liveness/summary checks
@@ -154,7 +156,7 @@ class BackendClient:
                 if not self._stop.is_set():
                     logger.debug("ZMQ SUB error: %s", exc)
 
-            now = time.time()
+            now = time.monotonic()
             up = self.connected
             if up and not self._was_connected:
                 logger.info("Backend link UP (first envelope received)")

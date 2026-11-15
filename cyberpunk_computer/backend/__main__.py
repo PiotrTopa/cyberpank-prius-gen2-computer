@@ -283,10 +283,23 @@ def _build_satellites() -> dict:
     return out
 
 
+def _build_ntp(mfd_enabled: bool) -> dict:
+    """SNTP for the MFD Pi (backend/ntp_server.py):
+
+        BACKEND_NTP_SERVE=1                    # default: on when the MFD manager is
+        BACKEND_NTP_ALLOW=192.168.100.0/24     # clients answered
+    """
+    raw = (os.environ.get("BACKEND_NTP_SERVE") or "").strip().lower()
+    serve = mfd_enabled if not raw else raw in ("1", "true", "yes", "on")
+    return {"ntp_serve": serve,
+            "ntp_allow": (os.environ.get("BACKEND_NTP_ALLOW") or "192.168.100.0/24").strip()}
+
+
 def _build_config(args: argparse.Namespace) -> BackendConfig:
     mfd_enabled, mfd_config = _build_mfd()
     roadsense_enabled, roadsense_config = _build_roadsense()
     return BackendConfig(
+        **_build_ntp(mfd_enabled),
         **_build_dashcam(),
         **_build_bean(),
         **_build_satellites(),
