@@ -34,7 +34,7 @@ Proof of life: `journalctl -u mfd.service -n 20 --no-pager` on the Pi.
 
 Wall clock: the Pi has no RTC and no internet. `prius-deploy-mfd` also installs
 `/etc/systemd/timesyncd.conf.d/prius.conf` on the Pi (`NTP=192.168.100.1`, no fallback servers,
-`SaveIntervalSec=60`) and enables `systemd-timesyncd` (Raspbian ships it disabled). The backend
+`PollIntervalMaxSec=64`, `SaveIntervalSec=60`) and enables `systemd-timesyncd` (Raspbian ships it disabled). The backend
 answers on UDP 123 of the gadget link (`cyberpunk_computer/backend/ntp_server.py`,
 `BACKEND_NTP_SERVE`, default on with the MFD manager) and only with a synchronized phone clock
 (leap indicator 3 otherwise, which timesyncd ignores). Without the phone a cold boot starts at the

@@ -38,7 +38,10 @@ rsync -az --delete --exclude __pycache__ $DRY -e "$SSH" "$SRC" "$PI:$DST"
 # Wall clock: the Pi has no RTC and no internet. systemd-timesyncd syncs from
 # the backend's SNTP server on the gadget link (cyberpunk_computer/backend/
 # ntp_server.py) and saves the time every 60 s, so a cold boot without the
-# phone starts at the last saved time instead of a weeks-old one. Idempotent.
+# phone starts at the last saved time instead of a weeks-old one. Polling is
+# capped at 64 s: timesyncd backs a failed request off to the max interval,
+# and the first request after boot often goes out before the phone has put
+# its address on usb0. Idempotent.
 $SSH "$PI" 'sudo sh -s' <<'TIMECONF' || echo "prius-deploy-mfd: WARNING: Pi time config failed" >&2
 set -e
 mkdir -p /etc/systemd/timesyncd.conf.d
@@ -48,7 +51,7 @@ cat > /tmp/prius-time.conf <<'X'
 NTP=192.168.100.1
 FallbackNTP=
 PollIntervalMinSec=32
-PollIntervalMaxSec=1024
+PollIntervalMaxSec=64
 SaveIntervalSec=60
 X
 changed=0
