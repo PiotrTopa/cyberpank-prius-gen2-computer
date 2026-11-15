@@ -345,6 +345,12 @@ def _build_ntp(mfd_enabled: bool) -> dict:
             "ntp_allow": (os.environ.get("BACKEND_NTP_ALLOW") or "192.168.100.0/24").strip()}
 
 
+def _pop_env_token():
+    """Read BACKEND_AUTH_TOKEN and drop it from the environment, so the
+    processes the backend spawns (ssh, systemctl, uhubctl) never inherit it."""
+    return (os.environ.pop("BACKEND_AUTH_TOKEN", "") or "").strip() or None
+
+
 def _build_config(args: argparse.Namespace) -> BackendConfig:
     mfd_enabled, mfd_config = _build_mfd()
     roadsense_enabled, roadsense_config = _build_roadsense()
@@ -366,7 +372,9 @@ def _build_config(args: argparse.Namespace) -> BackendConfig:
         serial_baudrate=args.baudrate,
         api_host=args.api_host,
         api_port=args.api_port,
-        auth_token=args.auth_token or os.environ.get("BACKEND_AUTH_TOKEN"),
+        auth_token=args.auth_token or _pop_env_token(),
+        auth_trusted=os.environ.get("BACKEND_AUTH_TRUSTED", "127.0.0.0/8,::1"),
+        auth_state_dir=os.environ.get("BACKEND_AUTH_STATE_DIR") or "/var/lib/prius/auth",
         db_path=args.db,
         tick_hz=args.tick_hz,
         replay_file=args.replay,
@@ -439,7 +447,8 @@ def main() -> None:
     parser.add_argument(
         "--auth-token",
         default=None,
-        help="bearer token for the API (or set BACKEND_AUTH_TOKEN)",
+        help="bearer token for the API (prefer BACKEND_AUTH_TOKEN: an argument "
+             "is visible in the process list)",
     )
     parser.add_argument("--db", default="data/metrics.db", help="metrics SQLite path")
     parser.add_argument("--tick-hz", type=float, default=50.0, help="engine loop rate")

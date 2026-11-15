@@ -37,6 +37,10 @@ export function useAppStream(): { state: AppState | null; connected: boolean; cl
       };
       ws.onclose = () => {
         setConnected(false);
+        // A refused handshake looks like a network drop to the browser: ask
+        // the backend whether this browser's session is gone (revoked/expired)
+        // and go to the login page instead of retrying forever.
+        if (!import.meta.env.DEV) void checkSession();
         reconnectTimer = window.setTimeout(connect, 3000);
       };
     };
@@ -48,6 +52,20 @@ export function useAppStream(): { state: AppState | null; connected: boolean; cl
   }, []);
 
   return { state, connected, clockOffsetMs };
+}
+
+async function checkSession(): Promise<void> {
+  try {
+    const res = await fetch('/auth/status', { cache: 'no-store' });
+    if (!res.ok) return;
+    const st = await res.json();
+    if (st.auth && !st.authenticated) {
+      const next = window.location.pathname + window.location.hash;
+      window.location.assign(`/login?next=${encodeURIComponent(next)}`);
+    }
+  } catch {
+    // backend unreachable: keep retrying the stream
+  }
 }
 
 /** 1 Hz wall clock for freshness / age readouts. */

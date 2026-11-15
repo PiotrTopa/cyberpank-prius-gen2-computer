@@ -18,7 +18,13 @@ Surface (versioned under /api/v1), designed for the future Android dashboard:
     GET  /api/v1/position             position feeder status (api.position_routes;
     POST /api/v1/position/gnss        head-unit GNSS fixes; only when the feeder is on)
 
-All /api/v1 routes (and the WS) require a Bearer token when one is configured.
+    GET  /roadsense/                  roadsense status page for browsers (same login)
+    GET|POST /login, /logout, /auth/pair, GET /auth/status, POST /auth/revoke-all
+                                      browser sessions + pairing links (api.auth)
+
+With a token configured every route except /health and the login/pairing
+pages needs credentials: a trusted peer address (backend default: loopback),
+``Authorization: Bearer <token>``, or a session cookie (docs/AUTH.md).
 Blocking SQLite reads run in a thread pool (per-thread connections) so the event
 loop is never blocked.
 """
@@ -45,6 +51,8 @@ from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
 from ..metrics import MetricsDatabase
+from .auth import AuthConfig, Authenticator, AuthMiddleware
+from .auth import register_routes as register_auth_routes
 from .bridge import StoreBridge
 from .commands import CommandError, UnknownCommand, command_catalog
 from .serialization import serialize_events, serialize_series
@@ -78,23 +86,40 @@ def create_app(
     bean_frames=None,
     camera_preview=None,
     position_feeder=None,
+    auth_trusted: Optional[str] = None,
+    auth_state_dir: Optional[str] = None,
 ) -> FastAPI:
-    """Build the FastAPI app wired to the bridge and metrics database."""
+    """Build the FastAPI app wired to the bridge and metrics database.
+
+    ``auth_trusted``: comma-separated networks let in without credentials
+    (none by default here; the backend passes loopback). ``auth_state_dir``:
+    where sessions and pairing codes persist (None = memory only).
+    """
     app = FastAPI(title="CyberPunk Prius Backend", version="1.0.0")
     reads = _ReadConnections(db)
 
     # ── auth ─────────────────────────────────────────────────────────────────
 
+    auth = Authenticator.from_config(
+        AuthConfig(token=auth_token, trusted=auth_trusted or "", state_dir=auth_state_dir))
+    app.state.auth = auth
+    app.add_middleware(AuthMiddleware, auth=auth)
+
     def require_auth(request: Request) -> None:
-        if not auth_token:
+        # The middleware already gated the request; this keeps every route
+        # protected on its own should the app ever be mounted without it.
+        if request.scope.get("prius_auth") or auth.authorize(request) is not None:
             return
-        header = request.headers.get("authorization", "")
-        if not _token_ok(header, auth_token):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="missing or invalid bearer token",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="authentication required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    def ws_authorized(websocket: WebSocket) -> bool:
+        return bool(websocket.scope.get("prius_auth")) or auth.authorize(websocket) is not None
+
+    register_auth_routes(app, auth)
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -224,7 +249,7 @@ def create_app(
 
     @app.websocket(API_PREFIX + "/stream")
     async def stream(websocket: WebSocket) -> None:
-        if auth_token and not _ws_authorized(websocket, auth_token):
+        if not ws_authorized(websocket):
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
             return
         await websocket.accept()
@@ -250,7 +275,8 @@ def create_app(
             ProxyConfig(base_url=roadsense_url),
             API_PREFIX + "/roadsense",
             require_auth,
-            lambda ws: (not auth_token) or _ws_authorized(ws, auth_token),
+            ws_authorized,
+            ui_prefix="/roadsense",
         )
 
     # ── on-demand camera preview (backend.camera_preview) ───────────────────
@@ -277,24 +303,9 @@ def create_app(
 
     dashboard_path = Path(__file__).parent.parent.parent / "dashboard" / "dist"
     if dashboard_path.exists():
+        import mimetypes
+
+        mimetypes.add_type("application/manifest+json", ".webmanifest")
         app.mount("/", StaticFiles(directory=str(dashboard_path), html=True), name="dashboard")
 
     return app
-
-
-def _ws_authorized(websocket: WebSocket, expected: str) -> bool:
-    """Accept the token from either the Authorization header or ?token=."""
-    if _token_ok(websocket.headers.get("authorization", ""), expected):
-        return True
-    token = websocket.query_params.get("token") or ""
-    return _token_ok("Bearer " + token, expected)
-
-
-def _token_ok(authorization_header: str, expected: str) -> bool:
-    """Constant-time check of a 'Bearer <token>' header against expected."""
-    import hmac
-
-    parts = authorization_header.split(" ", 1)
-    if len(parts) != 2 or parts[0].lower() != "bearer":
-        return False
-    return hmac.compare_digest(parts[1].strip(), expected)

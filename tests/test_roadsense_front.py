@@ -416,7 +416,10 @@ def test_helpers_in_prius_slice():
 
 
 def test_firewall_has_no_roadsense_opening():
+    # The Prius file never ACCEPTs 8090 (roadsense is reached through the
+    # backend front); it only confines it in the prius_guard table.
     nft = (ROOTFS / "etc/nftables.d/50_prius_backend.nft").read_text()
-    rules = [l for l in nft.splitlines() if "dport" in l and not l.strip().startswith("#")]
+    rules = [l for l in nft.splitlines() if "dport" in l and " accept" in l
+             and not l.strip().startswith("#")]
     assert rules and all("8090" not in r for r in rules)
     assert all(p in rules[0] for p in ("8080", "8081", "8082"))

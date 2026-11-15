@@ -14,6 +14,13 @@ its API bound to loopback (``ROADSENSE_API_HOST=127.0.0.1``, port 8090). Clients
     GET /api/v1/roadsense/preview             MJPEG overlay stream
     WS  /api/v1/roadsense/ws                  every daemon message (?topics=...)
 
+The roadsense status page (its ``GET /``) is published for browsers under
+``/roadsense/`` with the upstream layout kept (``/roadsense/v1/<name>``,
+``/roadsense/preview``, ``/roadsense/ws``); its absolute links are rewritten
+to that prefix. Both fronts sit behind the backend's login (api.auth), so a
+phone browser reaches roadsense through 8080 with one session while 8090
+stays firewalled.
+
 The boundary is HTTP only: this module speaks roadsense's documented HTTP/WS
 contract (roadsense docs/ARCHITECTURE.md, "api") and imports nothing from
 either roadsense repository. Endpoints are whitelisted (no open proxy), bodies
@@ -27,12 +34,13 @@ answers HTTP/1.0 with ``Connection: close``, so the body runs to EOF.
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from typing import AsyncIterator, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlsplit
 
 from fastapi import Depends, HTTPException, Request, WebSocket
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +55,8 @@ JSON_ENDPOINTS: Dict[str, str] = {
     "rules": "/v1/rules",
     "lights": "/v1/lights",
     "camera": "/v1/camera",
+    "map": "/v1/map",
+    "fused": "/v1/fused",
 }
 # Query parameters passed through per endpoint (everything else is dropped).
 ALLOWED_QUERY: Dict[str, Tuple[str, ...]] = {
@@ -55,7 +65,12 @@ ALLOWED_QUERY: Dict[str, Tuple[str, ...]] = {
 FRAME_PATH = "/v1/frame.jpg"
 PREVIEW_PATH = "/preview"
 WS_PATH = "/ws"
-WS_TOPICS = ("road", "signs", "env", "speed_limit", "rules", "lights", "camera", "calib")
+WS_TOPICS = ("road", "signs", "env", "speed_limit", "rules", "lights", "camera", "calib",
+             "map", "fused")
+INDEX_PATH = "/"
+# Absolute references in the roadsense status page ("/v1/...", "/preview",
+# "/ws" inside quotes, backticks or url(...)) -> moved under the UI prefix.
+_UI_REF = re.compile(r"""(?<=["'`(])/(v1/|preview\b|ws\b)""")
 
 
 class RoadsenseUnavailable(Exception):
@@ -178,24 +193,30 @@ async def open_stream(cfg: ProxyConfig, path: str) -> Tuple[int, str, AsyncItera
     return status, headers.get("content-type", "application/octet-stream"), chunks()
 
 
+def rewrite_ui(text: str, prefix: str) -> str:
+    """Point the roadsense page's absolute API links at ``prefix``."""
+    return _UI_REF.sub(lambda m: prefix + "/" + m.group(1), text)
+
+
 def index(cfg: ProxyConfig, prefix: str) -> Dict[str, object]:
     eps: List[str] = [prefix + "/" + n for n in JSON_ENDPOINTS]
     eps += [prefix + "/frame.jpg", prefix + "/preview", prefix + "/ws"]
     return {"upstream": cfg.base_url, "endpoints": eps, "ws_topics": list(WS_TOPICS)}
 
 
-def register(app, cfg: ProxyConfig, prefix: str, require_auth, ws_authorized) -> None:
-    """Mount the roadsense front routes on a FastAPI ``app``."""
+def register(app, cfg: ProxyConfig, prefix: str, require_auth, ws_authorized,
+             ui_prefix: Optional[str] = None) -> None:
+    """Mount the roadsense front routes on a FastAPI ``app``.
+
+    ``prefix`` gets the API front (``/api/v1/roadsense``); ``ui_prefix`` (e.g.
+    ``/roadsense``) additionally publishes the roadsense status page for
+    browsers. Both share one MJPEG relay budget.
+    """
     previews = {"n": 0}
 
     def _unavailable(exc: Exception) -> HTTPException:
         return HTTPException(status_code=503, detail="roadsense unavailable: %s" % exc)
 
-    @app.get(prefix, dependencies=[Depends(require_auth)])
-    async def rs_index() -> Dict[str, object]:
-        return index(cfg, prefix)
-
-    @app.get(prefix + "/frame.jpg", dependencies=[Depends(require_auth)])
     async def rs_frame() -> Response:
         try:
             status, ctype, body = await fetch(cfg, FRAME_PATH)
@@ -206,7 +227,6 @@ def register(app, cfg: ProxyConfig, prefix: str, require_auth, ws_authorized) ->
         return Response(content=body, status_code=status, media_type=ctype,
                         headers={"Cache-Control": "no-store"})
 
-    @app.get(prefix + "/preview", dependencies=[Depends(require_auth)])
     async def rs_preview() -> StreamingResponse:
         if previews["n"] >= cfg.max_preview_streams:
             raise HTTPException(status_code=429,
@@ -230,7 +250,6 @@ def register(app, cfg: ProxyConfig, prefix: str, require_auth, ws_authorized) ->
         return StreamingResponse(body(), status_code=status, media_type=ctype,
                                  headers={"Cache-Control": "no-store"})
 
-    @app.websocket(prefix + "/ws")
     async def rs_ws(websocket: WebSocket) -> None:
         if not ws_authorized(websocket):
             await websocket.close(code=1008)
@@ -276,12 +295,12 @@ def register(app, cfg: ProxyConfig, prefix: str, require_auth, ws_authorized) ->
             except Exception:  # noqa: BLE001
                 pass
 
-    @app.get(prefix + "/{name:path}", dependencies=[Depends(require_auth)])
     async def rs_json(name: str, request: Request) -> Response:
-        path = JSON_ENDPOINTS.get(name.strip("/"))
+        name = name.strip("/")
+        path = JSON_ENDPOINTS.get(name)
         if path is None:
             raise HTTPException(status_code=404, detail="unknown roadsense endpoint %r" % name)
-        path += build_query(name.strip("/"), dict(request.query_params))
+        path += build_query(name, dict(request.query_params))
         try:
             status, ctype, body = await fetch(cfg, path)
         except RoadsenseUnavailable as exc:
@@ -290,6 +309,52 @@ def register(app, cfg: ProxyConfig, prefix: str, require_auth, ws_authorized) ->
             raise HTTPException(status_code=502, detail=str(exc))
         return Response(content=body, status_code=status,
                         media_type=ctype.split(";")[0] or "application/json")
+
+    auth = [Depends(require_auth)]
+
+    # API front: /api/v1/roadsense/...
+    @app.get(prefix, dependencies=auth)
+    async def rs_index() -> Dict[str, object]:
+        return index(cfg, prefix)
+
+    app.add_api_route(prefix + "/frame.jpg", rs_frame, methods=["GET"], dependencies=auth)
+    app.add_api_route(prefix + "/preview", rs_preview, methods=["GET"], dependencies=auth)
+    app.add_api_websocket_route(prefix + "/ws", rs_ws)
+    app.add_api_route(prefix + "/{name:path}", rs_json, methods=["GET"], dependencies=auth)
+
+    if not ui_prefix:
+        return
+
+    # Browser UI: the roadsense status page and its upstream-shaped paths.
+    @app.get(ui_prefix, dependencies=auth, include_in_schema=False)
+    async def rs_ui_redirect() -> Response:
+        return RedirectResponse(ui_prefix + "/", status_code=307)
+
+    @app.get(ui_prefix + "/", dependencies=auth, include_in_schema=False)
+    async def rs_ui_index() -> Response:
+        try:
+            status, ctype, body = await fetch(cfg, INDEX_PATH)
+        except RoadsenseUnavailable as exc:
+            return HTMLResponse(
+                "<!doctype html><meta name=viewport content='width=device-width'>"
+                "<body style='background:#111;color:#ddd;font:16px monospace;padding:16px'>"
+                "<p>roadsense is not running (it runs with ACC on).</p>"
+                "<p><a style='color:#8cf' href='/'>back to the dashboard</a></p>",
+                status_code=503, headers={"Cache-Control": "no-store"})
+        except RoadsenseBadResponse as exc:
+            raise HTTPException(status_code=502, detail=str(exc))
+        if status == 200 and ctype.startswith("text/html"):
+            text = rewrite_ui(body.decode("utf-8", "replace"), ui_prefix)
+            return HTMLResponse(text, headers={"Cache-Control": "no-store"})
+        return Response(content=body, status_code=status, media_type=ctype)
+
+    app.add_api_route(ui_prefix + "/v1/frame.jpg", rs_frame, methods=["GET"],
+                      dependencies=auth, include_in_schema=False)
+    app.add_api_route(ui_prefix + "/preview", rs_preview, methods=["GET"],
+                      dependencies=auth, include_in_schema=False)
+    app.add_api_websocket_route(ui_prefix + "/ws", rs_ws)
+    app.add_api_route(ui_prefix + "/v1/{name:path}", rs_json, methods=["GET"],
+                      dependencies=auth, include_in_schema=False)
 
 
 async def _ws_connect(url: str):

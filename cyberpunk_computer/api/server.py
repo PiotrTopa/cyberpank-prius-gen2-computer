@@ -37,18 +37,25 @@ class ApiServer:
         bean_frames=None,
         camera_preview=None,
         position_feeder=None,
+        auth_trusted: Optional[str] = None,
+        auth_state_dir: Optional[str] = None,
     ) -> None:
         self._app = create_app(bridge, db, auth_token=auth_token,
                                roadsense_url=roadsense_url,
                                bean_frames=bean_frames,
                                camera_preview=camera_preview,
-                               position_feeder=position_feeder)
+                               position_feeder=position_feeder,
+                               auth_trusted=auth_trusted,
+                               auth_state_dir=auth_state_dir)
         config = uvicorn.Config(
             self._app,
             host=host,
             port=port,
             log_level=log_level,
             access_log=False,
+            # The peer address decides "trusted" (api.auth): never let an
+            # X-Forwarded-For header rewrite it.
+            proxy_headers=False,
             # Single worker: the bridge holds one event loop reference.
             loop="asyncio",
         )

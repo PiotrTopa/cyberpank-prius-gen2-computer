@@ -34,10 +34,10 @@ engine thread; snapshots go out latest-only so a slow client never blocks the en
 
 | Interface | Port | Content |
 |---|---|---|
-| REST | 8080 | `GET /health`; under `/api/v1`: `state`, `metrics/catalog`, `metrics`, `events`, `commands` (list), `POST commands/{name}`, `bean/frames`, `diag/*`, `camera/preview*`, `position` + `POST position/gnss` (feeder on only), roadsense proxy. Auth: `BACKEND_AUTH_TOKEN` when set |
-| WebSocket | 8080 `/api/v1/stream` | state snapshots (dashboard) |
+| REST | 8080 | `GET /health`; under `/api/v1`: `state`, `metrics/catalog`, `metrics`, `events`, `commands` (list), `POST commands/{name}`, `bean/frames`, `diag/*`, `camera/preview*`, `position` + `POST position/gnss` (feeder on only), roadsense proxy; `/roadsense/` (roadsense status page), `/login`, `/logout`, `/auth/*` (sessions, pairing). Auth with `BACKEND_AUTH_TOKEN` set: loopback trusted, else bearer token or session cookie ([AUTH.md](AUTH.md)) |
+| WebSocket | 8080 `/api/v1/stream` | state snapshots (dashboard); same auth as REST |
 | ZMQ PUB | 8081 | `{"type":"state","ts","state"}` (latest-only, throttled) and `{"type":"event","ts","name","data"}` (FIFO, never displaced by state) |
-| ZMQ REP | 8082 | `{"command": name, "params": {...}}` → `{"status":"ok"}` on acceptance (execution is asynchronous) or `{"status":"error","reason"}` |
+| ZMQ REP | 8082 (no auth; firewalled to lo/usb*/wg*) | `{"command": name, "params": {...}}` → `{"status":"ok"}` on acceptance (execution is asynchronous) or `{"status":"error","reason"}` |
 
 The frontend (`frontend/client.py`) subscribes to PUB, sends commands over REQ (socket rebuilt after a
 lost reply) and treats the link as up only while envelopes arrive within 5 s (state is published at

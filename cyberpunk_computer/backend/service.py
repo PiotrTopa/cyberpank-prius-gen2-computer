@@ -120,6 +120,10 @@ class BackendConfig:
     api_host: str = "0.0.0.0"
     api_port: int = 8080
     auth_token: Optional[str] = None
+    # Peers let in without credentials (comma-separated networks) and where
+    # browser sessions / pairing codes persist (root-only). docs/AUTH.md.
+    auth_trusted: str = "127.0.0.0/8,::1"
+    auth_state_dir: str = "/var/lib/prius/auth"
 
     db_path: str = "data/metrics.db"
 
@@ -694,6 +698,8 @@ class BackendService:
             host=cfg.api_host,
             port=cfg.api_port,
             auth_token=cfg.auth_token,
+            auth_trusted=cfg.auth_trusted,
+            auth_state_dir=cfg.auth_state_dir,
             log_level="debug" if cfg.verbose else "info",
             roadsense_url=roadsense_url,
             bean_frames=self.bean_monitor.frames_since if self.bean_monitor else None,

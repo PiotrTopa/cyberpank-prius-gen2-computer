@@ -84,9 +84,11 @@ Not corrected: the wheel speeds read 2.2 % below 0x0B4 (the yaw scales with it).
 ## 4. Head-unit GNSS contract (to build on the head unit)
 
 Transport: HTTP `POST http://<phone>:8080/api/v1/position/gnss`, `Content-Type: application/json`,
-`Authorization: Bearer <BACKEND_AUTH_TOKEN>` when the backend has a token. Port 8080 is open on every
-interface (`POCO/rootfs/etc/nftables.d/50_prius_backend.nft`), so it works over the planned USB RNDIS
-link or the phone's Wi-Fi AP ([HEADUNIT_INTEGRATION.md](HEADUNIT_INTEGRATION.md) §3).
+`Authorization: Bearer <BACKEND_AUTH_TOKEN>` (the car computer has a token since 2026-11-15; without it
+the route answers 401). Port 8080 is firewalled to `lo`, `wg*`, `usb*` and the car AP address
+10.42.0.1 (`POCO/rootfs/etc/nftables.d/50_prius_backend.nft`, [AUTH.md](AUTH.md)): the phone's Wi-Fi AP
+works as is; the planned USB RNDIS link ([HEADUNIT_INTEGRATION.md](HEADUNIT_INTEGRATION.md) §3) needs its
+interface named `usb*` (udev rule, like the MFD's `usb0`) or added to the guard.
 
 Why REST: the backend already serves authenticated REST to every other client; one request per fix
 at 1..10 Hz is cheap; each request is acknowledged with per-fix validation errors; no new port,
