@@ -77,8 +77,9 @@ yaw by ~10 % to ~50 %. The rear wheels are not driven (no drive slip). Rear-whee
 straight (> 8 m/s, |steering| < 3°): mean 0.87 °/s, standard deviation 0.84 °/s on the deduplicated
 log (mapd estimates a yaw bias).
 
-Not corrected: the wheel speeds read 2.2 % below 0x0B4 (the yaw scales with it); the backend's own
-`dynamics.steering_angle` still uses × 0.1.
+Not corrected: the wheel speeds read 2.2 % below 0x0B4 (the yaw scales with it). The 0x025 decoder
+(`decode_steering_deg` in `comm/can_decoder.py`) is the same for the feeder and the state's
+`dynamics.steering_angle`.
 
 ## 4. Head-unit GNSS contract (to build on the head unit)
 
@@ -206,8 +207,6 @@ Deploy (none of this was done):
 * 0x0B1/0x0B3 read 2.2 % below 0x0B4; 0x0B1/0x0B3 bytes E,F and the 0x025 fraction nibble are not
   decoded.
 * No yaw-rate sensor decoded; 0x03A is not one in the current reading.
-* `dynamics.steering_angle` in the state still uses × 0.1 (15× too small); nothing reads it for
-  motion.
 * Replay mode (`--replay`) has no panda, so no motion; the feeder is a live-car feature.
 * Steering ratio / wheelbase in mapd are nominal (19.1 / 2.70 m); this car's effective ratio is
   speed-dependent (21–29, §3).

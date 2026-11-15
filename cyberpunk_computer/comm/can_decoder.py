@@ -26,10 +26,32 @@ Note: Inverter temperature requires SOLICITED PID 21C3 to ECU 0x7E2
 """
 
 import logging
+from typing import Optional
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
 logger = logging.getLogger(__name__)
+
+
+# 0x025 steering wheel angle: 12-bit signed (low nibble of A, then B) x 1.5 deg,
+# positive = left. Scale verified on the car (2026-11-13 drive: +-650..660 deg
+# at the stops, r = 0.95 with the rear wheel-speed yaw); sign = Toyota
+# convention. The high nibble of A is not part of the angle. Shared by the
+# state (dynamics.steering_angle) and backend/position_feeder.py.
+STEERING_DEG_PER_COUNT = 1.5
+
+
+def steering_counts(data: bytes) -> int:
+    """0x025 bytes -> signed 12-bit count (low nibble of A, then B)."""
+    raw = ((data[0] & 0x0F) << 8) | data[1]
+    return raw - 4096 if raw > 2047 else raw
+
+
+def decode_steering_deg(data: bytes) -> Optional[float]:
+    """0x025 bytes -> steering wheel angle in degrees, positive = left."""
+    if len(data) < 2:
+        return None
+    return steering_counts(data) * STEERING_DEG_PER_COUNT
 
 
 class CANMessageType(Enum):
@@ -481,18 +503,12 @@ class CANDecoder:
         # VEHICLE DYNAMICS
         # ---------------------------------------------------
         
-        # 0x025: Steering Angle (13ms period)
-        # Docs: (256*A+B) unsigned, 12-bit signed interpretation
-        # Straight-ahead offset is vehicle-specific (needs calibration)
+        # 0x025: Steering wheel angle (13 ms period), see decode_steering_deg
         elif can_id == 0x025 and len(data) >= 2:
             msg.msg_type = CANMessageType.STEERING_ANGLE
-            raw = (data[0] << 8) | data[1]
-            # 12-bit signed: values > 2047 are negative
-            if raw > 2047:
-                raw -= 4096
+            raw = steering_counts(data)
             msg.values["steering_angle_raw"] = raw
-            # Approximate degrees (scaling ~0.1 deg/count typical for Toyota)
-            msg.values["steering_angle"] = raw * 0.1
+            msg.values["steering_angle"] = raw * STEERING_DEG_PER_COUNT
         
         # 0x022: Lateral + Longitudinal Acceleration (13ms period)
         # Docs: (256*A+B) - 0x0200 for each axis

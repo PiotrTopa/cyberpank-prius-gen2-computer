@@ -45,8 +45,8 @@ section 3. Summary:
   with the steering sign).
 * ``steering_wheel_deg`` = CAN 0x025 12-bit signed (low nibble of A, B) x 1.5,
   positive = left (scale from the full-lock range; sign third-party Toyota
-  convention, consistent with the wheel-speed difference). The backend's own
-  ``dynamics.steering_angle`` uses x 0.1 and is 15x too small.
+  convention, consistent with the wheel-speed difference). Decoder shared with
+  the state's ``dynamics.steering_angle`` (``comm/can_decoder.py``).
 * CAN 0x03A is NOT a yaw rate (correlation 0.01 with the wheel-speed yaw on
   the 2026-11-13 drive); no yaw-rate sensor is decoded.
 """
@@ -64,6 +64,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from ..comm.can_decoder import decode_steering_deg  # noqa: F401 (re-exported)
 from .position_client import PositionFeed
 
 logger = logging.getLogger(__name__)
@@ -149,16 +150,6 @@ def decode_wheel_pair_kmh(data: bytes) -> Optional[Tuple[float, float]]:
     if len(data) < 4:
         return None
     return ((data[0] << 8) | data[1]) * 0.01, ((data[2] << 8) | data[3]) * 0.01
-
-
-def decode_steering_deg(data: bytes) -> Optional[float]:
-    """0x025: 12-bit signed (low nibble of A, then B) x 1.5 deg, positive = left."""
-    if len(data) < 2:
-        return None
-    raw = ((data[0] & 0x0F) << 8) | data[1]
-    if raw > 2047:
-        raw -= 4096
-    return raw * 1.5
 
 
 class CanMotionTap:

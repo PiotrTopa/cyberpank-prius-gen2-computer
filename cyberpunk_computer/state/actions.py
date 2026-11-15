@@ -875,7 +875,7 @@ class SetHybridExtrasAction(Action):
 
 @dataclass
 class SetSteeringAngleAction(Action):
-    """Set steering wheel angle (degrees, approx)."""
+    """Set steering wheel angle (degrees of steering wheel, positive = left)."""
     angle: float = 0.0
     angle_raw: int = 0
     

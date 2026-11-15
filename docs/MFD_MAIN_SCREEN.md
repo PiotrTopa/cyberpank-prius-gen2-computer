@@ -489,7 +489,7 @@ Wanted by the design, not available from the car or roadsense today, and therefo
 | blind-spot markers | side radar or a rear/side camera |
 | traffic behind | a rear camera in roadsense |
 | parking distance arcs in the parked view | ultrasonic sensors |
-| steered front wheels in the parked view | `dynamics.steering_angle` calibrated in degrees |
+| steered front wheels in the parked view | a layer fed by `dynamics.steering_angle` (steering wheel degrees, + = left, CAN 0x025 × 1.5°); road-wheel angle = that / steering ratio (19.1 nominal, 21–29 effective, [POSITION_FEEDER.md](POSITION_FEEDER.md) §3) |
 | speed-limit source by map | GPS + the OSM speed-limit service |
 
 New elements go in as a layer function in `scene/render.py` (the layer list is in its docstring) fed

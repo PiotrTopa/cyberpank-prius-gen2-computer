@@ -22,7 +22,7 @@ CAN 0x5xx: [`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §5.
 |---|---|---|---|---|
 | 0x022 | 13 | lateral / longitudinal acceleration | (256A + B) − 0x200 and (256C + D) − 0x200, uncalibrated | G |
 | 0x023 | 13 | longitudinal acceleration | (256A + B) − 0x200, uncalibrated | G |
-| 0x025 | 13 | steering angle | 12-bit signed (low nibble of A, then B) × 1.5°, positive = left; E high nibble = a fraction (list: × 0.1°, unused) | Car (2026-11-13 drive): scale from the range (±650–660° at the stops); correlation 0.95 with the rear wheel-speed yaw, same sign as (right − left). Absolute sign = Toyota convention (G). `can_decoder.py` still scales × 0.1 (15× too small) |
+| 0x025 | 13 | steering angle | 12-bit signed (low nibble of A, then B) × 1.5°, positive = left; E high nibble = a fraction (list: × 0.1°, unused) | Car (2026-11-13 drive): scale from the range (±650–660° at the stops); correlation 0.95 with the rear wheel-speed yaw, same sign as (right − left). Absolute sign = Toyota convention (G). Decoded in `can_decoder.py` (`decode_steering_deg`, shared by `dynamics.steering_angle` and the position feeder) |
 | 0x030 | 6 | brake pedal | E, 0–127; may read 0x7F at start-up with the brake held | Car: E > 8 edges match BEAN `FE:29` brake bit (74/79 within 1 s) |
 | 0x038 | 8 | engine status | B > 0 seen only with the ICE turning (not an rpm), but B = 0 for 32 % of the time the ICE turns at low load (e.g. 1300 rpm warm-up): NOT an engine-running flag | Car (2026-11-13 drive against OBD 010C) |
 | 0x039 | 8 | ICE coolant | A °C, no offset; 254/255 = sensor not ready | Car: within 1 °C of BEAN `FE:2C` (r = 0.995) |
@@ -221,8 +221,7 @@ Battery power = current × sum of block voltages.
   0.08 /m at 2–8 m/s) come out right-handed 131 times against 87 left (right turns are the tighter ones
   in right-hand traffic). Resolves with one deliberate left turn logged, or a GNSS course.
 * **0x0B1/0x0B3 scale:** the wheels read 2.2 % below 0x0B4 (tyre size / ECU scaling); not corrected.
-* **0x025:** the backend's `dynamics.steering_angle` (× 0.1) is not corrected yet; the position feeder
-  decodes 0x025 itself (`backend/position_feeder.py`, [POSITION_FEEDER.md](POSITION_FEEDER.md)).
+* **0x025 fraction nibble** (E high nibble): not decoded; the angle has 1.5° resolution.
 * **0x348:** decoded as a pack temperature (byte C − 40) in `can_decoder.py`, while a comment there
   reports byte C × 25 tracking ICE rpm (r = 0.986). Resolves with a log covering ICE start/stop at a
   steady pack temperature.

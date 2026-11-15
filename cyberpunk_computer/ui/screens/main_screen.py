@@ -969,10 +969,11 @@ class MainScreen(Screen):
         surface.blit(lbl, (left_x, y))
         if dyn.steering_angle is not None:
             angle = dyn.steering_angle
-            # Color: green near center, yellow/red at extremes
-            if abs(angle) < 5:
+            # Steering wheel degrees (+ = left; about +-660 at the stops).
+            # Green near centre, yellow in normal turns, red beyond half a turn.
+            if abs(angle) < 15:
                 color = COLORS["green_bright"]
-            elif abs(angle) < 30:
+            elif abs(angle) < 180:
                 color = COLORS["yellow"]
             else:
                 color = COLORS["red_bright"]

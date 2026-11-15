@@ -343,8 +343,8 @@ class DynamicsState:
     headlight status, and SOC bar indicators.
     """
     # Steering (0x025)
-    steering_angle: Optional[float] = None       # Degrees (approx, uncalibrated)
-    steering_angle_raw: Optional[int] = None     # Raw 12-bit signed value
+    steering_angle: Optional[float] = None       # Steering wheel deg, + = left (CAN 0x025 x 1.5)
+    steering_angle_raw: Optional[int] = None     # Raw 12-bit signed count
     
     # Acceleration (0x022)
     lateral_accel_raw: Optional[int] = None      # Raw offset value (uncalibrated)

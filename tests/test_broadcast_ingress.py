@@ -160,3 +160,29 @@ def test_hv_voltage_above_255_is_not_wrapped():
     energy = twin.store.state.energy
     assert energy.hv_battery_voltage == 260
     assert abs(energy.battery_power_kw + 17.654) < 1e-3
+
+
+def test_steering_angle_is_steering_wheel_degrees():
+    """0x025: 12-bit signed (low nibble of A, B) x 1.5 deg, + = left; same
+    decoder as the position feeder; the high nibble of A is not angle."""
+    from cyberpunk_computer.backend.position_feeder import decode_steering_deg as feeder_decode
+    from cyberpunk_computer.comm.can_decoder import decode_steering_deg
+
+    twin = create_test_twin()
+    ing = twin.ingress
+    ing.set_broadcast_dedupe(0)
+    t0 = time.monotonic()
+    cases = (
+        (bytes([0x0F, 0xF9, 0, 0, 0x79, 0x79, 0x79, 0xA0]), -10.5, -7),   # 0xFF9 = -7
+        (bytes([0x00, 0x23, 0, 0, 0x09, 0x6A, 0x79, 0x3C]), 52.5, 35),
+        (bytes([0x01, 0xB8, 0, 0, 0, 0, 0, 0]), 660.0, 440),               # left stop
+        (bytes([0x0E, 0x48, 0, 0, 0, 0, 0, 0]), -660.0, -440),             # right stop
+        (bytes([0x70, 0x23, 0, 0, 0, 0, 0, 0]), 52.5, 35),                 # high nibble ignored
+    )
+    for i, (data, deg, raw) in enumerate(cases):
+        assert decode_steering_deg(data) == deg
+        assert feeder_decode(data) == deg
+        assert ing.ingest_broadcast_can(0x025, data, 0, 1.0 + i, t0 + i)
+        dyn = twin.store.state.dynamics
+        assert dyn.steering_angle == deg and dyn.steering_angle_raw == raw
+    assert decode_steering_deg(b"\x00") is None
