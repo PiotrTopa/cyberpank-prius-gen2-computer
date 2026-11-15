@@ -131,6 +131,9 @@ class Application:
             # events, latest-only; docs/MFD_MAIN_SCREEN.md)
             from ..ui.scene.inputs import FEED
             virtual_twin.add_event_callback(FEED.push)
+        # Alert banner ("alert" events) + its acknowledge path (docs/ALERTS.md)
+        from ..ui.scene.alerts import attach as attach_alerts
+        attach_alerts(virtual_twin)
         
         # Start the Virtual Twin
         virtual_twin.start()
