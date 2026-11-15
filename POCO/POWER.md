@@ -135,7 +135,13 @@ runs on this phone only while ACC is on; it is not enabled at boot. The backend'
    MemoryMax 3584M, AllowedCPUs 0-2,4-7); `prius-backend.service` in `prius.slice`
    (cpu3, CPUWeight 1000, Nice −10, MemoryMax 512M);
 6. thermals: every tick samples all `/sys/class/thermal` zones into `roadsense.temps`
-   (+ `hottest_zone` / `hottest_c`) whether or not the stack runs.
+   (+ `hottest_zone` / `hottest_c`) whether or not the stack runs;
+7. backend start: in mode `auto` the manager waits for the powerbox's first ACC report
+   (≤ 20 s, `acc_wait_s`; then ACC counts as off). Stack units found running while
+   wanted (ACC on, or mode `on`) are adopted as running, relay ch4 only re-asserted
+   on. Units found running while not wanted (ACC off, e.g. started by hand while
+   parked, or mode `off`) are stopped at once (no grace) and relay ch4 is not
+   switched on; it is switched off once the units are inactive.
 
 The sign provider is AGPL and reached only over its sockets; this repo only drives
 `systemctl` and reads JSON over HTTP.

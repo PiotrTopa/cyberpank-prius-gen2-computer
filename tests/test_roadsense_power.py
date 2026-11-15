@@ -49,6 +49,7 @@ class Harness:
         self.systemctl = []              # every systemctl argv
         self.published = []
         self.camera = FakeCamera()
+        self.stop_lag = 0                # is-active polls answering "deactivating" after a stop
         self.temps = {"cpu0-thermal": 41.0, "gpu-top-thermal": 33.2, "cpu7-thermal": 44.5}
         kw = dict(tick_s=5.0, camera_settle_s=8.0, grace_s=30.0, start_timeout_s=60.0,
                   stop_timeout_s=40.0, api_dead_restart_s=100.0, restart_cooldown_s=200.0)
@@ -70,6 +71,9 @@ class Harness:
         verb = cmd[1]
         if verb == "is-active":
             units = cmd[2:]
+            if self.stop_lag > 0 and not self.target_active:
+                self.stop_lag -= 1
+                return R(0, "\n".join("deactivating" for _ in units) + "\n")
             state = "active" if self.target_active else "inactive"
             return R(0 if self.target_active else 3, "\n".join(state for _ in units) + "\n")
         if verb in ("start", "restart"):
@@ -80,9 +84,9 @@ class Harness:
             return R(0)
         return R(1)
 
-    def tick(self, acc, dt=5.0):
+    def tick(self, acc, dt=5.0, acc_known=True):
         self.t += dt
-        self.m.tick(acc)
+        self.m.tick(acc, acc_known=acc_known)
 
     @property
     def state(self):
@@ -150,11 +154,67 @@ class TestAccFollower:
         assert h.camera.calls == [False]
         assert h.verbs() == []
 
-    def test_startup_adopts_running_stack_into_grace_when_key_off(self):
+    def test_startup_key_off_stops_stray_stack_without_camera_power(self):
+        """Units started by hand while parked (2026-11-15 09:58): a backend
+        start with ACC off stops them at once and never switches ch4 on."""
         h = Harness(target_active=True, api={})
+        h.stop_lag = 1                            # units still deactivating on the first poll
         h.tick(False)
-        assert h.state == STATE_GRACE
-        assert h.m.is_active()
+        assert h.state == STATE_STOPPING
+        assert h.verbs() == ["stop"]
+        assert h.camera.calls == []
+        h.tick(False)                             # units inactive
+        assert h.state == STATE_OFF
+        assert h.camera.calls == [False]
+        assert h.verbs() == ["stop"]
+        h.tick(False)
+        h.tick(False)
+        assert True not in h.camera.calls and h.verbs() == ["stop"]
+
+    def test_startup_mode_off_stops_stray_stack_without_camera_power(self):
+        h = Harness(target_active=True, api={}, mode=MODE_OFF)
+        h.tick(True)
+        assert h.verbs() == ["stop"]
+        assert h.state == STATE_OFF
+        assert h.camera.calls == [False]
+
+    def test_startup_key_on_adopts_running_stack_without_camera_glitch(self):
+        """Backend restart while driving: adopt, camera only asserted ON."""
+        h = Harness(target_active=True, api={})
+        h.camera.on = True                        # hub powered before the restart
+        h.tick(True)
+        assert h.state == STATE_RUNNING
+        assert h.camera.calls == [True]
+        assert h.verbs() == []                    # no stop / restart
+        h.tick(True)
+        assert h.state == STATE_RUNNING and h.camera.calls == [True]
+
+    def test_startup_waits_for_first_acc_report_then_adopts(self):
+        """ACC not reported yet after a restart: no decision, no relay."""
+        h = Harness(target_active=True, api={}, acc_wait_s=20.0)
+        h.camera.on = True
+        h.tick(False, acc_known=False)
+        h.tick(False, acc_known=False)
+        assert h.state == STATE_OFF
+        assert h.camera.calls == [] and h.verbs() == []
+        h.tick(True)                              # first ACC report: on
+        assert h.state == STATE_RUNNING
+        assert h.camera.calls == [True] and h.verbs() == []
+
+    def test_startup_without_acc_report_counts_as_off_after_wait(self):
+        h = Harness(target_active=True, api={}, acc_wait_s=20.0)
+        for _ in range(3):
+            h.tick(False, acc_known=False)        # t = +5, +10, +15
+        assert h.verbs() == []
+        h.tick(False, acc_known=False)            # +20: give up waiting
+        assert h.verbs() == ["stop"]
+        assert h.camera.calls == [False]
+
+    def test_startup_mode_on_adopts_with_key_off(self):
+        h = Harness(target_active=True, api={}, mode=MODE_ON)
+        h.tick(False, acc_known=False)            # mode on needs no ACC
+        assert h.state == STATE_RUNNING
+        assert h.camera.calls == [True] and h.verbs() == []
 
     def test_start_timeout_runs_degraded(self):
         h = Harness(start_timeout_s=20.0)
@@ -365,6 +425,7 @@ class TestServicePowerProfileHold:
         svc.twin.store = store
         svc.power_controller = self._Ctl()
         svc._low_mode_deferred = False
+        svc._acc_seen = True                  # the ignition report above
         h = Harness(camera_relay=False)
         svc.roadsense_power = h.m
         return svc, h

@@ -33,6 +33,15 @@ runs **only while ACC is on** and is stopped cleanly when the key goes away:
 * A manual ``mode`` (``auto`` | ``on`` | ``off``, API command ``roadsense_mode``)
   overrides the ACC follower: ``on`` keeps the stack up with the key off (bench
   work; the fan rules still apply), ``off`` keeps it down.
+* Backend start (first tick, "reconcile"): in mode ``auto`` the manager waits
+  for the powerbox's first ACC report (``acc_known``; at most ``acc_wait_s``,
+  then ACC counts as off). A stack found running while it is wanted (ACC on
+  or mode ``on``) is adopted: RUNNING, camera hub asserted ON (already on, no
+  power glitch). A stack found running while it is NOT wanted (ACC off, e.g.
+  units started by hand while parked, or mode ``off``) is stopped at once
+  (STOPPING, no grace) and the camera hub is NEVER switched on for it: the
+  hub is cut when the units are down. With nothing running and nothing
+  wanted, the hub is switched off.
 * A **preview hold** (:meth:`RoadsenseManager.set_preview_hold`, driven by the
   dashboard camera preview, ``backend.camera_preview``) powers the camera hub
   WITHOUT the stack while the stack is not wanted::
@@ -127,6 +136,7 @@ class RoadsenseConfig:
     restart_cooldown_s: float = 300.0  # min spacing between automatic restarts
     mode: str = MODE_AUTO            # initial operator mode
     systemctl_timeout_s: float = 15.0
+    acc_wait_s: float = 20.0         # start-up: wait this long for the first ACC report
     thermal_glob: str = "/sys/class/thermal/thermal_zone*"
 
 
@@ -251,6 +261,7 @@ class RoadsenseManager:
         self._last_published: Optional[tuple] = None
         self._last_publish_t: float = 0.0
         self._last_acc: Optional[bool] = None
+        self._born: float = clock()
 
     # ── external effects (injectable) ────────────────────────────────────
 
@@ -534,7 +545,10 @@ class RoadsenseManager:
             self._probe.reset()
         self._enter(STATE_PREVIEW if self._preview_hold else STATE_OFF)
 
-    def tick(self, acc_on: bool) -> None:
+    def tick(self, acc_on: bool, acc_known: bool = True) -> None:
+        """Advance the manager. ``acc_known`` is False until the powerbox has
+        reported ACC since this backend started (only the first reconcile
+        uses it)."""
         now = self._clock()
         if (now - self._last_tick) < self.config.tick_s:
             return
@@ -546,15 +560,32 @@ class RoadsenseManager:
         self._sample_thermals()
 
         if not self._reconciled:
-            # The backend may restart while the stack is up (bench work, a
-            # backend crash while driving): adopt it instead of restarting it.
+            if (not desired and self._mode == MODE_AUTO and not acc_known
+                    and now - self._born < cfg.acc_wait_s):
+                # ACC not reported yet: decide nothing (a running stack may be
+                # a legitimate one while driving).
+                self._emit()
+                return
             self._reconciled = True
+            if not acc_known and not desired and self._mode == MODE_AUTO:
+                logger.warning("roadsense: no ACC report %.0fs after start; "
+                               "treating ACC as off", cfg.acc_wait_s)
             if self._target_active():
-                logger.info("roadsense: adopting the already-running stack")
-                if cfg.camera_relay:
-                    self._set_camera(True)
-                self._enter(STATE_RUNNING if desired else STATE_GRACE,
-                            None if desired else self._grace_for())
+                if desired:
+                    # Backend restart while the stack is legitimately up:
+                    # adopt it; the hub is already powered (set is idempotent).
+                    logger.info("roadsense: adopting the already-running stack")
+                    if cfg.camera_relay:
+                        self._set_camera(True)
+                    self._enter(STATE_RUNNING)
+                else:
+                    # Not wanted (ACC off in mode auto, or mode off): units
+                    # started by hand or left over. Stop them without ever
+                    # powering the camera hub; _finish_stop cuts it.
+                    logger.warning("roadsense: stack running while not wanted "
+                                   "(acc_on=%s mode=%s): stopping it, camera hub "
+                                   "not switched on", bool(acc_on), self._mode)
+                    self._begin_stop()
             elif not desired:
                 self._set_camera(False)
 

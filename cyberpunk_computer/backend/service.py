@@ -457,6 +457,9 @@ class BackendService:
         # Key-off "low" CPU profile deferred until roadsense has stopped
         # (modeld is pinned to cpu4-7, which "low" takes offline).
         self._low_mode_deferred = False
+        # True once the powerbox reported ACC since this start (the roadsense
+        # manager's start-up reconcile waits for it).
+        self._acc_seen = False
 
         # USB hub port power controllers (backend.port_power.HubPortPower).
         self.port_power = None
@@ -1049,6 +1052,8 @@ class BackendService:
 
         def _powerbox_middleware(action, store) -> None:
             from ..state.actions import ActionSource
+            if type(action).__name__ == "SetPowerboxIgnitionAction":
+                self._acc_seen = True
             if type(action).__name__ == "SetPowerboxConnectionAction" and \
                     getattr(action, "boot", False):
                 # The firmware (re)booted: every NO relay dropped (relay VCC
@@ -1640,7 +1645,7 @@ class BackendService:
             return
         acc = bool(self.twin.store.state.powerbox.acc_on)
         try:
-            self.roadsense_power.tick(acc)
+            self.roadsense_power.tick(acc, acc_known=self._acc_seen)
         except Exception:
             logger.exception("roadsense tick failed")
         # The stack needs the Gold cluster (modeld/signd/envd pin cpu4-7, which
