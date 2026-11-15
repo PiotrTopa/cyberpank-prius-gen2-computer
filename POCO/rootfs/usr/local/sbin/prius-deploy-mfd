@@ -42,11 +42,14 @@ rsync -az --delete --exclude __pycache__ $DRY -e "$SSH" "$SRC" "$PI:$DST"
 # capped at 64 s: timesyncd backs a failed request off to the max interval,
 # and the first request after boot often goes out before the phone has put
 # its address on usb0. Idempotent.
+# A fresh Pi image has the same file (cyberpunk-prius-gateway
+# raspberry_pi_config/zero13-image/timesyncd-prius.conf, installed by boot-tune.sh); keep both identical.
 $SSH "$PI" 'sudo sh -s' <<'TIMECONF' || echo "prius-deploy-mfd: WARNING: Pi time config failed" >&2
 set -e
 mkdir -p /etc/systemd/timesyncd.conf.d
 cat > /tmp/prius-time.conf <<'X'
-# installed by prius-deploy-mfd (POCO): time from the phone over usb0
+# MFD Pi: time from the phone over usb0 (identical copy in cyberpank-prius-gen2-computer
+# POCO/rootfs/usr/local/sbin/prius-deploy-mfd and cyberpunk-prius-gateway raspberry_pi_config/zero13-image)
 [Time]
 NTP=192.168.100.1
 FallbackNTP=

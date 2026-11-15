@@ -39,6 +39,9 @@ answers on UDP 123 of the gadget link (`cyberpunk_computer/backend/ntp_server.py
 `BACKEND_NTP_SERVE`, default on with the MFD manager) and only with a synchronized phone clock
 (leap indicator 3 otherwise, which timesyncd ignores). Without the phone a cold boot starts at the
 time saved last (`/var/lib/systemd/timesync/clock`). Check on the Pi: `timedatectl timesync-status`.
+A freshly imaged card has the same file from the start (cyberpunk-prius-gateway
+`raspberry_pi_config/zero13-image/timesyncd-prius.conf`, installed and enabled by `boot-tune.sh`);
+the two copies are identical (`tests/test_pi_timesync_conf.py`).
 The frontend ages its link on the monotonic clock, so the step at sync does not flap it.
 
 The Pi image (config.txt with the DPI timings, cmdline.txt, gadget units, `mfd.service`,
