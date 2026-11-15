@@ -498,10 +498,15 @@ class BeanTx:
         self.hw.release()
 
     def guard(self):
-        """Outside an operation GP7 must be low (called every few ms)."""
+        """Outside an operation GP7 must be low (called every few ms). Also
+        drops rate stamps older than the window, so they are gone long
+        before ticks_diff could wrap (6.2 days) and count as recent."""
         if not self.busy and self.hw.tx_level():
             self.hw.release()
             self._latch("gp7 high outside tx")
+        st = self.stamps
+        if st and ticks_diff(ticks_ms(), st[0]) >= RATE_WIN_MS:
+            st.pop(0)
 
     def _tick(self, _t):
         """1 kHz timer during an operation. A legal frame holds GP7 high for

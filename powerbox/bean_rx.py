@@ -1,6 +1,7 @@
 """
 BEAN (Toyota MPX body bus) receiver/decoder for the powerbox (fw 2.3.0;
-2.4.0: idle fast path, own-frame flag and hooks for bean_tx.py).
+2.4.0: idle fast path, own-frame flag and hooks for bean_tx.py; 2.4.1:
+wrap-safe tick arithmetic, frame times anchored to edge stamps).
 
 Listens on GP6 (the transceiver's RX, INVERTED: bus idle 0 V -> GP6 high,
 bus dominant +B -> GP6 low). It never touches GP7 (TX) and never ACKs.
@@ -27,6 +28,14 @@ the BEAN id (3 -> backend 203) at most every BATCH_MS:
     {"t":ms,"bf":[[t_ms,pri,"DST","MES","DATAHEX",rsp,code],...],"st":{...}}
 A frame sent by our own transmitter (bean_tx.py sets ``own``) carries an
 8th element 1.
+
+Time base (2.4.1): every word advances the word-time cursor ``wt``
+(ticks_us domain) by its exact length; a run's end time is the edge stamp
+``last_edge``, its start ``end - d`` (only needed for short runs), so no run
+length - which saturates at 2^30 us after an 18 min sleep - is ever added
+to a tick value. ticks_add() raises OverflowError for |delta| >= 2^29 (537 s
+in us, 6.2 days in ms); every delta here is bounded far below that, and
+ages reported over longer spans (idle_ms, age_ms) are carried in steps.
 
 Idle cost (2.4.0): while the bus is quiet the ~100 timeout words/s are
 consumed by a short fast path (no decoder, no time anchor), a full pass runs
@@ -97,6 +106,9 @@ BAD_QUIET_MS = 5000          # health(): no receive error for this long
 TB16_TX_MIN = 95 * 16        # bit time accepted for transmitting (x16 us)
 TB16_TX_MAX = 108 * 16
 ADAPT_MIN = 16               # runs measured before the bit time counts
+OFF_MAX = 1 << 28            # |time anchor| bound (us); ticks_add needs < 2^29
+LONG_US = 1 << 28            # runs this long have no meaningful start time
+AGE_STEP_MS = 1 << 28        # carry step for ms ages (ticks_diff wraps at 2^29)
 
 # frame result codes ("code" in a frame record)
 E_OK = 0
@@ -370,6 +382,9 @@ class BeanRx:
         self.t_err = now
         self.t_cpu = now
         self.last_ok = None
+        self.ok_carry = 0            # ms of age_ms carried out of last_ok
+        self.idle_ref = None         # ticks_ms reference while cur is saturated
+        self.idle_base = 0           # idle ms up to idle_ref
         self.own = None              # bytearray PRI/ML..DATA of our TX frame
         self.own_until = 0           # ticks_ms: ``own`` is ignored afterwards
         self.own_n = 0               # own frames/fragments seen
@@ -406,7 +421,8 @@ class BeanRx:
         self.wt = now_us             # word-time cursor (ticks_us domain)
         self.et = now_us             # emitted-run cursor
         self.off = 0                 # min-filtered (now - wt): time anchor
-        self.last_edge = now_us
+        self.last_edge = now_us      # wt at the newest edge
+        self.dhalf = 0               # dominant runs measure 0.5 us short
         self.now_us = now_us
         self.now_ms = ticks_ms()
 
@@ -466,13 +482,9 @@ class BeanRx:
               "edges": self.edges, "glitch": self.glitches,
               "ovf": self.ovf, "lost": self.lost, "stall": self.cap.stalls,
               "lag": self.lag, "qdrop": self.qdrop, "txdrop": self.txdrop,
-              "esup": self.esup, "cpu": cpu,
+              "esup": self.esup, "cpu": cpu, "exn": self.exc,
               "tb": (self.tb16 * 10) >> 4, "skew": self.skew,
-              # ticks_us wraps after 17.9 min: long sleeps come from the
-              # word-domain run length (saturates at 2^30 us)
-              "idle_ms": self.cur // 1000 if self.cur > 60000000 else
-              ticks_diff(self.now_us, ticks_add(self.last_edge, self.off)) // 1000,
-              "age_ms": -1 if self.last_ok is None else ticks_diff(now, self.last_ok)}
+              "idle_ms": self._idle_ms(now), "age_ms": self._age_ms(now)}
         for i in range(7):
             st[CODE_KEYS[i]] = c[i]
         if self.err:
@@ -481,6 +493,37 @@ class BeanRx:
             st["exc"] = self.last_exc
         self.lag = 0
         return st
+
+    def _idle_ms(self, now):
+        """Time since the last edge. ticks_us wraps after 17.9 min: up to
+        60 s from the anchored edge stamp, then the word-domain run length;
+        once that saturates (2^30 us) on the ms clock, carried in
+        AGE_STEP_MS steps (stats() runs every STATS_MS while on)."""
+        cur = self.cur
+        if cur >= M30:
+            if self.idle_ref is None:
+                self.idle_ref = now
+                self.idle_base = M30 // 1000
+            elif ticks_diff(now, self.idle_ref) >= AGE_STEP_MS:
+                self.idle_ref = ticks_add(self.idle_ref, AGE_STEP_MS)
+                self.idle_base += AGE_STEP_MS
+            return self.idle_base + ticks_diff(now, self.idle_ref)
+        self.idle_ref = None
+        if cur > 60000000:
+            return cur // 1000
+        return ticks_diff(self.now_us, ticks_add(self.last_edge, self.off)) // 1000
+
+    def _age_ms(self, now):
+        """Time since the last good frame, -1 before the first; carried in
+        AGE_STEP_MS steps so it does not wrap after 6.2 days."""
+        if self.last_ok is None:
+            return -1
+        a = ticks_diff(now, self.last_ok)
+        if a >= AGE_STEP_MS:
+            self.last_ok = ticks_add(self.last_ok, AGE_STEP_MS)
+            self.ok_carry += AGE_STEP_MS
+            a -= AGE_STEP_MS
+        return self.ok_carry + a
 
     # -- main-loop entry -------------------------------------------------------
     def poll(self):
@@ -561,7 +604,7 @@ class BeanRx:
             self._abort()
             tail = p
             n = 0
-            self.wt = self.et = self.now_us     # time of the dropped words is lost
+            self.wt = self.et = self.last_edge = self.now_us   # dropped words' time is lost
             self.off = 0
         if n > self.lag:
             self.lag = n
@@ -575,12 +618,21 @@ class BeanRx:
         self.tail = tail
         # Time anchor: (now - word cursor) >= the unfinished run; its running
         # minimum (with a slow leak for clock drift) maps words to ticks.
+        # Bounded to +-OFF_MAX so ticks_add(x, off) can never overflow.
         obs = ticks_diff(ticks_us(), self.wt)
         if obs < self.off:
-            self.off = obs
+            self.off = obs if obs > -OFF_MAX else -OFF_MAX
         else:
-            self.off += LEAK_US * (1 + skipped)
-        self._flush(self.now_ms)
+            off = self.off + LEAK_US * (1 + skipped)
+            self.off = off if off < OFF_MAX else OFF_MAX
+        now = self.now_ms
+        # Stamps compared by ticks_diff go stale before they can wrap.
+        if self.own is not None and ticks_diff(now, self.own_until) >= 0:
+            self.own = None
+        bad = self.bad_ms
+        if bad is not None and not 0 <= ticks_diff(now, bad) < BAD_QUIET_MS:
+            self.bad_ms = None
+        self._flush(now)
 
     def _abort(self):
         if ST_DATA <= self.st <= ST_RSPC:
@@ -599,6 +651,8 @@ class BeanRx:
         pd = self.pd
         gl = self.gl
         wt = self.wt
+        last = self.last_edge
+        dh = self.dhalf
         raw = self.raw
         i = 0
         while i < n:
@@ -615,18 +669,23 @@ class BeanRx:
                     gl = 0
                     pl = -1
                 elif pl >= 0:
-                    self._run(pl, pd)
+                    self._run(pl, pd, last)      # it ended at the newest edge
                     pl = -1
                 if not self.idled and cur > 2000:
                     self.idled = True
                     self.ilv = lv
                     self._idle(lv)
                 continue
-            d = cur + T_CNT - x + OFF_US
+            r = T_CNT - x + OFF_US
+            d = cur + r
+            if lv:                            # a dominant run takes 3.5 us of
+                dh ^= 1                       # loop overhead, a recessive one 3:
+                r += dh                       # the time base gets the half us
             cur = 0
             self.idled = False
-            wt = ticks_add(wt, T_CNT - x + OFF_US)
-            self.last_edge = wt
+            wt = ticks_add(wt, r)
+            prev = last
+            last = wt
             self.edges += 1
             if raw is not None and self.raw_n < len(raw):
                 rd = d if d < M30 else M30
@@ -641,7 +700,7 @@ class BeanRx:
                 self.glitches += 1
                 continue
             if pl >= 0:
-                self._run(pl, pd)
+                self._run(pl, pd, prev)
             pl = lv
             pd = d
         self.cur = cur
@@ -649,11 +708,15 @@ class BeanRx:
         self.pd = pd
         self.gl = gl
         self.wt = wt
+        self.last_edge = last
+        self.dhalf = dh
 
     # -- runs -> frames ----------------------------------------------------------
-    def _run(self, v, d):
-        start = self.et
-        self.et = ticks_add(start, d)
+    def _run(self, v, d, end):
+        """One run of level ``v`` (1 = dominant), ``d`` us long, ending at
+        word time ``end`` (an edge stamp). ``d`` may be up to 2^30 us after
+        a long sleep: it is never added to a tick value."""
+        self.et = end
         tb = self.tb16
         dc = d - self.skew if v else d + self.skew
         n = (dc * 16 + (tb >> 1)) // tb
@@ -685,7 +748,7 @@ class BeanRx:
                 self.st = ST_ARMED
         elif st == ST_ARMED:
             if v:
-                self._sof(n, start)
+                self._sof(n, ticks_add(end, -d) if d < LONG_US else end)
         elif st == ST_POST:
             self._post(v, n)
         elif st == ST_EOM:
@@ -831,6 +894,7 @@ class BeanRx:
                 self.own_res = (code, self.rsp)
         if code == E_OK:
             self.last_ok = now
+            self.ok_carry = 0
             if not mine and len(self.seen) < SEEN_MAX:
                 self.seen.add((b[1] << 8) | b[2])
         else:

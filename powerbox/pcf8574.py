@@ -117,8 +117,9 @@ class RelayBoard:
         self.err_count += 1
         if code == "RELAY_IO":
             now = self._ticks()
+            # 0 <=: a stamp older than 6.2 days wraps negative (= report)
             if self._last_io_report is not None and \
-                    self._ticks_diff(now, self._last_io_report) < IO_REPORT_MS:
+                    0 <= self._ticks_diff(now, self._last_io_report) < IO_REPORT_MS:
                 return
             self._last_io_report = now
         if self._on_error is not None:

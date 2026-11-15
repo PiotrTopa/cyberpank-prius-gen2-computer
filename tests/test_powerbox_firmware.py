@@ -328,7 +328,7 @@ def _cmd(fw, payload, cfg):
 
 class TestCommandSurface:
     def test_version_bumped(self, fw):
-        assert fw.main.VERSION == "2.4.0"
+        assert fw.main.VERSION == "2.4.1"
         assert fw.main.I2C_FREQ == 100000  # PCF8574 is a 100 kHz part
 
     def test_relay_command_sets_load_channels(self, fw, pm):
@@ -1255,3 +1255,68 @@ class TestBeanRxWiring:
         with Recorder(fw):
             fw.main.wdt_sleep_ms(100)
         assert len(polls) == 21 and len(reads) == 20      # relay read-back unchanged
+
+
+# ─── fw 2.4.1: tick arithmetic across the 2^30 ms wrap ──────────────────────
+
+class _MicroMs:
+    """MicroPython ticks_ms semantics: wraps at 2^30, ticks_add raises for
+    |delta| >= 2^29, ticks_diff is signed modulo 2^30."""
+    P, H = 1 << 30, 1 << 29
+
+    def __init__(self, ms):
+        self.ms = ms
+
+    def install(self, monkeypatch):
+        import time
+        monkeypatch.setattr(time, "ticks_ms", lambda: self.ms & (self.P - 1), raising=False)
+        monkeypatch.setattr(time, "ticks_diff",
+                            lambda a, b: ((a - b + self.H) & (self.P - 1)) - self.H, raising=False)
+
+        def add(t, d):
+            if not -self.H < d < self.H:
+                raise OverflowError("ticks interval overflow")
+            return (t + d) & (self.P - 1)
+        monkeypatch.setattr(time, "ticks_add", add, raising=False)
+        return self
+
+
+class TestTickWrap:
+    def test_uptime_survives_wrap(self, fw, monkeypatch):
+        clk = _MicroMs(3 << 30).install(monkeypatch)
+        m = fw.main
+        monkeypatch.setattr(m, "_boot_ticks", clk.ms & ((1 << 30) - 1))
+        monkeypatch.setattr(m, "_up_carry_s", 0)
+        t0 = clk.ms
+        for _ in range(20 * 24):                       # 20 days, STATUS every hour
+            clk.ms += 3_600_000
+            up = m.uptime_s()
+        assert up == (clk.ms - t0) // 1000
+
+    def test_dead_phone_stays_dead_after_a_week(self, fw, pm, monkeypatch):
+        """fw <= 2.4.0: 6.2 days after the last heartbeat ticks_diff wrapped
+        negative, the dead phone read alive and the boot grace never ended,
+        so the wake ladder stopped pressing."""
+        clk = _MicroMs(5 << 30).install(monkeypatch)
+        p = pm.pm
+        p.boot_ms = p.last_btn_ms = clk.ms & ((1 << 30) - 1)
+        p.on_poco_hb(1)
+        for _ in range(7 * 24 * 60):                   # 7 days, a pass per minute
+            clk.ms += 60_000
+            p.age_stamps(clk.ms & ((1 << 30) - 1))
+        now = clk.ms & ((1 << 30) - 1)
+        import time
+        assert not p.poco_alive(now)
+        assert time.ticks_diff(now, p.boot_ms) >= p.boot_grace_ms
+        assert time.ticks_diff(now, p.last_poco_change_ms) >= fw.main.POCO_LOST_GRACE_MS
+        assert time.ticks_diff(now, p.last_btn_ms) >= fw.main.POCO_WAKE_COOLDOWN_MS
+
+    def test_bean_tx_arm_expires_in_the_loop(self, fw, monkeypatch):
+        clk = _MicroMs(1 << 30).install(monkeypatch)
+        m = fw.main
+        monkeypatch.setattr(m, "BEAN_TX_ENABLED", True)
+        monkeypatch.setattr(m, "_bean_tx_until", (clk.ms + 60_000) & ((1 << 30) - 1))
+        clk.ms += 61_000
+        assert m.bean_tx_allowed() is False
+        clk.ms += 7 * 86_400_000                       # a week later: still off
+        assert m.bean_tx_allowed() is False

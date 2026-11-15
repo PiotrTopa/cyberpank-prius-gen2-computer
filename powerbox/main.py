@@ -163,7 +163,7 @@ import pcf8574                      # PCF8574 driver + RelayBoard (pin map, NC, 
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-VERSION = "2.4.0"
+VERSION = "2.4.1"
 
 # Device role — reported in the unified identify ("whoami") response and the
 # ready banner so the computer can discover which USB-CDC port is the powerbox
@@ -382,10 +382,36 @@ _pending_banner = None
 # timeout, machine.reset(), mpremote reset).
 _reset_cause = None
 _boot_ticks = 0
+_up_carry_s = 0
+
+# ticks_ms wraps at 2^30 ms (12.4 days) and ticks_diff() of two stamps is
+# only meaningful below 2^29 ms (6.2 days); ticks_add() raises OverflowError
+# beyond that. Long spans are therefore carried (uptime) or capped (stamps
+# that only feed "older than X" decisions, see age_cap()).
+UP_STEP_MS = 100000000            # uptime carry step (27.8 h, whole seconds)
+AGE_CAP_MS = 86400000             # stamps are kept at most 1 day old (> every timeout)
 
 
 def uptime_s():
-    return time.ticks_diff(time.ticks_ms(), _boot_ticks) // 1000
+    """Seconds since boot, wrap-free (called at least every STATUS)."""
+    global _boot_ticks, _up_carry_s
+    d = time.ticks_diff(time.ticks_ms(), _boot_ticks)
+    if d >= UP_STEP_MS:
+        _boot_ticks = time.ticks_add(_boot_ticks, UP_STEP_MS)
+        _up_carry_s += UP_STEP_MS // 1000
+        d -= UP_STEP_MS
+    return _up_carry_s + d // 1000
+
+
+def age_cap(now, t):
+    """``t`` (a past ticks_ms stamp or None) moved forward so it is at most
+    AGE_CAP_MS old. Applied every main-loop pass, it keeps
+    ``ticks_diff(now, t)`` from wrapping negative after 6.2 days (a dead
+    phone would read alive again, a stale boot stamp would block the wake
+    ladder) while every "older than X" test keeps its answer."""
+    if t is not None and time.ticks_diff(now, t) > AGE_CAP_MS:
+        return time.ticks_add(now, -AGE_CAP_MS)
+    return t
 
 
 def set_host_present(present):
@@ -1436,6 +1462,20 @@ class PowerManager:
         if not self.relays.restart():
             set_led(0, 0, 0)
 
+    def age_stamps(self, now):
+        """Cap every past stamp at AGE_CAP_MS (see age_cap)."""
+        self.boot_ms = age_cap(now, self.boot_ms)
+        self.last_poco_change_ms = age_cap(now, self.last_poco_change_ms)
+        self.last_btn_ms = age_cap(now, self.last_btn_ms)
+        self.p2_alive_ms = age_cap(now, self.p2_alive_ms)
+        self.low_since = age_cap(now, self.low_since)
+        self.relay_verify_ms = age_cap(now, self.relay_verify_ms)
+        self.last_hb_tx_ms = age_cap(now, self.last_hb_tx_ms)
+        if self.state == "shutdown":
+            self.shutdown_t0 = age_cap(now, self.shutdown_t0)
+        for b in (self.btn1, self.btn2):
+            b.last_press_ms = age_cap(now, b.last_press_ms)
+
     def tick(self, voltage):
         """Run the power state machine for one main-loop iteration.
 
@@ -1443,6 +1483,7 @@ class PowerManager:
         """
         if voltage is not None:
             self.last_voltage = voltage
+        self.age_stamps(time.ticks_ms())
         # Drive the outbound-write gate from POCO liveness.
         set_host_present(self.poco_alive())
         now = time.ticks_ms()
@@ -1900,6 +1941,7 @@ def main():
         while True:
             feed_wdt()
             bean_release()
+            bean_tx_allowed()             # the 60 s TX arm expires on time
             poll_stdin(idle_config)
             acc_state, last_acc_tx = acc_step(acc_pin, acc_state, last_acc_tx)
             now_ms = time.ticks_ms()
@@ -1997,6 +2039,9 @@ def main():
         try:
             feed_wdt()
             bean_release()                # BEAN TX never left high
+            bean_tx_allowed()             # the 60 s TX arm expires on time, not
+                                          # lazily (a stale deadline re-arms
+                                          # after 6.2 days of ticks_diff wrap)
 
             # Process any inbound commands (non-blocking)
             poll_stdin(config)

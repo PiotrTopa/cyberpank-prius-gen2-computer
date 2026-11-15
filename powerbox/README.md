@@ -6,8 +6,8 @@ wakes the POCO F1 through the phone's power button, switches the loads on an
 senses ACC, and hosts the BEAN body-bus receiver and the guarded BEAN
 transmitter. It talks NDJSON over USB-CDC to the backend on the POCO.
 
-Firmware in this directory: **2.4.0** (`VERSION` in `main.py`), flashed to the car
-2026-11-13. Confirm with `ver` from `POWERBOX_READY` / IDENT.
+Firmware in this directory: **2.4.1** (`VERSION` in `main.py`). On the car: **2.4.0**
+(flashed 2026-11-13). Confirm with `ver` from `POWERBOX_READY` / IDENT.
 
 | File | Role |
 |---|---|
@@ -481,7 +481,12 @@ bits reported raw. Tested tolerance (CPython): ±20 µs jitter per edge without 
   the frame ring and capture log (`"own":1`) but out of the message table and the
   error count.
 - `t_ms` = firmware `ticks_ms` of the SOF (±~1 ms); `t` = `ticks_ms` at send time
-  (frame age = `t − t_ms`).
+  (frame age = `t − t_ms`, 0.1–0.5 s with 200 ms batching). Frame times come from
+  the edge stamps of the word-time cursor (fw ≥ 2.4.1); fw ≤ 2.4.0 summed run lengths
+  instead and its `t_ms` jumped by an arbitrary amount (mod 2^30 µs) at every wake
+  after a bus sleep > 537 s, and ran slow by 0.5 µs per dominant run beyond what the
+  anchor leak follows (2026-11-13 drive: `t_ms` 236.4 s ahead of `t`). The backend
+  times such frames with its estimator (`comm/bean.py` `BeanClock`).
 - `rsp`: 2 raw RSP bits (`1` = `01` = ACK, `0` = none, `2` = NAK, `3` = both), `null`
   if the frame broke before RSP.
 - `code`: 0 ok, 1 crc, 2 stuff, 3 len (ML outside 3..13), 4 frm (EOM/RSP/EOF shape,
@@ -492,9 +497,11 @@ bits reported raw. Tested tolerance (CPython): ±20 µs jitter per edge without 
 
 `st` counters: results `ok crc stuff len frm trunc ovf`; capture `edges glitch lost
 stall lag`; reporting `qdrop txdrop esup`; timing `tb` (bit time, 0.1 µs), `skew`
-(µs, dominant longer = +), `idle_ms` (since last edge; correct beyond 9 min,
-saturating at ~1,073,000), `age_ms` (since last good frame, −1 = none); load `cpu`
-(decoder time, ‰ of wall time); state `on`, `mode`, `err` / `exc`.
+(µs, dominant longer = +), `idle_ms` (since last edge; fw ≥ 2.4.1 keeps counting
+past the 2^30 µs run-length saturation on the ms clock, fw ≤ 2.4.0 sticks at
+1,073,741), `age_ms` (since last good frame, −1 = none; fw ≤ 2.4.0 wraps negative after
+6.2 days); load `cpu` (decoder time, ‰ of wall time); state `on`, `mode`, `err` /
+`exc` (last internal exception) / `exn` (count, fw ≥ 2.4.1).
 
 | command | reply |
 |---|---|
@@ -506,13 +513,29 @@ saturating at ~1,073,000), `age_ms` (since last good frame, −1 = none); load `
 (`err` in the stats). Preallocated buffers: allocation only per decoded frame and per
 line.
 
+**Tick arithmetic.** MicroPython ticks wrap at 2^30 (`ticks_us` 17.9 min, `ticks_ms`
+12.4 days); `ticks_diff` is meaningful below 2^29 and `ticks_add` raises
+`OverflowError('ticks interval overflow')` for |delta| ≥ 2^29 (537 s in µs, 6.2 days
+in ms). fw ≤ 2.4.0 added a run length to the frame cursor, so the first edge after a
+bus sleep > 537 s raised: one exception per such wake-up (`exc` in the stats on the
+car since 2026-11-13), the wake-up's sleep time lost from the frame clock, and the
+receiver marked unhealthy for 5 s. Ingest itself survived (the exception aborts that
+poll, `_abort()` zeroes the run, the next poll re-decodes the same words; ERR_LIMIT is
+never reached). A `bean_wake` in that window has its `send` refused with
+`err:"rx"` (`health()` = "rx errors"): the edge-test pulse is the first edge after the
+sleep. fw 2.4.1 never adds an unbounded delta to a tick value (run end = edge stamp,
+anchor bounded to ±2^28 µs), carries long ages (`idle_ms`, `age_ms`, `up`), and caps
+or expires every stored ms stamp (power manager, TX arm, TX rate stamps, `own`,
+`bad_ms`) before `ticks_diff` can wrap. Host tests on MicroPython tick semantics:
+`tests/test_bean_rx_wrap.py`, `TestTickWrap` in `tests/test_powerbox_firmware.py`.
+
 **Cost** (estimate; verify with `cpu`): 40–80 µs per run plus ~0.1 ms per poll →
 ~2–4 % CPU at 15 frames/s, ~8–14 % during the 45 frames/s IG-ON burst. Idle (fw
 2.4.0): with the decoder idle and nothing queued, a native fast path (`_quick`) only
 adds timeout words to the idle time; a full pass runs every 40 polls (200 ms) and,
 after 1 s recessive, the capture is looked at every 4th poll. Wake latency ≤ 20 ms
 (ring then holds ≤ ~40 words; `TestReceiverIdle`). fw 2.3.0 measured 87–94 ‰ asleep;
-the 2.4.0 value on the car is not yet read. The run-length counter saturates at
+2.4.0 reads 40–41 ‰ asleep on the car (2026-11-13 and 2026-11-15). The run-length counter saturates at
 2^30 µs. RAM: ~8 KB DMA ring (allocated at 2× for alignment), ~10 KB compiled module,
 up to 64 queued records.
 
@@ -726,6 +749,7 @@ Preconditions: fw 2.4.0 flashed (`status` answers), receiver healthy
 | 2.2.5 | `acc_sim` |
 | 2.3.0 | `bean_rx.py`, id 3, TX guard; new OTA file name (one extra reboot) |
 | 2.4.0 | `bean_tx.py`; bench ops need the bench override; receiver idle fast path |
+| 2.4.1 | wrap-safe ticks (no OverflowError after a > 537 s bus sleep, frame `t_ms` on the `ticks_ms` base, `idle_ms`/`age_ms`/`up` do not stick or wrap, dead-phone/boot-grace/TX-arm stamps cannot wrap after 6.2 days); `exn` counter |
 
 Tests: `tests/test_powerbox_firmware.py` (firmware on CPython with stubs),
 `tests/test_powerbox_io.py`, `tests/test_port_power.py`, `tests/test_bean_rx.py`
@@ -740,8 +764,8 @@ run against `tests/bean_pio_sim.py`), `tests/test_bean_backend.py`.
 | **PCF8574 spontaneous reset to 0xFF** (MCU keeps running, every coil releases). Seen at a key-off (MFD Pi browned out, all hubs re-enumerated) and later in the field; cause unknown. Not the ACC line (gate-only input, shares nothing with the expander). | Scope expander VCC (RP2040 5 V) and SDA/SCL around an event; correlate PMLOG `rly_fix` time stamps with 12 V and load switching. Whether the 5 ms re-assert keeps loads up on the car is not yet confirmed. |
 | Relays 5–8 never tested on this board (ch5 = RS485 rail). | Bench: switch each, confirm load and `rly`. |
 | Cause of spontaneous bench resets (during rewiring) unknown. | Watch `rc` / `boot_count` over a long run: rc 1 → power/wiring, rc 3 → firmware stall. |
-| BEAN TX on the car: the wake frame wakes the bus, but the send reports `ok:0 err:"rx"` (own frame not read back). PIO load, `fifo_join=JOIN_TX`, 1 kHz `machine.Timer` and real rise/fall are not measured. | Scope TX/RX on the parked car during a wake send; compare with the receiver's own-TX marking. |
-| Receiver `cpu` asleep with fw 2.4.0 (expected a few ‰). | Read `st.cpu` on the parked car. |
+| BEAN TX on the car (fw 2.4.0): the bus wakes, but the `bean_wake` send reports `ok:0 err:"rx"`. `err:"rx"` is a pre-transmit refusal by `health()`; on 2.4.0 the edge-test pulse after a > 537 s sleep raises the tick overflow and marks the receiver unhealthy for 5 s (reproduced in `tests/test_bean_rx_wrap.py`). Whether 2.4.1 sends cleanly is not confirmed on the car; PIO load, `fifo_join=JOIN_TX`, 1 kHz `machine.Timer` and real rise/fall are not measured. | Flash 2.4.1, `bean_wake` on the parked car after > 10 min of bus sleep; read the reply `detail` and `exn`. |
+| Receiver `cpu` asleep with fw 2.4.0 is 40–41 ‰, not the few ‰ the fast path was meant to give; where the time goes is not measured. | Profile `poll()` paths on the bench with the bus idle (`_quick` vs full pass vs `produced()`). |
 | Main hub model and which sockets switch VBUS. `POCO/provision.sh` (backend.env seed) says main hub `1-1` = Terminus `1a40:0101`, 4 ports, powerbox on port 1; `backend/port_power.py`, `io/discovery.py` (`DEFAULT_PORT_ROLES = {5: powerbox, 2: gateway}`) and `prius-usb-power` describe an ActionStar `2101:8500` with real VBUS switching on internal port 5 only. Until settled, a hub-port cycle of the powerbox may be data-only. | `lsusb -t` + `uhubctl` on the car; cut port power and check whether `energy_mah` resets (true cold boot). |
 | POCO button MOSFET not fitted. | Fit it, then set `POCO_BTN_ACTIVE_HIGH` / `ACTIVE_HIGH`. |
 | No box-air sensor (BMP280 #1, AHT20 not fitted): box purge untested. | Fit one. |
