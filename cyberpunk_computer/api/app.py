@@ -88,6 +88,7 @@ def create_app(
     position_feeder=None,
     auth_trusted: Optional[str] = None,
     auth_state_dir: Optional[str] = None,
+    extra_routes=None,
 ) -> FastAPI:
     """Build the FastAPI app wired to the bridge and metrics database.
 
@@ -298,6 +299,12 @@ def create_app(
     from ..diag.api import register as register_diag
 
     register_diag(app, API_PREFIX + "/diag", require_auth)
+
+    # ── further route groups (e.g. /alerts), mounted before the dashboard ───
+    # ``extra_routes``: callables (app, API_PREFIX, require_auth).
+
+    for add_routes in extra_routes or ():
+        add_routes(app, API_PREFIX, require_auth)
 
     # ── dashboard ────────────────────────────────────────────────────────────
 

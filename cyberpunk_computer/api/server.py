@@ -39,6 +39,7 @@ class ApiServer:
         position_feeder=None,
         auth_trusted: Optional[str] = None,
         auth_state_dir: Optional[str] = None,
+        extra_routes=None,
     ) -> None:
         self._app = create_app(bridge, db, auth_token=auth_token,
                                roadsense_url=roadsense_url,
@@ -46,7 +47,8 @@ class ApiServer:
                                camera_preview=camera_preview,
                                position_feeder=position_feeder,
                                auth_trusted=auth_trusted,
-                               auth_state_dir=auth_state_dir)
+                               auth_state_dir=auth_state_dir,
+                               extra_routes=extra_routes)
         config = uvicorn.Config(
             self._app,
             host=host,
