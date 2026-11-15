@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import {
-  Activity, Bug, Car, Clock, Cpu, LayoutDashboard, Map as MapIcon, Power, SatelliteDish, Stethoscope,
+  Activity, BellRing, Bug, Car, Clock, Cpu, LayoutDashboard, Map as MapIcon, Power, SatelliteDish, Stethoscope,
   Thermometer, Wifi, WifiOff, Zap,
 } from 'lucide-react';
 import type { Satellites, Tab, TimeRange } from './types';
@@ -15,6 +15,7 @@ import { ControlsTab } from './tabs/ControlsTab';
 import { SatellitesTab } from './tabs/SatellitesTab';
 import { DiagnosticsTab } from './tabs/DiagnosticsTab';
 import { MapTab } from './tabs/MapTab';
+import { AlertsTab } from './tabs/AlertsTab';
 import { transportOf } from './lib/satellites';
 
 const TABS: [Tab, string, typeof LayoutDashboard][] = [
@@ -23,6 +24,7 @@ const TABS: [Tab, string, typeof LayoutDashboard][] = [
   ['satellites', 'Satellites', SatelliteDish],
   ['charts', 'Telemetry', Activity],
   ['diagnostics', 'Diagnostics', Stethoscope],
+  ['alerts', 'Alerts', BellRing],
   ['controls', 'Controls', Power],
 ];
 
@@ -180,6 +182,7 @@ export default function App() {
           {activeTab === 'diagnostics' && (
             <DiagnosticsTab diag={state.diagnostics} connected={connected} now={serverNow} />
           )}
+          {activeTab === 'alerts' && <AlertsTab />}
           {activeTab === 'controls' && (
             <ControlsTab state={state} connected={connected} now={serverNow}
               satNodes={rs485Nodes} manualHeld={manualHeld} />

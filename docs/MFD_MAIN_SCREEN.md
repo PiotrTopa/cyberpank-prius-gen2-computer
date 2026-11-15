@@ -378,7 +378,7 @@ not changing, on the frontend clock.
  "path": {"y": [...]},                         # the model's planned path; may be shorter than "x"
  "lead": {"d": 34.2, "y": 0.3, "v_rel": -1.2, "a": -0.4, "prob": 0.93, "kind": "car"} | null,
  "objects": [{"kind": "car|truck|bus|van|person|bike|cone|lamp", "x": 41.0, "y": -3.4, "state": "on"}],
- "light": {"state": "red|yellow|red_yellow|green|off|unknown", "d": 34.0, "y": 2.1, "flashing": false} | null,
+ "light": {"state": "red|yellow|red_yellow|green|off|unknown", "d": 34.0, "y": 2.1, "flashing": false, "rel": 0.71, "agree": 2} | null,
  "limit": {"kmh": 50, "src": "sign|default", "conf": 0.71} | null,
  "signs": {"on":    [{"id": "no_stopping", "s": "B-36", "v": 20, "side": "l|r", "q": true}],   # <= 6
            "ahead": [{"id": "roundabout_ahead", "s": "A-8", "m": 60}]},                         # <= 3
@@ -415,7 +415,7 @@ through a latest-only slot per event name (`ZmqServer.enqueue_latest_event`, com
 | `path.y` | `road.plan.y` at `road.plan.x` (33 points along the planned trajectory) | linear interpolation at the 11 distances, cut where the plan ends (short at low speed); left out when the plan is unusable |
 | `lead.kind` | not provided | not sent: the screen draws a car |
 | `objects` | not provided | not sent |
-| `light` | `lights.ego` (api annotation): `state`, `dist_m`, `lateral_m`, `flashing` | `d` = `dist_m` (housing-size estimate, about +-30 %), `y` = `lateral_m`: offset from the planned path, not from the camera; null when no light is relevant |
+| `light` | `lights.ego` (api annotation): `state`, `dist_m`, `lateral_m`, `flashing`, `relevance`, `agree` | `d` = `dist_m` (housing-size estimate, about +-30 %), `y` = `lateral_m`: offset from the planned path, not from the camera; `rel` / `agree` for the alert log (ALERTS.md); null when no light is relevant |
 | `limit` | `speed_limit.limit_kmh`, `.source.kind`, `.confidence` | `{"kmh", "src", "conf"}`; null when the limit is unknown |
 | `signs.on` | `rules.in_effect[]` with `applies_to_car` not false, without `id: speed_limit` | `id`, `s` = `sign` (8 characters), `v` = `value`, `side` = first letter of `side`, `q` when `uncertain` is not empty; first 6 |
 | `signs.ahead` | `rules.ahead[]` (already nearest first) | `id`, `s`, `m` = `expected_in_m` rounded; first 3; `signs` is null when both lists are empty |
@@ -484,6 +484,8 @@ elements of section 6.5.
                   "feature": {"m": 230, "kind": "traffic_signals|crossing|stop|give_way|..."}},
         "pos": {"src": "gnss|dead_reckoning", "hacc": 2.1},
         "shape": {"ds": 40, "x": [0, 40, 79, 115], "y": [0, 1, 10, 27]},
+        "lead": {"present": true, "d": 5.4, "y": 0.1, "v_rel": 0.0, "v": 0.0, "a": 0.0, "gap": 1.2, "ttc": 4.0,
+                 "standing": true, "departed": true, "mode": "hold", "id": 7},   # roadsense's tracked lead, when fused carries it
         "in": {"gnss": "headunit|synthetic", "fix": "3d|none|...", "fix_age": 0.4,
                "motion": "vehicle|vision|none", "tag": "prius-can|synthetic"},
         "syn": true}                   # only when set: mapd's position comes, or may still come, from a synthetic drive
@@ -500,6 +502,7 @@ elements of section 6.5.
 | `ahead` | `fused.ahead` (null without the map) | `pc` = `path_confidence` (at the horizon); the nearest junction (`c` = its confidence), curve (`start_m`, `min_radius_m`, first letter of `direction`), speed-limit change (`src` = `source`, `c` = `confidence`: path up to it x the limit's own) and feature; m rounded. `jn`: up to 6 junctions within 700 m that have a side road which is not a service road, nearest first, as `[m, confidence, code]` with code `j` junction, `r` roundabout, `x` roundabout exit, `d` dead end, `n` no way on |
 | `shape` | mapd `map.ahead.shape` (`s`, `x`, `y`; `map_shape_to_scene`) | the road along the most likely path beyond camera range: every second point (`ds` = 40 m of path) up to 600 m, x forward along the matched bearing, y right, whole metres. Only while `ok` and the `map` topic is fresh. `fused` does not carry the shape, so it is taken from the `map` topic the feed already reads |
 | `pos` | `fused.position.source`, `.hacc_m` | no coordinates are passed on |
+| `lead` | `fused.lead` (roadsense lead tracker: `dist_m`, `lateral_m`, `v_rel_mps`, `v_lead_mps`, `a_lead_mps2`, `time_gap_s`, `ttc_s`, `standing`, `departed`, `mode`, `track_id`) | only when fused carries it; flags only when true. Read by the alert functions (stop-and-go), not drawn |
 | `in` | `map.input.gnss.source`, `.fix`, `.age_s`; `map.input.motion.source`, `.tag` | what mapd hears from the position feeders; `gnss: "synthetic"` marks a synthetic drive. Left out while the `map` topic is stale |
 | `syn` | the backend's `SyntheticTaint` over every `map` message | true from the first message whose `input.gnss.source` is `synthetic` until mapd reports `no_source` / `unknown` or `good` with a non-synthetic fix as the newest; covers the residue after a synthetic drive, when mapd still dead-reckons from the synthetic place while `in.gnss` already says `headunit` (no reset in the position API, [POSITION_FEEDER.md](POSITION_FEEDER.md) 5.1). Kept across WebSocket reconnects, lost on a backend restart |
 

@@ -1584,6 +1584,15 @@ class MainScreen(Screen):
             on_prev=lambda: self.show_page(self._current_page - 1),
             name="page-swipe",
         )
+        # Alert banner in the strip row (ui/scene/alerts.py, docs/ALERTS.md):
+        # tap = acknowledge, long press = mute that alert for the drive.
+        from ..pointer import PointerZone
+        from ..scene.alerts import ALERT_FEED
+        self.add_pointer_zone(PointerZone(
+            (center_x + 1, self.height - self.BOTTOM_BAR_HEIGHT, center_w - 46, self.BOTTOM_BAR_HEIGHT),
+            on_click=lambda x, y: ALERT_FEED.ack(False),
+            on_long_press=lambda x, y: ALERT_FEED.ack(True) or True,
+            enabled=lambda: ALERT_FEED.current() is not None, name="alert-ack"))
 
     # -- navigation API (also used by MFD hardware buttons) -----------------
 

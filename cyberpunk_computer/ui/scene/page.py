@@ -22,6 +22,7 @@ from typing import Any, Optional
 import pygame
 
 from ..colors import COLORS
+from .alerts import ALERT_FEED, AlertBanner, AlertFeed
 from .director import SceneDirector
 from .inputs import FEED, SceneFeed, SceneInputs, read_inputs, read_perception
 from .powerbox import PowerHistory, StatusStrip
@@ -36,7 +37,8 @@ PREWARM_S = 0.4
 
 class ScenePage:
     def __init__(self, x: int, y: int, width: int, feed: Optional[SceneFeed] = FEED,
-                 clock=time.monotonic, tuning: Optional[Tuning] = None):
+                 clock=time.monotonic, tuning: Optional[Tuning] = None,
+                 alerts: Optional[AlertFeed] = ALERT_FEED):
         # the tunables (tuning.py): defaults + the optional JSON overrides
         self.tuning = tuning if tuning is not None else load_tuning()
         self.x, self.y, self.width = x, y, width
@@ -53,6 +55,11 @@ class ScenePage:
         self.strip: Optional[StatusStrip] = None
         self._warm_t = 0.0
         self._hist_seen = -1
+        # alert banner in the strip row + real-speed chip (scene/alerts.py)
+        self.alerts = alerts
+        self.banner: Optional[AlertBanner] = None
+        self._alert_drawn: Optional[tuple] = None
+        self._chip_drawn: Optional[tuple] = None
 
     # -- data -------------------------------------------------------------------
 
@@ -94,10 +101,24 @@ class ScenePage:
             energy = getattr(self._state, "energy", None)
             self.history.add(getattr(energy, "battery_power_kw", None))
 
+    def _alert_now(self):
+        return self.alerts.current() if self.alerts is not None else None
+
+    @staticmethod
+    def _chip_sig(a) -> Optional[tuple]:
+        chip = a.get("chip") if a else None
+        return (chip.get("real_kmh"),) if isinstance(chip, dict) and chip.get("real_kmh") is not None else None
+
     def needs_frame(self, home: bool = True) -> bool:
         """Whether the next render would show something new: the scene would
-        re-draw (home page) or the power history moved on."""
+        re-draw (home page), the power history moved on, or the alert banner
+        appeared / changed / went."""
         if self.strip is None or self.history.version != self._hist_seen:
+            return True
+        a = self._alert_now()
+        if AlertBanner.signature(a) != self._alert_drawn:
+            return True
+        if home and self._chip_sig(a) != self._chip_drawn:
             return True
         if not home:
             return False
@@ -108,6 +129,16 @@ class ScenePage:
             self.scene = SceneRenderer((self.width, SCENE_H), tuning=self.tuning)
         surface.blit(self.scene.render(self.director, self.inputs, self._clock()),
                      (self.x, self.y))
+        a = self._alert_now()
+        chip_sig = self._chip_sig(a)
+        self._chip_drawn = chip_sig
+        if chip_sig is not None:
+            if self.banner is None:
+                self.banner = AlertBanner((self.width - DOTS_W, STRIP_H))
+            chip = self.banner.chip(chip_sig[0])
+            if chip is not None:
+                # under the limit sign, right edge of the scene
+                surface.blit(chip, (self.x + self.width - chip.get_width() - 3, self.y + 33))
 
     def render_strip(self, surface: pygame.Surface) -> None:
         if self.strip is None:
@@ -130,6 +161,19 @@ class ScenePage:
             inp.cruise_active, inp.cruise_main, inp.cruise_set_kmh, inp.cruise_mem_kmh,
             inp.cruise_gap)
         surface.blit(strip, (self.x, sep_y + 1))
+        a = self._alert_now()
+        self._alert_drawn = AlertBanner.signature(a)
+        if a is not None:
+            if self.banner is None:
+                self.banner = AlertBanner((self.width - DOTS_W, STRIP_H))
+            surface.blit(self.banner.render(a), (self.x, sep_y + 1))
+
+    def alert_rect(self):
+        """(x, y, w, h) of the banner in screen coordinates (the strip row)."""
+        return (self.x, self.y + SCENE_H + 1, self.width - DOTS_W, STRIP_H)
+
+    def alert_shown(self) -> bool:
+        return self._alert_now() is not None
 
     def render(self, surface: pygame.Surface) -> None:
         self.render_scene(surface)

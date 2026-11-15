@@ -213,6 +213,13 @@ def lights_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         out["y"] = round(y, 1)
     if ego.get("flashing"):
         out["flashing"] = True
+    # api annotation: how sure the ego assignment is (alerts' green-light half)
+    rel = _num(ego.get("relevance"))
+    if rel is not None:
+        out["rel"] = round(rel, 2)
+    agree = _num(ego.get("agree"))
+    if agree is not None:
+        out["agree"] = int(agree)
     return out
 
 
@@ -402,6 +409,17 @@ def fused_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     pos = msg.get("position")
     if isinstance(pos, dict):
         out["pos"] = _drop_none({"src": pos.get("source") or None, "hacc": _r(pos.get("hacc_m"), 1)})
+    ld = msg.get("lead")
+    if isinstance(ld, dict):
+        # roadsense's tracked lead (api lead.py; null when the tracker has no
+        # fresh estimate). Consumed by the alert functions (stop-and-go).
+        out["lead"] = _drop_none({
+            "present": bool(ld.get("present")), "d": _r(ld.get("dist_m"), 1), "y": _r(ld.get("lateral_m"), 2),
+            "v_rel": _r(ld.get("v_rel_mps"), 2), "v": _r(ld.get("v_lead_mps"), 2),
+            "a": _r(ld.get("a_lead_mps2"), 2), "gap": _r(ld.get("time_gap_s"), 2), "ttc": _r(ld.get("ttc_s"), 2),
+            "standing": True if ld.get("standing") else None, "departed": True if ld.get("departed") else None,
+            "mode": ld.get("mode") or None,
+            "id": ld.get("track_id") if isinstance(ld.get("track_id"), int) else None})
     return out
 
 

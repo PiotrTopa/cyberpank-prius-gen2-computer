@@ -135,7 +135,7 @@ def test_v_rel_falls_back_to_pose_vx():
 
 def test_slow_topics():
     msgs = {peek_type(ln): json.loads(ln) for ln in load_lines()}
-    assert lights_to_scene(msgs["lights"]) == {"state": "red", "d": 34.0, "y": 2.1}
+    assert lights_to_scene(msgs["lights"]) == {"state": "red", "d": 34.0, "y": 2.1, "rel": 0.71, "agree": 1}
     assert lights_to_scene({"type": "lights", "ego": None}) is None
     lim = limit_to_scene(msgs["speed_limit"])
     assert lim["kmh"] == 50 and lim["src"] == "sign"

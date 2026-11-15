@@ -458,6 +458,8 @@ class BackendService:
         self.position_feeder = None
         # On-demand dashboard camera preview (backend.camera_preview).
         self.camera_preview = None
+        # Driver alerts + smart functions (cyberpunk_computer/alerts).
+        self.alerts = None
         # Key-off "low" CPU profile deferred until roadsense has stopped
         # (modeld is pinned to cpu4-7, which "low" takes offline).
         self._low_mode_deferred = False
@@ -675,6 +677,10 @@ class BackendService:
         # Provide the initial state immediately.
         bridge.on_state(twin.store.state)
 
+        # Driver alerts + smart functions (docs/ALERTS.md): all types ship in
+        # shadow mode; event "alert" for the MFD banner, /api/v1/alerts.
+        self.alerts = self._wire_alerts(twin, bridge, db)
+
 
         # On-demand camera preview (lease + frames; powers the camera hub
         # through the roadsense manager's preview hold when the stack is down).
@@ -705,6 +711,7 @@ class BackendService:
             bean_frames=self.bean_monitor.frames_since if self.bean_monitor else None,
             camera_preview=self.camera_preview,
             position_feeder=self.position_feeder,
+            extra_routes=self._alert_routes(),
         )
         
         zmq_srv = ZmqServer(
@@ -767,6 +774,8 @@ class BackendService:
                 def _publish_scene(scene: dict) -> None:
                     zmq_srv.enqueue_latest_event({"type": "event", "ts": round(time.time(), 3),
                                                   "name": EVENT_NAME, "data": scene})
+                    if self.alerts is not None:
+                        self.alerts.on_scene(scene)
 
                 self.roadsense_scene = RoadsenseSceneFeed(sc_cfg, _publish_scene)
                 logger.info("roadsense scene feed wired (ws://%s:%d, <= %.0f Hz)",
@@ -779,6 +788,29 @@ class BackendService:
         self.bridge = bridge
         self.api = api
         self.zmq = zmq_srv
+
+    def _wire_alerts(self, twin: VirtualTwin, bridge, db):
+        """Alert framework (cyberpunk_computer/alerts); None when disabled."""
+        try:
+            from ..alerts.service import wire
+            return wire(self, twin, bridge, None, db, self.config.db_path)
+        except Exception:
+            logger.exception("Alert framework could not be wired; disabled")
+            return None
+
+    def _alert_routes(self):
+        if self.alerts is None:
+            return None
+        from ..alerts.routes import register
+        svc = self.alerts
+        return [lambda app, prefix, auth: register(app, svc, prefix + "/alerts", auth)]
+
+    def _alerts_tick(self) -> None:
+        if self.alerts is not None:
+            try:
+                self.alerts.tick()
+            except Exception:
+                logger.exception("alert tick failed")
 
     def _wire_position_feeder(self, twin: VirtualTwin):
         """Position feeder -> roadsense mapd (backend.position_feeder).
@@ -1593,6 +1625,7 @@ class BackendService:
                     self._bean_tick()
                     self._panda_tick()
                     self._dashcam_tick()
+                    self._alerts_tick()
                     if self.diag is not None:
                         self.diag.tick()
                     if self.recorder is not None:
@@ -2335,6 +2368,11 @@ class BackendService:
                 self.position_feeder.stop()
             except Exception:
                 logger.exception("Error stopping the position feeder")
+        if self.alerts is not None:
+            try:
+                self.alerts.stop()
+            except Exception:
+                logger.exception("Error stopping the alert framework")
         if self.api is not None:
             self.api.stop()
         if self.zmq:
