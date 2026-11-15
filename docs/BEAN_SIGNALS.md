@@ -513,8 +513,12 @@ Other open items:
   destination/LHD/options?).
 * B5 ↔ C1 role assignment; node `19` identity.
 * Does the gateway copy any BEAN ID to CAN besides §5, in other states (e.g. during cruise)?
-* Recording time base: in the drive capture the firmware `t_ms` runs about 236.7 s ahead of `ticks_ms`
-  and about 380 ppm slow, so the age correction in `frame_from_wire()` is skipped (§10).
+* Recording time base: in the drive capture (fw 2.4.0) the firmware `t_ms` runs 236.4 s ahead of
+  `ticks_ms` (a jump at the bus wake-up, tick overflow, `powerbox/README.md` *Tick arithmetic*) and
+  drifts while the bus is busy, so the age correction in `frame_from_wire()` is skipped and
+  `BeanClock` times frames (§10). Delivery latency on that drive, BEAN receive time vs CAN: FE:24
+  speed 0.6 s behind 0x0B4, FE:26 rpm 0.3 s behind OBD rpm (firmware 200 ms batching + queue).
+  fw 2.4.1 puts `t_ms` on the `ticks_ms` base (not yet confirmed on the car).
 
 ---
 
