@@ -630,7 +630,9 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
             "Operator hold for the MFD video board (Raspberry Pi): on=true keeps it "
             "powered with the key off, as ACC would (tests, measurements); on=false "
             "returns it to the normal policy (dark grace, then clean shutdown). The "
-            "hold is dropped automatically after 30 min. State in connection.mfd_state."
+            "hold is dropped automatically after 30 min (it survives a backend restart "
+            "with the time it had left, never a phone reboot) and at once on 12 V "
+            "under-voltage or a powerbox shutdown. State in connection.mfd_state."
         ),
         "params": {"on": "bool"},
     },

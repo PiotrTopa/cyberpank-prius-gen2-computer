@@ -440,7 +440,8 @@ class BackendService:
         # MFD video board power manager (backend.mfd_power).
         self.mfd_power = None
         self._mfd_bean_trigger = None
-        self._mfd_hold_until = 0.0     # monotonic; operator hold (mfd_hold command)
+        from .mfd_power import OperatorHold
+        self._mfd_hold = OperatorHold()  # operator hold (mfd_hold); kept on file once MFD is wired
         # roadsense stack manager (backend.roadsense_power).
         self.roadsense_power = None
         # roadsense -> MFD road scene feed (backend.roadsense_scene).
@@ -911,7 +912,7 @@ class BackendService:
         # Its VBUS goes through powerbox relay ch2 (RelayPortPower handles the
         # data-off sequencing + lossy-command verification).
         if cfg.mfd_enabled:
-            from .mfd_power import MfdPowerConfig, MfdPowerManager
+            from .mfd_power import MfdPowerConfig, MfdPowerManager, OperatorHold
             from ..state.actions import SetMfdStatusAction
 
             mfd_cfg = cfg.mfd_config or MfdPowerConfig()
@@ -931,6 +932,9 @@ class BackendService:
                 mfd_cfg, publish=_publish_mfd,
                 controller=self.port_power.mfd,
             )
+            # a hold set before a backend restart, with the time it has left
+            self._mfd_hold = OperatorHold(mfd_cfg.hold_file, mfd_cfg.hold_s)
+            self._mfd_hold.restore()
             logger.info(
                 "MFD power manager wired (relay ch%d, iface=%s board=%s "
                 "grace=%.0fs)",
@@ -1118,8 +1122,9 @@ class BackendService:
         def _mfd_hold_middleware(action, store) -> None:
             if type(action).__name__ != "MfdHoldAction":
                 return
-            self._mfd_hold_until = (time.monotonic() + 1800.0) if action.on else 0.0
-            logger.warning("MFD operator hold %s", "ON (30 min max)" if action.on else "off")
+            self._mfd_hold.set(bool(action.on))
+            logger.warning("MFD operator hold %s", "ON (%.0f min max)" % (self._mfd_hold.max_s / 60)
+                           if action.on else "off")
 
         twin.store.add_middleware(_mfd_hold_middleware)
 
@@ -1550,12 +1555,8 @@ class BackendService:
             early = trig.update(getattr(state, "bean", None), own_tx,
                                 time.monotonic(), time.time())
             why = trig.reason
-            if self._mfd_hold_until:
-                if time.monotonic() < self._mfd_hold_until:
-                    early, why = True, "operator hold"
-                else:
-                    self._mfd_hold_until = 0.0
-                    logger.info("MFD operator hold expired")
+            if self._mfd_hold.check(state.powerbox):
+                early, why = True, "operator hold"
             self.mfd_power.tick(acc, early=early, why=why)
         except Exception:
             logger.exception("MFD power tick failed")

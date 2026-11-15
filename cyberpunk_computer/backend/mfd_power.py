@@ -48,6 +48,7 @@ machine is unit-testable without hardware.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -118,6 +119,162 @@ class MfdPowerConfig:
     # SSH call is fire-and-forget, so a lost restore must not leave the UI
     # frozen with the key on.
     restore_resend_s: float = 30.0
+    # Operator hold (mfd_hold command): its length and the file that keeps it
+    # across backend restarts (tmpfs: gone with a phone reboot by design).
+    hold_s: float = 1800.0
+    hold_file: str = "/run/prius/mfd_hold.json"
+
+
+BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
+
+
+def _boottime() -> float:
+    """Seconds since boot, suspend included (CLOCK_BOOTTIME)."""
+    try:
+        return time.clock_gettime(time.CLOCK_BOOTTIME)
+    except (AttributeError, OSError):      # non-Linux (tests on other hosts)
+        return time.monotonic()
+
+
+def _read_boot_id() -> str:
+    try:
+        with open(BOOT_ID_PATH) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+class OperatorHold:
+    """The operator MFD hold (``mfd_hold`` command) with its expiry.
+
+    ``set(True)`` holds the board powered for ``max_s`` (30 min), as ACC
+    would; ``set(False)`` releases it. The deadline is kept in ``path``
+    together with the kernel boot id, on the boot-time clock, so a backend
+    restart restores the hold with the time it had left (the remaining time
+    keeps running out while the backend is down). It is never restored after
+    a phone reboot (boot id differs; the default path is on tmpfs anyway),
+    never with more than ``max_s`` left, and never when the file is
+    unreadable.
+
+    Protections win: :meth:`check` drops the hold (live or restored) while
+    the powerbox reports under-voltage, a requested shutdown or a power
+    state other than normal, so a hold can never keep the board powered
+    against them.
+    """
+
+    def __init__(self, path: str = "", max_s: float = 1800.0,
+                 clock: Callable[[], float] = _boottime,
+                 boot_id: Callable[[], str] = _read_boot_id):
+        self.path = path
+        self.max_s = float(max_s)
+        self._clock = clock
+        self._boot_id = boot_id
+        self.until = 0.0                 # on ``clock``; 0 = no hold
+
+    # -- queries ----------------------------------------------------------------
+
+    def remaining(self) -> float:
+        return max(0.0, self.until - self._clock()) if self.until else 0.0
+
+    def check(self, powerbox=None) -> bool:
+        """True while the hold is in force. Expires it, and drops it when a
+        protection is active (``powerbox``: PowerboxState or None)."""
+        if not self.until:
+            return False
+        if self._clock() >= self.until:
+            logger.info("MFD operator hold expired")
+            self._clear()
+            return False
+        why = self.blocked_by(powerbox)
+        if why:
+            logger.warning("MFD operator hold dropped: %s", why)
+            self._clear()
+            return False
+        return True
+
+    @staticmethod
+    def blocked_by(powerbox) -> str:
+        """Why a hold must not keep the board powered ("" = it may)."""
+        if powerbox is None:
+            return ""
+        if getattr(powerbox, "undervoltage", False):
+            return "12 V under-voltage"
+        if getattr(powerbox, "shutdown_requested", False):
+            return "shutdown requested (%s)" % (getattr(powerbox, "shutdown_reason", "") or "?")
+        pm = getattr(powerbox, "pm_state", "") or ""
+        if pm and pm != "normal":
+            return "powerbox power state %s" % pm
+        return ""
+
+    # -- changes ----------------------------------------------------------------
+
+    def set(self, on: bool) -> None:
+        self.until = (self._clock() + self.max_s) if on else 0.0
+        self._save()
+
+    def restore(self) -> float:
+        """Load a hold kept by a previous backend run of this boot. Returns
+        the seconds it has left (0 = none restored; a stale file is removed)."""
+        if not self.path:
+            return 0.0
+        try:
+            with open(self.path) as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return 0.0
+        except (OSError, ValueError) as exc:
+            logger.warning("MFD operator hold: %s unreadable (%s), not restored", self.path, exc)
+            self._remove()
+            return 0.0
+        until = data.get("until_boottime") if isinstance(data, dict) else None
+        boot = data.get("boot_id") if isinstance(data, dict) else None
+        now = self._clock()
+        current = self._boot_id()
+        left = (until - now) if isinstance(until, (int, float)) and not isinstance(until, bool) else 0.0
+        if not current or boot != current:
+            why = "from another boot"
+        elif not (0.0 < left <= self.max_s):
+            why = "expired" if left <= 0.0 else "longer than %.0f s" % self.max_s
+        else:
+            self.until = float(until)
+            logger.warning("MFD operator hold restored: %.0f s left", left)
+            return left
+        logger.info("MFD operator hold in %s not restored (%s)", self.path, why)
+        self._remove()
+        return 0.0
+
+    # -- file -------------------------------------------------------------------
+
+    def _clear(self) -> None:
+        self.until = 0.0
+        self._save()
+
+    def _save(self) -> None:
+        if not self.path:
+            return
+        if not self.until:
+            self._remove()
+            return
+        tmp = self.path + ".tmp"
+        try:
+            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+            with open(tmp, "w") as f:
+                json.dump({"boot_id": self._boot_id(), "until_boottime": self.until,
+                           "hold_s": self.max_s, "set_at_wall": time.time()}, f)
+            os.replace(tmp, self.path)
+        except OSError as exc:
+            logger.warning("MFD operator hold: %s not written (%s); it will not "
+                           "survive a backend restart", self.path, exc)
+
+    def _remove(self) -> None:
+        if not self.path:
+            return
+        try:
+            os.unlink(self.path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logger.warning("MFD operator hold: %s not removed (%s)", self.path, exc)
 
 
 class BeanWakeTrigger:

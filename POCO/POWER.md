@@ -342,6 +342,18 @@ Config: `BACKEND_MFD_*` in `/etc/prius/backend.env` (`ENABLED`, `HUB`, `PORT`,
 authorized on the Pi). State: `connection.mfd_state` / `mfd_usb_power` /
 `mfd_reachable`. Code deploy to the Pi: `sudo prius-deploy-mfd`.
 
+Operator hold (`mfd_hold` command, `{"on": true|false}`; `OperatorHold` in
+`backend/mfd_power.py`): the board stays powered with the key off, as with ACC, for
+30 min (`hold_s`), then the normal grace follows. The deadline is written to
+`/run/prius/mfd_hold.json` (tmpfs) with the kernel boot id on the boot-time clock, so a
+backend restart (deploy) restores the hold with the time it had left: the startup
+reconciliation then adopts the running board as ON (no dark standby). Not restored:
+after a phone reboot (boot id differs; tmpfs is empty anyway), with more than 30 min
+left, from an unreadable file. A hold (live or restored) is dropped at once while the
+powerbox reports `undervoltage`, `shutdown_requested` or a `pm_state` other than
+`normal`, so it never keeps the board on against those protections. Log lines: `MFD
+operator hold restored: N s left`, `... expired`, `... dropped: <why>`.
+
 ## Thermal testing rules
 
 For heat-management work (fan policy for `low` / `full`, report in
