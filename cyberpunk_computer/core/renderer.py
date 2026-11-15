@@ -122,16 +122,18 @@ class Renderer:
         """
         return self.native_surface
     
-    def present(self) -> None:
+    def present(self, rect=None) -> None:
         """
         Present the frame to the display.
         
         Handles scaling and post-processing effects.
         Uses direct framebuffer output when SDL video isn't available.
+        ``rect`` (native coordinates) limits the framebuffer update to the
+        part that changed; None = the whole frame.
         """
         if self.use_direct_fb and self.framebuffer:
             # Direct framebuffer output - write native surface to /dev/fb0
-            self.framebuffer.blit_surface(self.native_surface)
+            self.framebuffer.blit_surface(self.native_surface, rect)
         elif self.config.scale_factor == 1:
             # No scaling needed, blit directly
             self.window.blit(self.native_surface, (0, 0))
