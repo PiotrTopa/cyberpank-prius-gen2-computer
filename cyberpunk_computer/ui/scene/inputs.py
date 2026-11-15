@@ -215,8 +215,14 @@ def _line(raw: Any, n: int) -> Optional[RoadLine]:
             prob = p
     if not isinstance(ys, (list, tuple)) or len(ys) < 2:
         return None
+    vs = ys[:n]
+    # the wire carries floats: one comprehension (NaN and non-floats fall
+    # through to the checked loop below)
+    out = [-v for v in vs if type(v) is float and v == v]
+    if len(out) == len(vs):
+        return RoadLine(tuple(out), prob)
     out = []
-    for v in ys[:n]:
+    for v in vs:
         f = _num(v)
         if f is None:
             return None
@@ -304,7 +310,6 @@ def read_inputs(state: Any, feed: Optional[SceneFeed] = None) -> SceneInputs:
     dyn = getattr(state, "dynamics", None)
     body = getattr(state, "body", None)
     pbx = getattr(state, "powerbox", None)
-    rs = getattr(state, "roadsense", None)
     decoded = getattr(getattr(state, "bean", None), "decoded", None)
 
     # Speed: the speedometer value for display (BEAN; None while BEAN is
@@ -362,7 +367,32 @@ def read_inputs(state: Any, feed: Optional[SceneFeed] = None) -> SceneInputs:
     if getattr(veh, "ice_stopped", None) is True:
         ice = False
 
-    # Perception
+    cs = _num(getattr(veh, "cruise_set_speed", None))
+    cm = _num(getattr(veh, "cruise_memory_speed", None))
+    cg = _num(_first((veh,), ("cruise_gap", "acc_gap")))
+    return SceneInputs(
+        speed_kmh=max(0.0, spd),
+        real_speed_kmh=max(0.0, real),
+        gear=gear,
+        ready=bool(getattr(veh, "ready_mode", False)),
+        acc_on=bool(getattr(pbx, "acc_on", False) or getattr(veh, "acc_on", False)),
+        ice_running=_opt_bool(ice),
+        doors=doors, rear_group=rear_group, door_any=door_any,
+        head=head, high=high, tail=tail, fog=fog, brake=_opt_bool(brake_v),
+        cruise_active=bool(getattr(veh, "cruise_active", False)),
+        cruise_main=_opt_bool(getattr(veh, "cruise_main_switch", None)),
+        cruise_set_kmh=int(cs) if cs else None,
+        cruise_mem_kmh=int(cm) if cm else None,
+        cruise_gap=int(cg) if cg else None,
+        **read_perception(state, feed),
+    )
+
+
+def read_perception(state: Any, feed: Optional[SceneFeed] = None) -> dict:
+    """The perception fields of ``SceneInputs`` (road scene, limit, signs,
+    light, environment) from the state and the newest feed event. A new feed
+    event changes only these: ``inputs._replace(**read_perception(...))``."""
+    rs = getattr(state, "roadsense", None)
     rs_state = str(getattr(rs, "state", "") or "")
     rs_ok = rs_state == "running" and getattr(rs, "api_ok", None) is not False
     health = getattr(rs, "health", None)
@@ -401,23 +431,7 @@ def read_inputs(state: Any, feed: Optional[SceneFeed] = None) -> SceneInputs:
         env = health.get("env")
     env = env if isinstance(env, Mapping) else {}
 
-    cs = _num(getattr(veh, "cruise_set_speed", None))
-    cm = _num(getattr(veh, "cruise_memory_speed", None))
-    cg = _num(_first((veh,), ("cruise_gap", "acc_gap")))
-    return SceneInputs(
-        speed_kmh=max(0.0, spd),
-        real_speed_kmh=max(0.0, real),
-        gear=gear,
-        ready=bool(getattr(veh, "ready_mode", False)),
-        acc_on=bool(getattr(pbx, "acc_on", False) or getattr(veh, "acc_on", False)),
-        ice_running=_opt_bool(ice),
-        doors=doors, rear_group=rear_group, door_any=door_any,
-        head=head, high=high, tail=tail, fog=fog, brake=_opt_bool(brake_v),
-        cruise_active=bool(getattr(veh, "cruise_active", False)),
-        cruise_main=_opt_bool(getattr(veh, "cruise_main_switch", None)),
-        cruise_set_kmh=int(cs) if cs else None,
-        cruise_mem_kmh=int(cm) if cm else None,
-        cruise_gap=int(cg) if cg else None,
+    return dict(
         rs_state=rs_state,
         rs_ok=rs_ok,
         road=road if rs_ok else None,

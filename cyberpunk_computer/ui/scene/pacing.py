@@ -4,9 +4,10 @@ Frame pacing of the UI loop: render a frame only when the picture can change.
 The Pi Zero cannot afford to compose and push 480x240 at the loop rate when
 nothing moves. ``FramePacer`` answers two questions per loop pass:
 
-``loop_fps(now)``
+``loop_fps(now, pulsing, animating)``
     how fast the loop polls input and steps animations: ``fps_touch`` while
-    the screen is used or a panel pulses, else ``fps_scene``.
+    the screen is used or a panel pulses, ``fps_scene`` while the scene
+    animates, else ``fps_loop`` (never above ``fps_scene``).
 
 ``due(now, changed, animating, pulsing)``
     whether to render now. The screen reports
@@ -45,6 +46,7 @@ class FramePacer:
         self.idle_s = 1.0 / max(0.01, t.fps_idle)
         self.fps_touch = max(0.1, t.fps_touch)
         self.fps_scene = max(0.1, min(t.fps_scene, t.fps_touch))
+        self.fps_loop = max(0.1, min(t.fps_loop, self.fps_scene))
         self.touch_hold_s = max(0.0, t.touch_hold_s)
         self.last = float("-inf")
         self._input_t = float("-inf")
@@ -67,8 +69,10 @@ class FramePacer:
 
     # -- decisions ------------------------------------------------------------
 
-    def loop_fps(self, now: float, pulsing: bool = False) -> float:
-        return self.fps_touch if (pulsing or self.interacting(now)) else self.fps_scene
+    def loop_fps(self, now: float, pulsing: bool = False, animating: bool = False) -> float:
+        if pulsing or self.interacting(now):
+            return self.fps_touch
+        return self.fps_scene if animating else self.fps_loop
 
     def due(self, now: float, changed: bool = False, animating: bool = False,
             pulsing: bool = False) -> bool:

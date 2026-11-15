@@ -458,8 +458,8 @@ The UI loop (`core/app.py`) renders a frame only when the picture can have chang
 
 | Situation | Loop passes/s | Frames/s |
 |---|---|---|
-| nothing changes (parked, nobody touches) | `fps_scene` (10) | store snapshot (1 Hz from the backend) + power-history step (1 Hz) + `fps_idle` refresh: 1..2 |
-| scene animates (driving, camera swing, doors, rain) | `fps_scene` | the scene's redraws, at most `fps_scene` |
+| nothing changes (parked, nobody touches) | `fps_loop` (10) | store snapshot (1 Hz from the backend) + power-history step (1 Hz) + `fps_idle` refresh: 1..2 |
+| scene animates (driving, camera swing, doors; `MainScreen.moving()` = the director's `animating`) | `fps_scene` (20) | the scene's redraws, at most `fps_scene` |
 | a panel pulses (focus shown, edit mode) | `fps_touch` (20) | `fps_pulse` (5) |
 | touch / MFD button / drag, for `touch_hold_s` after it | `fps_touch` | `fps_touch` |
 
@@ -470,6 +470,12 @@ What each frame costs is kept small by caching:
   least every `1 / fps_idle` s; otherwise the frame is the cached chrome plus the centre column.
 * While the app draws no overlay (touch feedback, FPS counter), a frame that reuses the chrome
   re-draws and pushes only the centre column (x 120..359, `present_rect`).
+* A frame is stamped with the time the pacer decided it, not the end of its render: stamped late,
+  a 20 ms render pushed every other 20 Hz pass under the `SLACK * 1 / fps_touch` limit (11 of 20
+  frames/s measured).
+* A road event alone (no new store snapshot) re-reads only the perception fields
+  (`inputs.read_perception`, 2.0 ms on the Pi instead of 2.8 ms for `read_inputs`); lane / edge /
+  path lists take a one-comprehension fast path when all values are floats.
 * The framebuffer is mapped as a pygame surface (`pygame.image.frombuffer(mmap, size, "BGRA")`), so
   a push is one SDL blit into it (alpha forced opaque; byte-identical to the old
   `convert_alpha` + `tobytes` + write path, which stays for padded rows or equalizer gains).
@@ -487,6 +493,42 @@ Measured on the Pi Zero (production loop, `Application` with a fake twin: state 
 
 Pieces on the Pi: chrome re-draw 18 ms, frame with cached chrome 4 ms + scene redraw 4.4 ms,
 `read_inputs` per scene event 2.9 ms, a full-surface fill or blit 1.1..1.3 ms.
+
+#### 20 fps driving scene (2026-11-15)
+
+Why 20 frames/s are 20 different pictures although road events come at most 10 times a second:
+the director moves the lanes, road edges, planned path and lead vehicle towards the newest event
+on every UI frame (exponential low-pass, `SMOOTH_TAU_S` 0.3 s, frame-rate independent), and the
+floor scrolls with the distance travelled. On the demo drive timeline at 20 loop passes/s with
+events at 10 Hz every scene redraw differs from the previous one and half of them fall between two
+events (`tests/test_mfd_pacing.py::test_scene_frames_between_events_are_new`). World objects
+(`objects`) jump per event; the backend feed sends none today. Sign / limit / light changes are
+discrete anyway.
+
+Event rate: roadsense's modeld ran 13.7..13.9 road messages/s on the phone (GPU backend,
+`--max-hz 20`, journal 2026-11-13 22:06); the backend publishes at most `BACKEND_ROADSENSE_SCENE_HZ`
+(10). Raising it to 15 (all model frames) cost 0.4 % CPU on the Pi but made frame intervals less
+regular (p90 86 ms instead of 72 ms); behind the 0.3 s low-pass the extra samples change the
+picture little, so 10 stays.
+
+Measured on the Pi Zero (`tools/mfd_bench.py`, same method as above, 30 s after 6 s warm-up):
+
+| Case | CPU | Loop passes/s | Frames/s | frame interval p50 / p90 / p99 |
+|---|---|---|---|---|
+| parked, before (`fps_scene` 10) | 9.4 % | 10.0 | 1.9 | |
+| parked, now | 9.2 % | 10.0 | 2.0 | |
+| driving, before (`fps_scene` 10), 10 Hz events | 26.3 % | 10.0 | 8.9 | 101 / 179 / 191 ms |
+| driving, `fps_scene` 20 before the decision-time stamp | 31.3 % | 19.7 | 11.0 | |
+| driving, now (`fps_scene` 20), 10 Hz events | 41.1 % | 19.5 | 18.2 | 54 / 72 / 105 ms |
+| driving, now, 15 Hz events | 41.5 % | 19.0 | 17.7 | 55 / 86 / 132 ms |
+
+Where the driving CPU goes at 20 fps (per second): scene redraw 12.7 ms x 17.9 = 23 % (the demo
+drive timeline with lead, objects, signs and roadside; 4.4 ms for the single snapshot above),
+centre-column frame with cached chrome, strip and push about 7 ms x 17.9 = 12 %, chrome re-draw
+17 ms x 1 = 1.7 %, `ScenePage.update` 3 ms x 19 = 5.7 %. Frames lost (18 of 20) are passes that
+overran 50 ms: the 1 Hz snapshot pass (chrome re-draw + scene) and event parsing on top of a frame.
+Budget: total `mfd` CPU while driving stays under about 60..65 % (single core: the link reader and
+touch handling need the rest).
 
 ### 10.2 Desktop numbers
 
@@ -587,7 +629,8 @@ ignored and logged.
 | `cruise_chip` | true | `SET nn` beside the speed while cruise is engaged (with `show_speed`; the cruise slot of the strip shows it always) |
 | `side_ticks` | true | corner ticks on the six side panels |
 | `ambient_panel` | `plain` | `plain` or `level` (section 2) |
-| `fps_scene` | 10.0 | scene redraws per second while it animates (driving, camera swing, doors); also the UI loop rate while nobody uses the screen (section 10) |
+| `fps_scene` | 20.0 | scene redraws per second while it animates (driving, camera swing, doors), and the UI loop rate meanwhile (section 10) |
+| `fps_loop` | 10.0 | UI loop rate while nothing moves and nobody uses the screen (input and link polling; never above `fps_scene`) |
 | `fps_touch` | 20.0 | frames per second while the screen is used (touch, MFD buttons, drags) and the loop rate then |
 | `fps_pulse` | 5.0 | frames per second while a panel only pulses (focus shown, edit mode) |
 | `fps_idle` | 1.0 | refresh rate when nothing changed |

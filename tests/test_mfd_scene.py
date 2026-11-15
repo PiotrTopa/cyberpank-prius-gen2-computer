@@ -851,3 +851,27 @@ def test_lights_screen_shows_real_lamps_and_only_stores_settings(monkeypatch):
     scr.handle_input(IE.PRESS_LIGHT)
     scr.handle_input(IE.ROTATE_RIGHT)
     assert scr._mode == "AUTO"                        # OFF -> AUTO (wraps)
+
+
+def test_line_fast_path_matches_the_checked_path():
+    from cyberpunk_computer.ui.scene.inputs import _line
+    assert _line({"y": [0.5, -1.25, 2.0], "prob": 0.7}, 11).ys == (-0.5, 1.25, -2.0)
+    assert _line([1, 2.0, 3], 11).ys == (-1.0, -2.0, -3.0)            # ints: checked path
+    assert _line([1.0, float("nan"), 3.0], 11) is None
+    assert _line([1.0, True, 3.0], 11) is None
+    assert _line([1.0, None], 11) is None
+    assert _line([1.0, 2.0, 3.0, 4.0], 2).ys == (-1.0, -2.0)
+
+
+def test_feed_event_updates_only_the_perception_fields():
+    from cyberpunk_computer.ui.scene.inputs import read_perception
+    sim = demo.Sim("live")
+    sim.run_to(20.0)
+    page = sim.screen.scene_page
+    st = sim.store.state
+    full = read_inputs(st, page.feed)
+    assert page.inputs == full
+    sim.feed.push(SCENE_EVENT, demo.scene_at(20.05, 99999))
+    page.update(0.05)
+    assert page.inputs == read_inputs(st, page.feed)
+    assert set(read_perception(st, page.feed)) < set(SceneInputs._fields)

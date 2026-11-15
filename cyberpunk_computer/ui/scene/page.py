@@ -23,7 +23,7 @@ import pygame
 
 from ..colors import COLORS
 from .director import SceneDirector
-from .inputs import FEED, SceneFeed, SceneInputs, read_inputs
+from .inputs import FEED, SceneFeed, SceneInputs, read_inputs, read_perception
 from .powerbox import PowerHistory, StatusStrip
 from .render import SceneRenderer
 from .tuning import Tuning, load as load_tuning
@@ -64,11 +64,16 @@ class ScenePage:
 
     def _refresh_inputs(self) -> None:
         feed_n = self.feed.received if self.feed is not None else 0
-        if self._state is not self._inputs_for or feed_n != self._feed_seen:
+        if self._state is not self._inputs_for:
             self._inputs_for = self._state
             self._feed_seen = feed_n
             if self._state is not None:
                 self.inputs = read_inputs(self._state, self.feed)
+        elif feed_n != self._feed_seen:
+            # a road event alone (5-10/s): only the perception fields change
+            self._feed_seen = feed_n
+            if self._state is not None:
+                self.inputs = self.inputs._replace(**read_perception(self._state, self.feed))
 
     # -- frame --------------------------------------------------------------------
 

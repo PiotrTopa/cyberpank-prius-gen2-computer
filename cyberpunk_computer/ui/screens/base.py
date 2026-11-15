@@ -110,6 +110,12 @@ class Screen:
         touch rate, as before pacing existed."""
         return (False, True, False)
 
+    def moving(self) -> bool:
+        """Whether something on the screen moves on its own (the loop then
+        runs at ``fps_scene`` instead of ``fps_loop``). Without bookkeeping:
+        always."""
+        return True
+
     def invalidate(self) -> None:
         """Something outside the screen's own bookkeeping may have changed
         what it shows (input delivered, screen switch): redraw everything."""

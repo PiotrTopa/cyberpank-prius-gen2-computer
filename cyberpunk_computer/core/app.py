@@ -82,8 +82,10 @@ class Application:
         self.clock = pygame.time.Clock()
         self.delta_time = 0.0
         self.pacer = FramePacer(load_scene_tuning())
+        self._due_t = 0.0                # when the pacer last decided a frame
         self._feedback_drawn = False
         self._pulsing = False
+        self._animating = True           # the screen moves on its own (loop rate)
         self._last_clean = False
         self._last_screen = None
         
@@ -316,7 +318,7 @@ class Application:
         while self.running:
             # Calculate delta time (the loop slows down while nothing is used)
             fps = min(self.config.target_fps,
-                      pacer.loop_fps(time.monotonic(), self._pulsing))
+                      pacer.loop_fps(time.monotonic(), self._pulsing, self._animating))
             self.delta_time = self.clock.tick(fps) / 1000.0
             self.frame_count += 1
             
@@ -340,16 +342,20 @@ class Application:
             # Render, if the picture can have changed
             if self._frame_due():
                 self._render()
-                pacer.rendered(time.monotonic())
+                # stamped with the decision time, not the end of the render:
+                # a frame taking 20 ms would otherwise push the next one past
+                # the following loop pass and halve the rate
+                pacer.rendered(self._due_t)
 
     def _frame_due(self) -> bool:
         """Ask the pacer, with the screen's (changed, animating, pulsing)."""
-        now = time.monotonic()
+        now = self._due_t = time.monotonic()
         screen = self.current_screen
         if screen is None:
             return self.pacer.due(now, changed=True)
         changed, animating, pulsing = screen.frame_state()
         self._pulsing = pulsing
+        self._animating = screen.moving()
         feedback = self.pointer.feedback_visible
         if feedback != self._feedback_drawn:
             changed = True

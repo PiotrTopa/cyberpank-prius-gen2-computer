@@ -4,7 +4,7 @@ Scene renderer (pygame): the car, the floor, the road, the scenery and the HUD.
 The whole scene is drawn into one cached surface (``SceneRenderer.surface``)
 that the main screen blits every frame. It is re-drawn only when something
 on it changed, and at most every ``0.8 / fps_scene`` s while it animates
-(tuning.py; ~10 fps), so a parked car costs one opaque blit per UI frame.
+(tuning.py; 20 fps), so a parked car costs one opaque blit per UI frame.
 ``due()`` tells the frame pacer whether ``render()`` would draw.
 
 Layers, back to front (each one a function, so new elements slot in):

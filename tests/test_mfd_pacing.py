@@ -92,6 +92,70 @@ def test_input_holds_the_touch_rate_and_the_loop_rate():
     assert p.loop_fps(2.6, pulsing=True) == 20.0
 
 
+def test_loop_runs_at_fps_scene_only_while_something_moves():
+    p = _pacer(fps_touch=20.0, fps_scene=20.0, fps_loop=10.0)
+    assert p.loop_fps(0.0) == 10.0                       # parked: as before (10 passes/s)
+    assert p.loop_fps(0.0, animating=True) == 20.0       # driving: every scene frame on time
+    assert p.loop_fps(0.0, pulsing=True) == 20.0
+    q = _pacer(fps_touch=20.0, fps_scene=5.0, fps_loop=10.0)
+    assert q.loop_fps(0.0) == 5.0                        # never above fps_scene
+
+
+def test_frames_at_the_loop_rate_are_due():
+    """A 20 fps scene with a 20 Hz loop: each pass is due when the frame is
+    stamped with the decision time (core/app.py), even if rendering it took
+    20 ms; stamped at the end of the render every other pass was skipped."""
+    p = _pacer(fps_touch=20.0, fps_scene=20.0)
+    t = 0.0
+    p.rendered(t)
+    for _ in range(20):
+        t += 0.05
+        assert p.due(t, animating=True)
+        p.rendered(t)
+    late = _pacer(fps_touch=20.0, fps_scene=20.0)
+    late.rendered(0.02)                                  # end of a 20 ms render
+    assert not late.due(0.05, animating=True)
+
+
+def test_main_screen_moving_follows_the_scene():
+    sim = demo.Sim("live")
+    sim.run_to(1.0)                                      # parked, steady
+    assert not sim.screen.moving()
+    sim.run_to(20.0)                                     # driving
+    assert sim.screen.moving()
+
+
+def test_scene_frames_between_events_are_new():
+    """20 fps with road events at 10 Hz: every scene redraw differs from the
+    previous one (lanes / lead ease towards the newest event, the floor
+    scrolls), half of them fall between two events."""
+    from cyberpunk_computer.ui.scene.inputs import SCENE_EVENT
+    sim = demo.Sim("live", mods={"tuning": {"fps_scene": 20.0}})
+    sim.run_to(17.0)
+    page = sim.screen.scene_page
+    surf = pygame.Surface(SIZE)
+    sim.frame(surf)
+    t, seq, last_ev = sim.t, 1000, -1.0
+    prev, same, between, redraws, ev = None, 0, 0, 0, 0
+    while t < 21.0:
+        t += 0.05
+        sim.t = t
+        if t - last_ev >= 0.1 - 1e-9:
+            sc = demo.scene_at(t, seq + 1)
+            if sc is not None:
+                seq, last_ev, ev = seq + 1, t, ev + 1
+                sim.feed.push(SCENE_EVENT, sc)
+        sim.screen.update(0.05)
+        if page.scene.due(page.director, page.inputs, t):
+            sim.frame(surf)
+            raw = page.scene.surface.get_buffer().raw
+            redraws += 1
+            same += raw == prev
+            between += ev == 0
+            prev, ev = raw, 0
+    assert redraws >= 75 and same == 0 and between >= 30, (redraws, same, between)
+
+
 def test_poke_forces_the_next_frame():
     p = _pacer()
     p.rendered(0.0)

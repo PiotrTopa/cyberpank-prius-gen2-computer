@@ -758,6 +758,15 @@ class MainScreen(Screen):
             animating = True
         return (changed, animating, pulsing)
 
+    def moving(self) -> bool:
+        """The scene animates (driving, camera move, doors): the loop runs at
+        ``fps_scene`` so each of its frames is on time."""
+        page = self._scene_page
+        if page is None or (self.app and getattr(self.app, "config", None)
+                            and self.app.config.dev_mode):
+            return True
+        return self._current_page != 1 and page.director.animating
+
     def _is_editing(self) -> bool:
         """Check if any editing mode is active."""
         return (self._editing_volume or self._editing_target_temp or 

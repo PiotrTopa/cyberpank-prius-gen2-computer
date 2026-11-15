@@ -86,8 +86,12 @@ class Tuning:
     ambient_panel = "plain"     # plain (empty, as originally) | level (mode + level bar)
 
     # ── frame pacing (ui/scene/pacing.py; the UI loop renders only when needed) ──
-    fps_scene = 10.0            # scene redraws/s while it animates (driving, camera move, doors);
-                                # also the loop rate while nobody touches the screen
+    fps_scene = 20.0            # scene redraws/s while it animates (driving, camera move, doors);
+                                # also the loop rate meanwhile. Between road events (<= 10/s) the
+                                # lanes, edges, path and lead ease towards the newest data and
+                                # the floor scrolls with the distance, so each frame is new
+    fps_loop = 10.0             # loop passes/s while nothing moves and nobody touches the screen
+                                # (input and link polling; never above fps_scene)
     fps_touch = 20.0            # frames/s while the screen is used (touch, buttons, drags)
     fps_pulse = 5.0             # frames/s while a panel only pulses (focus shown, edit mode)
     fps_idle = 1.0              # refresh when nothing changed (catches anything time-based)
