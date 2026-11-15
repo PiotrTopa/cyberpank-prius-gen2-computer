@@ -102,6 +102,99 @@ def test_session_expires_and_ends_with_roadsense():
     assert not f.stop_synthetic()
 
 
+def _session_msgs(feed):
+    return [(m["type"], m.get("source"), m.get("fix"), m.get("reason")) for m in feed.msgs]
+
+
+def test_reset_at_session_start_and_end_before_the_new_source_fix():
+    c = Clock()
+    f, tap, feed = _feeder(c)
+    feed.accepts = ["gnss", "motion", "reset"]          # roadsense >= 2026-11-15
+    f.set_active(True)
+    f.step(c.t)
+    n = len(feed.msgs)
+    assert not any(m["type"] == "reset" for m in feed.msgs)   # no session: never
+    assert f.start_synthetic(now=c.t)[0]
+    c.tick(0.1)
+    f.step(c.t)
+    new = [m for m in feed.msgs[n:] if m["type"] != "motion"]
+    # the reset goes before the synthetic drive's first fix
+    assert new[0] == {"type": "reset", "reason": "synthetic session started"}
+    assert new[1]["type"] == "gnss" and new[1]["source"] == "synthetic"
+    assert f.start_synthetic(now=c.t)[0]                # renewing is no source change: no reset
+    for _ in range(10):
+        c.tick(0.1)
+        f.step(c.t)
+    assert sum(m["type"] == "reset" for m in feed.msgs) == 1
+    n = len(feed.msgs)
+    assert f.stop_synthetic("stopped", now=c.t)
+    f.step(c.t)
+    new = [m for m in feed.msgs[n:] if m["type"] != "motion"]
+    assert new[0] == {"type": "reset", "reason": "synthetic session ended: stopped"}
+    assert (new[1]["type"], new[1]["source"], new[1]["fix"]) == ("gnss", "headunit", "none")
+    st = f.status(c.t)
+    assert st["reset_sent"] == 2 and not st["reset_pending"]
+    assert st["last_reset"]["sent"] and st["last_reset"]["reason"].endswith("stopped")
+    assert st["mapd_accepts"] == ["gnss", "motion", "reset"]
+
+
+def test_reset_on_every_way_a_session_ends():
+    for how in ("car_moving", "expired", "roadsense_stopped"):
+        c = Clock()
+        f, tap, feed = _feeder(c, synthetic_session_s=60.0)
+        feed.accepts = ["gnss", "motion", "reset"]
+        f.set_active(True)
+        f.start_synthetic(now=c.t)
+        f.step(c.t)
+        if how == "car_moving":
+            tap.on_frame(0x0B4, SPEED_20, 0, 0.0, c.t)
+        elif how == "expired":
+            c.tick(61)
+        else:
+            f.set_active(False)
+            f.set_active(True)                          # roadsense back: the reset is still owed
+        f.step(c.t)
+        assert f.last_session_end["reason"] == how
+        resets = [m["reason"] for m in feed.msgs if m["type"] == "reset"]
+        assert resets == ["synthetic session started", "synthetic session ended: %s" % how], how
+
+
+def test_no_reset_to_an_older_mapd():
+    c = Clock()
+    f, _, feed = _feeder(c)
+    feed.accepts = ["gnss", "motion"]                    # roadsense before 2026-11-15
+    f.set_active(True)
+    f.start_synthetic(now=c.t)
+    for _ in range(5):
+        f.step(c.t)
+        c.tick(0.1)
+    f.stop_synthetic(now=c.t)
+    f.step(c.t)
+    assert not any(m["type"] == "reset" for m in feed.msgs)
+    st = f.status(c.t)
+    assert st["reset_sent"] == 0 and not st["reset_pending"]
+    assert st["last_reset"]["sent"] is False and st["last_reset"]["why"] == "not_accepted"
+
+
+def test_reset_waits_for_the_hello_reply_and_a_connection():
+    c = Clock()
+    f, _, feed = _feeder(c)
+    feed.up = False                                      # mapd away
+    f.set_active(True)
+    f.start_synthetic(now=c.t)
+    f.stop_synthetic(now=c.t)
+    f.step(c.t)
+    assert feed.msgs == [] and f.status(c.t)["reset_pending"]
+    feed.up = True                                       # connected, hello reply not read yet
+    f.step(c.t)
+    assert not any(m["type"] == "reset" for m in feed.msgs) and f.status(c.t)["reset_pending"]
+    feed.hello_after_poll = ["gnss", "motion", "reset"]  # the reply arrives
+    c.tick(0.1)
+    f.step(c.t)
+    assert [m["reason"] for m in feed.msgs if m["type"] == "reset"] == ["synthetic session ended: stopped"]
+    assert not f.status(c.t)["reset_pending"]
+
+
 def test_raw_fix_kept_out_of_status():
     c = Clock()
     f, _, _ = _feeder(c)

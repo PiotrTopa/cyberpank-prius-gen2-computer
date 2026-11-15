@@ -860,7 +860,11 @@ class PositionFeeder:
         self._last_status: Optional[Dict[str, Any]] = None
         self._was_connected = False
         self.suspended: Optional[str] = None
-        self.counts = {"motion": 0, "gnss": 0, "none": 0}
+        self.counts = {"motion": 0, "gnss": 0, "none": 0, "reset": 0}
+        # roadsense position-input `reset` owed to mapd after a synthetic
+        # session started / ended: sent once the connection's hello lists it
+        self._reset_pending: Optional[str] = None
+        self.last_reset: Optional[Dict[str, Any]] = None
         self.yaw_input: Optional[str] = None
         if source.name == "synthetic":
             logger.warning("position feeder: SYNTHETIC GNSS + motion source (test/demo only; "
@@ -926,6 +930,7 @@ class PositionFeeder:
             if self.session is None:
                 self.source = SyntheticGnssSource(self.cfg, wall=self._wall)
                 self.session = {"by": str(by)[:32], "started": round(self._wall(), 1)}
+                self._queue_reset("synthetic session started")
                 self._fix_ok = None
                 self._last_motion_ts = 0
                 self.suspended = None
@@ -950,10 +955,46 @@ class PositionFeeder:
             self._last_motion_ts = 0
             self.suspended = None
             self.last_session_end = {"reason": reason, "at": round(self._wall(), 1)}
+            self._queue_reset("synthetic session ended: %s" % reason)
         logger.warning("position feeder: synthetic session ended (%s); source %s again",
                        reason, self.base_source.name)
         self._status(self._clock() if now is None else now, force=True)
         return True
+
+    def _queue_reset(self, reason: str) -> None:
+        """Owe mapd a position ``reset`` (a newer reason replaces an unsent one)."""
+        self._reset_pending = reason
+
+    def _flush_reset(self) -> None:
+        """Send the owed ``reset`` once this connection's hello reply says mapd
+        accepts it. An older mapd (no ``reset`` in ``accepts``) is never sent
+        one: it is dropped and the status says so. Not connected or no reply
+        yet: kept for a later cycle (the motion stream opens the connection)."""
+        reason = self._reset_pending
+        if reason is None:
+            return
+        f = self.feed
+        if not f.connected:
+            return
+        accepts = getattr(f, "accepts", None)
+        if accepts is None:
+            if hasattr(f, "poll"):
+                f.poll()
+            accepts = getattr(f, "accepts", None)
+            if accepts is None:
+                return
+        self._reset_pending = None
+        if "reset" not in accepts:
+            self.last_reset = {"reason": reason, "at": round(self._wall(), 1), "sent": False,
+                               "why": "not_accepted"}
+            logger.info("position feeder: mapd does not accept reset (older roadsense); not sent (%s)", reason)
+            return
+        ok = self._send({"type": "reset", "reason": reason}, "reset")
+        self.last_reset = {"reason": reason, "at": round(self._wall(), 1), "sent": bool(ok)}
+        if ok:
+            logger.info("position feeder: reset sent to mapd (%s)", reason)
+        else:
+            self._reset_pending = reason         # dropped (connection lost): next connection
 
     def start(self) -> None:
         if self._thread is not None:
@@ -1022,6 +1063,7 @@ class PositionFeeder:
 
     def _gnss(self, now: float) -> None:
         src = self.source
+        self._flush_reset()                     # before the first fix of the new source
         if self.suspended is not None:
             return
         for g in src.drain(now):
@@ -1081,6 +1123,9 @@ class PositionFeeder:
                 "sent": f.sent, "dropped": f.dropped, "connects": f.connects,
                 "motion_sent": self.counts["motion"], "gnss_sent": self.counts["gnss"],
                 "none_sent": self.counts["none"], "errors": f.errors_total, "last_error": last_err,
+                "reset_sent": self.counts["reset"], "reset_pending": self._reset_pending is not None,
+                "last_reset": self.last_reset,
+                "mapd_accepts": list(f.accepts) if getattr(f, "accepts", None) is not None else None,
                 "motion": motion, "gnss": self.source.status(now)}
 
     def raw_fix(self, now: Optional[float] = None) -> Optional[Dict[str, Any]]:

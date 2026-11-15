@@ -203,10 +203,16 @@ def test_headunit_fix_state():
 # ── feeder cycle (fake socket) ───────────────────────────────────────────────
 
 class FakeFeed:
-    def __init__(self, up=True):
+    def __init__(self, up=True, accepts=None):
         self.up, self.msgs, self.path = up, [], "/fake/position.sock"
         self.sent = self.dropped = self.connects = self.errors_total = 0
         self.errors = []
+        self.accepts = accepts          # mapd's hello "accepts"; None = no reply read yet
+        self.hello_after_poll = None    # poll() sets accepts to this (a reply that arrives)
+
+    def poll(self):
+        if self.hello_after_poll is not None and self.up:
+            self.accepts = self.hello_after_poll
 
     @property
     def connected(self):
@@ -368,6 +374,34 @@ def test_position_feed_unix_socket_reconnects():
         feed.send({"type": "motion", "speed_mps": 4.0})
     assert not feed.connected and feed.dropped >= 2
     feed.close()
+
+
+def test_position_feed_reads_the_hello_accepts_list():
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, "position.sock")
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(path)
+    srv.listen(1)
+    feed = PositionFeed(d, name="t", retry_s=0.05)
+    assert feed.accepts is None
+    assert feed.send({"type": "motion", "speed_mps": 1.0})
+    conn, _ = srv.accept()
+    conn.sendall(b'{"type":"hello","api":1,"server":"roadsense-mapd","accepts":["gnss","motion","reset"]}\n')
+    time.sleep(0.05)
+    feed.poll()
+    assert feed.accepts == ["gnss", "motion", "reset"] and feed.server["server"] == "roadsense-mapd"
+    assert feed.reset("test over")
+    conn.settimeout(2)
+    buf = b""
+    while buf.count(b"\n") < 3:
+        buf += conn.recv(4096)
+    assert json.loads(buf.splitlines()[2])["type"] == "reset"
+    assert json.loads(buf.splitlines()[2])["reason"] == "test over"
+    feed.close()
+    assert feed.accepts is None and feed.server is None          # per connection
+    conn.close()
+    srv.close()
+    os.unlink(path)
 
 
 # ── scene: fused + map ───────────────────────────────────────────────────────

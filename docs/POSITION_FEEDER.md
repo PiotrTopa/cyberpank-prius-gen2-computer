@@ -160,17 +160,23 @@ session, like every route) swaps the configured source for a synthetic drive whi
 | CAN dark (car off, bench) | counts as parked: start allowed |
 | session ends | the real car moves (the session ends instead of suspending; the real CAN motion goes out in the same cycle), roadsense stops (feeder inactive), after `BACKEND_POSITION_SYNTHETIC_SESSION_S` (1800 s; a second start renews), or `{"on": false}` |
 | on the end | the configured source is back at once and sends `fix: none` (the head unit has no fix); `last_session_end` = `{reason, at}` |
+| position reset | on the start and on every end (any reason above), the feeder owes mapd a `{"type":"reset","reason":"synthetic session started"}` / `"synthetic session ended: <reason>"` and sends it before the new source's first GNSS message, once its connection's hello reply lists `reset` in `accepts` (roadsense mapd since 2026-11-15). An older mapd (`accepts` without `reset`) is never sent one (`last_reset.sent` false, `why` `not_accepted`); with mapd away or the reply not yet read it stays owed (`reset_pending`) and goes out on the next connection. Renewing a running session is no source change and sends none |
 | while it runs | `POST /gnss` answers 503 `source_not_headunit` |
 
-Residue (fact, not fixable in the backend): mapd's position input API v1 has no reset. After a synthetic
+Residue with an older roadsense (mapd before 2026-11-15, no `reset` in the position input API): after a synthetic
 session mapd keeps dead-reckoning from the synthetic place (measured with the live harness: `dead_reckoning`,
 `available` true, `input.gnss.source` `headunit` 4 s after the stop) until a real fix arrives or dead reckoning
 runs out (vision odometry 120 s; vehicle motion up to 900 s / 25 km while CAN motion flows). The scene feed
 therefore marks the scene `map` block `syn: true` from the first synthetic fix until mapd reports
 `no_source` / `unknown` or a non-synthetic fix is in use (`roadsense_scene.SyntheticTaint`), and the MFD ignores
 a `syn` map ([MFD_MAIN_SCREEN.md](MFD_MAIN_SCREEN.md) 7.2). A backend restart during the residue forgets the
-taint. The same residue follows the env-configured synthetic source when it suspends for real motion.
-Request to roadsense: a `{"type":"reset"}` (or `fix:"none","reset":true`) input message that drops the position.
+taint. The same residue follows the env-configured synthetic source when it suspends for real motion (no
+session ends there, so no reset is sent). With a mapd that accepts `reset` the feeder's reset ends the residue:
+mapd answers `no_source` until the next real fix (and treats a synthetic <-> real change of the GNSS source tag as
+an implicit reset of its own), which also clears the taint; the taint stays as the guard for the older mapd and for
+a backend restart. Checked against the real mapd of the roadsense checkout (862bee3) on the dev box:
+`tests/test_position_mapd_e2e.py::test_session_end_sends_reset_and_mapd_forgets_the_place` (the map is
+`no_source` right after the stop, `input.last_reset.reason` is the feeder's); not yet on the phone.
 
 ## 6. Status (`state.roadsense.position`, `GET /api/v1/position`)
 
@@ -186,6 +192,7 @@ Mirrored on change, at most every 2 s; `null` while the feeder is off.
 | `sent`, `dropped` | messages written / dropped (mapd away or socket full) |
 | `motion_sent`, `gnss_sent`, `none_sent` | per kind |
 | `errors`, `last_error` | error replies from mapd |
+| `reset_sent`, `reset_pending`, `last_reset`, `mapd_accepts` | position resets sent to mapd; one is owed (5.1); `{reason, at, sent, why?}` of the last one handled; mapd's hello `accepts` on this connection (null before the reply) |
 | `base_source`, `synthetic_control` | configured source; the run-time synthetic switch exists (5.1) |
 | `session`, `last_session_end` | running synthetic session `{by, started, until}` (wall-clock s) or null; `{reason, at}` of the last one |
 | `motion.yaw_input` | `wheels`, `steer`, `wheels+steer` or null in the last motion message |
@@ -252,6 +259,7 @@ Deploy (none of this was done):
 | same, synthetic drive with a fix dropout at 15–20 s | `good` + matched; position error against the synthetic truth after 8 s: max 4.1 m, mean 2.5 m; `dead_reckoning` exactly in the dropout, `available` throughout (13/13 samples), `good` again after it; `input.gnss.source` `synthetic`, motion tag `synthetic`; scene `map.ok` true, `map.in.gnss` `synthetic`, road `Mały Rynek` (living street) |
 | `tests/test_phone_gnss.py` (2026-11-15): NMEA checksum, full epoch (position, speed, course, date, DOPs, GSV C/N0), searching trace as the modem sends it, malformed input (bad checksum, minutes ≥ 60, hemisphere, hour 25, 0,0, truncated, junk), GGA/RMC of different epochs, talker preference, `hacc_m`; phone lifecycle with a fake ModemManager (setup keeps other sources, linger, restore only what was added, owner-enabled GNSS left on, MM restart with a new path, silent setup loss, no capability), fix time from UTC / receipt, epoch dedupe, thread start / stop, mmcli fallback; selector fallback / hysteresis / old-fix drop / flicker; feeder with `headunit,phone` incl. REST ingest forwarding; env list parsing. `tests/test_trip_recorder.py`: position off by default, recorded with the token, skipped by replay | 18 + 3 passed |
 | full suite after the phone source (worktree, fixture copied in) | 1266 passed, 9 skipped |
+| position reset (2026-11-15): `tests/test_position_synthetic_control.py` (reset before the new source's first fix at start and at each kind of end, none to an older mapd, owed until connected and the hello reply is read), `tests/test_position_feeder.py` (hello `accepts` read on a Unix socket, per connection), `tests/test_position_mapd_e2e.py` (real mapd) | 4 + 1 + 1 new, passed |
 | full suite `pytest tests --ignore=tests/test_pointer_ui.py` | 1155 passed, 9 skipped, 5 failed: the 5 (`test_bean_rx`, `test_bean_tx`) need `tests/fixtures/bean_nhw20_frames.txt.gz`, which exists only untracked in the main checkout; with that file copied in, both files pass (162) |
 
 ## 9. Open gaps
@@ -272,6 +280,8 @@ Deploy (none of this was done):
   speed-dependent (21–29, §3).
 * The MFD draws only the fused speed limit from the scene `map` key ([MFD_MAIN_SCREEN.md](MFD_MAIN_SCREEN.md) 4).
 * No raw-fix trail: the dashboard trail is of filtered positions, kept by the browser while the MAP tab is open.
+* The reset (5.1) is checked against mapd on the dev box only; the phone's mapd gets it once roadsense
+  862bee3 or later is deployed there (until then the feeder sends none, `why` `not_accepted`).
 * roadsense reference client gap (reported, roadsense not changed): `tools/position_client.py`
   counts a short non-blocking `send` as sent and leaves a partial line in the stream; the copy here
   closes the connection instead.

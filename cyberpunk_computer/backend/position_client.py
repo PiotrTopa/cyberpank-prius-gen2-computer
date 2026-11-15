@@ -11,6 +11,11 @@ is imported from roadsense. Changes against the reference client:
   mapd sees the connection end instead and drops the partial line.
 * ``connected`` property and ``errors_total`` counter for the status mirror.
 * the retry period after a failed connect is ``retry_s`` (default 2 s here).
+* mapd's ``hello`` reply is kept (``server``, ``accepts``: None until it has
+  been read on this connection), so a caller can check that mapd accepts
+  ``reset`` (listed since roadsense 2026-11-15) before sending it; ``poll()``
+  reads pending replies without sending. ``reset()`` as in the reference
+  client (roadsense f51b678).
 
 Transport: Unix stream socket ``<rundir>/position.sock``, one JSON object per
 line. The client never blocks the caller: while mapd is away every message is
@@ -37,6 +42,8 @@ class PositionFeed:
         self.connects = 0
         self.errors = []                 # error replies from mapd (most recent last, at most 20)
         self.errors_total = 0
+        self.server = None               # mapd's hello reply on this connection
+        self.accepts = None              # its "accepts" list; None until the reply was read
 
     @property
     def connected(self) -> bool:
@@ -74,9 +81,18 @@ class PositionFeed:
                 m = json.loads(line)
             except ValueError:
                 continue
-            if m.get("type") == "error":
+            if m.get("type") == "hello":
+                self.server = m
+                acc = m.get("accepts")
+                self.accepts = [str(a) for a in acc] if isinstance(acc, list) else []
+            elif m.get("type") == "error":
                 self.errors = (self.errors + [m])[-20:]
                 self.errors_total += 1
+
+    def poll(self):
+        """Read pending replies (hello, errors) without sending anything."""
+        if self.sock is not None:
+            self._poll_replies()
 
     def send(self, msg):
         """Send one message (a dict with "type": "gnss" or "motion"). Returns False when it was dropped."""
@@ -119,6 +135,16 @@ class PositionFeed:
         m.update(extra)
         return self.send(m)
 
+    def reset(self, reason=None, ts_mono_ns=None):
+        """Make mapd forget the position (filter, fix, match): the map is `no_source` until a new fix
+        arrives. Only for a mapd whose hello lists "reset" in `accepts` (the caller checks)."""
+        m = {"type": "reset"}
+        if reason is not None:
+            m["reason"] = str(reason)
+        if ts_mono_ns is not None:
+            m["ts_mono_ns"] = ts_mono_ns
+        return self.send(m)
+
     def motion(self, speed_mps, yaw_rate_rps=None, steering_wheel_deg=None, wheel_speeds_mps=None, gear=None,
                reverse=None, ts_mono_ns=None, **extra):
         m = {"type": "motion", "speed_mps": speed_mps}
@@ -137,3 +163,5 @@ class PositionFeed:
             except OSError:
                 pass
             self.sock = None
+        self.server = None
+        self.accepts = None

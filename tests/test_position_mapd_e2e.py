@@ -287,3 +287,29 @@ def test_synthetic_drive_matches_and_dead_reckons(stack):
         feeder.stop()
         if sfeed is not None:
             sfeed.stop()
+
+
+def test_session_end_sends_reset_and_mapd_forgets_the_place(stack):
+    """Run-time synthetic session on a head-unit feeder: start (reset), a fix and
+    a match, stop -> the feeder's reset reaches mapd before the head unit's
+    "no fix", and the map is no_source at once (no dead-reckoning residue)."""
+    cfg = PositionFeederConfig(enabled=True, source="headunit", rundir=stack.rundir)
+    feeder = PositionFeeder(cfg, HeadunitGnssSource(cfg), tap=CanMotionTap())   # CAN dark: parked
+    feeder.start()
+    feeder.set_active(True)
+    try:
+        assert _wait(lambda: feeder.status()["mapd_accepts"], 10), "no hello reply from mapd"
+        assert "reset" in feeder.status()["mapd_accepts"]
+        assert feeder.start_synthetic(by="e2e") == (True, None)
+        m = _wait(lambda: (lambda x: x if x["state"] == "good" and x["available"] else None)(stack.latest_map()), 15)
+        assert m, "the synthetic session never gave a position"
+        assert m["input"]["synthetic"] is True
+        assert feeder.stop_synthetic("e2e_done")
+        m = _wait(lambda: (lambda x: x if x["state"] == "no_source" else None)(stack.latest_map()), 5)
+        assert m, "mapd kept the synthetic place"
+        assert m["available"] is False and m["position"] is None
+        assert m["input"]["last_reset"]["reason"] == "synthetic session ended: e2e_done", m["input"]
+        st = feeder.status()
+        assert st["reset_sent"] == 2 and not st["reset_pending"] and st["last_reset"]["sent"]
+    finally:
+        feeder.stop()
