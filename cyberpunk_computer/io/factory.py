@@ -80,6 +80,19 @@ class VirtualTwinConfig:
     log_commands: bool = True
 
 
+def _env_pad() -> Optional[int]:
+    """``BACKEND_OBD_PAD`` (hex or decimal byte) or None."""
+    import os
+    raw = os.environ.get("BACKEND_OBD_PAD", "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw, 0) & 0xFF
+    except ValueError:
+        logger.warning("BACKEND_OBD_PAD=%r is not a byte; requests keep their padding", raw)
+        return None
+
+
 @dataclass
 class VirtualTwin:
     """
@@ -109,6 +122,8 @@ class VirtualTwin:
         """Initialize mutable solicited-setup state."""
         import threading
         self._setup_lock = threading.Lock()
+        # Padding byte of the solicited requests (None = as defined, 0x00).
+        self._obd_pad = _env_pad()
         self._setup_pending: Optional[str] = None   # reason, set from any thread
         self._last_setup_mono: float = 0.0
         self._setup_count: int = 0
@@ -153,13 +168,17 @@ class VirtualTwin:
         from ..persistence import get_settings
         for s in CORE_GROUP.slots:
             if s.slot == slot:
-                return s.payload
+                return self._pad(s.payload)
         ds = get_settings().data_sources
         for g in TOGGLEABLE_GROUPS:
             for s in g.slots:
                 if s.slot == slot:
-                    return s.payload if ds.is_group_enabled(g.key) else None
+                    return self._pad(s.payload) if ds.is_group_enabled(g.key) else None
         return None
+
+    def _pad(self, payload: dict) -> dict:
+        from ..comm.subscription_groups import with_padding
+        return with_padding(payload, self._obd_pad)
 
     def _send_unsub_slot(self, slot: int) -> bool:
         from .ports import OutgoingCommand, DEVICE_CAN
@@ -208,7 +227,7 @@ class VirtualTwin:
         suspended = self._slot_suspender.suspended
         for slot_def in CORE_GROUP.slots:
             if slot_def.slot not in suspended:
-                sent += send("sub", slot_def.payload)
+                sent += send("sub", self._pad(slot_def.payload))
         
         # Subscribe toggleable groups based on user settings
         ds = get_settings().data_sources
@@ -217,7 +236,7 @@ class VirtualTwin:
             if ds.is_group_enabled(group.key):
                 for slot_def in group.slots:
                     if slot_def.slot not in suspended:
-                        sent += send("sub", slot_def.payload)
+                        sent += send("sub", self._pad(slot_def.payload))
                 enabled_names.append(group.key)
             else:
                 logger.debug("Skipping disabled group: %s", group.key)
@@ -317,7 +336,7 @@ class VirtualTwin:
             self.output_port.send(OutgoingCommand(
                 device_id=DEVICE_CAN,
                 command_type="sub",
-                payload=slot_def.payload,
+                payload=self._pad(slot_def.payload),
             ))
         logger.info("Subscribed group: %s (%d slots)", group.key, len(group.slots))
     

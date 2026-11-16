@@ -298,11 +298,22 @@ class SlotSuspender:
 #                 CAN 0x5C8 b2 10   0.4 s    content ~3 s late, missed a 1 s off/on
 #   cruise_active OBD 21D3 D 0x40   1.0 s    at the poll
 #                 CAN 0x120 b4 80   0.26 s   ~2 s behind 21D3 at engage/cancel
+
+#   intake_temp   CAN 0x3CF C       0.14 s   = OBD 010F, median difference 0,
+#                 OBD 010F (slot 9) 30 s     r 0.988 (2026-11-16, 4..10 °C)
+#   ambient_air   CAN 0x3CF B       0.14 s   = OBD 0146, median difference 0,
+#                 OBD 0146 (slot 14) 60 s    r 0.975; 0 °C and below unverified:
+#                                            the ingress then does not offer
+#                                            the CAN source, so the poll resumes
 # ─────────────────────────────────────────────────────────────────────────────
 
 #: Gateway subscription slot of the OBD 010C (engine rpm) request
 #: (comm.subscription_groups.CORE_GROUP).
 SLOT_OBD_RPM = 0
+#: Slots of OBD 010F (intake air) and 0146 (ambient air); both values are
+#: broadcast on CAN 0x3CF.
+SLOT_OBD_INTAKE_TEMP = 9
+SLOT_OBD_AMBIENT_TEMP = 14
 
 DEFAULT_POLICIES: Tuple[SignalPolicy, ...] = (
     SignalPolicy("rpm", (Source("bean", 2.0), Source("obd", 3.0, SOLICITED)),
@@ -327,6 +338,14 @@ DEFAULT_POLICIES: Tuple[SignalPolicy, ...] = (
     SignalPolicy("cruise_main", (Source("bean", 3.0), Source("obd", 3.0, SOLICITED),
                                  Source("can", 3.0))),
     SignalPolicy("cruise_active", (Source("obd", 3.0, SOLICITED), Source("can", 2.0))),
+    # ECM air temperatures: broadcast 0x3CF replaces the OBD polls. The OBD
+    # windows are 1.5 poll periods, so a late reply does not flip the source.
+    SignalPolicy("intake_temp", (Source("can", 3.0), Source("obd", 45.0, SOLICITED)),
+                 solicited_slots=(SLOT_OBD_INTAKE_TEMP,),
+                 note="CAN 0x3CF C replaces OBD 010F"),
+    SignalPolicy("ambient_air", (Source("can", 3.0), Source("obd", 90.0, SOLICITED)),
+                 solicited_slots=(SLOT_OBD_AMBIENT_TEMP,),
+                 note="CAN 0x3CF B replaces OBD 0146"),
 )
 
 

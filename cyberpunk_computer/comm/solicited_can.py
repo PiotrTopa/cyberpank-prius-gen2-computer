@@ -751,6 +751,31 @@ def parse_dtc_response(data: list[int], ecu_name: str) -> list[tuple[str, str]]:
 # Subscription Manager
 # =============================================================================
 
+def reply_payload(raw_data: list[int]) -> list[int]:
+    """Data bytes of a positive reply, after the mode and PID echo.
+
+    The gateway delivers two shapes (fw 3.x, ``can_sol.c``):
+
+    * a subscription without ``isotp``: the CAN frame as received,
+      ``[PCI length, mode + 0x40, pid, data...]`` -> data starts at index 3;
+    * a subscription or request with ``isotp`` (every multi-frame 21xx reply,
+      and single frames too): the reassembled message without PCI,
+      ``[mode + 0x40, pid, data...]`` -> data starts at index 2.
+
+    A positive-response mode byte is >= 0x40 and a single-frame PCI is
+    0x01..0x07, so the first byte tells the two apart (the same rule as
+    ``comm.can_decoder``). Until 2026-11-17 index 3 was used for both, which
+    shifted every reassembled reply by one byte.
+    """
+    if not raw_data:
+        return []
+    if raw_data[0] >= 0x40:
+        return list(raw_data[2:])
+    if len(raw_data) > 3:
+        return list(raw_data[3:])
+    return list(raw_data)
+
+
 @dataclass
 class Subscription:
     """Active subscription information."""
@@ -1044,12 +1069,7 @@ class SolicitedCANManager:
         if not raw_data:
             return None
         
-        # Skip OBD-II header bytes: [length, mode+0x40, pid, ...]
-        # Data starts at byte index 3
-        if len(raw_data) > 3:
-            payload = raw_data[3:]
-        else:
-            payload = raw_data
+        payload = reply_payload(raw_data)
         
         try:
             result = pid_def.formula(payload)

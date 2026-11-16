@@ -76,6 +76,7 @@ def test_concurrent_dispatch_from_panda_thread_and_engine_thread():
     twin = create_test_twin()
     ing = twin.ingress
     ing.set_broadcast_dedupe(0)
+    ing.set_broadcast_dispatch_cap(0)     # every frame must dispatch here
     errors = []
     n = 2000
 
@@ -186,3 +187,101 @@ def test_steering_angle_is_steering_wheel_degrees():
         dyn = twin.store.state.dynamics
         assert dyn.steering_angle == deg and dyn.steering_angle_raw == raw
     assert decode_steering_deg(b"\x00") is None
+
+
+# ── 2026-11-17: log cadence of undecoded ids, dispatch cap, 0x3CF ────────────
+
+def _logged(ing):
+    seen = []
+    ing.add_message_log_callback(lambda msg, direction: seen.append(msg.data))
+    return seen
+
+
+def test_undecoded_id_reaches_the_log_once_a_second():
+    """Until 2026-11-16 an id the decoder does not know reached the trip log
+    3 times a minute (0x3CA, 0x3CF, 0x484 ...: 0.05 /s for 100 ms frames)."""
+    twin = create_test_twin()
+    ing = twin.ingress
+    seen = _logged(ing)
+    t0 = time.monotonic()
+    n = 0
+    t = 0.0
+    while t < 20.0:                       # a 100 ms frame with a changing byte
+        ing.ingest_broadcast_can(0x3CA, bytes([0, 0, n & 0xFF, 0, 0]), 0, 1000.0 + t, t0 + t)
+        n += 1
+        t += 0.1
+    logged = [d for d in seen if d["i"] == "0x3CA"]
+    assert 18 <= len(logged) <= 24        # 3 probes + one per second
+    assert ing.stats.broadcast_unknown_logged >= 17
+    assert twin.store.state is not None and ing.stats.broadcast_dispatched == 0
+
+
+def test_fast_id_updates_state_at_the_cap_and_logs_every_change():
+    twin = create_test_twin()
+    ing = twin.ingress
+    seen = _logged(ing)
+    t0 = time.monotonic()
+    dispatched = 0
+    for k in range(125):                  # 0x03B every 8 ms for 1 s, value changing
+        dispatched += bool(ing.ingest_broadcast_can(
+            0x03B, frame_03b(-100 - k, 0xE5), 0, 1000.0 + k * 0.008, t0 + k * 0.008))
+    assert 9 <= dispatched <= 13          # 0.1 s cap
+    assert len([d for d in seen if d["i"] == "0x03B"]) == 125
+    assert ing.stats.broadcast_rate_limited == 125 - dispatched
+    # The stream stops changing: the next frame carries the deferred value
+    # into the state without a second log line.
+    last = frame_03b(-100 - 124, 0xE5)
+    t = t0 + 125 * 0.008
+    for k in range(20):
+        ing.ingest_broadcast_can(0x03B, last, 0, 1001.0 + k * 0.008, t + k * 0.008)
+    assert abs(twin.store.state.energy.hv_battery_current + 22.4) < 1e-6
+    assert len([d for d in seen if d["i"] == "0x03B"]) == 125
+
+
+def test_event_frame_after_a_periodic_one_is_not_deferred():
+    """0x529 comes once a second and immediately on an event: the event frame
+    50 ms after a periodic one must reach the state at once."""
+    twin = create_test_twin()
+    ing = twin.ingress
+    t0 = time.monotonic()
+    a = bytes([0x25, 0, 0, 0x03, 0, 0])
+    b = bytes([0xA5, 0, 0, 0x83, 0, 0])
+    for k in range(3):
+        ing.ingest_broadcast_can(0x529, a, 0, 1000.0 + k, t0 + k)
+    before = ing.stats.broadcast_rate_limited
+    ing.ingest_broadcast_can(0x529, b, 0, 1002.05, t0 + 2.05)
+    assert ing.stats.broadcast_rate_limited == before
+
+
+def test_dispatch_cap_off():
+    twin = create_test_twin()
+    ing = twin.ingress
+    ing.set_broadcast_dispatch_cap(0)
+    t0 = time.monotonic()
+    n = sum(bool(ing.ingest_broadcast_can(0x03B, frame_03b(-100 - k, 0xE5), 0, 1.0, t0 + k * 0.008))
+            for k in range(50))
+    assert n == 50
+
+
+def test_0x3cf_feeds_air_temperatures_and_marks_the_can_source():
+    twin = create_test_twin()
+    ing = twin.ingress
+    t0 = time.monotonic()
+    assert ing.ingest_broadcast_can(0x3CF, bytes([0x10, 8, 21, 0, 0x33]), 0, 1000.0, t0)
+    v = twin.store.state.vehicle
+    assert v.ambient_air_temp == 8.0 and v.intake_air_temp == 21.0
+    assert ing.sources.fresh("ambient_air", "can") and ing.sources.fresh("intake_temp", "can")
+
+
+def test_0x3cf_at_or_below_zero_does_not_cover_the_obd_poll():
+    """0 °C and below are not verified on the car: the value is shown while
+    no OBD reply is fresh, but the CAN source is not marked alive, so the
+    OBD 0146 slot is not suspended and both values reach the log."""
+    twin = create_test_twin()
+    ing = twin.ingress
+    t0 = time.monotonic()
+    assert ing.ingest_broadcast_can(0x3CF, bytes([0x10, 0xFD, 12, 0, 0]), 0, 1000.0, t0)
+    v = twin.store.state.vehicle
+    assert v.ambient_air_temp == -3.0 and v.intake_air_temp == 12.0
+    assert not ing.sources.fresh("ambient_air", "can")
+    assert ing.sources.fresh("intake_temp", "can")

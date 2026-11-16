@@ -19,7 +19,8 @@ Other important messages:
 - 0x039: ICE RPM alternative
 - 0x03A: Vehicle speed related
 - 0x120: Gear position
-- 0x348: Battery pack temperature/status
+- 0x348: follows ICE speed (not decoded)
+- 0x3CF: outside / intake air temperature
 
 Note: Inverter temperature requires SOLICITED PID 21C3 to ECU 0x7E2
       (not available in unsolicited CAN messages)
@@ -78,6 +79,7 @@ class CANMessageType(Enum):
     SOC_BARS_EVENT = auto()     # MFD SOC bars & events (0x529)
     YAW_RATE = auto()           # Yaw rate / vehicle dynamics (0x03A)
     CRUISE_CONTROL = auto()     # Cruise control state (0x5C8)
+    AIR_TEMPS = auto()          # Outside / intake air temperature (0x3CF)
     # Solicited response types (OBD-II style)
     SOLICITED_RESPONSE = auto()        # Generic solicited response
     SOLICITED_ENGINE = auto()          # Response from Engine ECU (0x7E8)
@@ -151,7 +153,8 @@ KNOWN_CAN_IDS = {
     0x5C8: "CRUISE_CONTROL",        # Cruise control active flag
 
     # Temperatures
-    0x348: "BATTERY_PACK_TEMP",    # Battery pack temperature/status
+    0x348: "ICE_SPEED_RELATED",    # bytes B,C follow ICE speed (not decoded)
+    0x3CF: "AIR_TEMPS",            # B outside air degC, C intake air degC
     # 0x540: NOT inverter temp - unknown status message (see decode section)
     
     # Other frequent messages
@@ -405,27 +408,27 @@ class CANDecoder:
             fault_code = (data[0] << 8) | data[1]
             msg.values["fault_code"] = fault_code
             
-            # Voltage: bytes 2-3 (same format as 0x03B potentially)
-            # Observed range: BA-FF (186-255), 8F-D4 (143-212) for checksum
-            # Let's decode bytes 3-4 as voltage  
-            voltage_raw = (data[3] << 8) | data[4]
-            # This doesn't look right, let's just store raw for now
-            msg.values["voltage_raw_3cd"] = voltage_raw
-        
-        # 0x348: Battery Pack Temperature/Status
-        # Observed: [04, 60, 34, 00, 18, 01] = [04, 96, 52, 0, 24, 1]
-        # Byte 2: 0x34 = 52, with offset 40 = 12°C (matches 0x3CB temps)
-        # Byte 1: 0x60 = 96, with offset 40 = 56°C (seems too high, likely not temp)
-        elif can_id == 0x348 and len(data) >= 6:
-            msg.msg_type = CANMessageType.HV_BATTERY_TEMP
-            # Use byte 2 as primary pack temperature (matches other temp readings)
-            temp_raw = data[2]
-            if temp_raw > 0:
-                msg.values["pack_temp"] = temp_raw - 40
-            # Byte 4 might be additional temp or status
-            if len(data) > 4 and data[4] > 0:
-                msg.values["pack_temp2"] = data[4] - 40
-        
+            # Bytes C,D = pack voltage in V (2026-11-16 data crunch: median
+            # difference against 0x03B 1 V, r 0.90 at 0.2 s alignment). Not
+            # used downstream: 0x03B is the voltage source (8 ms period).
+            msg.values["pack_voltage_3cd"] = (data[2] << 8) | data[3]
+
+        # 0x3CF (139 ms): byte B = outside air °C, byte C = intake air °C,
+        # both without offset (2026-11-16 data crunch against OBD 0146 and
+        # 010F: median difference 0, r 0.975 / 0.988 over 4..10 °C outside).
+        # Nothing at or below 0 °C has been recorded yet, so a byte of 0 or
+        # with bit 7 set is reported as "unverified": the value is decoded as
+        # signed, and the ingress then keeps the OBD poll of that value alive.
+        elif can_id == 0x3CF and len(data) >= 3:
+            msg.msg_type = CANMessageType.AIR_TEMPS
+            for key, b in (("ambient_temp", data[1]), ("intake_air_temp", data[2])):
+                msg.values[key] = b - 256 if b & 0x80 else b
+                msg.values[key + "_verified"] = 0 < b < 0x80
+
+        # 0x348 (44 ms): bytes B,C follow the ICE speed (about 23.4 x C rpm,
+        # r 0.89; 2026-11-16 data crunch). It is NOT a pack temperature (the
+        # earlier "C - 40" label); nothing is decoded from it.
+
         # ---------------------------------------------------
         # ENGINE & INVERTER
         # ---------------------------------------------------
@@ -470,8 +473,9 @@ class CANDecoder:
             # Note: byte 2 is NOT used for RPM anymore
             # RPM comes from 0x038 byte 1 which properly shows 0 when ICE is off
         
-        # 0x4CE: Battery compartment intake air temp (NOT outside ambient)
-        # Requires OBD-II PID 0x46 for real ambient - see docs/prius_can.md
+        # 0x4CE: constant `0F 00 01 01 00 00 ...` on every drive (2026-11-16):
+        # an index/configuration frame like 0x4C1..0x4D1, not a temperature.
+        # Outside and intake air temperature are on 0x3CF.
         
         # 0x540: Status flags (NOT inverter temperature)
         # Inverter temps require SOLICITED PID 21C3 to ECU 0x7E2

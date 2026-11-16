@@ -6,6 +6,25 @@ Defines logical groups of OBD-II/diagnostic PIDs that can be
 individually enabled/disabled by the user via the Data Sources screen.
 
 Core drivetrain PIDs (RPM, hybrid, cruise) are always active.
+
+Intervals (2026-11-17): every request is a frame the gateway transmits onto
+the car's powertrain CAN, and an ISO-TP reply costs a second one (the flow
+control frame). A value that is broadcast is not polled (rpm: BEAN FE:26;
+intake and ambient air: CAN 0x3CF; these slots are suspended while the
+broadcast is fresh, comm.source_priority), and a poll runs no faster than
+its consumer needs:
+
+    21D3  1 s   cruise set speed, exists nowhere else
+    21CE  2 s   block voltages; the block-resistance estimate pairs samples
+                at most 3.5 s apart (docs/BATTERY_HEALTH.md)
+    21C3  2 s   inverter / motor temperatures, torques
+    21C4, 0104, 0110, 0124   5 s
+    21CF 10 s   battery temperatures, fan, delta SOC (10 s table of the
+                battery collector; 0x3CB carries two temperatures at 0.1 s)
+    21D0, 0142, 010F  30 s;  0133, 0146, 0131  60 s
+
+Nominal transmit rate with the broadcasts alive: 3.0 requests/s + 1.3 flow
+controls/s = 4.3 frames/s (before: 5.9 + 2.7 = 8.6 frames/s).
 """
 
 from dataclasses import dataclass
@@ -29,6 +48,27 @@ class SubscriptionGroup:
     default_enabled: bool
     toggleable: bool
     slots: List[SubscriptionSlot]
+
+
+def with_padding(payload: Dict[str, Any], pad: int | None) -> Dict[str, Any]:
+    """The subscription payload with its unused request bytes set to ``pad``.
+
+    A request is a single ISO-TP frame ``[n, b1..bn, padding]``. The slots
+    above pad with 0x00, which makes the frame mostly dominant bits on the
+    wire; 0x55 / 0xAA / 0xCC are the customary alternatives and ECUs ignore
+    the padding. ``pad`` None returns the payload unchanged (the default:
+    ``BACKEND_OBD_PAD`` unset). Bench/drive experiment for the gateway's
+    transmit errors, see docs/prius_can.md §9.
+    """
+    if pad is None:
+        return payload
+    d = list(payload.get("d") or [])
+    n = d[0] if d else 0
+    if not (1 <= n <= 7) or len(d) != 8:
+        return payload
+    out = dict(payload)
+    out["d"] = d[:1 + n] + [pad & 0xFF] * (7 - n)
+    return out
 
 
 # ── Core Drivetrain (always ON, not user-toggleable) ─────────────────
@@ -55,7 +95,7 @@ CORE_GROUP = SubscriptionGroup(
                 "a": "sub", "slot": 1,
                 "i": "0x7E0",
                 "d": [0x02, 0x01, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "int": 2000, "t": 200, "r": ["0x7E8"],
+                "int": 5000, "t": 200, "r": ["0x7E8"],
             },
         ),
         SubscriptionSlot(
@@ -64,7 +104,7 @@ CORE_GROUP = SubscriptionGroup(
                 "a": "sub", "slot": 2,
                 "i": "0x7E2",
                 "d": [0x02, 0x21, 0xC3, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "int": 1000, "t": 500, "r": ["0x7EA"], "isotp": True,
+                "int": 2000, "t": 500, "r": ["0x7EA"], "isotp": True,
             },
         ),
         SubscriptionSlot(
@@ -107,7 +147,7 @@ BATTERY_CELLS_GROUP = SubscriptionGroup(
                 # The answer is 18 bytes (first frame 10 12 61 CF ...): without
                 # ISO-TP the gateway returned the first frame only and nothing
                 # after the intake temperature was ever decoded.
-                "int": 2000, "t": 500, "r": ["0x7EB"], "isotp": True,
+                "int": 10000, "t": 500, "r": ["0x7EB"], "isotp": True,
             },
         ),
         SubscriptionSlot(
@@ -116,7 +156,7 @@ BATTERY_CELLS_GROUP = SubscriptionGroup(
                 "a": "sub", "slot": 5,
                 "i": "0x7E3",
                 "d": [0x02, 0x21, 0xD0, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "int": 5000, "t": 500, "r": ["0x7EB"], "isotp": True,
+                "int": 30000, "t": 500, "r": ["0x7EB"], "isotp": True,
             },
         ),
     ],
@@ -135,7 +175,7 @@ HYBRID_EXTENDED_GROUP = SubscriptionGroup(
                 "a": "sub", "slot": 8,
                 "i": "0x7E2",
                 "d": [0x02, 0x21, 0xC4, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "int": 2000, "t": 500, "r": ["0x7EA"], "isotp": True,
+                "int": 5000, "t": 500, "r": ["0x7EA"], "isotp": True,
             },
         ),
     ],
@@ -154,7 +194,7 @@ ENGINE_SENSORS_GROUP = SubscriptionGroup(
                 "a": "sub", "slot": 9,
                 "i": "0x7E0",
                 "d": [0x02, 0x01, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "int": 5000, "t": 200, "r": ["0x7E8"],
+                "int": 30000, "t": 200, "r": ["0x7E8"],
             },
         ),
         SubscriptionSlot(
@@ -163,7 +203,7 @@ ENGINE_SENSORS_GROUP = SubscriptionGroup(
                 "a": "sub", "slot": 10,
                 "i": "0x7E0",
                 "d": [0x02, 0x01, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "int": 2000, "t": 200, "r": ["0x7E8"],
+                "int": 5000, "t": 200, "r": ["0x7E8"],
             },
         ),
         SubscriptionSlot(
@@ -172,7 +212,7 @@ ENGINE_SENSORS_GROUP = SubscriptionGroup(
                 "a": "sub", "slot": 11,
                 "i": "0x7E0",
                 "d": [0x02, 0x01, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "int": 2000, "t": 200, "r": ["0x7E8"],
+                "int": 5000, "t": 200, "r": ["0x7E8"],
             },
         ),
     ],
@@ -191,7 +231,7 @@ AUX_BATTERY_GROUP = SubscriptionGroup(
                 "a": "sub", "slot": 7,
                 "i": "0x7E0",
                 "d": [0x02, 0x01, 0x42, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "int": 5000, "t": 200, "r": ["0x7E8"],
+                "int": 30000, "t": 200, "r": ["0x7E8"],
             },
         ),
     ],
@@ -210,7 +250,7 @@ ENVIRONMENT_GROUP = SubscriptionGroup(
                 "a": "sub", "slot": 13,
                 "i": "0x7E0",
                 "d": [0x02, 0x01, 0x33, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "int": 10000, "t": 200, "r": ["0x7E8"],
+                "int": 60000, "t": 200, "r": ["0x7E8"],
             },
         ),
         SubscriptionSlot(
@@ -219,7 +259,7 @@ ENVIRONMENT_GROUP = SubscriptionGroup(
                 "a": "sub", "slot": 14,
                 "i": "0x7E0",
                 "d": [0x02, 0x01, 0x46, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "int": 10000, "t": 200, "r": ["0x7E8"],
+                "int": 60000, "t": 200, "r": ["0x7E8"],
             },
         ),
     ],
@@ -238,7 +278,7 @@ ODOMETER_GROUP = SubscriptionGroup(
                 "a": "sub", "slot": 12,
                 "i": "0x7E0",
                 "d": [0x02, 0x01, 0x31, 0x00, 0x00, 0x00, 0x00, 0x00],
-                "int": 10000, "t": 200, "r": ["0x7E8"],
+                "int": 60000, "t": 200, "r": ["0x7E8"],
             },
         ),
     ],

@@ -190,6 +190,20 @@ def unpack_can_buffer_v2(dat: bytes) -> List[Tuple[int, bytes, int]]:
     return ret
 
 
+def coalesce_frames(frames: Sequence[Tuple[int, bytes, int]]
+                    ) -> Tuple[List[Tuple[int, bytes, int]], int]:
+    """Backlog batch -> newest frame of each (id, bus), in arrival order of
+    those newest frames. Ids from 0x700 up (diagnostic requests and replies,
+    multi-frame sequences) are all kept. Returns (frames, dropped count)."""
+    last: Dict[Tuple[int, int], int] = {}
+    for i, (can_id, _payload, bus) in enumerate(frames):
+        if can_id < 0x700:
+            last[(can_id, bus)] = i
+    out = [fr for i, fr in enumerate(frames)
+           if fr[0] >= 0x700 or last[(fr[0], fr[2])] == i]
+    return out, len(frames) - len(out)
+
+
 def pack_can_buffer_v2(frames: Sequence[Tuple[int, bytes, int]]) -> bytes:
     """Inverse of :func:`unpack_can_buffer_v2` (tests)."""
     body = bytearray()
@@ -475,6 +489,11 @@ class PandaCanConfig:
     # Hint for the whole process: the CPython GIL switch interval bounds how
     # long a busy engine thread can delay the reader after a transfer returns.
     switch_interval_s: Optional[float] = 0.002
+    # A bulk transfer with more frames than this is a backlog (the reader
+    # fell behind the bus, about 1650 frames/s on the Prius): only the newest
+    # frame of each id below 0x700 is passed on, so the backlog is worked off
+    # in one pass instead of being replayed seconds late. 0 = never coalesce.
+    coalesce_over: int = 64
 
 
 @dataclass
@@ -507,6 +526,9 @@ class PandaCanStats:
     last_frame_wall: float = 0.0
     last_error: str = ""
     bus_counts: Dict[int, int] = field(default_factory=dict)
+    coalesced: int = 0                 # frames dropped as older copies in a backlog batch
+    batch_max: int = 0                 # largest bulk transfer, frames
+    busy_s: float = 0.0                # time spent handling frames (reader thread)
 
 
 class PandaCanSource:
@@ -521,9 +543,13 @@ class PandaCanSource:
                  config: Optional[PandaCanConfig] = None,
                  usb_factory: Callable[[], "LibusbPanda"] = LibusbPanda,
                  clock: Callable[[], float] = time.monotonic,
-                 wall: Callable[[], float] = time.time):
+                 wall: Callable[[], float] = time.time,
+                 on_every_frame: Optional[FrameCallback] = None):
         self.config = config or PandaCanConfig()
         self._on_frame = on_frame
+        # Cheap tap that must see every frame, backlog or not (wheel speeds
+        # for the position feeder); runs before the backlog coalescing.
+        self._on_every_frame = on_every_frame
         self._on_link = on_link
         self._usb_factory = usb_factory
         self._clock = clock
@@ -711,23 +737,41 @@ class PandaCanSource:
                 self._stats.checksum_errors += 1
             return
         bus_filter = self.config.bus
-        accepted = 0
+        tap = self._on_every_frame
+        kept: List[Tuple[int, bytes, int]] = []
         filtered = 0
-        for can_id, payload, bus in frames:
+        for fr in frames:
+            bus = fr[2]
             if bus >= 128 or (bus_filter is not None and bus != bus_filter):
                 filtered += 1
                 continue
-            accepted += 1
+            kept.append(fr)
+            if tap is not None:
+                try:
+                    tap(fr[0], fr[1], bus, t_wall, t_mono)
+                except Exception:
+                    logger.exception("Panda frame tap failed (id 0x%03X)", fr[0])
+        accepted = len(kept)
+        coalesced = 0
+        over = self.config.coalesce_over
+        if over and accepted > over:
+            kept, coalesced = coalesce_frames(kept)
+        for can_id, payload, bus in kept:
             try:
                 self._on_frame(can_id, payload, bus, t_wall, t_mono)
             except Exception:
                 logger.exception("Panda frame callback failed (id 0x%03X)", can_id)
+        busy = self._clock() - t_mono
         with self._lock:
             s = self._stats
             s.bulk_reads += 1
             s.bytes += len(data)
             s.frames += accepted
             s.frames_filtered += filtered
+            s.coalesced += coalesced
+            s.busy_s += busy
+            if accepted > s.batch_max:
+                s.batch_max = accepted
             for _, _, bus in frames:
                 s.bus_counts[bus] = s.bus_counts.get(bus, 0) + 1
             if accepted:

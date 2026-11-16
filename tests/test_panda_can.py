@@ -323,3 +323,52 @@ def test_bench_safety_mode_is_opt_in_and_logged():
     src.stop()
     assert ("out", REQ_SAFETY_MODE, 19, 0) in usb.controls
     assert PandaCanConfig().safety_mode == SAFETY_SILENT
+
+
+# ── 2026-11-17: backlog coalescing ───────────────────────────────────────────
+
+def test_coalesce_keeps_newest_per_id_and_all_diagnostic_frames():
+    from cyberpunk_computer.io.panda_can import coalesce_frames
+    frames = [(0x03B, b"\x01", 0), (0x0B4, b"\x02", 0), (0x7EA, b"\x10", 0),
+              (0x03B, b"\x03", 0), (0x7EA, b"\x21", 0), (0x03B, b"\x04", 1), (0x0B4, b"\x05", 0)]
+    out, dropped = coalesce_frames(frames)
+    assert out == [(0x7EA, b"\x10", 0), (0x03B, b"\x03", 0), (0x7EA, b"\x21", 0),
+                   (0x03B, b"\x04", 1), (0x0B4, b"\x05", 0)]
+    assert dropped == 2
+
+
+def test_backlog_batch_is_coalesced_but_the_tap_sees_every_frame():
+    """A bulk transfer holding seconds of bus traffic (the reader fell
+    behind: 0..5 s late frames on the 2026-11-16 drive) is worked off in one
+    pass: one frame per id reaches the ingress, the tap still gets all."""
+    backlog = [(0x03B, bytes([k & 0xFF, 0, 0, 0xE5, 0]), 0) for k in range(300)] \
+        + [(0x0B4, bytes([0, 0, 0, 0, 0, k & 0xFF, 0, 0]), 0) for k in range(200)]
+    small = [(0x03B, bytes([1, 2, 0, 0xE5, 0]), 0), (0x03B, bytes([1, 3, 0, 0xE5, 0]), 0)]
+    usb = FakeUsb([pack_can_buffer(backlog), pack_can_buffer(small)])
+    tapped = []
+    got = []
+    done = threading.Event()
+
+    def on_frame(can_id, data, bus, t_wall, t_mono):
+        got.append((can_id, data))
+        if len(got) >= 4:
+            done.set()
+
+    src = PandaCanSource(on_frame, None, config=PandaCanConfig(reconnect_s=0.01, read_timeout_ms=2),
+                         usb_factory=lambda: usb,
+                         on_every_frame=lambda can_id, data, bus, tw, tm: tapped.append(can_id))
+    pc_available = pc.libusb_available
+    pc.libusb_available = lambda: True
+    try:
+        assert src.start()
+        assert done.wait(3.0)
+    finally:
+        pc.libusb_available = pc_available
+        src.stop()
+    # backlog -> newest 0x03B and newest 0x0B4; the 2-frame transfer is not touched
+    assert got[0] == (0x03B, bytes([299 & 0xFF, 0, 0, 0xE5, 0]))
+    assert got[1] == (0x0B4, bytes([0, 0, 0, 0, 0, 199, 0, 0]))
+    assert got[2:4] == [(0x03B, small[0][1]), (0x03B, small[1][1])]
+    assert len(tapped) == 502
+    st = src.status()
+    assert st.coalesced == 498 and st.batch_max == 500 and st.frames == 502

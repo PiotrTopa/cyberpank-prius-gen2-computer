@@ -233,6 +233,7 @@ class BackendConfig:
     panda_enabled: bool = True
     panda_bus: Optional[int] = None
     panda_dedupe_s: float = 0.25        # identical payload repeated within this -> dropped
+    panda_dispatch_min_s: float = 0.1   # state updates of one fast id at most this far apart (log keeps every change)
     panda_status_s: float = 1.0         # state mirror cadence
     # 0 = SAFETY_SILENT (always, in the car). 19 = SAFETY_NOOUTPUT: the panda
     # ACKs frames so the gateway can transmit on a two-node bench segment;
@@ -579,18 +580,14 @@ class BackendService:
         # the frames). Reader thread -> ingress.ingest_broadcast_can -> store.
         if cfg.panda_enabled and not cfg.replay_file:
             twin.ingress.set_broadcast_dedupe(cfg.panda_dedupe_s)
-            on_frame = twin.ingress.ingest_broadcast_can
-            if motion_tap is not None:
-                # Tee: the tap sees every frame before the ingress dedupe
-                # (a few integer ops for 5 ids, a set lookup otherwise).
-                _ingest, _tap = on_frame, motion_tap.on_frame
-
-                def on_frame(can_id, data, bus, t_wall, t_mono):
-                    _tap(can_id, data, bus, t_wall, t_mono)
-                    return _ingest(can_id, data, bus, t_wall, t_mono)
+            twin.ingress.set_broadcast_dispatch_cap(cfg.panda_dispatch_min_s)
             self.panda = PandaCanSource(
-                on_frame=on_frame,
+                on_frame=twin.ingress.ingest_broadcast_can,
                 config=PandaCanConfig(bus=cfg.panda_bus, safety_mode=cfg.panda_safety_mode),
+                # The motion tap sees every frame, before the backlog
+                # coalescing and the ingress filters (a few integer ops for
+                # 5 ids, a set lookup otherwise).
+                on_every_frame=motion_tap.on_frame if motion_tap is not None else None,
             )
             twin.store.add_middleware(self._panda_bench_middleware)
             logger.info("Panda broadcast CAN source enabled (bus=%s, dedupe %.2fs)",
@@ -1874,6 +1871,7 @@ class BackendService:
         self._panda_status_last = now
         st = self.panda.status()
         ist = self.twin.ingress.stats
+        self._panda_load_log(now, st, ist)
         fields = dict(
             panda_enabled=True,
             panda_connected=st.connected,
@@ -1899,6 +1897,29 @@ class BackendService:
             return
         self._panda_last_mirror = key
         self.twin.store.dispatch(SetPandaStateAction(**fields))
+
+    def _panda_load_log(self, now: float, st, ist) -> None:
+        """One journal line a minute while frames flow: reader load and what
+        the filters did (verifies that the reader keeps up with the bus)."""
+        prev = getattr(self, "_panda_load_prev", None)
+        cur = (now, st.frames, st.busy_s, st.coalesced, ist.broadcast_dispatched,
+               ist.broadcast_deduped, ist.broadcast_rate_limited, ist.broadcast_skipped_unknown)
+        if prev is None:
+            self._panda_load_prev = cur
+            return
+        dt = now - prev[0]
+        if dt < 60.0:
+            return
+        self._panda_load_prev = cur
+        frames = cur[1] - prev[1]
+        if frames <= 0:
+            return
+        logger.info(
+            "Panda reader: %.0f frames/s, busy %.0f %%, largest batch %d, coalesced %d, "
+            "dispatched %.0f/s, deferred %.0f/s, deduped %.0f/s, unknown %.0f/s",
+            frames / dt, 100.0 * (cur[2] - prev[2]) / dt, st.batch_max, cur[3] - prev[3],
+            (cur[4] - prev[4]) / dt, (cur[6] - prev[6]) / dt, (cur[5] - prev[5]) / dt,
+            (cur[7] - prev[7]) / dt)
 
     def _powerbox_watchdog_tick(self) -> None:
         """Flip powerbox.connected -> False when the link goes silent, and

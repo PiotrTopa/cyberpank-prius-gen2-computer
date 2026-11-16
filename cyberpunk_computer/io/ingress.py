@@ -93,6 +93,8 @@ class IngressStats:
     broadcast_dispatched: int = 0
     broadcast_deduped: int = 0
     broadcast_skipped_unknown: int = 0
+    broadcast_rate_limited: int = 0      # logged, state update deferred (dispatch cap)
+    broadcast_unknown_logged: int = 0    # undecoded ids written to the log (<= 1/s each)
 
 
 class IngressController:
@@ -155,10 +157,22 @@ class IngressController:
         # per-id caches; the Store serialises the dispatches.
         self._bcast_decoder = CANDecoder()
         self._bcast_dedupe_s: float = 0.25
-        self._bcast_last: Dict[int, tuple] = {}        # id -> (payload, t_mono)
-        self._bcast_unknown: Dict[int, list] = {}      # id -> [misses, t_mono]
+        # id -> [payload, t_seen, t_dispatched, dirty, t_raw, fast_streak]
+        self._bcast_last: Dict[int, list] = {}
+        self._bcast_unknown: Dict[int, list] = {}      # id -> [misses, t_mono, t_logged]
         self._BCAST_UNKNOWN_AFTER = 3                  # misses before an id is skipped
         self._BCAST_UNKNOWN_TTL_S = 60.0               # ...and retried after this long
+        # An id the decoder does not know is still written to the message log
+        # (trip recorder), at most once per this many seconds: until
+        # 2026-11-16 such ids reached the log 3 times per minute, 100 ms
+        # frames included, which made them useless for signal research.
+        self._bcast_unknown_log_s: float = 1.0
+        # State updates of one id are at most this far apart while the id
+        # keeps arriving faster (store dispatch is the expensive step: about
+        # 0.6 ms per frame on the laptop, more on the phone; at the bus rate
+        # of the hot ids the reader thread fell 0..5 s behind the bus). The
+        # message log still gets every changed frame.
+        self._bcast_dispatch_min_s: float = 0.1
 
         # Gateway reset listeners: fn(reason) on GATEWAY_READY and on a GW_HB
         # uptime regression (the gateway's RAM tables — solicited subscriptions,
@@ -316,6 +330,10 @@ class IngressController:
     def set_broadcast_dedupe(self, seconds: float) -> None:
         """Suppress a repeated identical broadcast payload for this long (0 = off)."""
         self._bcast_dedupe_s = max(0.0, float(seconds))
+
+    def set_broadcast_dispatch_cap(self, seconds: float) -> None:
+        """Minimum spacing of state updates from one fast broadcast id (0 = off)."""
+        self._bcast_dispatch_min_s = max(0.0, float(seconds))
 
     def register_satellite_handler(
         self,
@@ -598,6 +616,16 @@ class IngressController:
         if actions:
             self._dispatch_actions(actions)
     
+    def _log_broadcast(self, raw: dict, t_wall: float) -> None:
+        if not self._message_log_callbacks:
+            return
+        msg = RawMessage(device_id=DEVICE_CAN, timestamp=t_wall, data=raw)
+        for cb in self._message_log_callbacks:
+            try:
+                cb(msg, "IN")
+            except Exception:
+                logger.exception("Message log callback failed")
+
     def ingest_broadcast_can(self, can_id: int, data: bytes, bus: int = 0,
                              t_wall: Optional[float] = None,
                              t_mono: Optional[float] = None) -> bool:
@@ -609,12 +637,15 @@ class IngressController:
         phone for the hot ids) instead of a 20 ms tick later. The Store
         serialises concurrent dispatches.
 
-        Two cheap filters keep the full-bus rate affordable:
+        Three cheap filters keep the full-bus rate affordable:
         * ids the decoder does not know are skipped after a few misses
           (retried every minute, so a decoder gaining an id is picked up);
+          they still reach the message log once a second;
         * an identical payload repeated within ``dedupe_s`` is dropped — the
           state already holds that value; freshness is kept because every
-          id still comes through at least every ``dedupe_s`` while it repeats.
+          id still comes through at least every ``dedupe_s`` while it repeats;
+        * an id arriving faster than the dispatch cap (0.1 s) updates the
+          state at most once per cap; every changed frame is still logged.
 
         Returns True when the frame reached the store.
         """
@@ -640,24 +671,60 @@ class IngressController:
         if neg is not None and neg[0] >= self._BCAST_UNKNOWN_AFTER:
             if now_m - neg[1] < self._BCAST_UNKNOWN_TTL_S:
                 st.broadcast_skipped_unknown += 1
+                if self._message_log_callbacks and \
+                        (now_m - neg[2]) >= self._bcast_unknown_log_s:
+                    neg[2] = now_m
+                    st.broadcast_unknown_logged += 1
+                    self._log_broadcast({"i": "0x%03X" % can_id, "d": list(data),
+                                         "ts": int(now_w * 1000), "bus": bus}, now_w)
                 return False
             neg[0] = 0          # TTL elapsed: give the id another chance
 
-        if self._bcast_dedupe_s > 0.0:
-            last = self._bcast_last.get(can_id)
-            if last is not None and last[0] == data and (now_m - last[1]) < self._bcast_dedupe_s:
-                st.broadcast_deduped += 1
-                return False
-            self._bcast_last[can_id] = (data, now_m)
+        # Per-id filter. ent = [payload, t_logged, t_dispatched, deferred,
+        # t_last_frame, fast_streak]. Three outcomes for a frame:
+        #   dropped   identical payload repeated within dedupe_s
+        #   logged    payload changed, but the state was updated from this id
+        #             less than the dispatch cap ago and the id is periodic
+        #             faster than the cap ("deferred": a later frame of the
+        #             same id carries the value into the state)
+        #   logged + dispatched   everything else
+        # The cap only applies after two consecutive short gaps, so an event
+        # frame right after a periodic one (0x529) is never deferred.
+        cap = self._bcast_dispatch_min_s
+        ent = self._bcast_last.get(can_id)
+        log = True
+        if ent is None:
+            ent = self._bcast_last[can_id] = [data, now_m, now_m, False, now_m, 0]
+        else:
+            ent[5] = ent[5] + 1 if (now_m - ent[4]) < cap else 0
+            ent[4] = now_m
+            # (an id still being probed by the unknown-id cache is not capped)
+            capped = neg is None and ent[5] >= 2 and (now_m - ent[2]) < cap
+            if ent[0] == data:
+                if ent[3]:
+                    if capped:
+                        return False
+                    log = False             # flush the deferred value
+                elif self._bcast_dedupe_s > 0.0 and (now_m - ent[1]) < self._bcast_dedupe_s:
+                    st.broadcast_deduped += 1
+                    return False
+                else:
+                    ent[1] = now_m          # periodic refresh
+            else:
+                ent[0] = data
+                ent[1] = now_m
+            if capped:
+                ent[3] = True
+                st.broadcast_rate_limited += 1
+            else:
+                ent[2] = now_m
+                ent[3] = False
 
         raw = {"i": "0x%03X" % can_id, "d": list(data), "ts": int(now_w * 1000), "bus": bus}
-        if self._message_log_callbacks:
-            msg = RawMessage(device_id=DEVICE_CAN, timestamp=now_w, data=raw)
-            for cb in self._message_log_callbacks:
-                try:
-                    cb(msg, "IN")
-                except Exception:
-                    logger.exception("Message log callback failed")
+        if log:
+            self._log_broadcast(raw, now_w)
+        if ent[3]:
+            return False
 
         try:
             decoded = self._bcast_decoder.decode(raw)
@@ -667,7 +734,7 @@ class IngressController:
             return False
         if decoded is None or decoded.msg_type == CANMessageType.UNKNOWN:
             if neg is None:
-                self._bcast_unknown[can_id] = [1, now_m]
+                self._bcast_unknown[can_id] = [1, now_m, now_m]
             else:
                 neg[0] += 1
                 neg[1] = now_m
@@ -922,6 +989,27 @@ class IngressController:
         
         # Outside temperature: AVC-LAN only (1C6->110 E0 5D F7, io/avc_ingest.py).
         # CAN 0x5CC CLIMATE_DATA and OBD PID 0146 never write climate.outside_temp.
+
+        # 0x3CF: the ECM's outside and intake air temperature (engine data,
+        # the same fields OBD 0146 / 010F feed). A verified value counts as
+        # the passive source of its signal, which suspends the OBD poll
+        # (comm.source_priority); an unverified one (0 °C or below, not yet
+        # checked on the car) is used only while the OBD reply is stale and
+        # leaves the poll running.
+        elif msg.msg_type == CANMessageType.AIR_TEMPS:
+            for key, signal, field_name in (
+                    ("ambient_temp", "ambient_air", "ambient_air_temp"),
+                    ("intake_air_temp", "intake_temp", "intake_air_temp")):
+                val = msg.values.get(key)
+                if val is None:
+                    continue
+                if msg.values.get(key + "_verified"):
+                    use = self._sources.offer(signal, "can")
+                else:
+                    use = not self._sources.fresh(signal, "obd")
+                if use:
+                    actions.append(SetEngineDataAction(
+                        **{field_name: float(val)}, source=ActionSource.GATEWAY))
         
         # Gear Position
         elif msg.msg_type == CANMessageType.GEAR_POSITION:
@@ -1092,7 +1180,7 @@ class IngressController:
         
         # Intake air temperature (PID 0x0F)
         intake_temp = values.get("intake_air_temp")
-        if intake_temp is not None:
+        if intake_temp is not None and self._sources.offer("intake_temp", "obd"):
             actions.append(SetEngineDataAction(
                 intake_air_temp=float(intake_temp),
                 source=ActionSource.GATEWAY
@@ -1153,7 +1241,8 @@ class IngressController:
         # (VehicleState.ambient_air_temp, solicited monitor). It is never the
         # outside temperature: climate.outside_temp comes from AVC-LAN only.
         ambient = values.get("ambient_temp")
-        if ambient is not None and -50 <= ambient <= 80:
+        if ambient is not None and -50 <= ambient <= 80 \
+                and self._sources.offer("ambient_air", "obd"):
             actions.append(SetEngineDataAction(
                 ambient_air_temp=float(ambient), source=ActionSource.GATEWAY
             ))
