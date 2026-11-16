@@ -160,8 +160,8 @@ Gateway firmware 3.x forwards no passive frames unless `sniff` is on, and `sniff
 
 - always **SAFETY_SILENT** (bus monitor: no ACK, no TX); the backend never writes to its CAN TX endpoint.
   The gateway is the only device that transmits on the car's CAN, so polling belongs to it alone;
-- filters on the reader thread (the bus carries about 1650 frames/s, a state update costs about
-  0.6 ms): an identical payload repeated within 0.25 s is dropped; a fast id updates the state at
+- filters on the reader thread (the bus carries about 1650 frames/s; a state update costs about
+  0.07 ms on the laptop, and the phone managed about 500 a second before it fell behind): an identical payload repeated within 0.25 s is dropped; a fast id updates the state at
   most every 0.1 s (`panda_dispatch_min_s`; every changed frame still reaches the trip log and the
   battery collector); an id the decoder does not know is logged once a second and not decoded; a bulk
   transfer of more than 64 frames is a backlog and is reduced to the newest frame per id (ids from

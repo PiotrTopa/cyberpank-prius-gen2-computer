@@ -169,8 +169,9 @@ class IngressController:
         self._bcast_unknown_log_s: float = 1.0
         # State updates of one id are at most this far apart while the id
         # keeps arriving faster (store dispatch is the expensive step: about
-        # 0.6 ms per frame on the laptop, more on the phone; at the bus rate
-        # of the hot ids the reader thread fell 0..5 s behind the bus). The
+        # 0.07 ms per frame on the laptop; on the phone, sharing the GIL with
+        # the engine thread, the reader managed about 500 state updates/s and
+        # fell 0..5 s behind the bus at the rate of the hot ids). The
         # message log still gets every changed frame.
         self._bcast_dispatch_min_s: float = 0.1
 

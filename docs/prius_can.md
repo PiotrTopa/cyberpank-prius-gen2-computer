@@ -224,8 +224,8 @@ Battery power = current × sum of block voltages.
   per stalk tap (needs `21D3` faster than 1 Hz).
 * **Passive-stream latency (cause found 2026-11-17, fix deployed, drive check open):** the broadcast
   frames come from the panda, not from the gateway. Its reader thread could not keep up with the bus
-  (about 1650 frames/s; a state update cost about 0.6 ms per frame on the laptop and more on the
-  phone), so for 81 % of the 2026-11-16 21:14 drive the frames arrived in bursts 0.3–1.2 s apart and
+  (about 1650 frames/s on the bus, of which about 500 a second passed the filters and each cost a
+  full state update: all the reader thread could do on the phone), so for 81 % of the 2026-11-16 21:14 drive the frames arrived in bursts 0.3–1.2 s apart and
   reached the state and the trip log 0–5 s late (median 0.6 s). Now a fast id updates the state at
   most every 0.1 s, every changed frame is still logged, and a backlog batch is reduced to the newest
   frame per id (`io/ingress.py`, `io/panda_can.py`). The journal line `Panda reader: … busy … %` once
