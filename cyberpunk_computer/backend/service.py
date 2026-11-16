@@ -879,6 +879,14 @@ class BackendService:
 
         def _bean_middleware(action, store) -> None:
             name = type(action).__name__
+            if name == "BatchAction":
+                # ingress batches a SetBeanRxAction with the vehicle actions
+                # decoded from its frames; the store hands middleware the
+                # batch, so unwrap it or those frames miss the capture log
+                for sub in getattr(action, "actions", ()) or ():
+                    if type(sub).__name__ != "BatchAction":
+                        _bean_middleware(sub, store)
+                return
             if name == "SetBeanRxAction":
                 if action.frames or action.stats:
                     mon.ingest(action.frames, action.stats)

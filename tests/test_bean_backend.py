@@ -361,6 +361,32 @@ class TestServiceWiring:
         kinds = [json.loads(l)["type"] for l in open(cap["file"])]
         assert kinds == ["header", "frame", "mark"]
 
+    def test_batched_frames_reach_capture(self, tmp_path):
+        # ingress dispatches SetBeanRxAction inside a BatchAction whenever its
+        # frames also decode to vehicle actions (car on); 2026-11-16 drive
+        # capture kept only ~30 % of the frames because these were skipped
+        from cyberpunk_computer.backend.service import BackendConfig, BackendService
+        from cyberpunk_computer.state.actions import ActionSource, BatchAction
+        svc = BackendService(BackendConfig(bean_capture_dir=str(tmp_path / "bean")))
+
+        class Twin:
+            store = Store()
+        twin = Twin()
+        svc.twin = twin
+        svc._wire_bean(twin)
+        twin.store.dispatch(BeanCaptureAction(True, "b"))
+        rx = SetBeanRxAction(frames=_frames((6, "FE", "2C", "64"), (2, "FE", "7F", "00")),
+                             recv_ts=T0)
+        twin.store.dispatch(BatchAction([rx, BeanMarkAction("in batch")], ActionSource.GATEWAY))
+        twin.store.dispatch(SetBeanRxAction(frames=_frames((6, "FE", "2C", "65")), recv_ts=T0))
+        svc._bean_tick()
+        cap = twin.store.state.bean.capture
+        assert cap["frames"] == 3
+        assert twin.store.state.bean.frames_total == 3
+        twin.store.dispatch(BeanCaptureAction(False))
+        kinds = [json.loads(l)["type"] for l in open(cap["file"])]
+        assert kinds == ["header", "frame", "frame", "mark", "frame"]
+
     def test_bean_rx_action_reaches_wire(self):
         a = PowerboxBeanRxAction(on=False)
         assert (a.on, a.op, a.raw) == (False, None, None)
