@@ -6,8 +6,10 @@ current ``SceneInputs``. The renderer only reads the public attributes.
 
 Views
     ``view`` runs 0.0 (parked "hero" view of the car) .. 1.0 (chase view of
-    the road). It opens when the car moves forward and closes again
-    ``STOP_HOLD_S`` after it stopped (at once in P or with a door open).
+    the road). It opens when the car moves forward. It closes only when the
+    car stands and is really parked: gear P, power off (neither READY nor
+    ACC/IG), or a door open. A stop in D or N in traffic keeps the road
+    (owner, 2026-11-16; before that the view closed after 2.5 s standing).
 
 Vision (road perception) status
     off    roadsense not running                -> arcade floor only
@@ -30,7 +32,6 @@ VIEW_STEPS = 14            # camera positions between hero and chase (cache keys
 VIEW_SECONDS = 1.3         # duration of the opening/closing move
 MOVE_ON_KMH = 3.0
 MOVE_OFF_KMH = 1.0
-STOP_HOLD_S = 2.5          # standstill before the scene closes (not in P)
 DOOR_SECONDS = 0.55        # door swing time
 DOOR_STEPS = 6             # quantisation of door angles (cache keys)
 STALE_S = 2.5              # road data older than this is "stale"
@@ -102,7 +103,7 @@ class SceneDirector:
         if forward and not inp.any_door_open:
             self.mode = "drive"
         elif (not self.moving) and (inp.gear == "P" or inp.any_door_open
-                                    or self._stopped_for >= STOP_HOLD_S):
+                                    or not (inp.ready or inp.acc_on)):
             self.mode = "parked"
         elif self.moving and inp.gear == "R":
             self.mode = "parked"

@@ -8,7 +8,8 @@ Climate on this car is read and controlled over AVC-LAN only:
   ECU's AVC frames (io/avc_ingest.py): ``E0 5D F3`` status (fan, AUTO, A/C,
   intake, vent, front defrost, rear defogger, system on/off), ``E0 5D F5``
   setpoint (0.5 °C grid, "OFF" sentinel) and ``E0 5D F7`` outside temperature.
-  Inside temperature is not on the bus (``inside_temp`` stays ``None``).
+  Inside temperature is not on AVC-LAN; it comes from BEAN 52:6D b0
+  (io.bean_ingest, scale probable, offset a guess).
 * **write** — every command below becomes a UI-sourced store action. On the
   Pi frontend ``RemoteStore`` turns it into a backend REST command
   (frontend/remote_store.py ``_translate``); in the backend (or a local twin)
@@ -121,7 +122,7 @@ class ClimateView:
     system_on: Optional[bool]        # False = climate OFF; None = unknown
     mode: str                        # "auto" | "manual" | "off" | "unknown"
     target_temp: float               # last known setpoint, 0.5 °C grid
-    inside_temp: Optional[float]     # not on AVC-LAN: normally None
+    inside_temp: Optional[float]     # BEAN 52:6D (not on AVC-LAN)
     outside_temp: Optional[float]    # AVC F7; None when stale
     fan: int                         # 0..7 (0 = system off)
     fan_auto: bool                   # fan level chosen by AUTO

@@ -287,8 +287,8 @@ def decode_known(mes: str, data_hex: str, dst: Optional[str] = None) -> Dict[str
       FE:50 P-lock bits; 98:EC b5 HV bus voltage (V ~ 1.9 x + 102);
       98:27 b0 01 + b1 FF READY.
 
-    Placeholder (no meaning yet; recorded raw so a cruise-on drive yields
-    data): 62:C8 cruise -> ``cruise_raw``.
+    62:C8 cruise (2026-11-16 cruise drive): b1 10 = main switch on
+    (``cruise_main``, 2-byte frames only); the raw value -> ``cruise_raw``.
 
     NB: FE:E1 is a STATUS REPORT the body ECU broadcasts after it acts, not a
     command — see docs/BEAN_SIGNALS.md §7.
@@ -347,8 +347,12 @@ def decode_known(mes: str, data_hex: str, dst: Optional[str] = None) -> Dict[str
     if mes == "20" and is_dst("62") and len(data) >= 2:       # [C] fuel per injection
         out["injection_word"] = _w(data, 0)
         return out
-    if mes == "6D" and is_dst("52"):                          # [P] cabin temp raw
+    if mes == "6D" and is_dst("52"):                          # [P] cabin temp
         out["prov_cabin_temp_raw"] = d0
+        # 0.25 °C/count (P, two soak points + warm-up slope, 2026-11-16 data
+        # crunch); offset -6.5 (G: Toyota A/C data-list range -6.5..57.25 °C;
+        # may read 1-2 °C high). The only cabin temperature the car has.
+        out["cabin_temp_c"] = 0.25 * d0 - 6.5
         return out
     if mes == "FD" and is_dst("52"):                          # [C] target temp
         out["climate_target_c"] = None if d0 == 0x39 else 15.5 + 0.5 * d0
@@ -358,8 +362,10 @@ def decode_known(mes: str, data_hex: str, dst: Optional[str] = None) -> Dict[str
         out["key_out_warning"] = bool(d0 & 0x80)
         out["key_out_beep"] = bool(d1 & 0x80)
         return out
-    if mes == "C8" and is_dst("62"):                          # placeholder: cruise
+    if mes == "C8" and is_dst("62"):                          # [C] cruise main switch
         out["cruise_raw"] = data.hex().upper()
+        if len(data) == 2:
+            out["cruise_main"] = bool(d1 & 0x10)
         return out
 
     # The rest are body-bus broadcasts (DST 0xFE). Guard on DST so a directed
@@ -387,7 +393,7 @@ def decode_known(mes: str, data_hex: str, dst: Optional[str] = None) -> Dict[str
         out["lamp_tail"] = bool(d0 & 0x10)
         out["lamp_head"] = bool(d0 & 0x20)          # low beam
         out["lamp_fog_front"] = bool(d0 & 0x01)
-        out["lamp_high_beam"] = bool(d0 & 0x08)     # [unconfirmed: never seen set]
+        out["lamp_high_beam"] = bool(d0 & 0x08)     # [C] seen 2026-11-16 17:44-17:46
         if d1 is not None:
             out["illumination"] = bool(d1 & 0x08)
         if d2 is not None:

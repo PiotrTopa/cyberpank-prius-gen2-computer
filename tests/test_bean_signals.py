@@ -130,11 +130,14 @@ class TestConfirmedDecodes:
         assert decode_known("40", "000000", "FE")["shift"] == ""           # transit
 
     def test_provisional_are_prefixed(self):
-        assert decode_known("6D", "37807F", "52") == {"prov_cabin_temp_raw": 0x37}
+        assert decode_known("6D", "37807F", "52") == {"prov_cabin_temp_raw": 0x37,
+                                                      "cabin_temp_c": 0.25 * 0x37 - 6.5}
         assert decode_known("50", "0C", "FE") == {
             "prov_p_locked": False, "prov_out_of_p": True, "prov_p_ecu_on": True,
             "prov_power_off_handshake": False}
-        assert decode_known("C8", "0000", "62") == {"cruise_raw": "0000"}
+        assert decode_known("C8", "0000", "62") == {"cruise_raw": "0000", "cruise_main": False}
+        assert decode_known("C8", "0010", "62")["cruise_main"] is True
+        assert "cruise_main" not in decode_known("C8", "001054", "62")   # malformed length
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -231,6 +234,7 @@ def make_ingress():
     clk = Clock()
     ing._sources._clock = clk
     ing._bean._clock = clk
+    ing._cruise._clock = clk
     return store, ing, clk
 
 
@@ -354,14 +358,15 @@ class TestIngressBean:
         assert (c.defrost, c.rear_defogger, c.fan_speed, c.target_temp) == (True, True, 5, 20.0)
         assert c.status_source == "bean"
 
-    def test_cruise_placeholder_records_changes(self):
+    def test_cruise_raw_changes_recorded(self):
         store, ing, clk = make_ingress()
         feed_bean(ing, [("62", "C8", "0000")])
         feed_bean(ing, [("62", "C8", "0000")])
-        feed_bean(ing, [("62", "C8", "0010")])           # hypothetical change
+        feed_bean(ing, [("62", "C8", "0010")])           # main switch on
         feed_can(ing, 0x5C8, [0x24, 0, 0])
         v = store.state.vehicle
         assert v.cruise_raw_62c8 == "0010"
+        assert v.cruise_main_switch is True        # BEAN beats the late 0x5C8 copy
         assert [(c["src"], c["data"]) for c in v.cruise_raw_changes] == [
             ("bean:62C8", "0000"), ("bean:62C8", "0010"), ("can:5C8", "24 00 00")]
 
@@ -544,3 +549,12 @@ class TestCanGatewayCopies:
         feed_can(ing, 0x57F, [0x68, 0x30, 0x18, 0x80, 0, 0, 0])
         d = store.state.dynamics
         assert d.door_open is True and d.headlight_state == "LOW"
+
+
+def test_cabin_temperature_from_52_6d_and_its_expiry():
+    store, ing, clk = make_ingress()
+    feed_bean(ing, [("52", "6D", "6C807F")])          # 0x6C = 108 -> 20.5 °C
+    assert store.state.climate.inside_temp == 20.5
+    clk.t += 11.0
+    ing.update()
+    assert store.state.climate.inside_temp is None

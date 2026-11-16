@@ -487,16 +487,14 @@ class CANDecoder:
             msg.msg_type = CANMessageType.SYSTEM_STATUS
             msg.values["bean_98cc_raw"] = ((data[1] << 8) | data[2]) & 0x3FF
         
-        # 0x5C8: Cruise Control Cancel Event (~1050ms period, sparse)
-        # This message is event-based (only ~18 msgs in 37 min recording).
-        # Byte C (data[2]) bit 4: cruise control CANCEL flag
-        #   - bit=1 means cruise was just CANCELED (brake/cancel pressed)
-        #   - bit=0 is a system heartbeat/check-in (NOT "cruise active")
-        # NOTE: This bus has no "cruise engaged" flag. Cruise activation
-        # is inferred from speed stability in the store.
+        # 0x5C8: gateway CAN copy of BEAN 62:C8 ([BEAN header 0x24][62:C8
+        # data], §5 of docs/BEAN_SIGNALS.md). Byte 2 bit 4 (0x10) = cruise
+        # MAIN SWITCH on (2026-11-16 cruise drive; NOT a cancel flag). The
+        # copy lags BEAN by ~3 s and missed a 1 s off/on; byte 0 bit 7
+        # (A4 vs 24) was set for ~1 s at a refused SET (meaning open).
         elif can_id == 0x5C8 and len(data) >= 3:
             msg.msg_type = CANMessageType.CRUISE_CONTROL
-            msg.values["cruise_cancel"] = bool(data[2] & 0x10)
+            msg.values["cruise_main_switch"] = bool(data[2] & 0x10)
             msg.values["cruise_status_byte"] = data[0]
         
         # ---------------------------------------------------
@@ -636,6 +634,9 @@ class CANDecoder:
             else:
                 msg.values["gear"] = "?"
             msg.values["gear_raw"] = gear_val
+            # Byte 4 bit 7 (and byte 7 bit 7): cruise engaged (2026-11-16,
+            # every engage/cancel; ~2 s behind 21D3 D bit 6).
+            msg.values["cruise_active"] = bool(data[4] & 0x80)
         
         # ---------------------------------------------------
         # SOLICITED OBD-II RESPONSES (Gateway Protocol v2.8.0)
@@ -980,49 +981,10 @@ class CANDecoder:
             msg.values["aircon_power_kw"] = 0.019608 * payload[15]
     
     def _decode_pid_21d3(self, msg: CANMessage, payload: list[int]) -> None:
-        """
-        Decode PID 21D3 - Cruise Control data.
-        
-        - Byte 0 (A): Cruise Memory Vehicle Speed (km/h)
-        - Byte 1 (B): Cruise Set/Resume Speed (km/h), resets to 0 < 40 km/h
-        - Byte 2 (C): Cruise status bitmask
-            - Bit 0: Main Switch
-            - Bit 2: Main Switch Ready
-            - Bit 5: Indicator
-            - Bit 6: Cruise Control
-            - Bit 7: Shift D Position
-        - Byte 3 (D): Cruise switch/active bitmask
-            - Bit 0: Stop Light Switch 1 (Sub CPU)
-            - Bit 1: Stop Light Switch 2 (Sub CPU)
-            - Bit 2: Stop Light Switch 1 (Main CPU)
-            - Bit 3: RES / ACC Switch
-            - Bit 4: SET / COAST Switch
-            - Bit 5: Cancel Switch
-            - Bit 6: Cruise Control Active (Set)
-            - Bit 7: D drive mode selected
-        """
-        if len(payload) >= 2:
-            msg.values["cruise_memory_speed"] = payload[0]
-            msg.values["cruise_set_speed"] = payload[1]
-        
-        if len(payload) >= 3:
-            c = payload[2]
-            msg.values["cruise_main_switch"] = bool(c & 0x01)
-            msg.values["cruise_main_ready"] = bool(c & 0x04)
-            msg.values["cruise_indicator"] = bool(c & 0x20)
-            msg.values["cruise_control"] = bool(c & 0x40)
-            msg.values["shift_d_position"] = bool(c & 0x80)
-        
-        if len(payload) >= 4:
-            dd = payload[3]
-            msg.values["stop_light_1_sub"] = bool(dd & 0x01)
-            msg.values["stop_light_2_sub"] = bool(dd & 0x02)
-            msg.values["stop_light_1_main"] = bool(dd & 0x04)
-            msg.values["cruise_res_acc_switch"] = bool(dd & 0x08)
-            msg.values["cruise_set_coast_switch"] = bool(dd & 0x10)
-            msg.values["cruise_cancel_switch"] = bool(dd & 0x20)
-            msg.values["cruise_active"] = bool(dd & 0x40)
-            msg.values["d_drive_selected"] = bool(dd & 0x80)
+        """PID 21D3 cruise control; layout in
+        comm.solicited_can._hybrid_21d3_parser (decoded 2026-11-16)."""
+        from .solicited_can import _hybrid_21d3_parser
+        msg.values.update(_hybrid_21d3_parser(payload))
     
     def _decode_hv_battery_response(self, msg: CANMessage, data: list[int]) -> None:
         """

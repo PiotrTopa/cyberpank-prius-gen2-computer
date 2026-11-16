@@ -21,8 +21,9 @@ state (docs/BEAN_SIGNALS.md §4, survey 2026-11-14):
 * engine-running evidence (accepted rpm, 98:27, 62:20 presence) goes to the
   :class:`~cyberpunk_computer.comm.engine_gate.EngineRunningGate`, and the
   62:20 per-injection word to the ingress fuel-flow computation;
-* raw 62:C8 (cruise, no known bit meanings) is recorded on every change
-  (:class:`CruiseRawLog`) so the next drive with cruise in use yields data.
+* 62:C8 b1 0x10 (cruise main switch) goes to the
+  :class:`~cyberpunk_computer.io.cruise_fusion.CruiseFusion`; the raw value
+  is still recorded on every change (:class:`CruiseRawLog`).
 
 Freshness is judged on the frame's true time, not its arrival: a frame is
 offered to the arbiter as seen at ``now - age`` (age = wall receive time -
@@ -70,6 +71,7 @@ CLIMATE_FIELDS = {
     "compressor_rpm": "compressor_rpm",
     "compressor_running": "compressor_running",
     "ac_switch_on": "ac_switch_on",
+    "cabin_temp_c": "inside_temp",          # 52:6D b0 (scale P, offset G)
 }
 #: decode_known ``prov_*`` key -> ProvisionalBeanSignals field
 PROVISIONAL_FIELDS = {
@@ -96,6 +98,9 @@ DISPLAY_SPEED_STALE_S = 3.0
 #: 52:90 period is 0.5 s; after this long without it the meter's
 #: instantaneous consumption is unknown (None) and ours is shown instead.
 METER_CONSUMPTION_STALE_S = 3.0
+
+#: 52:6D period is 1 s; after this long the cabin temperature is unknown.
+CABIN_TEMP_STALE_S = 10.0
 
 #: Arbitrated BEAN values older than this (frame ``ts`` vs now) are not
 #: dispatched: a better-than-nothing source must also be current.
@@ -132,16 +137,22 @@ class BeanIngest:
                  clock: Callable[[], float] = time.monotonic,
                  engine_gate: Optional[Any] = None,
                  fuel_word_sink: Optional[Callable[[int], List[Action]]] = None,
-                 wall: Callable[[], float] = time.time) -> None:
+                 wall: Callable[[], float] = time.time,
+                 cruise_fusion: Optional[Any] = None) -> None:
         self.sources = sources
         self._wall = wall
         self.cruise = cruise_log or CruiseRawLog()
+        if cruise_fusion is None:
+            from .cruise_fusion import CruiseFusion
+            cruise_fusion = CruiseFusion(sources, clock)
+        self.cruise_fusion = cruise_fusion
         self._clock = clock
         self.engine_gate = engine_gate
         self.fuel_word_sink = fuel_word_sink
         self._last: Dict[str, Any] = {}           # (group, field) -> value dispatched
         self._display_speed_seen: Optional[float] = None
         self._meter_consumption_seen: Optional[float] = None
+        self._cabin_temp_seen: Optional[float] = None
         self.frames = 0
 
     def _changed(self, group: str, name: str, value: Any) -> bool:
@@ -179,6 +190,8 @@ class BeanIngest:
                 self._display_speed_seen = now
             if "consumption_stopped" in v:
                 self._meter_consumption_seen = now
+            if "cabin_temp_c" in v:
+                self._cabin_temp_seen = now
             gate = self.engine_gate
             if gate is not None and mes.upper() == "27" and "ice_stopped" in v:
                 gate.observe_bean_9827(int(data[:2], 16), now)
@@ -227,6 +240,8 @@ class BeanIngest:
                 t = v["climate_target_c"]
                 out.append(SetAvcClimateAction(system_on=False, status_source=SRC) if t is None
                            else SetAvcClimateAction(target_temp=t, status_source=SRC))
+            if "cruise_main" in v and current:
+                out.extend(self.cruise_fusion.from_bean_62c8(v["cruise_main"], now))
             if "cruise_raw" in v and self.cruise.observe("bean:62C8", v["cruise_raw"], f.get("ts", 0.0)):
                 vehicle["cruise_raw_62c8"] = v["cruise_raw"]
                 vehicle["cruise_raw_changes"] = self.cruise.changes
@@ -253,4 +268,10 @@ class BeanIngest:
             for f in ("meter_consumption_l100km", "meter_consumption_stopped"):
                 self._last.pop("vehicle." + f, None)
                 vehicle[f] = None
-        return [SetPassiveSignalsAction(vehicle=vehicle)] if vehicle else []
+        climate: Dict[str, Any] = {}
+        if self._cabin_temp_seen is not None \
+                and now - self._cabin_temp_seen > CABIN_TEMP_STALE_S:
+            self._cabin_temp_seen = None
+            self._last.pop("climate.inside_temp", None)
+            climate["inside_temp"] = None
+        return [SetPassiveSignalsAction(vehicle=vehicle, climate=climate)] if (vehicle or climate) else []

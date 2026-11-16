@@ -247,16 +247,17 @@ class VehicleState:
     engine_requests_a: Optional[int] = None       # Engine request bitmask byte A (PID 21C4)
     engine_requests_b: Optional[int] = None       # Engine request bitmask byte B (PID 21C4)
     
-    # Cruise Control (from PID 21D3 - Hybrid ECU 0x7E2)
-    cruise_active: bool = False               # Cruise control currently engaged (D:6)
-    cruise_set_speed: Optional[int] = None    # Cruise set/resume speed (km/h)
-    cruise_memory_speed: Optional[int] = None # Cruise memory vehicle speed (km/h)
-    cruise_main_switch: Optional[bool] = None     # Cruise main switch on (C:0)
-    cruise_main_ready: Optional[bool] = None      # Cruise main switch ready (C:2)
-    cruise_indicator: Optional[bool] = None       # Cruise indicator lamp (C:5)
-    cruise_cancel_switch: Optional[bool] = None   # Cancel switch pressed (D:5)
-    cruise_res_acc_switch: Optional[bool] = None  # RES/ACC switch pressed (D:3)
-    cruise_set_coast_switch: Optional[bool] = None  # SET/COAST switch pressed (D:4)
+    # Cruise control (io.cruise_fusion; docs/BEAN_SIGNALS.md §1, decoded on
+    # the 2026-11-16 cruise drive). Sources: solicited 21D3 (1 Hz), BEAN 62:C8
+    # (main switch, fastest), CAN 0x5C8 (its gateway copy, ~3 s late) and CAN
+    # 0x120 b4 bit 7 (engaged, ~2 s late). All unknown when every source is silent.
+    cruise_active: bool = False               # cruise controlling the car (21D3 D bit 6 / 0x120)
+    cruise_set_speed: Optional[int] = None    # set speed km/h while engaged (21D3 B)
+    cruise_memory_speed: Optional[int] = None # resume speed km/h: 21D3 B, kept after a cancel
+                                              # until the car is slower than ~35 km/h (0 = none)
+    cruise_main_switch: Optional[bool] = None # main switch on (62:C8 b1 0x10 / 0x5C8 b2 0x10 / 21D3 D 0x0F)
+    cruise_drive_request: Optional[int] = None  # 21D3 C raw 0..~110: rises while cruise pulls,
+                                              # 0 when coasting or not engaged (meaning probable)
     cruise_5c8_debug: Optional[str] = None    # Raw 0x5C8 debug: hex bytes + data[2] bits
     # PLACEHOLDER (no bit meanings known yet): raw BEAN 62:C8 and CAN 0x5C8
     # (its gateway copy) and their last changes, so a drive with cruise in

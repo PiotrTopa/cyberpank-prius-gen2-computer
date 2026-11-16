@@ -564,26 +564,25 @@ class Store:
 
         elif action.type == ActionType.SET_CRUISE_CONTROL:
             updates = {}
+            if action.clear:
+                updates.update(cruise_active=False, cruise_set_speed=None,
+                               cruise_memory_speed=None, cruise_main_switch=None,
+                               cruise_drive_request=None)
+            if action.cruise_main_switch is not None:
+                updates["cruise_main_switch"] = action.cruise_main_switch
+                if not action.cruise_main_switch:      # main off: nothing engaged or held
+                    updates.update(cruise_active=False, cruise_set_speed=None,
+                                   cruise_memory_speed=None)
             if action.cruise_active is not None:
                 updates["cruise_active"] = action.cruise_active
                 if not action.cruise_active:
                     updates["cruise_set_speed"] = None
             if action.cruise_set_speed is not None:
-                updates["cruise_set_speed"] = action.cruise_set_speed
+                updates["cruise_set_speed"] = action.cruise_set_speed or None
             if action.cruise_memory_speed is not None:
-                updates["cruise_memory_speed"] = action.cruise_memory_speed
-            if action.cruise_main_switch is not None:
-                updates["cruise_main_switch"] = action.cruise_main_switch
-            if action.cruise_main_ready is not None:
-                updates["cruise_main_ready"] = action.cruise_main_ready
-            if action.cruise_indicator is not None:
-                updates["cruise_indicator"] = action.cruise_indicator
-            if action.cruise_cancel_switch is not None:
-                updates["cruise_cancel_switch"] = action.cruise_cancel_switch
-            if action.cruise_res_acc_switch is not None:
-                updates["cruise_res_acc_switch"] = action.cruise_res_acc_switch
-            if action.cruise_set_coast_switch is not None:
-                updates["cruise_set_coast_switch"] = action.cruise_set_coast_switch
+                updates["cruise_memory_speed"] = action.cruise_memory_speed or None
+            if action.cruise_drive_request is not None:
+                updates["cruise_drive_request"] = action.cruise_drive_request
             if action.cruise_5c8_debug is not None:
                 updates["cruise_5c8_debug"] = action.cruise_5c8_debug
             if updates:

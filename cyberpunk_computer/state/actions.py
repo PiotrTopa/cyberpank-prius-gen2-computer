@@ -413,30 +413,26 @@ class SetThrottlePositionAction(Action):
 
 @dataclass
 class SetCruiseControlAction(Action):
-    """Set cruise control state (from PID 21D3 and 0x5C8)."""
+    """Cruise control state (io.cruise_fusion: 21D3 + BEAN 62:C8 + CAN 0x5C8 /
+    0x120; docs/BEAN_SIGNALS.md §1). None = no change; ``clear`` resets every
+    cruise field to unknown (all sources silent)."""
     cruise_active: Optional[bool] = None
     cruise_set_speed: Optional[int] = None
     cruise_memory_speed: Optional[int] = None
     cruise_main_switch: Optional[bool] = None
-    cruise_main_ready: Optional[bool] = None
-    cruise_indicator: Optional[bool] = None
-    cruise_cancel_switch: Optional[bool] = None
-    cruise_res_acc_switch: Optional[bool] = None
-    cruise_set_coast_switch: Optional[bool] = None
+    cruise_drive_request: Optional[int] = None
     cruise_5c8_debug: Optional[str] = None
-    
+    clear: bool = False
+
     def __init__(
         self,
         cruise_active: Optional[bool] = None,
         cruise_set_speed: Optional[int] = None,
         cruise_memory_speed: Optional[int] = None,
         cruise_main_switch: Optional[bool] = None,
-        cruise_main_ready: Optional[bool] = None,
-        cruise_indicator: Optional[bool] = None,
-        cruise_cancel_switch: Optional[bool] = None,
-        cruise_res_acc_switch: Optional[bool] = None,
-        cruise_set_coast_switch: Optional[bool] = None,
+        cruise_drive_request: Optional[int] = None,
         cruise_5c8_debug: Optional[str] = None,
+        clear: bool = False,
         source: ActionSource = ActionSource.INTERNAL,
     ):
         super().__init__(ActionType.SET_CRUISE_CONTROL, source)
@@ -444,12 +440,9 @@ class SetCruiseControlAction(Action):
         self.cruise_set_speed = cruise_set_speed
         self.cruise_memory_speed = cruise_memory_speed
         self.cruise_main_switch = cruise_main_switch
-        self.cruise_main_ready = cruise_main_ready
-        self.cruise_indicator = cruise_indicator
-        self.cruise_cancel_switch = cruise_cancel_switch
-        self.cruise_res_acc_switch = cruise_res_acc_switch
-        self.cruise_set_coast_switch = cruise_set_coast_switch
+        self.cruise_drive_request = cruise_drive_request
         self.cruise_5c8_debug = cruise_5c8_debug
+        self.clear = clear
 
 
 @dataclass
@@ -1638,6 +1631,7 @@ PASSIVE_SIGNAL_FIELDS = {
     }),
     "climate": frozenset({
         "compressor_target_rpm", "compressor_rpm", "compressor_running", "ac_switch_on",
+        "inside_temp",
     }),
     "dynamics": frozenset({"soc_bars"}),
     "provisional": frozenset({

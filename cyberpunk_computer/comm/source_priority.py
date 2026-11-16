@@ -293,6 +293,11 @@ class SlotSuspender:
 #                 CAN 0x520/0x038   0.92 s   0x520 presence 98.5 % (0x038 b1: 68 %)
 #   fuel_word     CAN 0x520 b1-2    0.92 s   = BEAN 62:20 word (289/300 frames
 #                 BEAN 62:20        0.92 s   match the neighbouring 0x520)
+#   cruise_main   BEAN 62:C8 b1 10  1 s+chg  first (2026-11-16 cruise drive)
+#                 OBD 21D3 D 0x0F   1.0 s    ~0.6 s after 62:C8
+#                 CAN 0x5C8 b2 10   0.4 s    content ~3 s late, missed a 1 s off/on
+#   cruise_active OBD 21D3 D 0x40   1.0 s    at the poll
+#                 CAN 0x120 b4 80   0.26 s   ~2 s behind 21D3 at engage/cancel
 # ─────────────────────────────────────────────────────────────────────────────
 
 #: Gateway subscription slot of the OBD 010C (engine rpm) request
@@ -318,6 +323,10 @@ DEFAULT_POLICIES: Tuple[SignalPolicy, ...] = (
                  note="rpm > 400 / 98:27 / 62:20 / 0x520 presence / AVC B9"),
     # Fuel quantity per injection: CAN 0x520 b1-2 = BEAN 62:20 (same word).
     SignalPolicy("fuel_word", (Source("can", 2.5), Source("bean", 3.0))),
+    # Cruise (io.cruise_fusion): the solicited 21D3 beats the late CAN copies.
+    SignalPolicy("cruise_main", (Source("bean", 3.0), Source("obd", 3.0, SOLICITED),
+                                 Source("can", 3.0))),
+    SignalPolicy("cruise_active", (Source("obd", 3.0, SOLICITED), Source("can", 2.0))),
 )
 
 

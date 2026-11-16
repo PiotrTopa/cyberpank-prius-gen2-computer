@@ -47,6 +47,7 @@ from ..state.actions import (
     SetStoredDTCsAction, SetPendingDTCsAction, SetDTCScanStateAction,
 )
 from .avc_ingest import AvcIngest
+from .cruise_fusion import CruiseFusion
 from .bean_ingest import BeanIngest
 from ..comm.source_priority import default_arbiter
 from ..comm.engine_gate import EngineRunningGate
@@ -143,8 +144,11 @@ class IngressController:
         self.fuel_flow_k: float = FUEL_FLOW_K
         self._fuel_word_t: Optional[float] = None
         # BEAN body bus (powerbox device 203) -> vehicle state
+        # Cruise control (io.cruise_fusion): 21D3 + BEAN 62:C8 + CAN 0x5C8/0x120.
+        self._cruise = CruiseFusion(self._sources)
         self._bean = BeanIngest(self._sources, engine_gate=self._engine_gate,
-                                fuel_word_sink=lambda w: self._fuel_word_actions(w, "bean"))
+                                fuel_word_sink=lambda w: self._fuel_word_actions(w, "bean"),
+                                cruise_fusion=self._cruise)
 
         # Broadcast fast path (comma.ai panda, io.panda_can). Runs on the panda
         # reader thread, so it gets its own decoder instance and its own
@@ -376,7 +380,7 @@ class IngressController:
 
         # AVC-only values (outside temperature) read N/A once stale, also
         # when the bus has gone silent and no frame arrives to notice it.
-        expired = self._avc.expire() + self._bean.expire()
+        expired = self._avc.expire() + self._bean.expire() + self._cruise.expire()
         # Engine gate and fuel flow age out when their sources go silent
         # (0x520 is not sent while the engine is stopped).
         expired += self._fuel_flow_expiry() + self._engine_gate_actions()
@@ -582,6 +586,12 @@ class IngressController:
                 print(f"[SOL_RAW] Decode returned None for {can_id_raw}")
             return
         
+        # A reply relayed as a subscription/request response, not a passive
+        # copy of the same frame: the gateway's passive stream ran 0..5 s
+        # behind the replies on the 2026-11-16 drive, so a late passive copy
+        # of a 21D3 reply would flip the cruise state back.
+        decoded.values["_solicited"] = action in ("sub", "resp")
+
         # Convert to actions
         actions = self._can_message_to_actions(decoded)
         
@@ -927,6 +937,8 @@ class IngressController:
                 gear = gear_map.get(gear_str, GearPosition.PARK)
                 if self._sources.offer("gear", "can"):
                     actions.append(SetGearAction(gear, ActionSource.GATEWAY))
+            if "cruise_active" in msg.values:          # 0x120 b4 bit 7
+                actions.extend(self._cruise.from_can_120(msg.values["cruise_active"]))
         
         # ─────────────────────────────────────────────────────────────────────
         # VEHICLE DYNAMICS (PAGE 2 DATA)
@@ -1004,27 +1016,19 @@ class IngressController:
             if ev_active:
                 actions.append(SetReadyModeAction(True, ActionSource.GATEWAY))
         
-        # Cruise Control Event (0x5C8) — always dispatch raw debug data
+        # CAN 0x5C8 = gateway copy of BEAN 62:C8: byte 2 bit 4 cruise main switch
         elif msg.msg_type == CANMessageType.CRUISE_CONTROL:
-            cruise_cancel = msg.values.get("cruise_cancel", False)
-            # Format raw bytes as hex
-            raw_data = msg.data
-            debug_str = " ".join(f"{b:02X}" for b in raw_data)
-            # PLACEHOLDER: record every raw change (no bit meanings known;
-            # 0x5C8 = [BEAN header][62:C8 data]). See io.bean_ingest.CruiseRawLog.
+            debug_str = " ".join(f"{b:02X}" for b in msg.data)
+            # Raw changes stay recorded (byte 0 bit 7 is still undecoded).
             cruise_log = self._bean.cruise
             if cruise_log.observe("can:5C8", debug_str, time.time()):
                 actions.append(SetPassiveSignalsAction(
                     vehicle={"cruise_raw_changes": cruise_log.changes}))
-            
-            action_kwargs = {
-                "cruise_5c8_debug": debug_str,
-                "source": ActionSource.GATEWAY,
-            }
-            if cruise_cancel:
-                # Cruise was just canceled — force cruise_active off
-                action_kwargs["cruise_active"] = False
-            actions.append(SetCruiseControlAction(**action_kwargs))
+                actions.append(SetCruiseControlAction(
+                    cruise_5c8_debug=debug_str, source=ActionSource.GATEWAY))
+            main = msg.values.get("cruise_main_switch")
+            if main is not None:
+                actions.extend(self._cruise.from_can_5c8(main))
         
         # ─────────────────────────────────────────────────────────────────────
         # SOLICITED CAN RESPONSES (OBD-II style)
@@ -1221,30 +1225,10 @@ class IngressController:
         if hv_current is not None:
             actions.append(SetBatteryCurrentAction(hv_current, ActionSource.GATEWAY))
         
-        # PID 21D3 cruise control data (proper source with active flag and switches)
-        cruise_set = values.get("cruise_set_speed")
-        cruise_mem = values.get("cruise_memory_speed")
-        cruise_active_flag = values.get("cruise_active")
-        cruise_main_switch = values.get("cruise_main_switch")
-        cruise_main_ready = values.get("cruise_main_ready")
-        cruise_indicator = values.get("cruise_indicator")
-        cruise_cancel = values.get("cruise_cancel_switch")
-        cruise_res_acc = values.get("cruise_res_acc_switch")
-        cruise_set_coast = values.get("cruise_set_coast_switch")
-        if any(v is not None for v in (cruise_set, cruise_mem, cruise_active_flag,
-                                        cruise_main_switch, cruise_cancel)):
-            actions.append(SetCruiseControlAction(
-                cruise_set_speed=cruise_set,
-                cruise_memory_speed=cruise_mem,
-                cruise_active=cruise_active_flag,
-                cruise_main_switch=cruise_main_switch,
-                cruise_main_ready=cruise_main_ready,
-                cruise_indicator=cruise_indicator,
-                cruise_cancel_switch=cruise_cancel,
-                cruise_res_acc_switch=cruise_res_acc,
-                cruise_set_coast_switch=cruise_set_coast,
-                source=ActionSource.GATEWAY
-            ))
+        # PID 21D3 cruise control (layout: comm.solicited_can._hybrid_21d3_parser);
+        # replies only, never a (late) passive copy of one
+        if values.get("_solicited"):
+            actions.extend(self._cruise.from_21d3(values))
         
         # Accelerator pedal from PID 21C4
         accel = values.get("accelerator_percent")

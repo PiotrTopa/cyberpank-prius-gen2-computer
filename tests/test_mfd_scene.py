@@ -20,7 +20,7 @@ pygame = pytest.importorskip("pygame")
 from cyberpunk_computer.state.app_state import AppState, GearPosition  # noqa: E402
 from cyberpunk_computer.ui.scene import demo  # noqa: E402
 from cyberpunk_computer.ui.scene.director import (  # noqa: E402
-    LOST_S, REAR_GROUP_AJAR, STALE_S, STOP_HOLD_S, VIEW_SECONDS, VIEW_STEPS, SceneDirector)
+    LOST_S, REAR_GROUP_AJAR, STALE_S, VIEW_SECONDS, VIEW_STEPS, SceneDirector)
 from cyberpunk_computer.ui.scene.inputs import (  # noqa: E402
     SCENE_EVENT, SceneFeed, SceneInputs, parse_scene, parse_signs, read_inputs)
 from cyberpunk_computer.ui.scene.model import Camera, get_model  # noqa: E402
@@ -139,17 +139,24 @@ def test_road_only_while_roadsense_runs_and_health_fallback():
 
 # ── director ─────────────────────────────────────────────────────────────────
 
-def test_view_opens_when_moving_and_closes_after_the_stop_hold():
+def test_view_opens_when_moving_and_a_stop_in_d_keeps_the_road():
     d = SceneDirector()
-    drive = SceneInputs(speed_kmh=40, real_speed_kmh=40, gear="D")
+    drive = SceneInputs(speed_kmh=40, real_speed_kmh=40, gear="D", ready=True, acc_on=True)
     step(d, drive, VIEW_SECONDS + 0.3)
     assert d.mode == "drive" and d.view == 1.0 and d.view_step == VIEW_STEPS
-    stop = SceneInputs(gear="D")
-    step(d, stop, STOP_HOLD_S - 0.5)
-    assert d.mode == "drive" and d.view == 1.0          # a short stop keeps the road
-    step(d, stop, 0.6 + VIEW_SECONDS + 0.2)
+    for gear in ("D", "N", "B"):                        # standing in traffic, READY
+        step(d, SceneInputs(gear=gear, ready=True, acc_on=True), 60.0)
+        assert d.mode == "drive" and d.view == 1.0
+    step(d, SceneInputs(gear="P", ready=True, acc_on=True), VIEW_SECONDS + 0.2)
     assert d.mode == "parked" and d.view == 0.0
     assert d.animating is False                         # steady: nothing to redraw
+
+
+def test_power_off_closes_the_view():
+    d = SceneDirector()
+    step(d, SceneInputs(speed_kmh=40, real_speed_kmh=40, gear="D", ready=True, acc_on=True), 2.0)
+    d.update(SceneInputs(gear="D", ready=False, acc_on=False), 0.05)  # gear frame stale
+    assert d.mode == "parked"
 
 
 def test_park_or_open_door_closes_at_once_and_reverse_stays_closed():
@@ -1189,7 +1196,7 @@ def test_map_tunables_change_the_picture_and_redraws_stay_cached():
     t = Tuning()
     r, d = SceneRenderer((238, 216), tuning=t), SceneDirector(t)
     live_step(d, inp, 3.0)
-    still = inp._replace(speed_kmh=0, real_speed_kmh=0)
+    still = inp._replace(speed_kmh=0, real_speed_kmh=0, ready=True, acc_on=True)   # stopped in D
     live_step(d, still, 1.0)
     r.render(d, still, 1.0)
     n = r.redraws

@@ -445,58 +445,34 @@ PID_HYBRID_ADDITIONAL = PIDDefinition(
 
 def _hybrid_21d3_parser(d: list[int]) -> dict[str, Any]:
     """
-    Parse PID 21D3 response (Cruise Control data).
-    
-    Reference: docs/prius_can.md Section 6
-    Layout (4 bytes):
-    - Byte A (0): Cruise Control Memory Vehicle Speed (0-150 km/h)
-    - Byte B (1): Cruise Set/Resume Speed (0-255 km/h, resets to 0 < 40 km/h)
-    - Byte C (2): Cruise status bitmask
-        - Bit 0: Cruise Control Main Switch
-        - Bit 2: Cruise Control Main Switch Ready
-        - Bit 5: Cruise Control Main Switch Indicator
-        - Bit 6: Cruise Control
-        - Bit 7: Shift D Position
-    - Byte D (3): Cruise switch/active bitmask
-        - Bit 0: Stop Light Switch 1 (Sub CPU)
-        - Bit 1: Stop Light Switch 2 (Sub CPU)
-        - Bit 2: Stop Light Switch 1 (Main CPU)
-        - Bit 3: RES / ACC Switch
-        - Bit 4: SET / COAST Switch
-        - Bit 5: Cancel Switch
-        - Bit 6: Cruise Control Active (Set)
-        - Bit 7: D drive mode selected
+    Parse PID 21D3 (cruise control), reply ``[len, 0x61, 0xD3, A, B, C, D, E]``.
+
+    Decoded on this car's cruise drive of 2026-11-16 (docs/BEAN_SIGNALS.md §1;
+    the third-party list in docs/prius_can.md was wrong for A, C and D):
+
+    - A: vehicle speed, km/h (not a memory speed)
+    - B: cruise set speed, km/h. Set at SET, follows RES/ACC and SET/COAST,
+      kept after a cancel (the resume speed) and cleared to 0 once the car
+      is slower than ~35 km/h; 0 = none
+    - C: analog 0..~110, rises while cruise pulls the car, 0 when it coasts
+      or is not engaged: probably the cruise drive (torque) request. Raw.
+    - D: bit 7 shift in D; bits 0-3 all set while the main switch is on;
+      bit 6 cruise controlling the car
+    - E: not decoded (0, 1, 2, 5, 7, 8, 16 seen)
     """
-    result = {}
-    
-    if len(d) < 2:
+    result: dict[str, Any] = {}
+    if len(d) < 4:
         return result
-    
-    # Byte A: Memory vehicle speed (km/h)
-    result["cruise_memory_speed"] = d[0]
-    
-    # Byte B: Set/Resume speed (km/h)
-    result["cruise_set_speed"] = d[1]
-    
-    if len(d) >= 3:
-        c = d[2]
-        result["cruise_main_switch"] = bool(c & 0x01)
-        result["cruise_main_ready"] = bool(c & 0x04)
-        result["cruise_indicator"] = bool(c & 0x20)
-        result["cruise_control"] = bool(c & 0x40)
-        result["shift_d_position"] = bool(c & 0x80)
-    
-    if len(d) >= 4:
-        dd = d[3]
-        result["stop_light_1_sub"] = bool(dd & 0x01)
-        result["stop_light_2_sub"] = bool(dd & 0x02)
-        result["stop_light_1_main"] = bool(dd & 0x04)
-        result["cruise_res_acc_switch"] = bool(dd & 0x08)
-        result["cruise_set_coast_switch"] = bool(dd & 0x10)
-        result["cruise_cancel_switch"] = bool(dd & 0x20)
-        result["cruise_active"] = bool(dd & 0x40)
-        result["d_drive_selected"] = bool(dd & 0x80)
-    
+    a, b, c, dd = d[0], d[1], d[2], d[3]
+    result["cruise_vehicle_speed"] = a
+    result["cruise_set_speed"] = b
+    result["cruise_drive_request"] = c
+    result["cruise_status_raw"] = dd
+    result["cruise_main_switch"] = (dd & 0x0F) == 0x0F
+    result["cruise_active"] = bool(dd & 0x40)
+    result["shift_d_position"] = bool(dd & 0x80)
+    if len(d) >= 5:
+        result["cruise_raw_e"] = d[4]
     return result
 
 
@@ -507,9 +483,9 @@ PID_HYBRID_CRUISE = PIDDefinition(
     name="cruise_control",
     unit="multi",
     formula=_hybrid_21d3_parser,
-    byte_count=4,  # Single-frame response
+    byte_count=4,  # Single-frame response (5 data bytes)
     interval_ms=1000,
-    description="Cruise control speeds, switches, and active status"
+    description="Cruise: vehicle speed, set speed, drive request, main/engaged/D"
 )
 
 

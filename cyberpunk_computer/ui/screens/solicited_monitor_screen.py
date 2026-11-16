@@ -262,7 +262,7 @@ class SolicitedMonitorScreen(Screen):
         ry += row_h
 
         # Cruise memory speed
-        lbl = font_label.render("MEM SPD", True, COLORS["text_secondary"])
+        lbl = font_label.render("RES SPD", True, COLORS["text_secondary"])
         surface.blit(lbl, (right_x, ry))
         if v.cruise_memory_speed is not None and v.cruise_memory_speed > 0:
             val_surf = font_value.render(f"{v.cruise_memory_speed} km/h", True, COLORS["cyan_bright"])
@@ -271,26 +271,14 @@ class SolicitedMonitorScreen(Screen):
         surface.blit(val_surf, (right_x + col_width - val_surf.get_width(), ry))
         ry += row_h
 
-        # Cruise switches row: MAIN | RDY | RES | SET | CAN
-        lbl = font_label.render("SWITCHES", True, COLORS["text_secondary"])
+        # Main switch + drive request (21D3 C raw; the stalk switches are on
+        # no bus this backend hears, docs/BEAN_SIGNALS.md §1)
+        lbl = font_label.render("MAIN/REQ", True, COLORS["text_secondary"])
         surface.blit(lbl, (right_x, ry))
-        sw_parts = []
-        sw_items = [
-            ("SW", v.cruise_main_switch),
-            ("RDY", v.cruise_main_ready),
-            ("IND", v.cruise_indicator),
-            ("R/A", v.cruise_res_acc_switch),
-            ("S/C", v.cruise_set_coast_switch),
-            ("CAN", v.cruise_cancel_switch),
-        ]
-        for tag, val in sw_items:
-            if val is not None:
-                sw_parts.append(f"{tag}:{'1' if val else '0'}")
-            else:
-                sw_parts.append(f"{tag}:-")
-        sw_str = " ".join(sw_parts)
+        main = {None: "-", True: "ON", False: "OFF"}[v.cruise_main_switch]
+        req = "-" if v.cruise_drive_request is None else str(v.cruise_drive_request)
         sw_color = COLORS["green_bright"] if v.cruise_active else COLORS["text_dim"]
-        val_surf = font_small.render(sw_str, True, sw_color)
+        val_surf = font_small.render(f"{main} {req}", True, sw_color)
         surface.blit(val_surf, (right_x + col_width - val_surf.get_width(), ry))
         ry += row_h
 
