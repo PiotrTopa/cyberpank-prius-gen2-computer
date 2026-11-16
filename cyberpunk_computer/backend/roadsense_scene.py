@@ -8,7 +8,7 @@ docs/MFD_MAIN_SCREEN.md section 7; consumer: ``ui/scene/inputs.SceneFeed``).
 This module builds that mapping from what the roadsense stack already
 publishes and hands it to the ZMQ event channel:
 
-    roadsense api  ws://127.0.0.1:8090/ws?topics=road,lights,speed_limit,env,rules,fused,map,lead
+    roadsense api  ws://127.0.0.1:8090/ws?topics=road,lights,speed_limit,env,rules,fused,map,lead,lanes
          │  (road 10-14/s ~16 kB, lights ~3/s, speed_limit and rules >= 1/s, env ~1/s,
          │   fused ~2/s, map 2/s ~4 kB, lead 10-14/s ~0.7 kB)
          ▼
@@ -57,7 +57,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 logger = logging.getLogger(__name__)
 
 EVENT_NAME = "roadsense_scene"
-TOPICS = ("road", "lights", "speed_limit", "env", "rules", "fused", "map", "lead")
+TOPICS = ("road", "lights", "speed_limit", "env", "rules", "fused", "map", "lead", "lanes")
 
 # Caps of the sign lists (payload and screen room: the MFD shows this many).
 MAX_SIGNS_ON = 6
@@ -83,6 +83,7 @@ class SceneFeedConfig:
     rules_max_age_s: float = 3.0       # rules: on change and >= 1/s
     map_max_age_s: float = 3.0         # fused / map: ~2/s (roadsense's own map staleness is 3 s)
     lead_max_age_s: float = 0.5        # lead (tracker): one per road frame, 10-14/s; older -> road.leads[0]
+    lanes_max_age_s: float = 0.5       # lanes (road-geometry tracker): one per road frame; older -> road.lane_lines
     lane_min_prob: float = 0.2         # below this a lane line goes out as null (UI draws >= 0.3)
     lead_min_prob: float = 0.3         # below this the lead goes out as null (UI draws >= 0.5)
     connect_timeout_s: float = 3.0
@@ -196,6 +197,44 @@ def road_to_scene(road: Dict[str, Any], cfg: SceneFeedConfig) -> Dict[str, Any]:
     if path is not None:
         out["path"] = path
     return out
+
+
+# A tracked line is "present" by roadsense's own hysteresis; the screen still
+# gates on prob >= 0.3 (contract 7.1), so a present line never goes out lower.
+TRACKED_MIN_PROB = 0.3
+
+
+def lanes_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """roadsense ``lanes`` topic (the api's road-geometry tracker) -> scene
+    ``lanes`` and ``edges``.
+
+    lanes[i] = {"y": lines[i].y at SCENE_XS, "prob": max(lines[i].conf, 0.3)}
+               for a line the tracker reports ``present`` (its presence has
+               hysteresis and its geometry is filtered over time), else null
+    edges[i] = {"y": edges[i].y at SCENE_XS} for a present road edge, else null
+
+    None when the message is not usable (then the raw road lines stay).
+    """
+    xs = msg.get("x")
+    lines, edges = msg.get("lines"), msg.get("edges")
+    if not isinstance(xs, list) or not isinstance(lines, list) or not isinstance(edges, list):
+        return None
+    out_l: List[Optional[Dict[str, Any]]] = [None, None, None, None]
+    for i, ln in enumerate(lines[:4]):
+        if not isinstance(ln, dict) or ln.get("present") is not True:
+            continue
+        ys = resample(xs, ln.get("y"))
+        if ys is not None:
+            p = _num(ln.get("conf")) or 0.0
+            out_l[i] = {"y": ys, "prob": round(min(1.0, max(TRACKED_MIN_PROB, p)), 2)}
+    out_e: List[Optional[Dict[str, Any]]] = [None, None]
+    for i, ed in enumerate(edges[:2]):
+        if not isinstance(ed, dict) or ed.get("present") is not True:
+            continue
+        ys = resample(xs, ed.get("y"))
+        if ys is not None:
+            out_e[i] = {"y": ys}
+    return {"seq": msg.get("seq"), "lanes": out_l, "edges": out_e}
 
 
 def lead_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -601,6 +640,7 @@ class SceneBuilder:
         self._last_pub = -1e9
         self._slow: Dict[str, Tuple[float, Optional[Dict[str, Any]]]] = {}
         self._lead: Optional[Tuple[float, Optional[Dict[str, Any]], bool]] = None
+        self._lanes: Optional[Tuple[float, Optional[Dict[str, Any]]]] = None
         self.decode_errors = 0
 
     def feed(self, line: str, now: float) -> None:
@@ -630,6 +670,8 @@ class SceneBuilder:
             self._slow["map"] = (now, fused_to_scene(msg))
         elif mtype == "lead":
             self._lead = (now, lead_to_scene(msg), msg.get("departed") is True)
+        elif mtype == "lanes":
+            self._lanes = (now, lanes_to_scene(msg))
         elif mtype == "map":
             self.taint.update(msg)
             self._slow["map_in"] = (now, map_input_to_scene(msg))
@@ -671,6 +713,14 @@ class SceneBuilder:
             if self._lead[1] is None and self._lead[2]:
                 # the lead was lost after it pulled away; the cue outlives it
                 scene["lead_departed"] = True
+        # the tracked road geometry (roadsense >= 2026-11-16: presence with
+        # hysteresis, filtered lines and edges) replaces the raw lane lines and
+        # road edges while its topic is fresh; an older roadsense never sends it
+        if (self._lanes is not None and self._lanes[1] is not None
+                and now - self._lanes[0] <= self.cfg.lanes_max_age_s):
+            scene["lanes"] = self._lanes[1]["lanes"]
+            scene["edges"] = self._lanes[1]["edges"]
+            scene["lanes_src"] = "tracked"
         ages = {"light": self.cfg.lights_max_age_s, "limit": self.cfg.limit_max_age_s,
                 "env": self.cfg.env_max_age_s, "signs": self.cfg.rules_max_age_s,
                 "map": self.cfg.map_max_age_s, "map_in": self.cfg.map_max_age_s,

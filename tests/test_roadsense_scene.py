@@ -27,6 +27,7 @@ from cyberpunk_computer.backend.roadsense_scene import (
     SceneBuilder,
     SceneFeedConfig,
     env_to_scene,
+    lanes_to_scene,
     lead_to_scene,
     lights_to_scene,
     limit_to_scene,
@@ -471,7 +472,7 @@ def test_feed_publishes_while_active_and_reconnects(server):
         assert server.accepted == 0 and not got        # idle: no connection at all
         feed.set_active(True)
         assert wait_for(lambda: len(got) >= 3)
-        assert server.paths[0] == "/ws?topics=road,lights,speed_limit,env,rules,fused,map,lead"
+        assert server.paths[0] == "/ws?topics=road,lights,speed_limit,env,rules,fused,map,lead,lanes"
         assert all(set(s) >= {"seq", "lanes", "edges", "lead"} for s in got)
         # roadsense restarts: the stream drops, the feed reconnects on its own
         n = len(got)
@@ -653,3 +654,54 @@ def test_zmq_publishes_scene_to_a_subscriber():
     finally:
         sub.close(linger=0)
         z.stop()
+
+
+LANES_X = [0.0, 3.0, 12.0, 27.0, 48.0, 75.0, 108.0]
+
+
+def lanes_msg(present=(False, True, True, False), conf=(0.1, 0.92, 0.22, 0.05), edges=(True, False), seq=7):
+    def line(i, on, c=None):
+        return {"present": on, "mode": "track" if on else "none", "conf": c, "prob": 0.5,
+                "y": [(-5.25, -1.75, 1.75, 5.25, -6.5, 6.5)[i]] * len(LANES_X) if on else None, "y_std": None}
+    return {"type": "lanes", "seq": seq, "ts_mono_ns": 1, "x": LANES_X,
+            "lines": [line(i, present[i], conf[i]) for i in range(4)],
+            "edges": [line(4 + i, edges[i]) for i in range(2)],
+            "lane_to_left": False, "lane_to_right": False, "lane_width_m": 3.5, "prior": None, "source": "vision"}
+
+
+def test_lanes_to_scene():
+    s = lanes_to_scene(lanes_msg())
+    assert s["lanes"][0] is None and s["lanes"][3] is None
+    assert s["lanes"][1] == {"y": [-1.75] * len(SCENE_XS), "prob": 0.92}
+    # a present line is never sent below the screen's drawing threshold: its presence is the tracker's
+    assert s["lanes"][2] == {"y": [1.75] * len(SCENE_XS), "prob": 0.3}
+    assert s["edges"] == [{"y": [-6.5] * len(SCENE_XS)}, None]
+    assert lanes_to_scene({"type": "lanes"}) is None
+    assert lanes_to_scene({"type": "lanes", "x": LANES_X, "lines": "x", "edges": []}) is None
+
+
+def test_builder_prefers_the_tracked_lanes_and_falls_back():
+    c = cfg(max_hz=1000.0)
+    b = SceneBuilder(c)
+    rl = [ln for ln in load_lines() if peek_type(ln) == "road"]
+    # older roadsense: no lanes topic -> the raw lane lines and edges
+    b.feed(rl[0], 0.0)
+    s = b.build(0.0)
+    raw = s["lanes"]
+    assert "lanes_src" not in s and s["edges"][0] is not None
+    # the tracker's geometry replaces both while fresh, including "this line is not there"
+    b.feed(json.dumps(lanes_msg()), 0.2)
+    b.feed(rl[1], 0.2)
+    s = b.build(0.2)
+    assert s["lanes_src"] == "tracked"
+    assert s["lanes"][0] is None and s["lanes"][1]["y"][0] == -1.75 and s["lanes"][2]["prob"] == 0.3
+    assert s["edges"] == [{"y": [-6.5] * len(SCENE_XS)}, None]
+    # stale tracker output (roadsense api restarted, topic gone): back to the raw lines
+    b.feed(rl[2], 1.0)
+    s = b.build(1.0)
+    assert "lanes_src" not in s and [x is None for x in s["lanes"]] == [x is None for x in raw]
+    # an unusable lanes message never blanks the road
+    b.feed(json.dumps({"type": "lanes", "seq": 9}), 1.2)
+    b.feed(rl[3], 1.2)
+    s = b.build(1.2)
+    assert "lanes_src" not in s and any(x is not None for x in s["lanes"])
