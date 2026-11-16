@@ -14,15 +14,87 @@ consistent observation); **G** = guess; **?** = unknown. Evidence is named in on
 
 ---
 
-## 1. Most-wanted gap: cruise control
+## 1. Cruise control
 
 The owner's top priority. A later phase plans an adaptive cruise by man-in-the-middling the cruise
 stalk, so the **set speed** matters most, then engaged/standby state and the stalk switches.
 
-What is known:
+Decoded on the cruise drive of 2026-11-16 21:14–21:28 (experiment E5, partial: owner timeline below,
+BEAN, broadcast CAN and the `21D3` poll; recording `2026-11-16_cruise_drive.ndjson.gz`, §10).
+Decoder: `comm/solicited_can.py` (`21D3`), `comm/bean.py` (`62:C8`), `comm/can_decoder.py` (0x5C8,
+0x120); fusion and freshness: `io/cruise_fusion.py`.
 
 | Source | Content | Confidence |
 |---|---|---|
+| BEAN `62:C8` (gateway → meter, PRI 6, 2 bytes, 1 s + on change, IG only) | **b1 `10` = cruise main switch on** (indicator lit). Set 21:16:59.4, cleared/set at the 1 s off/on 21:19:59.9/21:20:01.2, cleared 21:23:54.7, all at the owner's times; the fastest main-switch source. Everything else `00` | C |
+| CAN `0x5C8` (the gateway's copy of `62:C8`: `24 00 xx`) | b2 `10` = main switch, as above. In the trip log its content changed ~3 s after `62:C8` and missed the 1 s off/on (but see the timing caveat below). b0 bit 7 (`A4` instead of `24`) for 0.85 s at the refused SET at 37 km/h (21:20:02.3); also twice earlier that day (17:50:58, 17:52:29): meaning ? | main: C; b0 bit 7: ? |
+| CAN `0x120` b4 bit 7 (and b7 bit 7) | **cruise engaged**: set at every engage, cleared at every cancel (4 engages incl. the refused one) | C |
+| Solicited `0x7E2` mode 21 PID `D3`, reply `0x7EA` `07 61 D3 A B C D E`, polled 1 Hz | **A** = vehicle speed km/h (not a memory speed); **B** = set speed km/h (below); **C** = analog 0..107, rises while cruise pulls the car, 0 when it coasts or is off: probably the cruise drive (torque) request; **D** bit 7 = shift in D, bits 0–3 all set together while the main switch is on, bit 6 = cruise controlling the car; **E** not decoded (0, 1, 2, 5, 7, 8, 16 seen) | A, B, D: C; C: P (meaning) |
+| Repair manual RM1076E 05-1678 | HV ECU → meter "cruise indicator" via the gateway on BEAN | = `62:C8` (C) |
+
+`21D3` B in detail: set at SET to the current speed; follows RES/ACC and SET/COAST while engaged; kept
+after a cancel (the resume speed: 63 after the 21:17:16 cancel, RES at 21:17:19 resumed to 63); cleared
+to 0 once the car is slower than about 35 km/h (36 km/h kept, 32 km/h cleared). The refused SET at
+37 km/h showed B = 37 and D bit 6 for exactly one poll, then both cleared (minimum set speed is 40 km/h
+per the owner's manual). The third-party bit list in [`prius_can.md`](prius_can.md) (main, ready,
+indicator, RES/ACC, SET/COAST, CANCEL, stop-lamp bits) does not match this car for C and D bits 0–5.
+
+Not found anywhere: the stalk switches (RES/ACC, SET/COAST, CANCEL) are on neither BEAN nor broadcast
+CAN (bit search over the whole session); they can only be inferred from B changes. No set speed on BEAN
+or broadcast CAN: `21D3` is the only set-speed source.
+
+**Timing caveat (trip log).** The gateway's passive CAN stream reaches the phone 0–5 s after the
+solicited replies (passive copies of the same `0x7EA` replies: median 0.6 s, p90 2.1 s, max 4.8 s
+later). So "0x120 ~2 s behind `21D3`" and "0x5C8 ~3 s behind `62:C8`" are at least partly delivery
+latency, not the car. The backend therefore takes `21D3` only from the reply itself, never from a
+passive copy of it, and prefers `21D3` over 0x120 for "engaged".
+
+**Backend state** (`vehicle.*`): `cruise_main_switch` (`62:C8` → `21D3` → 0x5C8, best fresh source),
+`cruise_active` (`21D3` → 0x120), `cruise_set_speed` (B while engaged), `cruise_memory_speed` (B, the
+resume speed), `cruise_drive_request` (C raw). Main off clears engaged/set/resume; all sources silent
+for 5 s → everything unknown. The MFD cruise slot (`OFF` / `READY` / `ON`, set speed, resume speed dim)
+shows it.
+
+Owner timeline (CET) and what the bus showed:
+
+| Time | Owner | `21D3` B (A = speed) |
+|---|---|---|
+| 21:16:59 | main ON | D `80 → 8F`; `62:C8` `0010` at 59.4 |
+| 21:17:02 | SET 52 | 52 (A 52), D `CF`, C 4 → 66 in 3 s |
+| 21:17:06–15 | hold up | 53 55 55 57 58 60 61 63 65 66 (A 51 → 62) |
+| 21:17:16 | cancel | 63 kept, D `8F`, C 0 |
+| 21:17:19 | resume | 63 |
+| 21:17:21–29 | hold down | 58 55 55 55 55 55 53 53 52 (A 61 → 56) |
+| 21:17:37–50 | up | 53 (37) … 53, 55 (45), 55, 55, 55, 60 (49), 61 (50) |
+| 21:17:52 | cancel | 58 kept, cleared at 21:17:58 (A 32) |
+| 21:19:59 / 21:20:00 | main off / on | D `80`, `8F`; `62:C8` `0000` / `0010` |
+| 21:20:02.6 | SET at 37 (refused) | 37 for one poll, then 0; 0x5C8 b0 bit 7 |
+| 21:20:28 | SET 45 | 45 |
+| 21:21:15 | down to 40 | 40 in one poll (45 → 40) |
+| 21:21:21 | up to 42 | 42 in one poll (40 → 42) |
+| 21:23:07 | cancel | 42 kept, cleared at 21:23:09 |
+| 21:23:54 | main OFF | D `80`; `62:C8` `0000` |
+
+**Set-speed steps** (`21D3` is polled once a second, so every step below is the change between two
+polls, and taps closer together than 1 s merge):
+
+* resolution: 1 km/h (integer). Smallest step seen +1 and −1 (21:17:06, 21:17:37, 21:17:29), which is
+  consistent with one tap = 1 km/h, but no isolated tap was logged as such.
+* hold up: +13 km/h in 9 s (≈ 1.4–1.6 km/h per second, steps of +1/+2 per poll), set speed 2–4 km/h
+  ahead of the car, which follows at ≈ 1.2 km/h/s.
+* hold down: the first poll −5, then −3, then flat for 4 s while the car slowed, then −2, −1: the set
+  speed drops ahead of the car and then waits for it; no steady rate.
+* single −5 and +5 steps per poll also appear (45 → 40, 55 → 60); whether these are 5 fast taps, a
+  hold, or a 5 km/h step mode cannot be told at 1 Hz.
+* C (drive request): integer 0..107 seen, smooth (1-count resolution), 70–80 in steady cruise at 42
+  km/h, 85–107 while accelerating, falling to 0 while the set speed is below the car's speed.
+
+**What would settle the step size:** the same procedure with `21D3` polled at 5–10 Hz (or the owner
+marking each single tap with `bean_mark`), single taps 3 s apart at a steady speed, then holds of 2, 4
+and 6 s, up and down. Rest of E5: stalk wiring (connector, which ECU reads it, signal levels per
+switch) from the wiring diagram plus a multimeter, before any interposer design.
+
+---|---|---|
 | BEAN `62:C8` (gateway → meter, PRI 6, 2 bytes, 1 s, IG only) = CAN `0x5C8` (CAN→BEAN copy, §5) | `00 00` throughout the only IG-ON capture; cruise was not used in it | present: C; meaning: ? |
 | Repair manual RM1076E 05-1678 | HV ECU → meter "cruise indicator" travels via the gateway on BEAN (no ID given) | P that a cruise indicator frame exists; G that it is `62:C8` |
 | Third-party CAN list ([`prius_can.md`](prius_can.md)) | `0x5C8` byte C bit 4 (= `62:C8` b1 `10`) "cruise control on and active" | G (never seen set on this car) |
@@ -125,8 +197,8 @@ IDs with several fields follow in §4.1–§4.5. Counts and periods are from the
 | ID | Sender | PRI | Len | Period | When | CAN | Meaning | Conf. |
 |---|---|---|---|---|---|---|---|---|
 | `40:59` | ? (to body) | 2/10 | 2 | 1 s | OFF | — | constant `00 C0` in every state (JP the same) | ? |
-| `52:3F` | meter | 1/9 | 4 | 10 s + wake | OFF | 0x53F | odometer, b0–b2 km (24-bit); b3 `80` | C (owner read the meter) |
-| `52:6D` | A/C amp | 2/10 | 3 | 1 s | IG | 0x56D | b0 cabin (room) temperature raw; b1 flags; b2 = `FF` − b1 (§4.2) | P |
+| `52:3F` | meter | 1/9 | 4 | 10 s + wake | OFF | 0x53F | odometer, b0–b2 km (24-bit); b3 `80`. Frozen at `04 93 DF` = 299,999 km on this car (the NHW20 meter stops there; `52:76` kept counting): distance must come from 0x0B4 / `52:76` | C (owner read the meter) |
+| `52:6D` | A/C amp | 2/10 | 3 | 1 s | IG | 0x56D | b0 cabin (room) temperature, °C = 0.25·b0 − 6.5; b1 `20` blower running; b2 = `FF` − b1 (§4.2) | P |
 | `52:76` | meter | 9 | 3 | on change + ~15 s | IG | — | trip distance, b1 0.1 km/count, TRUE distance (= integrated 0x0B4, not the speedometer's); not reset at IG; b2 `80` = km | C |
 | `52:90` | meter | 1/9 | 3 | 0.5 s | IG | — | instantaneous consumption b0–b1 0.1 L/100 km over TRUE speed (§4.6); `00 00` no fuel (ICE off / EV, or fuel cut); `FF FE` stopped with ICE on; b2 `40` unit | C |
 | `52:99` | A/C amp | 2 | 3 | 5 s | IG | — | constant `00 00 00` | ? |
@@ -139,10 +211,10 @@ IDs with several fields follow in §4.1–§4.5. Counts and periods are from the
 | `62:20` | gateway | 14 | 2 | 0.92 s, ICE running only | IG | 0x520 | ECM fuel quantity PER INJECTION for the trip computer, 16-bit; flow = K × word × rpm (§4.3) | C |
 | `62:21` | gateway | 6 | 1 | 0.3 s | IG | 0x521 | constant `00`; warning demands to the meter? | G |
 | `62:6E` | ? | 2/10 | 2 | 1 s | OFF | — | key-not-in-vehicle warning: b0 `80` warning active, b1 `80` the ~1.2 s beep | C |
-| `62:C8` | gateway | 6 | 2 | 1 s | IG | 0x5C8 | cruise control (§1); constant `00 00`, cruise not used | ? |
+| `62:C8` | gateway | 6 | 2 | 1 s | IG | 0x5C8 | cruise control (§1): b1 `10` main switch on | C |
 | `98:27` | gateway | 6/14 | 2 | 1 s | IG | 0x527 | b0 `08` ICE stopped; b0 `01` + b1 `FF` HV ready (§4.3) | C / P |
 | `98:B2` | gateway | 6/14 | 3 | 5 s | IG | 0x5B2 | `00 04 00` from 0.4 s after READY; power permission to the A/C? | G |
-| `98:CC` | gateway | 6 | 2 | 0.26 s | IG | 0x5CC | slow 10-bit value 0x1FA–0x203 (§4.3); not a temperature in °C | ? |
+| `98:CC` | gateway | 6 | 2 | 0.26 s | IG | 0x5CC | raw outside-temperature sensor count (NTC), ≈ 535 − 5.6·T °C over 4–10 °C (§4.3) | P |
 | `98:EC` | gateway | 6 | 6 | 0.5 s | IG | 0x5EC | compressor feedback to the A/C amp (§4.2) | C/P |
 | `98:F8` | gateway | 6 | 1 | 1 s | IG | 0x5F8 | constant `00` | ? |
 | `FE:24` | meter | 1 | 1 | 0.5 s | IG | — | **displayed speed**, km/h (§4.4) | C |
@@ -160,7 +232,7 @@ IDs with several fields follow in §4.1–§4.5. Counts and periods are from the
 | `FE:AB` | each node | 0 (52: 4) | 2 / 11 | 1 s per node | OFF | — | network status (§3) | C |
 | `FE:B6` | body | 2/10 | 2 | 1 s | OFF | 0x5B6 | lock state and door switches (§4.1) | C |
 | `FE:C2` | each node | 8 (52: 12) | 2 | at wake | OFF | — | wake announcement (§3) | C |
-| `FE:CD` | A/C amp | 2 | 1 | 1 s | IG | — | outside temperature °C = x − 48 | C (offset), slope untested |
+| `FE:CD` | A/C amp | 2 | 1 | 1 s | IG | — | outside temperature °C = x − 48 | C (offset and slope, 4–10 °C) |
 | `FE:D4` | gateway | 6 | 1 | 1 s | IG | 0x5D4 | constant `00`; warning flags (RX300: starter/charge/oil) | G |
 | `FE:D8` | ? | 2/10 | 2 | 1 s | OFF | — | b1 `01` driver-door key window (~30 s); b0 power-mode flags (§4.5) | C (b1) / G (b0) |
 | `FE:DB` | ? | 2 | 1 | 1 s | OFF | — | constant `00` | ? |
@@ -207,7 +279,7 @@ than a lock motor moves.
 | b0 | `10` | tail/parking lamps | C (switch sequence) |
 | b0 | `20` | low beam | C |
 | b0 | `01` | front fog lamp | C (one occurrence) |
-| b0 | `08` | high beam | P (bean_tools decode and CAN 0x57F `0x38`; not yet seen on this car) |
+| b0 | `08` | high beam | C (2026-11-16 17:44:36–41, 17:44:45–50, 17:46:23–29, about 5 s each, moving with low beam on; CAN 0x57F b1 `30 → 38` in the same three episodes) |
 | b1 | `08` | follows the tail lamps (illumination) | C |
 | b1 | `10` | always set except in the first frame of a door-open wake | ? |
 | b2 | `80` | any door open (meter indicator) | C |
@@ -264,9 +336,12 @@ front-defrost press showed none).
 `52:6D` (A/C amp → gateway → CAN 0x56D):
 * b0 = cabin (room) temperature, raw (P): rises `35` → `65` during warm-up, drops 2–3 counts within
   about 10 s of each door opening (3/3), independent of outside, coolant and intake temperature.
-  Scale unknown (probably 0.3–0.5 °C per count).
-* b1 `20` on from the first defrost to the end of the drive; b1 `80` dropped three times after mode or
-  temperature changes. Both ?. b2 = `FF` − b1.
+  °C = 0.25·b0 − 6.5: scale P (two soak points against the powerbox sensor plus the warm-up slope,
+  2026-11-16 data crunch), offset G (Toyota A/C data-list range −6.5…57.25 °C; the box suggests −8.5,
+  so it may read 1–2 °C high). At the end of each 15-min AUTO drive it read 17.0–20.0 °C at setpoints
+  18/20. The backend feeds `climate.inside_temp` from it (None after 10 s without the frame).
+* b1 `20` = blower running (= `FE:FC` fan > 0, 3982/3992 s; P → C); b1 `80` clears in warm-up windows
+  (?). b2 = `FF` − b1.
 
 `52:ED` (A/C amp → gateway → CAN 0x5ED, the HV ECU's input from the A/C):
 
@@ -288,8 +363,9 @@ b4 slow, `06` → `12` over the drive, r = 0.99 with `52:6D` b0 and 0.97 with th
 temperatures: a slow temperature, maybe the compressor inverter (G); b5 tracks HV bus voltage, V ≈
 1.9·x + 102 (r = 0.977 against 0x03B) (P).
 
-`FE:CD` = outside temperature, x − 48 °C (C for the offset: `34` = 4 °C against OBD 0146 4–5 °C and
-the powerbox sensor 4.9 °C; x − 40 and x/2 ruled out; the value never changed, slope untested). Path
+`FE:CD` = outside temperature, x − 48 °C (C: `34` = 4 °C against OBD 0146 4–5 °C and the powerbox
+sensor 4.9 °C; x − 40 and x/2 ruled out; slope confirmed over 4–10 °C on 2026-11-16, identical or ±1
+against OBD 0146 for 4,000 s). Path
 (RM 05-1054, 05-1019): sensor → ECM → CAN → gateway → BEAN → A/C amp, which then sends `FE:CD` to the
 meter and the MFD (AVC `E0 5D F7`). It exists only with IG on: the ECM and the A/C amp do not take part
 in car-off wakes and no BEAN request produces it. With the car off the options are the last IG-ON value
@@ -316,10 +392,9 @@ or the project's own sensor.
 * `FE:91` (0x591): `A0 1F 06` from IG to the READY moment, then `00 00 00`; CAN 0x591 `25 00 00 00`
   throughout. The JP car shows `80 20 00` in READY; that reading does not transfer (G: HV ECU start-up
   handshake).
-* `98:CC` (0x5CC): 10-bit value 0x1FA–0x203, ±1 flicker; fell 0x203 → 0x1FB as intake air rose 5 →
-  15 °C at a standstill, rose again while driving (r = −0.81 against IAT, −0.85 against 0x3CF b2); not
-  HV voltage, 12 V, SOC or outside temperature. A raw thermistor count of something in the engine bay
-  (G).
+* `98:CC` (0x5CC): 10-bit raw count of the outside-temperature sensor (NTC, falls when warmer),
+  ≈ 535 − 5.6·T °C over 4–10 °C, r = −0.99 against OBD 0146 and CAN 0x3CF b1 (n = 3,965 s, 2026-11-16)
+  (P). The earlier "not outside temperature" came from a single drive at a constant 4 °C.
 
 ### 4.4 Speed: real and displayed
 
@@ -340,6 +415,20 @@ control) and `display_speed` = BEAN `FE:24` (what the driver sees on the speedom
 * `FE:50`: leaving P `84 → 04 → 0C`, entering P `0C → 04 → 84`, power-off `84 → 86 → 82 → 80`:
   `80` P locked, `08` out of P, `04` ECU on (IG), `02` pulses in the power-off/auto-P handshake (P:
   3 exits, 2 entries, 1 power-off, plus the JP car).
+* Step-by-step start, 2026-11-16 20:40 (trip log; owner pressed without the brake, then with it), C
+  for the order:
+
+  | Time | Step | Bus |
+  |---|---|---|
+  | 20:40:09.9 | power off (previous IG) | `FE:62` `3820 → 3800 → 3000 → 2000` (b1 `20` = the off press, now seen twice), `FE:50` `86 → 82 → 80`, `FE:83` `40 → 00` |
+  | 20:40:15.5 | press, no brake → **ACC** | `FE:83` `20`, `FE:62` `3000` |
+  | ~20:40:21 | press again, no brake | `FE:62` b0 `08` (word `0x0800`) for the press only |
+  | 20:40:21.5 | **IG** (not READY) | `FE:83` `60`, `FE:50` `04`, `FE:29` starts (brake bit clear) |
+  | 20:40:23.9 | brake pedal | `FE:29` b2 `08` |
+  | 20:40:26.4–27.6 | press with brake → **READY** | `FE:62` b0 `08` pulse again; `FE:29` b2 `80`, `98:27` `01FF` (READY candidates of E1 confirmed in this order) |
+  | 20:40:31.6 / 20:41:06.6 | R / D | `FE:40` |
+
+  The starts at 20:38 and 21:14 (brake held, one press) reached READY within 1.3 s. E1 is done.
 * `FE:D8` b0: `00 → 0C` at the power press with `FE:83`; `0C → 04 → 00` within 0.1 s at power-off; on
   the JP car `0C` already at ACC and `04` while a key is in the slot: `08` power not off, `04` key
   detected/authenticated (G).
@@ -488,13 +577,13 @@ Ranked by what they settle. By owner priority **E5 (cruise control) comes first*
 
 | # | Experiment | Settles |
 |---|---|---|
-| E1 | **IG-ON without READY.** Power without brake (ACC), wait 10 s; press again (IG, not READY), wait 20 s; brake + press (READY), wait 10 s; power off | `FE:83` `20` = ACC on this car; the READY bit among `FE:29` b2 `80`, `98:27` b0 `01`, `FE:91`, `98:B2`, `FE:AB[52]` b2 `80`; `FE:D8` b0; `FE:50` `04` |
+| E1 | DONE 2026-11-16 (§4.5). **IG-ON without READY.** Power without brake (ACC), wait 10 s; press again (IG, not READY), wait 20 s; brake + press (READY), wait 10 s; power off | `FE:83` `20` = ACC on this car; the READY bit among `FE:29` b2 `80`, `98:27` b0 `01`, `FE:91`, `98:B2`, `FE:AB[52]` b2 `80`; `FE:D8` b0; `FE:50` `04` |
 | E2 | **Hard climate keys, parked READY.** Front defrost on/off, rear defogger on/off, two steering-pad temperature/mode steps | `FE:FC` b0 `10`/`08`, `52:ED` b1 `20`, a possible mirror-heater bit, `52:6D` b1 flags |
-| E3 | **Cabin thermometer during a cold start**, one reading per minute for 10 min | `52:6D` b0 scale; whether `98:EC` b4 is cabin-related |
+| E3 | **Cabin thermometer during a cold start**, parked READY after a night soak, a reference thermometer, one reading per minute for 10 min | `52:6D` b0 offset only (scale P, 2026-11-16); whether `98:EC` b4 is cabin-related |
 | E4 | **Trip meter.** Note Trip A/B and average consumption at start and end of a drive; reset Trip A with IG on | which trip `52:76` is; whether `52:A2` resets with it |
-| E5 | **Cruise control** on/set/cancel on a drive (full procedure in §1) | `62:C8`/`0x5C8` bits, set speed source, `21D3` check |
+| E5 | **Cruise control** — PARTLY DONE 2026-11-16 (§1: main switch, engaged, set speed, `21D3` layout). Left: single taps 3 s apart and timed holds with `21D3` polled at 5–10 Hz; brake cancel; 0x5C8 b0 bit 7; stalk wiring | tap/hold step size, 0x5C8 b0 bit 7 |
 | E6 | **GPS speed at steady 50 and 80 km/h** | `FE:24` = displayed (over-reading) speed |
-| E7 | **High beam, flash, rear fog**, 10 s gaps | `FE:7F` b0 `08` on this car; whether rear fog has any bit |
+| E7 | **Flash, rear fog**, 10 s gaps (high beam seen 2026-11-16: `FE:7F` b0 `08`) | flash = the same bit?; whether rear fog has any bit |
 | E8 | `98:CC`, `40:59`, `52:CA`, `52:D0`, `FE:DB`: no cheap experiment. A K-line data list of the A/C amp (room, evaporator, inverter temperatures) next to a capture | `98:CC`, `98:EC` b4 |
 | E9 | **K-line tester on DLC3** (needs K-line hardware): body active tests Hazard on/off, Security Indic, Trunk/Bdor Open, Door Lock (all doors closed); A/C Defogger Rly-R, Blower | BEAN diagnostic frames gateway → `40`/`98`, diagnosis-mode entry, body node address |
 | E10 | **Key reminder:** power OFF/ACC, key in the slot, driver door open | other meter-buzzer requests besides `62:6E` |
@@ -513,6 +602,11 @@ Other open items:
   destination/LHD/options?).
 * B5 ↔ C1 role assignment; node `19` identity.
 * Does the gateway copy any BEAN ID to CAN besides §5, in other states (e.g. during cruise)?
+* Powerbox fw 2.4.1 receiver overflow (`ovf`/`lost`) loses 7–9 % of frames on a drive (2026-11-16
+  data crunch: 1 s IDs arrive at 0.91–0.98 /s); the BEAN capture file of that evening is lossier still
+  (frames batched with decoded vehicle actions were skipped, fixed in commit 79c4bb8).
+* Gateway passive CAN stream latency: in the trip log, passive CAN frames reach the phone 0–5 s after
+  the solicited replies (§1, timing caveat). CAN-vs-BEAN timing from trip logs needs this correction.
 * Recording time base: in the drive capture (fw 2.4.0) the firmware `t_ms` runs 236.4 s ahead of
   `ticks_ms` (a jump at the bus wake-up, tick overflow, `powerbox/README.md` *Tick arithmetic*) and
   drifts while the bus is busy, so the age correction in `frame_from_wire()` is skipped and
@@ -533,6 +627,7 @@ removed. All frames have valid CRCs. Times are CET.
 | `2026-11-13_remote_test.ndjson.gz` | 15:24:33–15:24:59 | 350 / 14 | car off | key-fob unlock, then lock |
 | `2026-11-13_session30_doors_locks.ndjson.gz` | 16:29:49–16:37:06 (capture started 16:18:29; bus silent before) | 4,372 / 14 | car off | handle-touch unlock/lock, interior switch, every door, back door (timeline below) |
 | `2026-11-13_drive_ig_on.ndjson.gz` | 21:47:47–22:07:26 | 59,444 / 43 | IG-ON, READY, drive | power-on, scripted AVC climate run (21 marks, 21:58:00–21:59:25), lamps, wipers, seat belt, reversing, key-out warning, power-off, lock on leaving |
+| `2026-11-16_cruise_drive.ndjson.gz` | 21:14:24–21:28:48 | 40,990 / 42 | IG-ON, READY, drive | cruise control session (§1), 16 `mark` records with the owner's timeline (main, SET, holds, cancels, refused SET); rebuilt from the phone trip log (powerbox device 203 batches), not from the BEAN capture file, which lost frames (79c4bb8); 254 CRC/length-bad frames and 14 frames to `B5`/`C1` removed |
 
 session30 timeline (from the bus, owner's action list):
 

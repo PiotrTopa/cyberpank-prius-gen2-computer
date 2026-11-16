@@ -67,7 +67,7 @@ accelerates.
 | Auto lock while driving / walk-away lock | not planned | — | — | no BEAN lock command; hard-wiring locks is a safety risk |
 | Seat / steering memory | not planned | — | — | manual seats |
 | Driver profiles | planned | phone BLE presence | — | first step: BLE presence in `prius-bled` |
-| Cabin over-temperature / rear-seat reminder | planned | BMP280 cabin temp, rear-door bit | — | first step: parked event type on `powerbox.bmp2_t` |
+| Cabin over-temperature / rear-seat reminder | planned | BMP280 cabin temp or BEAN `52:6D` (`climate.inside_temp`, IG on only, offset G), rear-door bit | — | first step: parked event type on `powerbox.bmp2_t` |
 
 ## 4. Energy and hybrid
 
@@ -103,6 +103,8 @@ accelerates.
 | Function | Status | Needs | Code | Note / first step |
 |---|---|---|---|---|
 | Alert banner on the MFD | have | — | `ui/scene/alerts.py` | main screen; other screens: planned (app-level overlay) |
+| Cruise state on the MFD (main switch, engaged, set / resume speed) | have | `21D3` poll, BEAN `62:C8`, CAN 0x5C8 / 0x120 | `io/cruise_fusion.py`, cruise slot in `ui/scene/powerbox.py`, `SET nn` chip | decoded 2026-11-16 (BEAN_SIGNALS §1); stalk switches are on no bus |
+| Main screen: road view while stopped in traffic | have | gear, READY / ACC, doors | `ui/scene/director.py` | parked view only in P, with power off or a door open (2026-11-16; was: after 2.5 s standing) |
 | HUD-style VFD display of alerts | planned | VFD satellite | — | first step: `alert` event to the VFD app |
 | Voice control | have (head unit) | — | — | own STT not planned |
 | Steering-wheel keys (acknowledge alerts) | planned | head-unit agent | — | first step: map a key to `input_event mfd/alert_ack` |
@@ -120,7 +122,7 @@ accelerates.
 | 6 | Object tracks in roadsense (adjacent / oncoming, lead class, pedestrians) | better distance warning, cut-in handling, truck-ahead recirc | roadsense `objects[]` (MFD_MAIN_SCREEN 8.2) | M–L |
 | 7 | Rain / light / dew sensor in the car | rain awareness, fogging assist, lights reminder | VAG RLS on a LIN satellite (firmware exists from the bench) | M |
 | 8 | Yaw rate / calibrated acceleration | live curve check, smoothness score | correlate undecoded fast CAN ids with wheel-speed yaw; calibrate 0x022/0x023 | S–M |
-| 9 | Verified cruise state | ISA behaviour with cruise set, eco statistics | experiment E5 (BEAN_SIGNALS §1) | S |
+| 9 | Cruise stalk taps (state, set speed, engaged are verified 2026-11-16) | adaptive-cruise interposer design, exact tap/hold behaviour | `21D3` at 5–10 Hz with marked taps (BEAN_SIGNALS §1, E5 rest); stalk wiring | S |
 | 10 | 21C3 torque units | absolute braking score | a braking test against 0x030 and deceleration | S |
 | 11 | Fuel level scale / LPG level and fuel select | range on LPG, true fuel statistics | inputs from the LPG changeover line and level sender | S–M |
 | 12 | Separate rear-door / hatch bits | door picture, rear-seat reminder | satellite input on the hatch switch or a further BEAN decode | S |

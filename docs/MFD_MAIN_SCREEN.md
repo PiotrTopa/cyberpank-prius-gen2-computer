@@ -120,7 +120,7 @@ striped sun and the skylines are 80s arcade; the depth scale is logarithmic (sec
 
 | State | Condition | Picture |
 |---|---|---|
-| Parked | not moving, and gear P, or a door open, or stopped for 2.5 s; also while reversing | three-quarter view of the car on a grid pad; gear, `READY`/`ACC`/`OFF`, `ICE`; chips for the lamps that are on; lit lamp lenses with halos |
+| Parked | not moving, and gear P, or a door open, or power off (neither READY nor ACC/IG); also while reversing. A stop in D / N / B in traffic keeps the road view (owner, 2026-11-16; before, the view closed after 2.5 s standing) | three-quarter view of the car on a grid pad; gear, `READY`/`ACC`/`OFF`, `ICE`; chips for the lamps that are on; lit lamp lenses with halos |
 | Doors | per door, 0.55 s swing | the door opens on the model with an amber outline; `OPEN DRIVER PASSENGER ...` at the bottom; `DOORS CLOSED` only when the state is known |
 | Rear group | only the shared "rear door or back door" bit is set | both rear doors and the hatch ajar (34 %) in amber, text `REAR/BACK`: one of them is open, the car does not say which |
 | Opening | real speed >= 3 km/h in a forward gear | 1.3 s camera swing from the three-quarter view to the chase view, the pad opens into the road |
@@ -129,7 +129,7 @@ striped sun and the skylines are 80s arcade; the depth scale is logarithmic (sec
 | Driving, signal lost | road data was live and is now older than 7 s | floor grid only, `NO SIGNAL` blinking |
 | Driving, no road data | roadsense running, no scene data received yet (stack starting, scene feed off) | floor grid only, `NO ROAD DATA` (steady, dim); limit sign and traffic light from the health mirror still show |
 | Driving, vision off | roadsense not running | floor grid only (a floor line runs under the car: never a fake lane), `VISION OFF` |
-| Closing | stopped for 2.5 s (at once in P or with a door open) | the swing in reverse |
+| Closing | standing and in P, power off, or a door open | the swing in reverse |
 
 Rules that hold in every state: nothing is drawn for data that is not there (no lead in the scene
 = no vehicle; unknown doors = no door text; unknown lamps = dark lenses); a short stop keeps the
@@ -195,7 +195,7 @@ offset: lane points need no projection (`SceneRenderer._row`, `_xs_table`).
 | any door | `bean.decoded["any_door_open"]`, `["door_open"]`, `dynamics.door_open` when set |
 | low beam, tail (position), front fog, high beam | `bean.decoded["lamp_head" / "lamp_tail" / "lamp_fog_front" / "lamp_high_beam"]`, else `dynamics.low_beam / parking_lights / fog_front / high_beam` |
 | stop lamps | `vehicle.brake_switch`, else `vehicle.brake_pressed > 0` |
-| cruise engaged, main switch, set speed, memory speed | `vehicle.cruise_active`, `.cruise_main_switch` (None = unknown), `.cruise_set_speed`, `.cruise_memory_speed` (solicited 21D3; unverified on the car) |
+| cruise engaged, main switch, set speed, resume speed | `vehicle.cruise_active`, `.cruise_main_switch` (None = unknown), `.cruise_set_speed` (while engaged), `.cruise_memory_speed` (the resume speed, kept after a cancel) — `io/cruise_fusion.py` from 21D3, BEAN 62:C8 and CAN 0x5C8 / 0x120, verified on the 2026-11-16 cruise drive ([BEAN_SIGNALS.md](BEAN_SIGNALS.md) §1) |
 | cruise gap setting | `vehicle.cruise_gap` / `.acc_gap` if a state ever has one (none today) |
 | HV power, SOC | `energy.battery_power_kw`, `energy.battery_soc`, bars from `avc.battery_bars` else `dynamics.soc_bars` |
 | roadsense running | `roadsense.state == "running"` and `roadsense.api_ok` not False |
@@ -523,7 +523,7 @@ The event `roadsense_scene` (section 7.1) and the health mirror (`RoadsenseState
 
 | Item | Type | Meaning |
 |---|---|---|
-| cruise state | `vehicle.cruise_active`, `.cruise_main_switch`, `.cruise_set_speed`, `.cruise_memory_speed` | exist (solicited 21D3) but are unverified; the cruise slot shows them as they are. The raw frames (`cruise_raw_62c8`, CAN 0x5C8) are being recorded to decode them |
+| cruise state | `vehicle.cruise_active`, `.cruise_main_switch`, `.cruise_set_speed`, `.cruise_memory_speed`, `.cruise_drive_request` | decoded and verified 2026-11-16 (BEAN_SIGNALS §1); `cruise_drive_request` (21D3 C, raw 0..~110) is not drawn |
 | cruise gap | `vehicle.cruise_gap: Optional[int]` 1..3 | read if present; the car has plain cruise, so this waits for a longitudinal controller |
 | high beam | `dynamics.high_beam` / BEAN `lamp_high_beam` | the bit was never seen set on this car; the high-beam fan is drawn when it is |
 
@@ -585,7 +585,6 @@ Wanted by the design, not available from the car or roadsense today, and therefo
 | end of a tunnel ahead, wet road | roadsense env (8.2) |
 | rear-left / rear-right / back door separately, bonnet | body switches the BEAN frame does not separate; a satellite input or a further BEAN decode |
 | turn signals, hazard lamps, reversing lamp, rear fog | not decoded on CAN/BEAN yet |
-| verified cruise set speed and state | decode of BEAN 62:C8 / CAN 0x5C8 (the slot is in place) |
 | adaptive-cruise gap and target | the car has plain cruise (the gap bars are reserved in the slot) |
 | blind-spot markers | side radar or a rear/side camera |
 | traffic behind | a rear camera in roadsense |

@@ -29,7 +29,7 @@ CAN 0x5xx: [`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §5.
 | 0x03B | 8 | HV battery current, voltage | current = low 12 bits of A,B signed × 0.1 A (> 0 discharge); voltage = 256C + D V | Car: voltage is 16-bit (byte D alone wraps at 256 V; the pack reaches ~260 V under hard regen) |
 | 0x0B1 / 0x0B3 | 13 | front / rear wheels (right A,B; left C,D) | (256A + B), (256C + D) × 0.01 km/h; E,F not decoded | Car (2026-11-13 drive): speed, not pulses: wheel mean = 0.978 (rear) / 0.981 (front) × 0x0B4; front and rear (right − left) correlate 0.97. Right/left labels G (consistent with 0x025's sign) |
 | 0x0B4 | 14 | vehicle speed | (256F + G) × 0.01 km/h | Car: true speed; the meter's trip distance agrees with it; the speedometer (`FE:24`) reads 12 % higher |
-| 0x120 | 17 | gear | byte F low nibble: 0 P, 1 R, 2 N, 3 D, 4 B (observed F = 0x20–0x23) | Car: P/R/N/D on 20 shifts, BEAN `FE:40` follows 45–110 ms later; B not observed. (The list's `{D:0-1}` does not match this car) |
+| 0x120 | 17 | gear | byte F low nibble: 0 P, 1 R, 2 N, 3 D, 4 B (observed F = 0x20–0x23) | Car: P/R/N/D on 20 shifts, BEAN `FE:40` follows 45–110 ms later; B not observed. (The list's `{D:0-1}` does not match this car). **Byte E bit 7 (and byte H bit 7) = cruise engaged**: Car, every engage/cancel of the 2026-11-16 cruise drive (`10 → 90`, H `60 → E0`) |
 | 0x244 | 25 | accelerator pedal | G, 0–0xC8 | G |
 | 0x3B6 | — | energy-monitor flow | bytes F, G bitmask | G (unvalidated; 0x528 carries the energy arrows, [`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §5) |
 | 0x3C8 | 70 | ICE speed target | 256C + D rpm | G |
@@ -45,7 +45,7 @@ CAN 0x5xx: [`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §5.
 | 0x57F | 1050 | lamps (BEAN `FE:7F` → CAN) | `{B:3-5}`: 0x00 off, 0x10 parking, 0x30 low beam, 0x38 high beam; `{D:7}` = any door open | Car (parking, low beam, door) |
 | 0x5A4 | 3400 | fuel level (BEAN `52:A4` → CAN) | B; full tank read 0x2C (44), assumed litres | G (scale) |
 | 0x5B6 | 1050 | doors (BEAN `FE:B6` → CAN) | `{C:7}` driver door, `{C:6}` front passenger door, `{C:2}` rear or back door | Car (the list's "0x40 = other doors" is the passenger door only) |
-| 0x5C8 | 1050 | cruise control (gateway CAN → BEAN `62:C8`) | list: `{C:4}` cruise on and active | ?, see §8 and [`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §1 |
+| 0x5C8 | 1050 | cruise control (gateway copy of BEAN `62:C8`, `24 00 xx`) | **`{C:4}` = cruise MAIN SWITCH on** (not "active", not a cancel event); A bit 7 (`A4`) for 0.85 s at a refused SET (meaning ?) | Car (2026-11-16 cruise drive, [`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §1); its content lagged `62:C8` by ~3 s in the trip log (partly the passive-stream latency, §8) |
 | 0x5CC | 272 | BEAN `98:CC` copy (not a temperature) | header `24` + 10-bit value | Car |
 
 **Fuel flow (0x520).** The word is the fuel quantity per injection, not a flow; the flow scales with
@@ -80,6 +80,12 @@ BEAN `98:27` → `62:20`/0x520 presence → AVC) in `cyberpunk_computer/comm/eng
 All gateway copies 0x5xx have byte 0 = header and bytes 1… = the BEAN data
 ([`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §5): 0x520/521/526/527/529/52C/540/591/5B2/5C8/5CC/5D4/5EC/5F8
 (CAN → BEAN) and 0x53F/553/554/56D/57F/5A4/5B6/5ED (BEAN → CAN).
+
+Decoded since (2026-11-16 data crunch, P): 0x3CF B = outside air °C (= OBD 0146, median difference
+0, r = 0.975; sign below 0 °C not yet seen), C = intake air °C (= OBD 010F, r = 0.988); A ?, D 0, E
+varies. 0x3CD C,D = pack voltage V (P). 0x3CA C = true speed km/h. 0x484 B ≈ coolant, 0.626·B °C
+(P). 0x230 D `04` = brake pressed (P). 0x348 B,C follow ICE speed, not a pack temperature. 0x4CE
+constant, not a temperature. 0x4C1…0x4D1, 0x020, 0x423 constant.
 
 No decode (period in ms): 0x020 (12), 0x03A (8; NOT a yaw rate in the `can_decoder.py` reading: correlation 0.01 with the wheel-speed yaw on the 2026-11-13 drive, byte A only 0/1), 0x03E (8), 0x230 (28),
 0x262 (21), 0x348 (44), 0x3C9 (106), 0x3CF (139), 0x423 (1075), 0x484 (1120), 0x4C1 (971), 0x4C3
@@ -176,14 +182,19 @@ Which of these answer on this car: [`TOYOTA_DIAGNOSTICS.md`](TOYOTA_DIAGNOSTICS.
 | O | boost (raising pressure) ratio | 100O/255 % |
 | P | A/C consumption power | 0.019608P kW |
 
-21D3 (cruise control; never checked against an engaged cruise on this car):
+21D3 (cruise control), reply `07 61 D3 A B C D E`. Checked against an engaged cruise on this car
+(2026-11-16, [`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §1). The third-party list (memory speed in A, switch
+and stop-lamp bits in C/D) does **not** match this car:
 
-| Byte | Content |
-|---|---|
-| A | cruise memory vehicle speed, km/h (0–150) |
-| B | **cruise set/resume speed, km/h**; 0 below about 40 km/h |
-| C | `{C:0}` main switch, `{C:2}` main switch ready, `{C:5}` indicator, `{C:6}` cruise control, `{C:7}` shift D |
-| D | `{D:0}` stop light switch 1 (sub CPU), `{D:1}` switch 2 (sub), `{D:2}` switch 1 (main), `{D:3}` RES/ACC, `{D:4}` SET/COAST, `{D:5}` CANCEL, `{D:6}` cruise active (set; reported to drop to 0 for < 1 s at times), `{D:7}` D selected |
+| Byte | Content (this car) | Confidence |
+|---|---|---|
+| A | vehicle speed, km/h | Car |
+| B | **cruise set speed, km/h**: set at SET, follows RES/ACC and SET/COAST, kept after a cancel (resume speed), 0 once slower than ~35 km/h; 1 km/h resolution | Car |
+| C | analog 0..107: rises while cruise pulls the car, 0 when coasting or off; probably the cruise drive request | Car (behaviour), G (meaning) |
+| D | bit 7 shift in D; bits 0–3 all set while the main switch is on; bit 6 cruise controlling the car; bits 4–5 never set | Car |
+| E | not decoded (0, 1, 2, 5, 7, 8, 16 seen) | ? |
+
+The stalk switches (RES/ACC, SET/COAST, CANCEL) are not in this reply, nor on broadcast CAN or BEAN.
 
 ## 7. Solicited PIDs, HV battery ECU 0x7E3
 
@@ -209,10 +220,14 @@ Battery power = current × sum of block voltages.
 
 ## 8. Open gaps
 
-* **0x5C8 / 21D3 (cruise):** the list reads 0x5C8 `{C:4}` as "cruise active"; a comment in
-  `can_decoder.py` reads the same bit as a cancel event and calls the message sparse (about 18 frames
-  in 37 min), while the list gives a 1050 ms period. Neither has been checked with cruise engaged.
-  Resolves with experiment E5 in [`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §1.
+* **0x5C8 / 21D3 (cruise):** resolved 2026-11-16 (§2, §6). Open: 0x5C8 A bit 7; the set-speed step
+  per stalk tap (needs `21D3` faster than 1 Hz).
+* **Passive-stream latency:** in the trip log the gateway's passive CAN frames arrive 0–5 s after the
+  solicited replies (passive copies of the same `0x7EA` replies: median 0.6 s, p90 2.1 s, max 4.8 s).
+  Timing comparisons between passive CAN and replies or BEAN in a trip log must allow for it; the
+  backend uses solicited data only from the reply itself.
+* **Trip-log cadence:** the trip log carries IDs outside the fast set once per 20 s (logging/forwarding
+  filter), so frame counts in a trip log say nothing about the car's period.
 * **0x5xx cadence:** the list gives about 1 s for most gateway copies; own CAN logs contain far fewer
   frames (e.g. 58 × 0x5C8 in 53 min). Whether the gateway sends them on change only or the logs drop
   them: compare a CAN log with a simultaneous BEAN capture (BEAN side is 1 s).
