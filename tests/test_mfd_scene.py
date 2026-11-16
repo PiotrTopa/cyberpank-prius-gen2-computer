@@ -1203,3 +1203,38 @@ def test_map_tunables_change_the_picture_and_redraws_stay_cached():
     d.update(still, 0.05)
     r.render(d, still, 2.0)
     assert r.redraws == n
+
+
+def test_roadside_trees_keep_their_place_while_they_approach(monkeypatch):
+    """A forest tree is one object: the same distance from the road edge and the same height from the
+    moment it appears until it passes (they swayed and scattered, owner 2026-11-16: the per-tree scatter
+    was keyed by the tree's current distance)."""
+    import cyberpunk_computer.ui.scene.render as R
+    from cyberpunk_computer.ui.scene.tuning import Tuning
+    r = R.SceneRenderer((238, 216), tuning=Tuning({"roadside": "normal"}))
+    d = SceneDirector(Tuning({"roadside": "normal"}))
+    step(d, drive_inputs(env_place="forest_road"), 2.0)
+    r.render(d, drive_inputs(env_place="forest_road"), 10.0)       # sets up the chase geometry
+    placed = []
+    monkeypatch.setattr(r, "_place", lambda cam, x, y, v: placed.append((x, y)) or (100.0, 100.0, 4.0))
+    talls = []
+    monkeypatch.setattr(R, "conifer", lambda s, gx, gy, tall, *a: talls.append(tall))
+    d.edges = [[5.5] * len(d.xs), [-5.5] * len(d.xs)]              # straight edges: any sway is the scatter's
+    trees = {}                                                     # (side, row, world position) -> offsets, heights
+    odo0 = d.odo
+    for i in range(400):
+        d.odo = odo0 + i * 0.25                                    # 100 m in 0.25 m steps
+        placed.clear()
+        talls.clear()
+        r._draw_roadside(r.surface, d, "forest_road", "day")
+        assert len(placed) == len(talls) > 4
+        for (x, y), tall in zip(placed, talls):
+            row = 0 if abs(y) > 8.0 else 1                          # far row beyond 7.5 m + 5.5 m edge
+            key = (y > 0, row, round((d.odo + x) * 4))
+            trees.setdefault(key, []).append((round(y, 3), round(tall, 3)))
+    followed = [v for v in trees.values() if len(v) > 100]
+    assert len(followed) >= 8
+    for v in followed:
+        assert len(set(v)) == 1, v[:5]
+    # and the trees do differ from one another
+    assert len({v[0] for v in followed}) > 3

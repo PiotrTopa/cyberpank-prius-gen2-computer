@@ -653,16 +653,23 @@ class SceneRenderer:
             for off, pitch, line_c, fill in rows:
                 if light == "night":
                     line_c = _k(line_c, 0.7)
-                x = 100.0 - ((d.odo + off * 3.1) % pitch)
+                # every tree keeps its own scatter (distance from the edge, height) for as
+                # long as it is on screen: keyed by the tree's index along the road, never by
+                # its current distance (which made it sway and change height as it came closer)
+                along = d.odo + off * 3.1
+                idx = int(along // pitch)
+                x = 100.0 - (along % pitch)
                 while x > 7.0:
                     for sgn in (1.0, -1.0):
-                        g = self._place(None, x, side_y(x, sgn, off + ((x * 13) % 5) * 0.25), 1.0)
+                        h = (idx * 2654435761 + (1 if sgn > 0 else 2) * 40503 + int(off * 10) * 97) & 0xFFFF
+                        g = self._place(None, x, side_y(x, sgn, off + (h % 5) * 0.25), 1.0)
                         if g is None:
                             continue
                         gx, gy, k = g
-                        tall = min(44.0, k * (6.0 + ((x * 7) % 4) * 0.6))
+                        tall = min(44.0, k * (6.0 + ((h >> 4) % 4) * 0.6))
                         conifer(s, gx, gy, tall, tall * 0.27, line_c, fill, 3 if tall > 26 else 2)
                     x -= pitch
+                    idx -= 1
         elif place in ("highway", "rural_road", "bridge"):
             # marker posts: white reflector on the left, red on the right
             pitch = 25.0
