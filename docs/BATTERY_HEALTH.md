@@ -19,7 +19,7 @@ backend's metrics database (2026-11-04 … 11-15).
 | READY flag | CAN 0x529 | passive | 1/s | | |
 | vehicle speed | CAN 0x0B4 | passive | 33/s (every 16th used) | 0.01 km/h | |
 | SOC, current, 14 block voltages | `21 CE` to 0x7E3 | poll, existing (2 s) | 0.48/s | 0.5 %, 0.01 A, 0.01 V | the 21CE current matches 0x03B at zero lag (mean abs. difference 1.5 A) |
-| intake air temp, fan motor voltage, 12 V at the battery ECU | `21 CF` first frame | poll, existing (2 s) | 0.49/s | 0.01 °C, 0.2 V | see §7: only the first frame arrived |
+| intake air temp, fan motor voltage, 12 V at the battery ECU | `21 CF` first frame | poll, existing (2 s; 10 s since 2026-11-17) | 0.49/s | 0.01 °C, 0.2 V | see §7: only the first frame arrived |
 | battery temperatures 1–3, limits in kW, delta SOC, fan step | `21 CF` further frames | poll, existing | **not received** | | fixed in this branch (ISO-TP on the subscription), unverified on the car |
 | ECU block resistances, accumulated-time counters | `21 D0` | poll, existing (5 s) | 0.19/s | 1 mΩ, 1 s | all 14 blocks read 19 mΩ on 2026-11-13; counters 0 |
 | 12 V at the ECM | OBD `01 42` | poll, existing (5 s) | 0.2/s | 1 mV | only while IG-ON |
@@ -306,7 +306,7 @@ The tab shows statistics only; nothing on it is live.
    no `21cf_first`; `can_diag.isotp_err` in the gateway heartbeat must stay flat. If 21CF fails with
    ISO-TP, revert the one-line change in `comm/subscription_groups.py`; the module works without it.
 
-The 21CF change adds, every 2 s, one flow-control frame from the gateway and two consecutive frames
+The 21CF change adds, with every poll (every 10 s since 2026-11-17; 21D0 every 30 s, 21CE unchanged at 2 s), one flow-control frame from the gateway and two consecutive frames
 from the battery ECU (the same exchange 21CE and 21D0 already run against that ECU).
 
 ## 12. Open gaps

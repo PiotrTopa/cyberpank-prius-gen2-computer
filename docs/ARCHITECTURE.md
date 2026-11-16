@@ -152,13 +152,21 @@ The vehicle CAN reaches the backend through two devices on the CAN hub (powerbox
 
 | Flow | Device | Traffic | Path into the state |
 |---|---|---|---|
-| Broadcast | comma.ai panda (`io/panda_can.py`) | every broadcast frame (0x03B battery, 0x3CB SOC, 0x0B4 speed, 0x120 gear, steering, wheel speeds, …; ids and scaling in [prius_can.md](prius_can.md)) | panda reader thread → `IngressController.ingest_broadcast_can` → `CANDecoder` → `Store.dispatch`; no input queue, no engine tick (≈0.5 ms decode+dispatch on the POCO) |
+| Broadcast | comma.ai panda (`io/panda_can.py`) | every broadcast frame (0x03B battery, 0x3CB SOC, 0x0B4 speed, 0x120 gear, steering, wheel speeds, 0x3CF air temperatures, …; ids and scaling in [prius_can.md](prius_can.md)) | panda reader thread → `IngressController.ingest_broadcast_can` → `CANDecoder` → `Store.dispatch`; no input queue, no engine tick |
 | Solicited | RP2040 gateway (`io/serial_io.py`) | periodic OBD/Toyota subscriptions, one-shot requests, DTC scans | serial reader → `RawMessage` queue → engine tick → `IngressController._handle_can_message` |
 
 Gateway firmware 3.x forwards no passive frames unless `sniff` is on, and `sniff` disables
 `req`/`sub`/`tx` ([PROTOCOL.md](PROTOCOL.md)), so one device cannot do both. Rules for the panda:
 
-- always **SAFETY_SILENT** (bus monitor: no ACK, no TX); the backend never writes to its CAN TX endpoint;
+- always **SAFETY_SILENT** (bus monitor: no ACK, no TX); the backend never writes to its CAN TX endpoint.
+  The gateway is the only device that transmits on the car's CAN, so polling belongs to it alone;
+- filters on the reader thread (the bus carries about 1650 frames/s, a state update costs about
+  0.6 ms): an identical payload repeated within 0.25 s is dropped; a fast id updates the state at
+  most every 0.1 s (`panda_dispatch_min_s`; every changed frame still reaches the trip log and the
+  battery collector); an id the decoder does not know is logged once a second and not decoded; a bulk
+  transfer of more than 64 frames is a backlog and is reduced to the newest frame per id (ids from
+  0x700 up are all kept). The position feeder's tap sees every frame. Journal line
+  `Panda reader: …` once a minute: frames/s, busy %, largest batch, coalesced, dispatched/s;
 - heartbeat every second (the panda firmware power-saves its transceivers 2 s after the heartbeat stops);
 - without the panda: no broadcast values, solicited data unaffected; `connection.panda_*` in the state
   shows link, firmware, frame rate and per-bus counts. `--no-panda` / `BACKEND_PANDA_ENABLED=0` disables it.
@@ -174,20 +182,30 @@ Single source of the backend's periodic PIDs. All groups are enabled by default;
 can be switched off on the MFD Data Sources screen. Requests go to physical ECU ids (response id =
 request + 8).
 
-| Group | Slot | Item | ECU | Request | Interval ms | Timeout ms / ISO-TP |
-|---|---|---|---|---|---|---|
-| core | 0 | engine RPM | 0x7E0 | `01 0C` | 500 | 200 |
-| core | 1 | engine load | 0x7E0 | `01 04` | 2000 | 200 |
-| core | 2 | hybrid comprehensive | 0x7E2 | `21 C3` | 1000 | 500 / yes |
-| core | 6 | cruise control | 0x7E2 | `21 D3` | 1000 | 200 |
-| battery_cells | 3 | block voltages | 0x7E3 | `21 CE` | 2000 | 500 / yes |
-| battery_cells | 4 | battery temps / fan / delta SOC | 0x7E3 | `21 CF` | 2000 | 500 / yes |
-| battery_cells | 5 | block resistances | 0x7E3 | `21 D0` | 5000 | 500 / yes |
-| hybrid_extended | 8 | hybrid additional | 0x7E2 | `21 C4` | 2000 | 500 / yes |
-| engine_sensors | 9 / 10 / 11 | intake air temp / MAF / lambda | 0x7E0 | `01 0F` / `01 10` / `01 24` | 5000 / 2000 / 2000 | 200 |
-| aux_battery | 7 | aux voltage | 0x7E0 | `01 42` | 5000 | 200 |
-| environment | 13 / 14 | barometric pressure / ambient air temp | 0x7E0 | `01 33` / `01 46` | 10000 | 200 |
-| odometer | 12 | distance since DTC clear | 0x7E0 | `01 31` | 10000 | 200 |
+| Group | Slot | Item | ECU | Request | Interval ms | Timeout ms / ISO-TP | Why this rate |
+|---|---|---|---|---|---|---|---|
+| core | 0 | engine RPM | 0x7E0 | `01 0C` | 500 | 200 | suspended while BEAN `FE:26` is fresh |
+| core | 1 | engine load | 0x7E0 | `01 04` | 5000 | 200 | no broadcast source |
+| core | 2 | hybrid comprehensive | 0x7E2 | `21 C3` | 2000 | 500 / yes | inverter and motor temperatures, torques |
+| core | 6 | cruise control | 0x7E2 | `21 D3` | 1000 | 200 | cruise set speed exists nowhere else |
+| battery_cells | 3 | block voltages | 0x7E3 | `21 CE` | 2000 | 500 / yes | block-resistance pairs must be ≤ 3.5 s apart ([BATTERY_HEALTH.md](BATTERY_HEALTH.md)) |
+| battery_cells | 4 | battery temps / fan / delta SOC | 0x7E3 | `21 CF` | 10000 | 500 / yes | slow values; 0x3CB carries two temperatures at 0.1 s |
+| battery_cells | 5 | block resistances | 0x7E3 | `21 D0` | 30000 | 500 / yes | ECU's own slow figures |
+| hybrid_extended | 8 | hybrid additional | 0x7E2 | `21 C4` | 5000 | 500 / yes | converter temperature, A/C power |
+| engine_sensors | 9 | intake air temp | 0x7E0 | `01 0F` | 30000 | 200 | suspended while CAN 0x3CF C is fresh |
+| engine_sensors | 10 / 11 | MAF / lambda | 0x7E0 | `01 10` / `01 24` | 5000 | 200 | no broadcast source |
+| aux_battery | 7 | aux voltage | 0x7E0 | `01 42` | 30000 | 200 | the powerbox measures the 12 V rail every second |
+| environment | 13 | barometric pressure | 0x7E0 | `01 33` | 60000 | 200 | |
+| environment | 14 | ambient air temp | 0x7E0 | `01 46` | 60000 | 200 | suspended while CAN 0x3CF B is fresh (above 0 °C) |
+| odometer | 12 | distance since DTC clear | 0x7E0 | `01 31` | 60000 | 200 | |
+
+Transmit budget: each request is one frame from the gateway onto the powertrain CAN, each ISO-TP
+reply costs one more (flow control). With the broadcast sources alive: 3.0 requests/s + 1.3 flow
+controls/s = 4.3 frames/s (8.6 until 2026-11-16). `tests/test_poll_budget.py` holds the budget.
+A slot that exists for one broadcast-covered value is unsubscribed after the broadcast has been fresh
+for 10 s and re-subscribed when it goes stale (`comm/source_priority.py`, `SlotSuspender`).
+`BACKEND_OBD_PAD` (unset by default) sets the padding byte of the requests
+([prius_can.md](prius_can.md) §9).
 
 Responses are decoded by `comm/can_decoder.py` (21C3 → `mg1/mg2_inverter_temp`, `mg1/mg2_motor_temp`,
 `inverter_temp` = MG2; 21CE → `battery_soc_21ce`, `battery_current_21ce`, 14 `block_voltages` with

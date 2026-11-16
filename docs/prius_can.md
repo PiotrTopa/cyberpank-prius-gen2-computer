@@ -33,10 +33,11 @@ CAN 0x5xx: [`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §5.
 | 0x244 | 25 | accelerator pedal | G, 0–0xC8 | G |
 | 0x3B6 | — | energy-monitor flow | bytes F, G bitmask | G (unvalidated; 0x528 carries the energy arrows, [`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §5) |
 | 0x3C8 | 70 | ICE speed target | 256C + D rpm | G |
-| 0x3CA | 108 | vehicle speed | C km/h | G |
+| 0x3CA | 108 | vehicle speed | C km/h, integer (true speed: slope 1.01, r 0.994 against 0x0B4) | Car (2026-11-16); not decoded, 0x0B4 is the speed source |
 | 0x3CB | 108 | battery ECU | A discharge limit A; B charge limit A (nominal ~100 / 105 A below 51 °C); SOC = (256C + D)/2 %; E, F battery temperatures, signed °C | Car: SOC tracks the MFD SOC bars (`FE:29`); temperatures correlate with `98:EC` b4 |
-| 0x3CD | 108 | battery fault code, voltage | AB fault code; voltage field unresolved | G |
-| 0x4CE | — | battery-compartment intake air temperature (not outside air) | — | P (`can_decoder.py` comment) |
+| 0x3CD | 108 | battery fault code, voltage | AB fault code; 256C + D = pack voltage V (median difference against 0x03B 1 V) | P (2026-11-16); 0x03B stays the voltage source |
+| 0x3CF | 139 | ECM air temperatures | B = outside air °C, C = intake air °C, no offset (= OBD 0146 / 010F, median difference 0, r 0.975 / 0.988 over 4–10 °C). Decoded as signed; 0 °C and below not yet recorded | P. Replaces the OBD 0146 and 010F polls (`can_decoder.py` `AIR_TEMPS`); a value ≤ 0 °C leaves the poll running until the sign is verified |
+| 0x4CE | — | constant `0F 00 01 01 00 00 …` on every drive: an index/configuration frame like 0x4C1…0x4D1, not a temperature | — | P (2026-11-16) |
 | 0x520 | 2231 | ECM fuel quantity per injection (gateway CAN → BEAN `62:20`); measured every 0.92 s, only while the ICE runs | header + 16-bit word 256B + C; fuel flow L/h = K × word × rpm, K = 2.69 × 10⁻⁶ (see below) | Car (BEAN copy; flow fitted to the meter) |
 | 0x526 | 530 | engine rpm (gateway CAN → BEAN `FE:26`) | header + word / 5.12 | Car (the list's "ignition timing B,C" is this rpm word) |
 | 0x528 | 522 | energy-monitor arrows | `25 xx yy 00`, see [`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §5 | P |
@@ -81,14 +82,13 @@ All gateway copies 0x5xx have byte 0 = header and bytes 1… = the BEAN data
 ([`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §5): 0x520/521/526/527/529/52C/540/591/5B2/5C8/5CC/5D4/5EC/5F8
 (CAN → BEAN) and 0x53F/553/554/56D/57F/5A4/5B6/5ED (BEAN → CAN).
 
-Decoded since (2026-11-16 data crunch, P): 0x3CF B = outside air °C (= OBD 0146, median difference
-0, r = 0.975; sign below 0 °C not yet seen), C = intake air °C (= OBD 010F, r = 0.988); A ?, D 0, E
-varies. 0x3CD C,D = pack voltage V (P). 0x3CA C = true speed km/h. 0x484 B ≈ coolant, 0.626·B °C
-(P). 0x230 D `04` = brake pressed (P). 0x348 B,C follow ICE speed, not a pack temperature. 0x4CE
-constant, not a temperature. 0x4C1…0x4D1, 0x020, 0x423 constant.
+Partly read (2026-11-16 data crunch, P; none of them is decoded by the backend): 0x3CF A ?, D 0, E
+varies (B, C in §2). 0x484 B ≈ coolant, 0.626·B − 0.6 °C (r 0.9998 against 0x039, redundant). 0x230 D
+`04` = brake pressed. 0x348 B,C follow ICE speed (about 23.4 × C rpm, r 0.89), not a pack
+temperature. 0x4C1…0x4D1, 0x020, 0x423 constant.
 
 No decode (period in ms): 0x020 (12), 0x03A (8; NOT a yaw rate in the `can_decoder.py` reading: correlation 0.01 with the wheel-speed yaw on the 2026-11-13 drive, byte A only 0/1), 0x03E (8), 0x230 (28),
-0x262 (21), 0x348 (44), 0x3C9 (106), 0x3CF (139), 0x423 (1075), 0x484 (1120), 0x4C1 (971), 0x4C3
+0x262 (21), 0x348 (44), 0x3C9 (106), 0x423 (1075), 0x484 (1120), 0x4C1 (971), 0x4C3
 (1042), 0x4C6 (1018), 0x4C7 (1028), 0x4C8 (1058), 0x4D0 (1118), 0x4D1 (1135), 0x602 (73009).
 
 ## 4. Diagnostic addresses
@@ -120,12 +120,12 @@ Which of these answer on this car: [`TOYOTA_DIAGNOSTICS.md`](TOYOTA_DIAGNOSTICS.
 | 0100 | supported 0101–0120 | bitmap | | 01, 03, 04, 05, 06, 07, 0C, 0D, 0E, 0F, 10, 11, 13, 15, 1C, 1F, 20 |
 | 0101 | MIL status / DTC count / engine type | `{A:7}` MIL, `{A:0-6}` count, `{B:3}` compression ignition | | |
 | 0104 | calculated engine load | A (as listed and decoded; J1979 scales 100A/255) | % | Car: correlates with `62:20` (r = 0.84) |
-| 0105 | ICE coolant | A − 40 | °C | same as 0x039 |
+| 0105 | ICE coolant | A − 40 | °C | same as 0x039; not polled |
 | 0106 / 0107 | short / long-term fuel trim | 0.7812 × (A − 128) | % | |
 | 010C | ICE rpm | (256A + B) / 4 | rpm | Car: BEAN `FE:26` r = 0.991 |
 | 010D | vehicle speed | A | km/h | |
 | 010E | timing advance | A/2 − 64 | ° | |
-| 010F | intake air temperature | A − 40 | °C | |
+| 010F | intake air temperature | A − 40 | °C | = CAN 0x3CF C; polled every 30 s only while 0x3CF is stale or ≤ 0 °C |
 | 0110 | MAF | (256A + B) / 100 | g/s | |
 | 0111 | throttle position | A × 100 / 255 | % | |
 | 0120 | supported 0121–0140 | bitmap | | 21, 24, 30, 31, 33, 3C, 3E, 40 |
@@ -134,7 +134,7 @@ Which of these answer on this car: [`TOYOTA_DIAGNOSTICS.md`](TOYOTA_DIAGNOSTICS.
 | 0133 | barometric pressure | A | kPa | |
 | 0140 | supported 0141–0160 | bitmap | | 42, 43, 44, 45, 46, 47, 4C, 4D, 4E |
 | 0142 | ECU (12 V) supply | (256A + B) / 1000 | V | |
-| 0146 | ambient air temperature | A − 40 | °C | Car: 4–5 °C against BEAN `FE:CD` 4 °C |
+| 0146 | ambient air temperature | A − 40 | °C | Car: 4–5 °C against BEAN `FE:CD` 4 °C; = CAN 0x3CF B; polled every 60 s only while 0x3CF is stale or ≤ 0 °C |
 | 21F3 | injector time | 0.128 × C | ms | |
 
 ## 6. Solicited PIDs, hybrid ECU 0x7E2
@@ -222,12 +222,19 @@ Battery power = current × sum of block voltages.
 
 * **0x5C8 / 21D3 (cruise):** resolved 2026-11-16 (§2, §6). Open: 0x5C8 A bit 7; the set-speed step
   per stalk tap (needs `21D3` faster than 1 Hz).
-* **Passive-stream latency:** in the trip log the gateway's passive CAN frames arrive 0–5 s after the
-  solicited replies (passive copies of the same `0x7EA` replies: median 0.6 s, p90 2.1 s, max 4.8 s).
-  Timing comparisons between passive CAN and replies or BEAN in a trip log must allow for it; the
-  backend uses solicited data only from the reply itself.
-* **Trip-log cadence:** the trip log carries IDs outside the fast set once per 20 s (logging/forwarding
-  filter), so frame counts in a trip log say nothing about the car's period.
+* **Passive-stream latency (cause found 2026-11-17, fix deployed, drive check open):** the broadcast
+  frames come from the panda, not from the gateway. Its reader thread could not keep up with the bus
+  (about 1650 frames/s; a state update cost about 0.6 ms per frame on the laptop and more on the
+  phone), so for 81 % of the 2026-11-16 21:14 drive the frames arrived in bursts 0.3–1.2 s apart and
+  reached the state and the trip log 0–5 s late (median 0.6 s). Now a fast id updates the state at
+  most every 0.1 s, every changed frame is still logged, and a backlog batch is reduced to the newest
+  frame per id (`io/ingress.py`, `io/panda_can.py`). The journal line `Panda reader: … busy … %` once
+  a minute shows the reader load; a drive must show `busy` well under 100 % and `coalesced` near 0.
+  Timing comparisons in trip logs recorded before 2026-11-17 must allow for the lag.
+* **Trip-log cadence (fixed 2026-11-17):** until then an id the decoder does not know reached the trip
+  log 3 times a minute (0.05 /s, 100 ms frames included): the unknown-id cache sat before the log
+  tap. Such ids are now logged once a second. Frame counts in older trip logs say nothing about the
+  car's period for those ids.
 * **0x5xx cadence:** the list gives about 1 s for most gateway copies; own CAN logs contain far fewer
   frames (e.g. 58 × 0x5C8 in 53 min). Whether the gateway sends them on change only or the logs drop
   them: compare a CAN log with a simultaneous BEAN capture (BEAN side is 1 s).
@@ -237,9 +244,6 @@ Battery power = current × sum of block voltages.
   in right-hand traffic). Resolves with one deliberate left turn logged, or a GNSS course.
 * **0x0B1/0x0B3 scale:** the wheels read 2.2 % below 0x0B4 (tyre size / ECU scaling); not corrected.
 * **0x025 fraction nibble** (E high nibble): not decoded; the angle has 1.5° resolution.
-* **0x348:** decoded as a pack temperature (byte C − 40) in `can_decoder.py`, while a comment there
-  reports byte C × 25 tracking ICE rpm (r = 0.986). Resolves with a log covering ICE start/stop at a
-  steady pack temperature.
 * **0x120 B position** and **0x3B6 bits**: not observed / unvalidated.
 * **0x3CA, 0x3C8, 0x244, 0x022/0x023 scalings**: third-party, unchecked. No yaw-rate sensor frame is
   decoded (0x03A is not one in the current reading).
@@ -254,3 +258,27 @@ Battery power = current × sum of block voltages.
     `state/fuel_model.py`). Detection needs an input from the LPG installation (changeover-switch /
     fuel-select LED line or LPG solenoid-valve supply on a powerbox input, or the LPG ECU's
     diagnostic link) and a level sender reading.
+
+## 9. What the gateway transmits, and its transmit errors
+
+The gateway (RP2040 + MCP2515) is the only device that transmits on the car's CAN; the panda is in
+SAFETY_SILENT (no frames, no acknowledge bits) and delivers every broadcast frame. Polls are therefore
+gateway-only, and a value that is broadcast is not polled.
+
+Poll table and rates: [ARCHITECTURE.md](ARCHITECTURE.md) §3. Nominal transmit rate 4.3 frames/s
+(3.0 requests + 1.3 flow controls) since 2026-11-17, 8.6 before (measured before: 6.5 requests/s
+including retries, about 8.7 frames/s).
+
+State of the transmit path on fw 3.2.9 (2026-11-13 and 2026-11-16, `can_diag`): 19–35 % of the
+transmit attempts are hit by an error, the TEC climbs to bus-off about every 15 s, while the receive
+error counter stays at 0 and the controller answers 0xFF on SPI once per frame it sends. Each failed
+attempt is an error frame on the powertrain CAN (about 2 per second before, about 1 per second at the
+new poll rate). The cause is the MCP2515 module while its transceiver drives the bus, not bit timing
+or the polls colliding with a second tester; the evidence, the firmware part (lost ISO-TP frames) and
+firmware 3.2.10 are in the gateway repository, `gateway-rp2350/README.md` section "CAN transmit
+path".
+
+Open experiment (no flash needed): `BACKEND_OBD_PAD=0x55` in the backend environment pads the
+requests with `55` instead of `00` (fewer consecutive dominant bits per frame, ECUs ignore the
+padding). If the transmit errors come from the module's supply sagging under dominant-bit current,
+`tec_up` per request falls with it. Off by default; compare two drives.
