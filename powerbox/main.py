@@ -163,7 +163,7 @@ import pcf8574                      # PCF8574 driver + RelayBoard (pin map, NC, 
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-VERSION = "2.4.1"
+VERSION = "2.4.2"
 
 # Device role — reported in the unified identify ("whoami") response and the
 # ready banner so the computer can discover which USB-CDC port is the powerbox

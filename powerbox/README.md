@@ -532,15 +532,45 @@ or expires every stored ms stamp (power manager, TX arm, TX rate stamps, `own`,
 `bad_ms`) before `ticks_diff` can wrap. Host tests on MicroPython tick semantics:
 `tests/test_bean_rx_wrap.py`, `TestTickWrap` in `tests/test_powerbox_firmware.py`.
 
-**Cost** (estimate; verify with `cpu`): 40–80 µs per run plus ~0.1 ms per poll →
-~2–4 % CPU at 15 frames/s, ~8–14 % during the 45 frames/s IG-ON burst. Idle (fw
-2.4.0): with the decoder idle and nothing queued, a native fast path (`_quick`) only
-adds timeout words to the idle time; a full pass runs every 40 polls (200 ms) and,
-after 1 s recessive, the capture is looked at every 4th poll. Wake latency ≤ 20 ms
-(ring then holds ≤ ~40 words; `TestReceiverIdle`). fw 2.3.0 measured 87–94 ‰ asleep;
-2.4.0 reads 40–41 ‰ asleep on the car (2026-11-13 and 2026-11-15). The run-length counter saturates at
-2^30 µs. RAM: ~8 KB DMA ring (allocated at 2× for alignment), ~10 KB compiled module,
-up to 64 queued records.
+**Cost** (measured on the car from `cpu` ÷ edges/s over 2-s stats windows with IG on;
+bus 1710–1719 capture words/s, ~52 frames/s, 33 words per frame on both 2026-11-13 and
+2026-11-16):
+
+| fw | µs per decoded word | `cpu` at IG on | result |
+|---|---|---|---|
+| 2.4.0 | 535 (p10–p90 527–545) | 924 ‰ | no loss; ring backlog up to 690 words |
+| 2.4.1 | 583 (572–599, also in windows without an overflow) | 940 ‰ (pinned) | 284 overflows, 129 lost words/s, 7–9 % of frames lost, junk IDs from broken frames |
+
+The bus load was the same on both days, so the loss is a 2.4.1 regression: +9 % per
+word on a receiver that already ran at 92 % duty. Cause: 2.4.1 added four `BeanRx`
+attributes (`ok_carry`, `idle_ref`, `idle_base`, `dhalf`: 69 → 73). MicroPython keeps
+instance attributes in an open-addressing table with linear probing that grows only
+when it is completely full (sizes …, 59, 73, 97, …). At 73 attributes the table was
+100 % full: a lookup that misses the instance (every `self.method()` call, ~3 per
+word in the decoder) scans all 73 slots, and hits probe longer chains. A replay of
+the decoder's attribute accesses through a model of that table
+(`tests/test_bean_rx_load.py`) gives 220 probes per word on 2.4.0 and 416 on 2.4.1;
+the decoder bytecode itself did not grow (weighted op count −5 %). Fitted to the two
+car figures, a probe costs ~0.35 µs (~34 cycles at 96 MHz).
+
+fw 2.4.2 (output bit-identical to 2.4.1, wrap-safe tick arithmetic kept):
+`BeanRx` has 74 attributes, all created in `__init__` (table 97, load 0.76; the test
+fails if the count lands on a full table again); `_drain` calls the run decoder
+through `self.run`, a bound method made once, instead of `self._run` per run; hot
+constants are `const()` literals; the word clock is advanced inline
+(`(wt + r) & M30`, equal to `ticks_add` for the < 2^17 µs deltas); the stuffed-data
+state (formerly `_data()` + `_bits()`) runs inline in a native `_run`. Host model
+(car-calibrated, not an RP2040 timing): 42 probes per word, ~290 µs per word, ~50 %
+duty at the 16 Nov load; crediting only the attribute-table fix, ~450 µs and ~78 %.
+Compiled for `armv6m` with `mpy-cross` 1.26.1 (the board's MicroPython) without error.
+
+Idle (fw 2.4.0): with the decoder idle and nothing queued, a native fast path
+(`_quick`) only adds timeout words to the idle time; a full pass runs every 40 polls
+(200 ms) and, after 1 s recessive, the capture is looked at every 4th poll. Wake
+latency ≤ 20 ms (ring then holds ≤ ~40 words; `TestReceiverIdle`). fw 2.3.0 measured
+87–94 ‰ asleep; 2.4.0 reads 40–41 ‰ asleep on the car (2026-11-13 and 2026-11-15).
+The run-length counter saturates at 2^30 µs. RAM: ~8 KB DMA ring (allocated at 2× for
+alignment), ~15 KB compiled module (2.4.2 `.mpy` for armv6m), up to 64 queued records.
 
 **TX guard.** Every TX-driving bench op answers `ERROR BEAN_TX_DISABLED` without
 touching GP7 unless `{"a":"bean_tx_enable","v":1}` was sent < 60 s ago (`status`
@@ -753,10 +783,12 @@ Preconditions: fw 2.4.0 flashed (`status` answers), receiver healthy
 | 2.3.0 | `bean_rx.py`, id 3, TX guard; new OTA file name (one extra reboot) |
 | 2.4.0 | `bean_tx.py`; bench ops need the bench override; receiver idle fast path |
 | 2.4.1 | full BEAN batches sent at once (no standing backlog); wrap-safe ticks (no OverflowError after a > 537 s bus sleep, frame `t_ms` on the `ticks_ms` base, `idle_ms`/`age_ms`/`up` do not stick or wrap, dead-phone/boot-grace/TX-arm stamps cannot wrap after 6.2 days); `exn` counter |
+| 2.4.2 | BEAN receiver keeps up with IG on again: decoder cost per word ~halved (attribute table no longer full, `const()`, native inline data path); 2.4.1 lost 7–9 % of frames with IG on |
 
 Tests: `tests/test_powerbox_firmware.py` (firmware on CPython with stubs),
 `tests/test_powerbox_io.py`, `tests/test_port_power.py`, `tests/test_bean_rx.py`
-(PIO cycle simulation, all 8,627 NHW20 frames of bean_tools), `tests/test_bean_tx.py`
+(PIO cycle simulation, all 8,627 NHW20 frames of bean_tools), `tests/test_bean_rx_load.py`
+(IG-on load through the receiver, ring and main loop; attribute-table model), `tests/test_bean_tx.py`
 (PIO programs assembled with MicroPython's assembler, `tests/fixtures/micropython_rp2_v1_21.py`,
 run against `tests/bean_pio_sim.py`), `tests/test_bean_backend.py`.
 
@@ -768,7 +800,8 @@ run against `tests/bean_pio_sim.py`), `tests/test_bean_backend.py`.
 | Relays 5–8 never tested on this board (ch5 = RS485 rail). | Bench: switch each, confirm load and `rly`. |
 | Cause of spontaneous bench resets (during rewiring) unknown. | Watch `rc` / `boot_count` over a long run: rc 1 → power/wiring, rc 3 → firmware stall. |
 | BEAN TX on the car (fw 2.4.0): the bus wakes, but the `bean_wake` send reports `ok:0 err:"rx"`. `err:"rx"` is a pre-transmit refusal by `health()`; on 2.4.0 the edge-test pulse after a > 537 s sleep raises the tick overflow and marks the receiver unhealthy for 5 s (reproduced in `tests/test_bean_rx_wrap.py`). Whether 2.4.1 sends cleanly is not confirmed on the car; PIO load, `fifo_join=JOIN_TX`, 1 kHz `machine.Timer` and real rise/fall are not measured. | Flash 2.4.1, `bean_wake` on the parked car after > 10 min of bus sleep; read the reply `detail` and `exn`. |
-| Receiver `cpu` asleep with fw 2.4.0 is 40–41 ‰, not the few ‰ the fast path was meant to give; where the time goes is not measured. | Profile `poll()` paths on the bench with the bus idle (`_quick` vs full pass vs `produced()`). |
+| fw 2.4.2 receiver cost on the car is a host-model figure (~50 % `cpu` with IG on), not measured. | Parked READY ≥ 5 min and one drive: `ovf` 0, `lost` 0, `cpu` with IG on, µs per word = `cpu` × 1000 ÷ edges/s, periodic 1-s IDs at 1.00 /s, `98:CC` ~3.9 /s, no `code` ≠ 0 frames. |
+| Receiver `cpu` asleep with fw 2.4.0 is 40–41 ‰, not the few ‰ the fast path was meant to give; where the time goes is not measured (each `poll()` call looks up methods on the then nearly full attribute table). | Read `cpu` asleep on 2.4.2; if still ~40 ‰, profile `poll()` on the bench with the bus idle (`_quick` vs full pass vs `produced()`). |
 | Main hub model and which sockets switch VBUS. `POCO/provision.sh` (backend.env seed) says main hub `1-1` = Terminus `1a40:0101`, 4 ports, powerbox on port 1; `backend/port_power.py`, `io/discovery.py` (`DEFAULT_PORT_ROLES = {5: powerbox, 2: gateway}`) and `prius-usb-power` describe an ActionStar `2101:8500` with real VBUS switching on internal port 5 only. Until settled, a hub-port cycle of the powerbox may be data-only. | `lsusb -t` + `uhubctl` on the car; cut port power and check whether `energy_mah` resets (true cold boot). |
 | POCO button MOSFET not fitted. | Fit it, then set `POCO_BTN_ACTIVE_HIGH` / `ACTIVE_HIGH`. |
 | No box-air sensor (BMP280 #1, AHT20 not fitted): box purge untested. | Fit one. |

@@ -328,7 +328,7 @@ def _cmd(fw, payload, cfg):
 
 class TestCommandSurface:
     def test_version_bumped(self, fw):
-        assert fw.main.VERSION == "2.4.1"
+        assert fw.main.VERSION == "2.4.2"
         assert fw.main.I2C_FREQ == 100000  # PCF8574 is a 100 kHz part
 
     def test_relay_command_sets_load_channels(self, fw, pm):

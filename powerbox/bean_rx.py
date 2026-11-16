@@ -1,7 +1,8 @@
 """
 BEAN (Toyota MPX body bus) receiver/decoder for the powerbox (fw 2.3.0;
 2.4.0: idle fast path, own-frame flag and hooks for bean_tx.py; 2.4.1:
-wrap-safe tick arithmetic, frame times anchored to edge stamps).
+wrap-safe tick arithmetic, frame times anchored to edge stamps; 2.4.2:
+decoder cost per word halved, see "Decoder cost").
 
 Listens on GP6 (the transceiver's RX, INVERTED: bus idle 0 V -> GP6 high,
 bus dominant +B -> GP6 low). It never touches GP7 (TX) and never ACKs.
@@ -38,6 +39,18 @@ to a tick value. ticks_add() raises OverflowError for |delta| >= 2^29 (537 s
 in us, 6.2 days in ms); every delta here is bounded far below that, and
 ages reported over longer spans (idle_ms, age_ms) are carried in steps.
 
+Decoder cost (2.4.2): with IG on the bus carries ~1700 capture words/s
+(~52 frames/s, ~33 words each). fw 2.4.0 spent 535 us per word (924 per
+mille of wall time), fw 2.4.1 583 us: above 100 %, so the ring overflowed
+(2026-11-16). 2.4.1 had raised BeanRx to 73 attributes, and MicroPython's
+attribute table (open addressing, grown only when full: ..59, 73, 97..)
+was then 100 % full, so every lookup that misses the instance (each
+``self.method`` call) scanned all 73 slots. The instance now has 74
+attributes (table 97, load 0.76; tests/test_bean_rx_load.py checks it),
+_drain calls the run decoder through ``self.run`` (one lookup per poll, not
+per run), constants are const() literals, and the stuffed-data state runs
+inline in a native _run. Output is bit-identical to 2.4.1.
+
 Idle cost (2.4.0): while the bus is quiet the ~100 timeout words/s are
 consumed by a short fast path (no decoder, no time anchor), a full pass runs
 every IDLE_SKIP polls, and once the bus has slept for 1 s the capture is
@@ -51,11 +64,15 @@ from binascii import hexlify
 
 try:
     import micropython                         # @micropython.native is a
-except ImportError:                            # compile-time directive on
-    class micropython:                         # the board; identity here
+    from micropython import const              # compile-time directive on
+except ImportError:                            # the board; identity here
+    class micropython:
         @staticmethod
         def native(f):
             return f
+
+    def const(x):                              # const(): folded into the
+        return x                               # bytecode on the board
 
 ticks_ms = time.ticks_ms
 ticks_us = time.ticks_us
@@ -69,67 +86,67 @@ PIO_FDEBUG = PIO_BASE + 0x008
 PIO_RXF0 = PIO_BASE + 0x020
 DREQ_PIO_RX0 = 12            # DREQ_PIO1_RX0
 SM_FREQ = 2000000            # 96 MHz / 48: 0.5 us per PIO cycle
-T_CNT = 10000                # loop counts (us) before a timeout word
-OFF_US = 3                   # per-run overhead cycles not counted by the loop
-TO_US = T_CNT + 4            # length of one timeout segment
-TO_MARK = 0xFFFF
-RING_BITS = 10
-RING = 1 << RING_BITS        # words in the ring
-RMASK = RING - 1
-M30 = 0x3FFFFFFF             # producer/consumer counters wrap at 2^30
+T_CNT = const(10000)                # loop counts (us) before a timeout word
+OFF_US = const(3)                   # per-run overhead cycles not counted by the loop
+TO_US = const(T_CNT + 4)            # length of one timeout segment
+TO_MARK = const(0xFFFF)
+RING_BITS = const(10)
+RING = const(1 << RING_BITS)        # words in the ring
+RMASK = const(RING - 1)
+M30 = const(0x3FFFFFFF)             # producer/consumer counters wrap at 2^30
 DMA_COUNT = 0x3FFFFFFF       # transfers per DMA arm (small int)
 DMA_REARM = 1 << 20
 
 # ─── decoder constants ──────────────────────────────────────────────────────
-GLITCH_US = 12               # shorter runs are merged into their neighbours
-IDLE_BITS = 7                # >= 7 recessive bit times = bus idle
-TB16_NOM = 1600              # bit time x16 (100 us)
-TB16_MIN = 80 * 16
-TB16_MAX = 125 * 16
-SKEW_MAX = 30                # us
-MAX_WORDS = 256              # words decoded per poll() call
-LEAK_US = 4                  # time-anchor leak per poll
+GLITCH_US = const(12)               # shorter runs are merged into their neighbours
+IDLE_BITS = const(7)                # >= 7 recessive bit times = bus idle
+TB16_NOM = const(1600)              # bit time x16 (100 us)
+TB16_MIN = const(80 * 16)
+TB16_MAX = const(125 * 16)
+SKEW_MAX = const(30)                # us
+MAX_WORDS = const(256)              # words decoded per poll() call
+LEAK_US = const(4)                  # time-anchor leak per poll
 
 # ─── reporting ──────────────────────────────────────────────────────────────
-BATCH_MS = 200
-BATCH_MAX = 16               # frames per line
-QUEUE_MAX = 64               # frames waiting for the host
-STATS_MS = 2000
-ERR_PER_S = 5                # failed frames reported per second (all counted)
+BATCH_MS = const(200)
+BATCH_MAX = const(16)               # frames per line
+QUEUE_MAX = const(64)               # frames waiting for the host
+STATS_MS = const(2000)
+ERR_PER_S = const(5)                # failed frames reported per second (all counted)
 RAW_MAX = 512
 RAW_CHUNK = 64
 ERR_LIMIT = 10               # consecutive poll() exceptions before giving up
-IDLE_SKIP = 40               # fast-path polls between two full passes (200 ms)
-SLEEP_US = 1000000           # recessive this long = bus asleep
-SLEEP_DIV = 4                # asleep: look at the capture every 4th poll
-SEEN_MAX = 160               # distinct foreign DST:MES pairs remembered
-BAD_QUIET_MS = 5000          # health(): no receive error for this long
+IDLE_SKIP = const(40)               # fast-path polls between two full passes (200 ms)
+SLEEP_US = const(1000000)           # recessive this long = bus asleep
+SLEEP_DIV = const(4)                # asleep: look at the capture every 4th poll
+SEEN_MAX = const(160)               # distinct foreign DST:MES pairs remembered
+BAD_QUIET_MS = const(5000)          # health(): no receive error for this long
 TB16_TX_MIN = 95 * 16        # bit time accepted for transmitting (x16 us)
 TB16_TX_MAX = 108 * 16
 ADAPT_MIN = 16               # runs measured before the bit time counts
-OFF_MAX = 1 << 28            # |time anchor| bound (us); ticks_add needs < 2^29
-LONG_US = 1 << 28            # runs this long have no meaningful start time
-AGE_STEP_MS = 1 << 28        # carry step for ms ages (ticks_diff wraps at 2^29)
+OFF_MAX = const(1 << 28)            # |time anchor| bound (us); ticks_add needs < 2^29
+LONG_US = const(1 << 28)            # runs this long have no meaningful start time
+AGE_STEP_MS = const(1 << 28)        # carry step for ms ages (ticks_diff wraps at 2^29)
 
 # frame result codes ("code" in a frame record)
-E_OK = 0
-E_CRC = 1
-E_STUFF = 2                  # 6+ equal bits inside SOF..CRC
-E_LEN = 3                    # ML outside 3..13
-E_FRAME = 4                  # EOM / RSP / EOF shape wrong, stuck dominant
-E_TRUNC = 5                  # bus went idle inside the frame
-E_OVF = 6                    # ring overflow aborted the frame
+E_OK = const(0)
+E_CRC = const(1)
+E_STUFF = const(2)                  # 6+ equal bits inside SOF..CRC
+E_LEN = const(3)                    # ML outside 3..13
+E_FRAME = const(4)                  # EOM / RSP / EOF shape wrong, stuck dominant
+E_TRUNC = const(5)                  # bus went idle inside the frame
+E_OVF = const(6)                    # ring overflow aborted the frame
 CODE_KEYS = ("ok", "crc", "stuff", "len", "frm", "trunc", "ovf")
 
 # decoder states
-ST_HUNT = 0                  # wait for >= IDLE_BITS recessive
-ST_ARMED = 1                 # idle seen: next dominant run is SOF
-ST_DATA = 2                  # SOF..CRC (stuffed)
-ST_POST = 3                  # after CRC: looking for EOM 0111111
-ST_EOM = 4                   # EOM ones seen: next recessive run = EOM0 [+RSP]
-ST_RSPB = 5                  # RSP1 = 1: next dominant run gives RSP2
-ST_RSPC = 6                  # RSP1 = 0, RSP2 = 1 (ACK): dominant run must be 1
-ST_EOFW = 7                  # RSP done: next recessive run = EOF
+ST_HUNT = const(0)                  # wait for >= IDLE_BITS recessive
+ST_ARMED = const(1)                 # idle seen: next dominant run is SOF
+ST_DATA = const(2)                  # SOF..CRC (stuffed)
+ST_POST = const(3)                  # after CRC: looking for EOM 0111111
+ST_EOM = const(4)                   # EOM ones seen: next recessive run = EOM0 [+RSP]
+ST_RSPB = const(5)                  # RSP1 = 1: next dominant run gives RSP2
+ST_RSPC = const(6)                  # RSP1 = 0, RSP2 = 1 (ACK): dominant run must be 1
+ST_EOFW = const(7)                  # RSP done: next recessive run = EOF
 
 _CRC = bytearray(256)
 for _i in range(256):
@@ -401,6 +418,21 @@ class BeanRx:
         self.s0 = 0
         self.s1 = 0
         self.skew = 0
+        self.acc = 0                 # frame assembly (set per SOF)
+        self.nb = 0
+        self.got = 0
+        self.need = 8
+        self.skip = 0
+        self.pz = 0
+        self.po = 0
+        # _drain calls the run decoder through this bound method: a
+        # self._run lookup per run first misses the instance map, then
+        # builds a bound method. It is also the 74th attribute: MicroPython
+        # grows an attribute table only when it is full (sizes ..59, 73,
+        # 97..), and at exactly 73 attributes (fw 2.4.1) every lookup that
+        # misses scans all 73 slots. Keep the count in 74..80 (table 97);
+        # tests/test_bean_rx_load.py checks it.
+        self.run = self._run
 
     # -- control ---------------------------------------------------------------
     def _reset_decoder(self):
@@ -647,6 +679,11 @@ class BeanRx:
     # -- words -> runs ---------------------------------------------------------
     @micropython.native
     def _drain(self, buf, base, tail, n):
+        # Hot loop (~1700 words/s with IG on). fw 2.4.2: constants are
+        # const() literals, the word clock is advanced inline (every delta
+        # is < 2^17 us, so (wt + r) & M30 == ticks_add(wt, r) on the
+        # 2^30 us ticks_us period), ``idled`` is written only when it
+        # changes and the edge count once per call.
         cur = self.cur
         pl = self.pl
         pd = self.pd
@@ -655,6 +692,9 @@ class BeanRx:
         last = self.last_edge
         dh = self.dhalf
         raw = self.raw
+        idl = self.idled
+        run = self.run
+        ne = 0
         i = 0
         while i < n:
             w = buf[base + ((tail + i) & RMASK)]
@@ -664,30 +704,33 @@ class BeanRx:
             if x == TO_MARK:
                 if cur < M30:                 # saturate (no big ints)
                     cur += TO_US
-                wt = ticks_add(wt, TO_US)
+                wt = (wt + TO_US) & M30
                 if gl:                        # held run still growing
                     cur += pd + gl
                     gl = 0
                     pl = -1
                 elif pl >= 0:
-                    self._run(pl, pd, last)      # it ended at the newest edge
+                    run(pl, pd, last)            # it ended at the newest edge
                     pl = -1
-                if not self.idled and cur > 2000:
+                if not idl and cur > 2000:
+                    idl = True
                     self.idled = True
                     self.ilv = lv
                     self._idle(lv)
                 continue
-            r = T_CNT - x + OFF_US
+            r = T_CNT + OFF_US - x
             d = cur + r
             if lv:                            # a dominant run takes 3.5 us of
                 dh ^= 1                       # loop overhead, a recessive one 3:
                 r += dh                       # the time base gets the half us
             cur = 0
-            self.idled = False
-            wt = ticks_add(wt, r)
+            if idl:
+                idl = False
+                self.idled = False
+            wt = (wt + r) & M30
             prev = last
             last = wt
-            self.edges += 1
+            ne += 1
             if raw is not None and self.raw_n < len(raw):
                 rd = d if d < M30 else M30
                 raw[self.raw_n] = rd if lv else -rd
@@ -701,9 +744,10 @@ class BeanRx:
                 self.glitches += 1
                 continue
             if pl >= 0:
-                self._run(pl, pd, prev)
+                run(pl, pd, prev)
             pl = lv
             pd = d
+        self.edges += ne
         self.cur = cur
         self.pl = pl
         self.pd = pd
@@ -713,13 +757,18 @@ class BeanRx:
         self.dhalf = dh
 
     # -- runs -> frames ----------------------------------------------------------
+    @micropython.native
     def _run(self, v, d, end):
         """One run of level ``v`` (1 = dominant), ``d`` us long, ending at
         word time ``end`` (an edge stamp). ``d`` may be up to 2^30 us after
-        a long sleep: it is never added to a tick value."""
+        a long sleep: it is never added to a tick value.
+
+        fw 2.4.2: native, state in locals, the stuffed-data state (most
+        runs) handled inline (was _data() + _bits(): two calls per run)."""
         self.et = end
         tb = self.tb16
-        dc = d - self.skew if v else d + self.skew
+        sk = self.skew
+        dc = d - sk if v else d + sk
         n = (dc * 16 + (tb >> 1)) // tb
         if n < 1:
             n = 1
@@ -729,21 +778,80 @@ class BeanRx:
             # and dominant/recessive skew; fast for the first runs after
             # start, slow afterwards so edge jitter does not move the
             # rounding thresholds.
-            k = 7
-            if self.nadapt < 256:
-                self.nadapt += 1
-                k = 4 if self.nadapt < 48 else 5
+            na = self.nadapt
+            if na < 256:
+                na += 1
+                self.nadapt = na
+                k = 4 if na < 48 else 5
+            else:
+                k = 7
             r = d * 16 - n * tb
             if v:
-                self.s1 += (r - self.s1 + (1 << (k - 1))) >> k
+                s1 = self.s1
+                s1 += (r - s1 + (1 << (k - 1))) >> k
+                self.s1 = s1
+                sk = (s1 - self.s0) >> 5
             else:
-                self.s0 += (r - self.s0 + (1 << (k - 1))) >> k
-            sk = (self.s1 - self.s0) >> 5
+                s0 = self.s0
+                s0 += (r - s0 + (1 << (k - 1))) >> k
+                self.s0 = s0
+                sk = (self.s1 - s0) >> 5
             self.skew = SKEW_MAX if sk > SKEW_MAX else (-SKEW_MAX if sk < -SKEW_MAX else sk)
             tb += (n * (dc * 16 - n * tb) + (1 << (k + 1))) >> (k + 2)
             self.tb16 = TB16_MIN if tb < TB16_MIN else (TB16_MAX if tb > TB16_MAX else tb)
         if st == ST_DATA:
-            self._data(v, n)
+            # SOF..CRC: destuff at run level, append the bits, then look
+            # for EOM in what is left of the run after the CRC.
+            r = n - self.skip
+            left = 0
+            got = self.got
+            need = self.need
+            nby = self.nby
+            if nby:
+                take = need - got
+                if r > take:
+                    left = r - take
+            if n - left > 5:
+                if not v and left == 0 and n >= IDLE_BITS:
+                    self._fin(E_TRUNC)
+                    self.st = ST_ARMED
+                else:
+                    self._fin(E_STUFF)
+                    self.st = ST_HUNT
+                return
+            k = r - left
+            if k > 0:
+                acc = (self.acc << k) | (((1 << k) - 1) if v else 0)
+                nb = self.nb + k
+                got += k
+                self.got = got
+                if nb >= 8:
+                    fb = self.fbuf
+                    while nb >= 8:
+                        nb -= 8
+                        b = (acc >> nb) & 0xFF
+                        acc &= (1 << nb) - 1
+                        fb[nby] = b
+                        nby += 1
+                        if nby == 1:
+                            ml = b & 0x0F
+                            if ml < 3 or ml > 13:
+                                self.nby = nby
+                                self._fin(E_LEN)
+                                self.st = ST_HUNT
+                                return
+                            need = 16 + 8 * ml
+                            self.need = need
+                    self.nby = nby
+                self.acc = acc
+                self.nb = nb
+            self.skip = 1 if (n == 5 and left == 0) else 0
+            if got == need:
+                self.st = ST_POST
+                self.pz = 0
+                self.po = 0
+                if left:
+                    self._post(v, left)
         elif st == ST_HUNT:
             if not v and n >= IDLE_BITS:
                 self.st = ST_ARMED
@@ -806,53 +914,6 @@ class BeanRx:
         self.need = 8
         self.skip = 1 if n == 5 else 0
         self.st = ST_DATA
-
-    def _bits(self, v, k):
-        """Append k bits of value v; False on a bad ML."""
-        acc = (self.acc << k) | (((1 << k) - 1) if v else 0)
-        nb = self.nb + k
-        self.got += k
-        while nb >= 8:
-            nb -= 8
-            b = (acc >> nb) & 0xFF
-            acc &= (1 << nb) - 1
-            self.fbuf[self.nby] = b
-            self.nby += 1
-            if self.nby == 1:
-                ml = b & 0x0F
-                if ml < 3 or ml > 13:
-                    self._fin(E_LEN)
-                    self.st = ST_HUNT
-                    return False
-                self.need = 16 + 8 * ml
-        self.acc = acc
-        self.nb = nb
-        return True
-
-    def _data(self, v, n):
-        r = n - self.skip
-        left = 0
-        if self.nby:
-            take = self.need - self.got
-            if r > take:
-                left = r - take
-        if n - left > 5:
-            if not v and left == 0 and n >= IDLE_BITS:
-                self._fin(E_TRUNC)
-                self.st = ST_ARMED
-            else:
-                self._fin(E_STUFF)
-                self.st = ST_HUNT
-            return
-        if r - left > 0 and not self._bits(v, r - left):
-            return
-        self.skip = 1 if (n == 5 and left == 0) else 0
-        if self.got == self.need:
-            self.st = ST_POST
-            self.pz = 0
-            self.po = 0
-            if left:
-                self._post(v, left)
 
     def _post(self, v, m):
         if v:
