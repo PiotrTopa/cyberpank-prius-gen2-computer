@@ -1686,8 +1686,12 @@ class BackendService:
                                 time.monotonic(), time.time())
             why = trig.reason
             if self.roadsense_power is not None:
-                # the same entry signal powers the camera early (not the operator hold below)
-                self.roadsense_power.set_early_camera(bool(early) and not acc)
+                # every entry condition of the trigger powers the camera early (not the
+                # operator hold below); rules and budget in roadsense_power
+                pb = state.powerbox
+                self.roadsense_power.set_early_camera(
+                    bool(early) and not acc,
+                    inhibit=bool(pb.undervoltage or pb.shutdown_requested))
             if self._mfd_hold.check(state.powerbox):
                 early, why = True, "operator hold"
             self.mfd_power.tick(acc, early=early, why=why)

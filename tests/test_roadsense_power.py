@@ -479,53 +479,321 @@ class TestServicePowerProfileHold:
 
 
 class TestEarlyCamera:
-    """Door unlocked before ACC: the camera hub is powered early, without the stack."""
+    """BEAN entry demand before ACC: the camera hub is powered early, without
+    the stack, in bounded sessions (tail, session cap, parked-period budget,
+    key-off hold-off), and handed over to the ACC start without a blip."""
+
+    @staticmethod
+    def early(h, on, dt=5.0, acc=False, inhibit=False):
+        h.m.set_early_camera(on, inhibit=inhibit)   # the service repeats the level every pass
+        h.tick(acc, dt=dt)
+
+    @staticmethod
+    def offs(h):
+        return [c for c in h.camera.calls if c is False]
 
     def test_early_demand_powers_the_camera_then_the_stack_starts_without_settle(self):
         h = Harness()
         h.tick(False)
         assert h.state == "off" and h.camera.read() is False
-        h.m.set_early_camera(True)
-        h.tick(False, dt=0.5)                       # reacts on the next loop pass
+        self.early(h, True, dt=0.5)                 # reacts on the next loop pass
         assert h.state == "preview" and h.camera.read() is True
         assert h.verbs() == []                      # no unit is started for it
-        h.tick(True)                                # the key: straight to the start, hub already up
+        self.early(h, False, acc=True)              # the key: straight to the start, hub already up
         assert h.state == "starting" and h.verbs() == ["start"]
         h.api = {"fps": {}}
         h.tick(True)
         assert h.state == "running"
+        assert self.offs(h) == [False] and h.camera.read() is True   # only the reconcile off
+        assert h.m.status()["early_camera"]["last_end"] == "ACC on"
 
-    def test_early_demand_without_a_key_ends_after_the_limit(self):
-        h = Harness(early_camera_s=20.0)
-        h.tick(False)
-        h.m.set_early_camera(True)
-        h.tick(False, dt=0.5)
-        assert h.camera.read() is True
-        for _ in range(3):
-            h.m.set_early_camera(True)              # the demand is a level: repeated every pass
-            h.tick(False)
-        assert h.state == "preview"
-        h.m.set_early_camera(True)
-        h.tick(False, dt=10.0)                      # 25.5 s after the demand
-        assert h.state == "off" and h.camera.read() is False
-        h.m.set_early_camera(True)                  # the same demand does not bring it back
-        h.tick(False)
-        assert h.state == "off"
-        h.m.set_early_camera(False)
-        h.m.set_early_camera(True)                  # a new one does
-        h.tick(False, dt=0.5)
-        assert h.state == "preview"
-
-    def test_early_demand_dropped_or_disabled(self):
+    def test_hand_over_has_no_hub_blip_even_if_the_demand_drops_before_the_key(self):
+        # 2026-11-17 13:19:34 demand, 13:19:54 gone, 13:20:02 ACC on: the tail bridges it
         h = Harness()
         h.tick(False)
-        h.m.set_early_camera(True)
-        h.tick(False, dt=0.5)
-        h.m.set_early_camera(False)
+        self.early(h, True, dt=0.5)
+        n_on = h.camera.calls.count(True)
+        for _ in range(4):
+            self.early(h, True)                     # 20 s of demand
+        self.early(h, False)                        # gone ...
+        self.early(h, False, dt=3.0)
+        assert h.state == "preview"                 # ... still within the tail
+        self.early(h, False, acc=True)              # ACC 8 s later
+        h.tick(True)
+        assert h.state in ("starting", "running")
+        assert self.offs(h) == [False]              # only the reconcile's initial off
+        assert h.camera.calls.count(True) >= n_on
+
+    def test_demand_gone_without_key_turns_the_hub_off_after_the_tail(self):
+        h = Harness(early_camera_tail_s=30.0)
         h.tick(False)
+        self.early(h, True, dt=0.5)
+        self.early(h, False)                        # gone at t0
+        for _ in range(5):
+            self.early(h, False)                    # 25 s
+        assert h.state == "preview" and h.camera.read() is True
+        self.early(h, False)                        # 30 s
+        assert h.state == "off" and h.camera.read() is False
+        assert h.m.status()["early_camera"]["last_end"] == "demand gone"
+
+    def test_demand_back_within_the_tail_keeps_the_same_session(self):
+        h = Harness()
+        h.tick(False)
+        self.early(h, True, dt=0.5)
+        self.early(h, False)
+        self.early(h, False)
+        self.early(h, True, dt=1.0)                 # a door opens again
+        assert h.state == "preview"
+        assert self.offs(h) == [False] and h.m.status()["early_camera"]["sessions"] == 1
+
+    def test_session_ends_at_its_limit_and_the_same_demand_does_not_restart_it(self):
+        h = Harness(early_camera_s=20.0)
+        h.tick(False)
+        self.early(h, True, dt=0.5)
+        assert h.camera.read() is True
+        for _ in range(3):
+            self.early(h, True)
+        assert h.state == "preview"
+        self.early(h, True, dt=10.0)                # 25.5 s after the demand
+        assert h.state == "off" and h.camera.read() is False
+        assert h.m.status()["early_camera"]["last_end"] == "time limit"
+        self.early(h, True)                         # the same demand does not bring it back
+        assert h.state == "off"
+        h.m.set_early_camera(False)
+        self.early(h, True, dt=0.5)                 # a new one does
+        assert h.state == "preview"
+
+    def test_parked_budget_caps_repeated_unlock_lock_cycles(self):
+        h = Harness(early_camera_s=180.0, early_camera_tail_s=30.0, early_camera_budget_s=200.0)
+        h.tick(False)
+        sessions = 0
+        on_time = 0.0
+        for _ in range(10):                         # unlock, 30 s of demand, lock
+            self.early(h, True, dt=0.5)
+            if h.state == "preview":
+                sessions += 1
+            for _ in range(6):
+                was = h.camera.read()
+                self.early(h, True)
+                on_time += 5.0 if was else 0.0
+            for _ in range(8):
+                was = h.camera.read()
+                self.early(h, False)
+                on_time += 5.0 if was else 0.0
+            assert h.state == "off"
+        st = h.m.status()["early_camera"]
+        assert st["used_s"] <= 200.0 + 1e-6 and on_time <= 205.0
+        assert sessions == st["sessions"] == 4      # 3 x 60 s, then the last 20 s of budget
+        self.early(h, True, dt=0.5)
+        assert h.state == "off"                     # budget used: no more early power
+
+    def test_budget_refilled_only_by_a_real_drive(self):
+        h = Harness(early_camera_budget_s=60.0, early_camera_tail_s=10.0,
+                    early_camera_keyoff_holdoff_s=0.0, early_camera_reset_acc_s=60.0)
+        h.tick(False)
+        self.early(h, True, dt=0.5)
+        for _ in range(14):
+            self.early(h, True)                     # the whole 60 s budget
+        assert h.state == "off"
+        h.tick(True)                                # a short ACC blip (10 s) ...
+        h.tick(True)
+        for _ in range(12):
+            h.tick(False)                           # ... stack up and down again
+        assert h.state == "off" and h.m.status()["early_camera"]["used_s"] >= 60.0
+        h.m.set_early_camera(False)
+        self.early(h, True, dt=0.5)
+        assert h.state == "off"                     # still no budget
+        h.api = {"fps": {}}
+        for _ in range(14):
+            h.tick(True)                            # a drive of 70 s
+        for _ in range(14):
+            h.tick(False)
+        assert h.state == "off" and h.m.status()["early_camera"]["used_s"] == 0.0
+        h.m.set_early_camera(False)
+        self.early(h, True, dt=0.5)
+        assert h.state == "preview"
+
+    def test_getting_out_after_the_drive_does_not_power_the_camera(self):
+        h = Harness(early_camera_keyoff_holdoff_s=120.0)
+        h.api = {"fps": {}}
+        for _ in range(4):
+            h.tick(True)
+        assert h.state == "running"
+        self.early(h, True)                         # key off, door opens at once
+        for _ in range(20):                         # grace + stop + 100 s parked
+            self.early(h, True)
+        assert h.state == "off" and h.camera.read() is False
+        assert h.m.status()["early_camera"]["sessions"] == 0
+        h.m.set_early_camera(False)                 # locked, walked away
+        for _ in range(10):
+            self.early(h, False)
+        self.early(h, True, dt=0.5)                 # the next entry is early again
+        assert h.state == "preview"
+
+    def test_stop_finishing_during_a_session_keeps_the_hub(self):
+        h = Harness(early_camera_keyoff_holdoff_s=0.0)
+        h.api = {"fps": {}}
+        for _ in range(4):
+            h.tick(True)
+        offs = len(self.offs(h))
+        h.tick(False)                               # grace
+        h.m.set_early_camera(False)
+        self.early(h, True, dt=1.0)                 # somebody gets in during the grace
+        for _ in range(8):
+            self.early(h, True)
+        assert h.state == "preview" and h.camera.read() is True
+        assert len(self.offs(h)) == offs            # never cut between the stop and the session
+
+    def test_inhibit_ends_a_session_at_once_and_refuses_new_ones(self):
+        h = Harness()
+        h.tick(False)
+        self.early(h, True, dt=0.5)
+        assert h.state == "preview"
+        self.early(h, True, dt=0.5, inhibit=True)   # undervoltage
+        assert h.state == "off" and h.camera.read() is False
+        h.m.set_early_camera(False, inhibit=True)
+        self.early(h, True, dt=0.5, inhibit=True)
+        assert h.state == "off"
+
+    def test_operator_modes_and_disabled(self):
+        h = Harness()
+        h.tick(False)
+        h.m.set_mode(MODE_OFF)
+        self.early(h, True, dt=0.5)
         assert h.state == "off" and h.camera.read() is False
         h = Harness(early_camera_s=0.0)
         h.tick(False)
-        h.m.set_early_camera(True)
-        h.tick(False)
+        self.early(h, True)
         assert h.state == "off" and h.camera.read() is False
+        h = Harness(camera_relay=False)
+        h.tick(False)
+        self.early(h, True)
+        assert h.state == "off"
+
+    def test_mode_off_during_a_session_ends_it(self):
+        h = Harness()
+        h.tick(False)
+        self.early(h, True, dt=0.5)
+        assert h.state == "preview"
+        h.m.set_mode(MODE_OFF)
+        self.early(h, True, dt=0.5)
+        assert h.state == "off" and h.camera.read() is False
+
+    def test_preview_hold_and_session_share_the_hub(self):
+        h = Harness()
+        h.tick(False)
+        self.early(h, True, dt=0.5)
+        h.m.set_preview_hold(True)
+        for _ in range(10):
+            self.early(h, False)                    # session over, preview keeps it
+        assert h.state == "preview" and h.camera.read() is True
+        h.m.set_preview_hold(False)
+        h.tick(False, dt=0.5)
+        assert h.state == "off" and h.camera.read() is False
+
+    def test_backend_shutdown_cuts_an_early_only_hub(self):
+        h = Harness()
+        h.tick(False)
+        self.early(h, True, dt=0.5)
+        h.m.shutdown_preview()
+        assert h.state == "off" and h.camera.read() is False
+        assert h.m.status()["early_camera"]["last_end"] == "backend shutdown"
+
+    def test_no_session_before_the_first_acc_report(self):
+        h = Harness(acc_wait_s=20.0)
+        h.m.set_early_camera(True)
+        h.tick(False, dt=0.5, acc_known=False)
+        assert h.state == "off" and h.camera.calls == []
+        h.tick(True, dt=5.0)                        # the report says ACC on: normal start
+        assert h.state == "camera_on"
+        assert h.m.status()["early_camera"]["sessions"] == 0
+
+
+class TestEarlyCameraWiring:
+    """BackendService._mfd_power_tick feeds EVERY entry condition of the BEAN
+    trigger (and nothing else) into the camera's early demand."""
+
+    class _Pb:
+        def __init__(self, acc=False):
+            self.acc_on = acc
+            self.bean_tx = None
+            self.undervoltage = False
+            self.shutdown_requested = False
+
+    class _Bean:
+        def __init__(self, frames, **decoded):
+            self.frames_total = frames
+            self.decoded = {k: {"value": v} for k, v in decoded.items()}
+
+    class _Rs:
+        def __init__(self):
+            self.calls = []
+
+        def set_early_camera(self, on, inhibit=False):
+            self.calls.append((on, inhibit))
+
+    class _Mfd:
+        def __init__(self, mode):
+            from cyberpunk_computer.backend.mfd_power import MfdPowerConfig
+            self.config = MfdPowerConfig(bean_wake=mode)
+            self.ticks = []
+
+        def tick(self, acc, early=False, why=""):
+            self.ticks.append((acc, early, why))
+
+    class _Hold:
+        def __init__(self):
+            self.on = False
+
+        def check(self, pb):
+            return self.on
+
+    def make(self, mode="entry"):
+        from types import SimpleNamespace
+        from cyberpunk_computer.backend.service import BackendService
+        state = SimpleNamespace(powerbox=self._Pb(), bean=self._Bean(0))
+        svc = SimpleNamespace(
+            mfd_power=self._Mfd(mode), roadsense_power=self._Rs(), _mfd_bean_trigger=None,
+            _mfd_hold=self._Hold(), twin=SimpleNamespace(store=SimpleNamespace(state=state)))
+        tick = lambda: BackendService._mfd_power_tick(svc)   # noqa: E731
+        return svc, state, tick
+
+    def test_each_entry_condition_powers_the_camera(self):
+        for decoded, mode in (({"doors_locked": False}, "entry"),
+                              ({"doors_locked": True, "any_door_open": True}, "entry"),
+                              ({"doors_locked": True, "door_open": True}, "entry"),
+                              ({"doors_locked": True}, "any")):
+            svc, state, tick = self.make(mode)
+            tick()                                       # first look at the frame counter
+            state.bean = self._Bean(5, **decoded)
+            tick()
+            assert svc.roadsense_power.calls[-1] == (True, False), (decoded, mode)
+            assert svc.mfd_power.ticks[-1][1] is True    # the same demand wakes the MFD
+
+    def test_locked_and_closed_does_not(self):
+        svc, state, tick = self.make("entry")
+        tick()
+        state.bean = self._Bean(5, doors_locked=True, any_door_open=False)
+        tick()
+        assert svc.roadsense_power.calls[-1] == (False, False)
+
+    def test_operator_hold_wakes_the_mfd_but_not_the_camera(self):
+        svc, state, tick = self.make("entry")
+        svc._mfd_hold.on = True
+        tick()
+        tick()
+        assert svc.mfd_power.ticks[-1][1:] == (True, "operator hold")
+        assert all(on is False for on, _ in svc.roadsense_power.calls)
+
+    def test_acc_on_is_not_an_early_demand_and_undervoltage_inhibits(self):
+        svc, state, tick = self.make("entry")
+        tick()
+        state.bean = self._Bean(5, doors_locked=False)
+        state.powerbox.acc_on = True
+        tick()
+        assert svc.roadsense_power.calls[-1] == (False, False)
+        state.powerbox.acc_on = False
+        state.powerbox.undervoltage = True
+        state.bean = self._Bean(6, doors_locked=False)
+        tick()
+        assert svc.roadsense_power.calls[-1] == (True, True)
