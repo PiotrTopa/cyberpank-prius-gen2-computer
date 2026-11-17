@@ -78,7 +78,7 @@ Owner timeline (CET) and what the bus showed:
 **Set-speed steps** (`21D3` is polled once a second, so every step below is the change between two
 polls, and taps closer together than 1 s merge):
 
-* resolution: 1 km/h (integer). Smallest step seen +1 and −1 (21:17:06, 21:17:37, 21:17:29), which is
+* resolution: 1 km/h (integer, floored; see the tap-step table below). Smallest step seen +1 and −1 (21:17:06, 21:17:37, 21:17:29), which is
   consistent with one tap = 1 km/h, but no isolated tap was logged as such.
 * hold up: +13 km/h in 9 s (≈ 1.4–1.6 km/h per second, steps of +1/+2 per poll), set speed 2–4 km/h
   ahead of the car, which follows at ≈ 1.2 km/h/s.
@@ -89,9 +89,27 @@ polls, and taps closer together than 1 s merge):
 * C (drive request): integer 0..107 seen, smooth (1-count resolution), 70–80 in steady cruise at 42
   km/h, 85–107 while accelerating, falling to 0 while the set speed is below the car's speed.
 
-**What would settle the step size:** the same procedure with `21D3` polled at 5–10 Hz (or the owner
-marking each single tap with `bean_mark`), single taps 3 s apart at a steady speed, then holds of 2, 4
-and 6 s, up and down. Rest of E5: stalk wiring (connector, which ECU reads it, signal levels per
+**Tap step = 1 mph (≈ 1.61 km/h), shown floored to whole km/h (settled 2026-11-17).** Single taps
+with long pauses (trip `trip_20261117_102419_216`, owner: "long pauses between clicks"):
+
+| Time | Set (`21D3` B) | Step | Internal set speed if SET = 54.0–54.2 and tap = 1.609 km/h |
+|---|---|---|---|
+| 10:25:12.7 | 54 | SET | 54.0 |
+| 10:25:19.7 | 55 | +1 | 55.6 |
+| 10:25:35.7 | 57 | **+2** | 57.2 |
+| 10:25:48.7 | 58 | +1 | 58.8 |
+| 10:25:58.7 | 57 | −1 | 57.2 |
+| 10:26:02.7 | 55 | **−2** | 55.6 |
+| 10:26:05.7 | 54 | −1 | 54.0 |
+| 10:26:08.7 | (54 kept) | cancel | |
+
+Each change came alone, 3–16 s from the next, so each is one tap; the alternating +1/+2 and −1/−2 is
+exactly floor(54.0 + k × 1.609). Second session (10:29:00–22): SET ≈ 50.0–50.4, two taps up within one
+poll (+3 → 53), then three single taps down 53 → 51 → 50 → 48, which fits only an internal value
+53.2–53.6 = 50.0–50.4 + 2 × 1.609. The ±5 steps of 2026-11-16 are three taps (4.8 km/h), and the hold
+rate (≈ 1.4–1.6 km/h per second) is about 1 mph per second. The ECU keeps the set speed in mph-based
+units; `21D3` B is that value floored to km/h, so the MFD may show it one less than the internal value.
+The 21D3 E byte and 0x5C8 b0 bit 7 stay unknown. Rest of E5: stalk wiring (connector, which ECU reads it, signal levels per
 switch) from the wiring diagram plus a multimeter, before any interposer design.
 
 ---|---|---|
@@ -581,7 +599,7 @@ Ranked by what they settle. By owner priority **E5 (cruise control) comes first*
 | E2 | **Hard climate keys, parked READY.** Front defrost on/off, rear defogger on/off, two steering-pad temperature/mode steps | `FE:FC` b0 `10`/`08`, `52:ED` b1 `20`, a possible mirror-heater bit, `52:6D` b1 flags |
 | E3 | **Cabin thermometer during a cold start**, parked READY after a night soak, a reference thermometer, one reading per minute for 10 min | `52:6D` b0 offset only (scale P, 2026-11-16); whether `98:EC` b4 is cabin-related |
 | E4 | **Trip meter.** Note Trip A/B and average consumption at start and end of a drive; reset Trip A with IG on | which trip `52:76` is; whether `52:A2` resets with it |
-| E5 | **Cruise control** — PARTLY DONE 2026-11-16 (§1: main switch, engaged, set speed, `21D3` layout). Left: single taps 3 s apart and timed holds with `21D3` polled at 5–10 Hz; brake cancel; 0x5C8 b0 bit 7; stalk wiring | tap/hold step size, 0x5C8 b0 bit 7 |
+| E5 | **Cruise control** — PARTLY DONE 2026-11-16/17 (§1: main switch, engaged, set speed, `21D3` layout, tap step 1 mph). Left: timed holds; brake cancel; 0x5C8 b0 bit 7; stalk wiring | tap/hold step size, 0x5C8 b0 bit 7 |
 | E6 | **GPS speed at steady 50 and 80 km/h** | `FE:24` = displayed (over-reading) speed |
 | E7 | **Flash, rear fog**, 10 s gaps (high beam seen 2026-11-16: `FE:7F` b0 `08`) | flash = the same bit?; whether rear fog has any bit |
 | E8 | `98:CC`, `40:59`, `52:CA`, `52:D0`, `FE:DB`: no cheap experiment. A K-line data list of the A/C amp (room, evaporator, inverter temperatures) next to a capture | `98:CC`, `98:EC` b4 |
