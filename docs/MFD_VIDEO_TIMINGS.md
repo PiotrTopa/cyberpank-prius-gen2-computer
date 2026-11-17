@@ -78,6 +78,26 @@ lanes on the wrong DAC rungs: gray 51 renders saturated green, gray 128 blue, gr
 G ramp black. The panel colour gains (`MFD_GAIN_R/G/B` in `mfd.service.d/equalizer.conf`) are 1.00
 with the correct format.
 
+**Open hardware fault (found 2026-11-17): the two red MSB lanes are not connected.** GPIO20
+(DPI_D16, red bit 4, header pin 38) and GPIO21 (DPI_D17, red bit 5 = MSB, header pin 40), the last
+two pins of the 40-pin header on the GPIO21 side, do not reach the VGA666 red DAC. Red is left with
+its four low bits (GPIO16–19, pins 36, 11, 12, 35), at most 15/63 of full red, so whites and bright
+greys are green-cyan and a red ramp repeats four times over 0..255. Evidence:
+
+* photo of a 16-step ramp pattern written raw to `/dev/fb0`: red brightness by step is dark, mid,
+  bright, bright, then the same again three more times; green and blue rise once;
+* pull test on the Pi (`pinctrl set N ip pu`, read, `ip pd`, read, back to `a2`): GPIO9, 15, 16, 17,
+  18, 19 read low against the pull-up (loaded by the DAC ladder); GPIO20 and GPIO21 follow the pull
+  (high / low) exactly like the unused GPIO22 and GPIO26.
+
+The format (`0x105`) is right: green and blue prove the lane order. The panel measured neutral on
+2026-09-08, so the contact was probably lost when the board was reworked for the sync jumper on
+2026-11-05. Fix: reseat the VGA666 at that end of the header or reflow pins 38 and 40 (Pi header and
+VGA666 socket), then repeat the pull test (both must read low with the pull-up) and the ramp photo.
+No software correction is applied: a neutral picture would need green and blue cut to ~24 %.
+The pattern generator and the raw-framebuffer procedure: stop `mfd.service`, `cat pattern.bgra >
+/dev/fb0` (BGRA 480×240), `systemctl start mfd`.
+
 ## 4. Frontend unit
 
 `mfd.service` runs `python -m cyberpunk_computer.frontend --host 192.168.100.1 --fullscreen --scale 1 --production`
