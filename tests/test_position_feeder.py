@@ -697,3 +697,15 @@ def test_gyro_yaw_rate_opt_in_and_standstill_zero():
     tap.rear = (30.0, 30.0, t)
     tap.on_frame(0x022, _gyro_frame(1 - 20, -4 - 20), 0, 0.0, t)
     assert tap.sample(t, cfg)["yaw_rate_rps"] == pytest.approx(-20 * GYRO_RAD_PER_COUNT, abs=3e-4)
+
+
+def test_turn_signal_hook_rides_along_while_fresh():
+    cfg = PositionFeederConfig(enabled=True)
+    tap = _tap_with()
+    assert "turn_signal" not in tap.sample(100.0, cfg)               # nobody decodes the lamps yet: no field
+    tap.set_turn_signal("right", now=99.5)
+    assert tap.sample(100.0, cfg)["turn_signal"] == "right"
+    tap.set_turn_signal("left", now=98.3)
+    assert "turn_signal" not in tap.sample(100.0, cfg)               # 1.7 s old: not repeated by the caller
+    tap.set_turn_signal("nonsense", now=100.0)
+    assert "turn_signal" not in tap.sample(100.0, cfg)

@@ -38,7 +38,7 @@ Pt = Tuple[float, float]
 FAR_FROM_M = 100.0
 FAR_END_UP = 3                  # the picture ends this many rows under the horizon
 MIN_CONF = 0.5                  # the path is drawn while its confidence stays above this
-RING_SEG = 20                   # polygon segments of a ring
+RING_SEG = 16                   # polygon segments of a ring
 X_BACK = -5.0                   # ground points are clamped to this far behind the camera
 ARM_FILL = (8, 14, 30)          # the surface of a road that is not the car's way (render.pal["lane_side"])
 ISLAND = (0, 0, 0)
@@ -110,42 +110,72 @@ class Projection:
         t = (x - gx[lo]) / ((gx[hi] - gx[lo]) or 1.0)
         return gc[lo] + (gc[hi] - gc[lo]) * t
 
-    def pt(self, x: float, y: float) -> Pt:
-        """Screen position of the ground point (x ahead, y left; the map's part
-        is shifted onto the camera's lane by the caller: use ``mp``)."""
-        if x < X_BACK:
-            x = X_BACK
-        c = self.centre(x)
-        if x <= FAR_FROM_M:
-            wx = self.cam_x + x
-            shown = self.compress(wx)
-            sy, k = self.r._row(shown)
-            ratio = (shown - self.back) / (wx - self.back) if wx > 1.0 else 1.0
-            sx = self.cx - k * ((y - c) + c * ratio)
-        else:
-            t = math.log(x / FAR_FROM_M) / self.span
-            if t > 1.0:
-                t = 1.0
-            sy = self.y100 - (self.y100 - self.y_end) * t
-            kw = self.k100 * FAR_FROM_M / x
-            kc = self.kc100 * (FAR_FROM_M + self.depth0) / (x + self.depth0)
-            sx = self.cx - (kw * (y - c) + kc * c)
-        if sx < -3000.0:
-            sx = -3000.0
-        elif sx > 3000.0:
-            sx = 3000.0
-        return sx, sy
-
-    def mp(self, x: float, y: float) -> Pt:
-        """A point of the map's geometry."""
-        return self.pt(x, y + self.shift)
+    def many(self, pts: Sequence[Pt]) -> List[Pt]:
+        """Screen positions of ground points of the MAP's geometry (x ahead, y
+        left). One loop with everything inline: this runs some 50-150 times
+        per redraw on a Pi Zero (render.compress and SceneRenderer._row are
+        repeated here, see there)."""
+        from . import render as R
+        r = self.r
+        cx, shift = self.cx, self.shift
+        gx, gc = self.gx, self.gc
+        n = len(gx)
+        g_last_x, g_last_c, g_first_x, g_first_c = gx[n - 1], gc[n - 1], gx[0], gc[0]
+        cam_x, back = self.cam_x, self.back
+        x0c, dn_i = R.COMP_X0, 1.0 / R._COMP_DN
+        dslope = (dn_i - 1.0 / R.COMP_DFAR) / R._COMP_LN
+        cs = R.COMP_S
+        f0, fz, u0, uz, cy, F = r._row_f0, r._row_fz, r._row_u0, r._row_uz, r._chase_cy, R.CHASE_F
+        y100, y_end, span, k100, kc100, depth0 = self.y100, self.y_end, self.span, self.k100, self.kc100, self.depth0
+        log = math.log
+        out: List[Pt] = []
+        for x, y in pts:
+            y += shift
+            if x < X_BACK:
+                x = X_BACK
+            if x >= g_last_x:
+                c = g_last_c
+            elif x <= g_first_x:
+                c = g_first_c
+            else:
+                lo, hi = 0, n - 1
+                while hi - lo > 1:
+                    mid = (lo + hi) >> 1
+                    if gx[mid] <= x:
+                        lo = mid
+                    else:
+                        hi = mid
+                c = gc[lo] + (gc[hi] - gc[lo]) * (x - gx[lo]) / ((gx[hi] - gx[lo]) or 1.0)
+            if x <= FAR_FROM_M:
+                wx = cam_x + x
+                rr = wx - x0c
+                if rr <= 0.0:
+                    dx = wx - back
+                    ratio = 1.0
+                else:
+                    dx = 1.0 / (dn_i - dslope * log(1.0 + rr / cs))
+                    ratio = dx / (wx - back)
+                k = F / (dx * f0 + fz)
+                sy = cy - k * (dx * u0 + uz)
+                sx = cx - k * ((y - c) + c * ratio)
+            else:
+                t = log(x / FAR_FROM_M) / span
+                if t > 1.0:
+                    t = 1.0
+                sy = y100 - (y100 - y_end) * t
+                sx = cx - (k100 * FAR_FROM_M / x * (y - c) + kc100 * (FAR_FROM_M + depth0) / (x + depth0) * c)
+            if sx < -3000.0:
+                sx = -3000.0
+            elif sx > 3000.0:
+                sx = 3000.0
+            out.append((sx, sy))
+        return out
 
 
 def _ribbon(pr: Projection, pts: Sequence[Pt], half: float) -> Tuple[List[Pt], List[Pt]]:
     """Left and right edge (screen) of a road of half-width ``half`` along a
     ground polyline (map geometry)."""
-    left: List[Pt] = []
-    right: List[Pt] = []
+    g: List[Pt] = []
     n = len(pts)
     for i in range(n):
         ax, ay = pts[i - 1] if i > 0 else pts[i]
@@ -154,9 +184,10 @@ def _ribbon(pr: Projection, pts: Sequence[Pt], half: float) -> Tuple[List[Pt], L
         ln = math.hypot(dx, dy) or 1.0
         nx, ny = -dy / ln * half, dx / ln * half        # to the left of the direction of travel
         x, y = pts[i]
-        left.append(pr.mp(x + nx, y + ny))
-        right.append(pr.mp(x - nx, y - ny))
-    return left, right
+        g.append((x + nx, y + ny))
+        g.append((x - nx, y - ny))
+    sc = pr.many(g)
+    return sc[0::2], sc[1::2]
 
 
 def _circle(pr: Projection, cx: float, cy: float, rad: float) -> Optional[List[Pt]]:
@@ -179,7 +210,7 @@ def _circle(pr: Projection, cx: float, cy: float, rad: float) -> Optional[List[P
         g = cut
     if len(g) < 3:
         return None
-    return [pr.mp(x, y) for x, y in g]
+    return pr.many(g)
 
 
 class Prepared:
@@ -192,14 +223,26 @@ def prepare(r: Any, d: Any) -> Optional[Prepared]:
     geo = d.map.geo
     if geo is None or not r._fast or d.vision != "live":
         return None
+    cen = r._cen
+    cache = r.__dict__.get("_geo_cache")
+    if cache is not None and cache[0] is geo and cache[3] == bool(d.lanes[1] or d.lanes[2]):
+        # the same geometry as at the last redraw (the scene comes 10 times a second, the
+        # picture is redrawn up to 20 times): the projection is kept; the camera's lanes have
+        # moved by a fraction of their 0.3 s low-pass since
+        for i, c in cache[2]:
+            if i < len(cen):
+                cen[i] = c
+        return cache[1]
     pr = Projection(r, d, geo)
     # beyond the camera's reach everything that stands on the road (the lead, objects, the
     # roadside) follows the fused centre line
-    cen = r._cen
+    tail = []
     for i, x in enumerate(d.xs):
         if x > geo.v and i < len(cen):
             cen[i] = pr.centre(x)
+            tail.append((i, cen[i]))
     out = Prepared()
+    r.__dict__["_geo_cache"] = (geo, out, tail, bool(d.lanes[1] or d.lanes[2]))
     # the way on: the path while it is known well enough
     pts: List[Pt] = []
     if not (d.lanes[1] or d.lanes[2]) and geo.path[0][0] > 3.0:
@@ -218,7 +261,7 @@ def prepare(r: Any, d: Any) -> Optional[Prepared]:
     out.way = _ribbon(pr, pts, geo.width * 0.5) if len(pts) >= 2 else None
     out.way_split = next((i for i, p in enumerate(pts) if p[0] > FAR_FROM_M), len(pts))
     out.end = "" if cut_short else geo.end
-    out.way_end = pr.mp(*pts[-1]) if pts else None
+    out.way_end = pr.many(pts[-1:])[0] if pts else None
     arms = []
     for b in geo.branches:
         if b.minor and b.pts[0][0] > 60.0:

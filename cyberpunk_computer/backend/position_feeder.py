@@ -75,6 +75,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from ..comm.can_decoder import decode_steering_deg  # noqa: F401 (re-exported)
+from ..comm.can_decoder import YAW_RAD_S_PER_COUNT, YAW_STANDSTILL_OFFSETS
+from ..comm.can_decoder import decode_yaw_counts as _yaw_counts
 from .position_client import PositionFeed
 
 logger = logging.getLogger(__name__)
@@ -93,8 +95,12 @@ DEFAULT_YAW_INPUTS = ("wheels",)
 # from the ratio to the rear wheel-speed yaw, 0.0042-0.0046, and not yet
 # calibrated on a full circle, which is why it is not the default). The
 # standstill offset of each channel is learned whenever the car stands.
-GYRO_RAD_PER_COUNT = 0.0044
-GYRO_OFFSETS = (-2.0, -7.0)                 # counts at standstill (AB, CD), 2026-11-17
+# Scale, start offsets and the frame decode are the state decoder's
+# (comm/can_decoder.py; the state shows the same sensor as dynamics.yaw_rate_dps).
+# The feeder reads the frames itself because it needs them at the bus rate,
+# not at the state's publish rate.
+GYRO_RAD_PER_COUNT = YAW_RAD_S_PER_COUNT
+GYRO_OFFSETS = YAW_STANDSTILL_OFFSETS      # counts at standstill (AB, CD), 2026-11-17
 GYRO_MAX_COUNTS = 400                       # |value| beyond this (1.76 rad/s) is not a yaw rate
 FIXES = ("none", "2d", "3d", "dgps", "rtk", "dr")
 GEARS = ("P", "R", "N", "D", "B")
@@ -178,10 +184,10 @@ def decode_yaw_counts(data: bytes) -> Optional[Tuple[int, int]]:
     """0x022: the two yaw-rate channels in counts, (256A + B) - 0x200 and
     (256C + D) - 0x200; positive = turning left. None when either is out of
     range (not a plausible yaw rate)."""
-    if len(data) < 4:
+    y = _yaw_counts(data)
+    if y is None:
         return None
-    a = ((data[0] << 8) | data[1]) - 0x200
-    b = ((data[2] << 8) | data[3]) - 0x200
+    a, b = y
     if abs(a) > GYRO_MAX_COUNTS or abs(b) > GYRO_MAX_COUNTS:
         return None
     return a, b
@@ -221,6 +227,9 @@ class CanMotionTap:
         self.rear: Optional[Tuple[float, float, float]] = None
         self.steer: Optional[Tuple[float, float]] = None          # (deg, t_mono)
         self.gyro: Optional[Tuple[int, int, float]] = None        # (counts AB, counts CD, t_mono)
+        # driver intent (optional): the turn-signal lamps, set by whoever decodes them
+        # (set_turn_signal); nothing in the backend does yet (the lamps are on BEAN)
+        self.turn_signal: Optional[Tuple[str, float]] = None      # (off | left | right | both, t_mono)
         self.gyro_offsets: Tuple[float, float] = GYRO_OFFSETS     # learned at standstill
         self._still_since: Optional[float] = None
         self._zero_t: Optional[float] = None
@@ -257,6 +266,18 @@ class CanMotionTap:
                 self.gear = (g, t)
         self.frames += 1
 
+    def set_turn_signal(self, side: Optional[str], now: Optional[float] = None) -> None:
+        """The turn-signal lamps as the driver set them: ``off``, ``left``,
+        ``right``, ``both`` (hazard), or None for unknown. Rides along in the
+        motion message as ``turn_signal`` while younger than 1.5 s, so the
+        caller repeats it at least once a second; roadsense uses it as the
+        driver's intent at the next junction (its docs/ARCHITECTURE.md,
+        topic ``roadgeom``). Call it from the place that decodes the lamps."""
+        if side in ("off", "left", "right", "both"):
+            self.turn_signal = (side, time.monotonic() if now is None else now)
+        else:
+            self.turn_signal = None
+
     def speed_mps(self, now: float, stale_s: float) -> Optional[float]:
         sp = self.speed
         if sp is None or now - sp[1] > stale_s:
@@ -274,6 +295,9 @@ class CanMotionTap:
         g = self.gear
         if g is not None and now - g[1] <= cfg.gear_stale_s:
             m["gear"] = g[0]
+        ts = self.turn_signal
+        if ts is not None and now - ts[1] <= 1.5:
+            m["turn_signal"] = ts[0]
         if "wheels" in cfg.yaw_inputs:
             fr, rr = self.front, self.rear
             if fr is not None and rr is not None and abs(fr[2] - t) <= cfg.pair_s \

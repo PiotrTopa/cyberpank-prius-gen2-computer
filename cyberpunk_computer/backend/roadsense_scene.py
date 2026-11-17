@@ -8,7 +8,7 @@ docs/MFD_MAIN_SCREEN.md section 7; consumer: ``ui/scene/inputs.SceneFeed``).
 This module builds that mapping from what the roadsense stack already
 publishes and hands it to the ZMQ event channel:
 
-    roadsense api  ws://127.0.0.1:8090/ws?topics=road,lights,speed_limit,env,rules,fused,map,lead,lanes
+    roadsense api  ws://127.0.0.1:8090/ws?topics=road,lights,speed_limit,env,rules,fused,map,lead,lanes,roadgeom
          │  (road 10-14/s ~16 kB, lights ~3/s, speed_limit and rules >= 1/s, env ~1/s,
          │   fused ~2/s, map 2/s ~4 kB, lead 10-14/s ~0.7 kB)
          ▼
@@ -680,7 +680,7 @@ def _thin(pts: List[Tuple[float, float, float]], tol_near: float = 0.25, tol_far
             stack.append((wi, b))
             continue
         # straight enough: keep the points where the confidence steps (a junction on the path)
-        for i in range(a + 1, b):
+        for i in range(a + 1, b + 1):
             if abs(pts[i][2] - pts[i - 1][2]) > 0.1:
                 keep.append(i - 1)
                 keep.append(i)
@@ -702,7 +702,11 @@ def roadgeom_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     v = _num(cen.get("vision_to_m")) or 0.0
     first = src.find("m")
     if first < 0:
-        return None
+        # the centre line ends within the camera's reach (the way on turns off at a junction):
+        # no map part of the lane, but the junction's roads still belong to the picture
+        if len(xs) < 2 or not (msg.get("branches") or msg.get("ring")):
+            return None
+        first = len(xs) - 1
     start = max(first - 1, 0)                           # the last point of the camera's part: where the two join
     pts = [(float(xs[i]), float(ys[i]), float(cf[i])) for i in range(start, len(xs)) if ss[i] <= GEO_MAX_M]
     if len(pts) < 2:
