@@ -48,6 +48,7 @@ from ..state.actions import (
 )
 from .avc_ingest import AvcIngest
 from .cruise_fusion import CruiseFusion
+from .dynamics_ingest import DynamicsIngest
 from .bean_ingest import BeanIngest
 from ..comm.source_priority import default_arbiter
 from ..comm.engine_gate import EngineRunningGate
@@ -148,9 +149,13 @@ class IngressController:
         # BEAN body bus (powerbox device 203) -> vehicle state
         # Cruise control (io.cruise_fusion): 21D3 + BEAN 62:C8 + CAN 0x5C8/0x120.
         self._cruise = CruiseFusion(self._sources)
+        # Broadcast dynamics: yaw-rate offsets, accelerations, distance and
+        # our own odometer, flags with expiry (io.dynamics_ingest).
+        self._dynamics = DynamicsIngest()
         self._bean = BeanIngest(self._sources, engine_gate=self._engine_gate,
                                 fuel_word_sink=lambda w: self._fuel_word_actions(w, "bean"),
-                                cruise_fusion=self._cruise)
+                                cruise_fusion=self._cruise,
+                                odometer_sink=self._dynamics.on_meter_odometer)
 
         # Broadcast fast path (comma.ai panda, io.panda_can). Runs on the panda
         # reader thread, so it gets its own decoder instance and its own
@@ -234,6 +239,18 @@ class IngressController:
     @property
     def bean(self) -> BeanIngest:
         return self._bean
+
+    @property
+    def dynamics(self) -> DynamicsIngest:
+        """Broadcast dynamics / distance / own odometer (io.dynamics_ingest)."""
+        return self._dynamics
+
+    def set_odometer_file(self, path: Optional[str]) -> None:
+        """Persist our own odometer in ``path`` (JSON) and publish its value."""
+        self._dynamics.odometer.set_path(path)
+        acts = self._dynamics.odometer_action()
+        if acts:
+            self._dispatch_actions(acts)
 
     @property
     def engine_gate(self) -> EngineRunningGate:
@@ -373,6 +390,7 @@ class IngressController:
     def stop(self) -> None:
         """Stop the ingress controller and input port."""
         self._input_port.stop()
+        self._dynamics.odometer.flush()
         logger.info("Ingress controller stopped")
     
     def update(self, max_messages: int = 100) -> int:
@@ -399,7 +417,8 @@ class IngressController:
 
         # AVC-only values (outside temperature) read N/A once stale, also
         # when the bus has gone silent and no frame arrives to notice it.
-        expired = self._avc.expire() + self._bean.expire() + self._cruise.expire()
+        expired = (self._avc.expire() + self._bean.expire() + self._cruise.expire()
+                   + self._dynamics.expire())
         # Engine gate and fuel flow age out when their sources go silent
         # (0x520 is not sent while the engine is stopped).
         expired += self._fuel_flow_expiry() + self._engine_gate_actions()
@@ -879,11 +898,14 @@ class IngressController:
                 actions.append(SetBatterySOCAction(soc / 100.0, ActionSource.GATEWAY))
             
             voltage = msg.values.get("voltage")
-            if voltage is not None:
+            if voltage is not None and self._sources.offer("hv_voltage", "can"):
                 actions.append(SetBatteryVoltageAction(voltage, ActionSource.GATEWAY))
+            v3cd = msg.values.get("pack_voltage_3cd")
+            if v3cd and 100 <= v3cd <= 350 and self._sources.offer("hv_voltage", "can3cd"):
+                actions.append(SetBatteryVoltageAction(v3cd, ActionSource.GATEWAY))
             
             current = msg.values.get("current")
-            if current is not None:
+            if current is not None and self._sources.offer("hv_current", "can"):
                 actions.append(SetBatteryCurrentAction(current, ActionSource.GATEWAY))
             
             temp = msg.values.get("battery_temp")
@@ -956,7 +978,43 @@ class IngressController:
             if speed is None:
                 speed = msg.values.get("speed")
             if speed is not None and speed < 300:
+                if self._sources.offer("speed", "can"):
+                    actions.append(SetSpeedAction(speed, ActionSource.GATEWAY))
+                actions.extend(self._cruise.observe_speed(speed))
+                actions.extend(self._dynamics.on_speed(speed, msg.values.get("moving")))
+
+        # 0x3CA C: true speed, integer km/h (fallback while 0x0B4 is stale)
+        elif msg.msg_type == CANMessageType.VEHICLE_SPEED_KMH:
+            speed = msg.values.get("speed_kph")
+            if speed is not None and speed < 300 and self._sources.offer("speed", "can3ca"):
                 actions.append(SetSpeedAction(speed, ActionSource.GATEWAY))
+
+        # 0x230: distance counter (distance, own odometer) and brake flag
+        elif msg.msg_type == CANMessageType.DISTANCE:
+            actions.extend(self._dynamics.on_distance_counter(msg.values["distance_counter"]))
+            if self._sources.offer("brake_switch", "can"):
+                actions.append(SetPassiveSignalsAction(
+                    vehicle={"brake_switch": msg.values["brake_flag"]}))
+
+        # 0x348 / 0x3C8: ICE rpm (secondary sources behind BEAN FE:26)
+        elif msg.msg_type == CANMessageType.ICE_SPEED:
+            rpm = msg.values.get("ice_rpm")
+            src = msg.values.get("rpm_source", "can")
+            if rpm is not None and self._sources.offer("rpm", src):
+                actions.append(SetRPMAction(int(rpm), ActionSource.GATEWAY))
+                self._engine_gate.observe_rpm(rpm)
+                actions.extend(self._engine_gate_actions())
+
+        # 0x03A E bit 4: accelerator pressed
+        elif msg.msg_type == CANMessageType.POWERTRAIN_FLAGS:
+            actions.extend(self._dynamics.on_vehicle_value(
+                "accelerator_pressed", msg.values.get("accelerator_pressed")))
+
+        # 0x484 B: coolant (third source)
+        elif msg.msg_type == CANMessageType.COOLANT_ALT:
+            t = msg.values.get("coolant_temp")
+            if t is not None and -40 <= t <= 130 and self._sources.offer("coolant", "can484"):
+                actions.append(SetICECoolantTempAction(t, ActionSource.GATEWAY))
         
         # Engine status (0x039 - coolant temp only)
         # Byte 0 = direct °C, no offset. Valid range: cold start (~-10°C) to hot (~130°C).
@@ -975,11 +1033,17 @@ class IngressController:
             if ice_running is not None:
                 self._engine_gate.observe_can_038(bool(ice_running))
                 actions.append(SetReadyModeAction(True, ActionSource.GATEWAY))
+            if "ice_power_request_kw" in msg.values:
+                actions.extend(self._dynamics.on_vehicle_value(
+                    "ice_power_request_kw", msg.values["ice_power_request_kw"]))
         
         # Pedals
         elif msg.msg_type == CANMessageType.PEDAL_POSITION:
             if "throttle" in msg.values:
                 actions.append(SetThrottlePositionAction(msg.values["throttle"], ActionSource.GATEWAY))
+            mg2 = msg.values.get("mg2_rpm")
+            if mg2 is not None and self._sources.offer("mg2_rpm", "can"):
+                actions.append(SetMGRPMsAction(mg2_rpm=int(mg2), source=ActionSource.GATEWAY))
             if "brake" in msg.values:
                 actions.append(SetBrakePressedAction(msg.values["brake"], ActionSource.GATEWAY))
         
@@ -1040,18 +1104,13 @@ class IngressController:
             if angle is not None:
                 actions.append(SetSteeringAngleAction(angle, raw, ActionSource.GATEWAY))
         
-        # Acceleration (0x022, 0x023)
+        # Accelerations (0x023), m/s² (io.dynamics_ingest)
         elif msg.msg_type == CANMessageType.ACCELERATION:
-            lat = msg.values.get("lateral_accel_raw")
-            lon = msg.values.get("longitudinal_accel_raw")
-            if lat is not None or lon is not None:
-                actions.append(SetAccelerationAction(lat, lon, ActionSource.GATEWAY))
+            actions.extend(self._dynamics.on_accel(msg.values))
         
-        # Yaw Rate (0x03A)
+        # Yaw rate (0x022, two channels; offsets learnt at standstill)
         elif msg.msg_type == CANMessageType.YAW_RATE:
-            yaw = msg.values.get("yaw_rate_raw")
-            if yaw is not None:
-                actions.append(SetYawRateAction(yaw, ActionSource.GATEWAY))
+            actions.extend(self._dynamics.on_yaw(msg.values["yaw_raw_1"], msg.values["yaw_raw_2"]))
         
         # Wheel Speed (0x0B1 front, 0x0B3 rear) — also updates vehicle speed
         elif msg.msg_type == CANMessageType.WHEEL_SPEED:
@@ -1072,10 +1131,11 @@ class IngressController:
                     source=ActionSource.GATEWAY
                 ))
 
-            # Use average wheel speed as vehicle speed (more frequent than 0xB4)
+            # Wheel mean as the vehicle speed only while 0x0B4 / 0x3CA are
+            # stale: it reads 2.2 % below the true speed (docs/prius_can.md §8).
             if right_kph is not None and left_kph is not None:
                 avg_speed = (right_kph + left_kph) / 2
-                if avg_speed < 300:
+                if avg_speed < 300 and self._sources.offer("speed", "wheels"):
                     actions.append(SetSpeedAction(avg_speed, ActionSource.GATEWAY))
         
         # Headlight Status (0x57F)
@@ -1107,8 +1167,10 @@ class IngressController:
         
         # CAN 0x5C8 = gateway copy of BEAN 62:C8: byte 2 bit 4 cruise main switch
         elif msg.msg_type == CANMessageType.CRUISE_CONTROL:
-            debug_str = " ".join(f"{b:02X}" for b in msg.data)
-            # Raw changes stay recorded (byte 0 bit 7 is still undecoded).
+            # Byte 0 bit 7 (A4 vs 24) is the gateway's immediate-copy header,
+            # not a signal: masked, so it does not count as a raw change.
+            debug_str = " ".join(f"{b:02X}" for b in
+                                 [msg.data[0] & 0x7F] + list(msg.data[1:]))
             cruise_log = self._bean.cruise
             if cruise_log.observe("can:5C8", debug_str, time.time()):
                 actions.append(SetPassiveSignalsAction(
@@ -1176,7 +1238,7 @@ class IngressController:
         
         # Vehicle speed (PID 0x0D)
         speed = values.get("speed_kph")
-        if speed is not None and 0 <= speed <= 300:
+        if speed is not None and 0 <= speed <= 300 and self._sources.offer("speed", "obd"):
             actions.append(SetSpeedAction(speed, ActionSource.GATEWAY))
         
         # Intake air temperature (PID 0x0F)
@@ -1294,6 +1356,8 @@ class IngressController:
         # MG1/MG2 RPMs
         mg1_rpm = values.get("mg1_rpm")
         mg2_rpm = values.get("mg2_rpm")
+        if mg2_rpm is not None and not self._sources.offer("mg2_rpm", "obd"):
+            mg2_rpm = None              # CAN 0x244 E,F is fresh (broadcast, ~30 Hz)
         if mg1_rpm is not None or mg2_rpm is not None:
             actions.append(SetMGRPMsAction(
                 mg1_rpm=mg1_rpm,
@@ -1306,13 +1370,15 @@ class IngressController:
         # Handled above in SetHybridTempsAction
         
         # HV voltage from hybrid ECU (alternative source)
+        # (fallbacks only: CAN 0x03B carries both at 8 ms with 1 V / 0.1 A)
         hv_voltage = values.get("hv_voltage_21c3")
-        if hv_voltage is not None and 150 <= hv_voltage <= 300:
+        if hv_voltage is not None and 150 <= hv_voltage <= 300 \
+                and self._sources.offer("hv_voltage", "obd"):
             actions.append(SetBatteryVoltageAction(hv_voltage, ActionSource.GATEWAY))
         
         # HV current from hybrid ECU
         hv_current = values.get("hv_current_21c3")
-        if hv_current is not None:
+        if hv_current is not None and self._sources.offer("hv_current", "obd"):
             actions.append(SetBatteryCurrentAction(hv_current, ActionSource.GATEWAY))
         
         # PID 21D3 cruise control (layout: comm.solicited_can._hybrid_21d3_parser);
@@ -1382,7 +1448,7 @@ class IngressController:
         
         # Battery current from 21CE
         current = values.get("battery_current_21ce")
-        if current is not None:
+        if current is not None and self._sources.offer("hv_current", "obd"):
             actions.append(SetBatteryCurrentAction(current, ActionSource.GATEWAY))
             # Determine charging state
             is_charging = current < -0.5

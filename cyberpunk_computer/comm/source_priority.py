@@ -293,11 +293,27 @@ class SlotSuspender:
 #                 CAN 0x520/0x038   0.92 s   0x520 presence 98.5 % (0x038 b1: 68 %)
 #   fuel_word     CAN 0x520 b1-2    0.92 s   = BEAN 62:20 word (289/300 frames
 #                 BEAN 62:20        0.92 s   match the neighbouring 0x520)
-#   cruise_main   BEAN 62:C8 b1 10  1 s+chg  first (2026-11-16 cruise drive)
-#                 OBD 21D3 D 0x0F   1.0 s    ~0.6 s after 62:C8
-#                 CAN 0x5C8 b2 10   0.4 s    content ~3 s late, missed a 1 s off/on
-#   cruise_active OBD 21D3 D 0x40   1.0 s    at the poll
-#                 CAN 0x120 b4 80   0.26 s   ~2 s behind 21D3 at engage/cancel
+#   cruise_main   CAN 0x5C8 C 10    1 s+chg  first: 40-60 ms before 62:C8
+#                 BEAN 62:C8 b1 10  1 s+chg  (2026-11-17, panda reader fixed;
+#                 OBD 21D3 D 0x0F   1.0 s    the "3 s late" of 11-16 was the
+#                                            reader's delivery delay)
+#   cruise_active CAN 0x120 E 80    17 ms    first at every engage/cancel
+#                 OBD 21D3 D 0x40   1.0 s    0.04-1.1 s after 0x120 (poll phase)
+#   speed         CAN 0x0B4         14 ms    true speed, 0.01 km/h
+#                 CAN 0x3CA C       108 ms   integer km/h (slope 1.01)
+#                 CAN 0x0B1/0x0B3   13 ms    wheel mean reads 2.2 % low
+#   rpm (CAN)     0x348 C x 25      44 ms    r 0.99 against FE:26 (P)
+#                 0x3C8 C x 32      70 ms    r 0.99 (P)
+#   mg2_rpm       CAN 0x244 E,F     25 ms    = 21C3 A,B (slope 1.00, r 0.999)
+#                 OBD 21C3 (slot 2) 2 s
+#   hv_voltage    CAN 0x03B C,D     8 ms     1 V
+#                 CAN 0x3CD C,D     108 ms   median diff 1 V (P)
+#                 OBD 21C3 AC       2 s      2 V steps
+#   hv_current    CAN 0x03B A,B     8 ms     0.1 A
+#                 OBD 21C3 AE/21CE  2 s      2 A / 0.01 A at the poll only
+#   coolant       (+ CAN 0x484 B, 1.1 s, 0.626 B - 0.6 °C, P)
+#   brake_switch  CAN 0x230 D 04    28 ms    99 % at a FE:29 edge (C)
+#                 BEAN FE:29 b2 08  1 s
 
 #   intake_temp   CAN 0x3CF C       0.14 s   = OBD 010F, median difference 0,
 #                 OBD 010F (slot 9) 30 s     r 0.988 (2026-11-16, 4..10 °C)
@@ -316,11 +332,21 @@ SLOT_OBD_INTAKE_TEMP = 9
 SLOT_OBD_AMBIENT_TEMP = 14
 
 DEFAULT_POLICIES: Tuple[SignalPolicy, ...] = (
-    SignalPolicy("rpm", (Source("bean", 2.0), Source("obd", 3.0, SOLICITED)),
+    SignalPolicy("rpm", (Source("bean", 2.0), Source("can", 1.0), Source("can3c8", 1.0),
+                         Source("obd", 3.0, SOLICITED)),
                  solicited_slots=(SLOT_OBD_RPM,),
-                 note="BEAN FE:26 (0.5 s) replaces OBD 010C (0.5 s)"),
-    SignalPolicy("coolant", (Source("can", 2.0), Source("bean", 3.0),
+                 note="BEAN FE:26 (0.5 s) or CAN 0x348/0x3C8 replace OBD 010C (0.5 s)"),
+    SignalPolicy("coolant", (Source("can", 2.0), Source("bean", 3.0), Source("can484", 4.0),
                              Source("obd", 5.0, SOLICITED))),
+    SignalPolicy("speed", (Source("can", 0.5), Source("can3ca", 1.0), Source("wheels", 0.5),
+                           Source("obd", 3.0, SOLICITED)),
+                 note="0x0B4 true speed; 0x3CA, wheel mean (2.2 % low), OBD as fallbacks"),
+    SignalPolicy("mg2_rpm", (Source("can", 1.0), Source("obd", 5.0, SOLICITED)),
+                 note="CAN 0x244 E,F; 21C3 A,B while the broadcast is stale"),
+    SignalPolicy("hv_voltage", (Source("can", 1.0), Source("can3cd", 1.0),
+                                Source("obd", 5.0, SOLICITED))),
+    SignalPolicy("hv_current", (Source("can", 1.0), Source("obd", 5.0, SOLICITED))),
+    SignalPolicy("brake_switch", (Source("can", 1.0), Source("bean", 3.0))),
     SignalPolicy("outside_temp", (Source("avc", 15.0), Source("bean", 3.0))),
     SignalPolicy("gear", (Source("can", 2.0), Source("bean", 3.0))),
     SignalPolicy("lights", (Source("can", 3.0), Source("bean", 3.0))),
@@ -334,10 +360,11 @@ DEFAULT_POLICIES: Tuple[SignalPolicy, ...] = (
                  note="rpm > 400 / 98:27 / 62:20 / 0x520 presence / AVC B9"),
     # Fuel quantity per injection: CAN 0x520 b1-2 = BEAN 62:20 (same word).
     SignalPolicy("fuel_word", (Source("can", 2.5), Source("bean", 3.0))),
-    # Cruise (io.cruise_fusion): the solicited 21D3 beats the late CAN copies.
-    SignalPolicy("cruise_main", (Source("bean", 3.0), Source("obd", 3.0, SOLICITED),
-                                 Source("can", 3.0))),
-    SignalPolicy("cruise_active", (Source("obd", 3.0, SOLICITED), Source("can", 2.0))),
+    # Cruise (io.cruise_fusion): CAN 0x5C8 / 0x120 arrive first (2026-11-17);
+    # the 21D3 poll is the fallback and confirms the set speed.
+    SignalPolicy("cruise_main", (Source("can", 3.0), Source("bean", 3.0),
+                                 Source("obd", 3.0, SOLICITED))),
+    SignalPolicy("cruise_active", (Source("can", 1.0), Source("obd", 3.0, SOLICITED))),
     # ECM air temperatures: broadcast 0x3CF replaces the OBD polls. The OBD
     # windows are 1.5 poll periods, so a late reply does not flip the source.
     SignalPolicy("intake_temp", (Source("can", 3.0), Source("obd", 45.0, SOLICITED)),

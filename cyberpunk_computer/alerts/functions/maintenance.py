@@ -1,8 +1,10 @@
 """
 8. Maintenance, range and new fault codes.
 
-``service_due`` (info): service intervals from the odometer (BEAN 52:3F,
-``bean.decoded.odometer_km``, passively heard) and the date. The list is in
+``service_due`` (info): service intervals from our own odometer
+(``vehicle.odometer_km``: the CAN 0x230 distance added to a persisted value
+that never falls below the meter's BEAN 52:3F; the meter itself is frozen at
+299,999 km on this car, so 52:3F alone never moves) and the date. The list is in
 tuning ``maintenance.services`` (id, name, every_km, every_days); when each was
 last done is recorded from the dashboard (POST /api/v1/alerts/service/{id}/done,
 default: the odometer now) and kept in alerts_settings.json. Items never
@@ -51,8 +53,9 @@ class MaintenanceFunction(AlertFunction):
             AlertSpec(id=SERVICE, title="Service interval due", text="SERVICE DUE", severity="info",
                       priority=10, icon="service", sound="soft", clear_after_s=5.0, min_show_s=3.0,
                       max_show_s=8.0, cooldown_s=0.0, max_per_drive=1, require_ready=True,
-                      description="Owner-entered intervals against the odometer (BEAN 52:3F) and the date.",
-                      needs=("bean odometer_km (52:3F)", "dashboard: service done records")),
+                      description="Owner-entered intervals against our odometer (CAN 0x230 distance, "
+                                  "floor BEAN 52:3F, frozen at 299,999 km) and the date.",
+                      needs=("vehicle.odometer_km (CAN 0x230 + 52:3F)", "dashboard: service done records")),
             AlertSpec(id=RANGE, title="Low range (petrol)", text="RANGE LOW", severity="notice",
                       priority=30, icon="fuel", sound="soft", clear_after_s=30.0, min_show_s=3.0,
                       max_show_s=8.0, cooldown_s=0.0, max_per_drive=1, require_ready=True,
@@ -89,7 +92,7 @@ class MaintenanceFunction(AlertFunction):
             return False, "unknown service item"
         km = km if km is not None else self.odo
         if km is None:
-            return False, "odometer not known yet (BEAN 52:3F not heard)"
+            return False, "odometer not known yet (no 52:3F heard, no odometer file)"
         done = dict(self._mem("service_done", {}))
         done[item] = {"km": float(km), "ts": time.time()}
         self._set("service_done", done)

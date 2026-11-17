@@ -443,22 +443,37 @@ PID_HYBRID_ADDITIONAL = PIDDefinition(
 )
 
 
+#: 21D3 E bits (docs/CRUISE_CONTROL.md §3.1, 2026-11-17): the HV ECU's own
+#: reading of its switch inputs at the moment of the reply (a sample, not a
+#: latch: taps shorter than the poll gap are mostly missed).
+CRUISE_E_SET_COAST = 0x10   # C: 11 of 11 SET / SET-COAST samples
+CRUISE_E_RES_ACC = 0x08     # C: 11 of 11 RES/ACC samples
+CRUISE_E_BRAKE = 0x07       # C: all three set while the pedal is pressed
+                            # (P: three separate brake inputs)
+
+
 def _hybrid_21d3_parser(d: list[int]) -> dict[str, Any]:
     """
     Parse PID 21D3 (cruise control), reply ``[len, 0x61, 0xD3, A, B, C, D, E]``.
 
-    Decoded on this car's cruise drive of 2026-11-16 (docs/BEAN_SIGNALS.md §1;
-    the third-party list in docs/prius_can.md was wrong for A, C and D):
+    Decoded on this car's cruise drives of 2026-11-16/17
+    (docs/CRUISE_CONTROL.md §3.1; the third-party list in docs/prius_can.md
+    was wrong for A, C, D and E):
 
     - A: vehicle speed, km/h (not a memory speed)
-    - B: cruise set speed, km/h. Set at SET, follows RES/ACC and SET/COAST,
-      kept after a cancel (the resume speed) and cleared to 0 once the car
-      is slower than ~35 km/h; 0 = none
-    - C: analog 0..~110, rises while cruise pulls the car, 0 when it coasts
+    - B: cruise set speed, km/h, floored from the ECU's internal mph-based
+      value (one tap = 1 mph). Set at SET, follows RES/ACC and SET/COAST;
+      after a cancel it is the resume memory (= the vehicle speed at the
+      cancel, P), cleared to 0 at A <= 32 and by the main switch; 0 = none
+    - C: analog 0..~107, rises while cruise pulls the car, 0 when it coasts
       or is not engaged: probably the cruise drive (torque) request. Raw.
     - D: bit 7 shift in D; bits 0-3 all set while the main switch is on;
       bit 6 cruise controlling the car
-    - E: not decoded (0, 1, 2, 5, 7, 8, 16 seen)
+    - E: switch inputs as the HV ECU sees them: 0x10 SET/COAST, 0x08
+      RES/ACC, bits 0-2 brake pedal (0x07 pressed; 0x05/0x04/0x01 at the
+      moment of press or release). 0x02 alone for two polls at power-off and
+      0x01 alone while driving are unexplained and not used. CANCEL not
+      sampled yet.
     """
     result: dict[str, Any] = {}
     if len(d) < 4:
@@ -472,7 +487,11 @@ def _hybrid_21d3_parser(d: list[int]) -> dict[str, Any]:
     result["cruise_active"] = bool(dd & 0x40)
     result["shift_d_position"] = bool(dd & 0x80)
     if len(d) >= 5:
-        result["cruise_raw_e"] = d[4]
+        e = d[4]
+        result["cruise_raw_e"] = e
+        result["cruise_switch_set_coast"] = bool(e & CRUISE_E_SET_COAST)
+        result["cruise_switch_res_acc"] = bool(e & CRUISE_E_RES_ACC)
+        result["cruise_brake_inputs"] = e & CRUISE_E_BRAKE
     return result
 
 

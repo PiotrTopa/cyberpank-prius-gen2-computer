@@ -4,6 +4,13 @@ The centre column of the main screen (`ui/screens/main_screen.py`, page 1) shows
 parked and the road when it drives. Code: `cyberpunk_computer/ui/scene/`. Tests:
 `tests/test_mfd_scene.py`. Demo: `python -m cyberpunk_computer.ui.scene.demo`.
 
+| | |
+|---|---|
+| ![Night drive on a left curve with a lead vehicle](images/mfd_curve_night.png) | ![Parked with doors and hatch open](images/mfd_parked_doors_open.png) |
+| Driving: road, lead vehicle with distance and time gap, signs in the top line, status strip | Parked: the car with the open doors and hatch |
+
+Headless renders of the demo timeline (`--shots DIR`), scaled 4×.
+
 ## 1. Hardware it is built for
 
 | Fact | Value | Consequence |
@@ -57,6 +64,10 @@ Status strip (`scene/powerbox.py::StatusStrip`, 194 x 21):
 The strip is the stopgap for the power read-out until the VFD satellite shows it; the BATTERY panel
 keeps the numbers.
 
+![Status strip with the cruise engaged at 50 km/h](images/mfd_cruise_active.png)
+
+*Cruise slot `ON 50`, HV power with `ICE`, history bars and the SOC segments.*
+
 CLIMATE box: the three indicators are LED keys (`ui/widgets/led_keys.py`): an original 1-bit
 pictogram with a dash under it that is amber when on. A/C = snowflake, AUTO = the word (as on the
 car's key), intake = a car with the air looping inside and the dash lit for recirculation, a car
@@ -79,6 +90,8 @@ commands through `state/climate_model.py::ClimateController`, AVC-LAN only): a c
 | centre | the NHW20 in side view as an X-ray (nose left, cropped to the cabin): seat, occupant, dashboard. Air streams as moving chevrons for exactly the outlets of the reported direction (`face`, `face_foot`, `foot`, `windscreen_foot`, `defrost`), more and faster with the fan level, bright cyan with A/C on and warm without; the intake as an arrow entering at the cowl (`FRESH`) or an amber loop in the cabin (`RECIRC`); amber heat marks on the windscreen (front defrost) and at the rear glass (rear defogger). `SYSTEM OFF` / `NO CLIMATE DATA` instead of streams | (picture only) |
 | under the cabin | the four outlets as tiles: FACE, FACE FEET, FEET, FEET SCRN | 55 x 46 each |
 | right | AUTO, A/C, intake (FRESH / RECIRC), OFF, FRONT (defrost), REAR (defogger) as single-tap tiles with an amber LED dash when on | 56 x 66 each |
+
+![Climate screen: 21.5 degrees, fan 7, face and feet, fresh air, A/C on](images/mfd_climate.png)
 
 Behaviour: everything is drawn from `ClimateController.view()` each frame. AUTO tapped while in AUTO
 leaves it through the controller's "manual" mode (the car has no AUTO-off key); OFF tapped while off
@@ -234,6 +247,10 @@ feed and by the health mirror):
 | light | `day`, `dusk_dawn`, `night` |
 | weather | `clear`, `overcast`, `rain`, `snow`, `fog` |
 
+![Forest road by day](images/mfd_forest_day.png)
+
+*`forest_road`, `day`, `clear`: tree rows on the horizon band and at the roadside.*
+
 | Place | Backdrop (above the horizon) | Roadside (streams past with the distance driven) |
 |---|---|---|
 | (unknown) | bare ridge | none |
@@ -288,6 +305,10 @@ lanes; and whether a lane to the left carries oncoming traffic. The neighbour la
 lanes without a direction. Requests to roadsense for these are in section 8.2.
 
 ### 6.5 Map layer: ambient information (`scene/mapinfo.py`, `scene/maplayer.py`)
+
+![Map layer in a tunnel: exit in 640 m](images/mfd_tunnel_exit.png)
+
+*In a tunnel the map knows: the portal pictogram and the exit distance bottom-left, lamp rows on the walls (synthetic drive).*
 
 Built 2026-11-15. `mapinfo.parse_map` turns the scene's `map` block (section 7.2) into `SceneInputs.map`
 (None unless usable), `mapinfo.MapDirector` (`SceneDirector.map`) decides what is shown over time,

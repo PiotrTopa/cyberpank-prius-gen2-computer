@@ -25,23 +25,27 @@ CAN 0x5xx: [`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §5.
 
 | ID | Period | Content | Decode | Confidence |
 |---|---|---|---|---|
-| 0x022 | 13 | **yaw rate**, two redundant channels (not an acceleration) | (256A + B) − 0x200 and (256C + D) − 0x200; ≈ 0.0044 rad/s (≈ 0.25 °/s) per count, positive = turning left; standstill offset −2 (AB) and −7 (CD) counts | Car (2026-11-17, 29 min at full rate): the ratio to the rear wheel-speed yaw stays 0.0042–0.0046 rad/s per count from 15 to 80 km/h (r 0.94–0.999), while its ratio to lateral acceleration grows 3× with speed. Scale and sign P (rest on the wheel-speed yaw with a 1.48 m track and the 0x0B3 left/right labels) |
-| 0x023 | 13 | **acceleration sensor, two channels at ±45°** | P = (256A + B) − 0x200, Q = (256C + D) − 0x200; longitudinal ≈ 0.020 × (P − Q) m/s², lateral ≈ 0.025 × (P + Q) m/s² (lateral offset about −0.35 m/s²) | P (2026-11-17, > 15 km/h: r 0.93 against d(0x0B4)/dt and 0.95 against yaw × speed; a single channel gives only 0.72; the sensor also sees road grade) |
+| 0x022 | 13 | **yaw rate**, two redundant channels (not an acceleration) | (256A + B) − 0x200 and (256C + D) − 0x200; ≈ 0.0044 rad/s (≈ 0.25 °/s) per count, positive = turning left; standstill offset −2 (AB) and −7 (CD) counts | Car (2026-11-17, 29 min at full rate): the ratio to the rear wheel-speed yaw stays 0.0042–0.0046 rad/s per count from 15 to 80 km/h (r 0.94–0.999), while its ratio to lateral acceleration grows 3× with speed. Scale and sign P (rest on the wheel-speed yaw with a 1.48 m track and the 0x0B3 left/right labels). Replay through the ingress: r 0.957, slope 0.976 against the wheel-speed yaw above 15 km/h; learnt offsets −2.0 / −7.5. **Decoded**: `dynamics.yaw_rate_dps` (mean of both channels minus offsets re-learnt at every standstill, `io/dynamics_ingest.py`), raw `yaw_rate_raw`/`_2`, `yaw_offsets` |
+| 0x023 | 13 | **acceleration sensor, two channels at ±45°** | P = (256A + B) − 0x200, Q = (256C + D) − 0x200; longitudinal ≈ 0.020 × (P − Q) m/s², lateral ≈ 0.025 × (P + Q) m/s² (lateral offset about −0.35 m/s²) | P (2026-11-17, > 15 km/h: r 0.93 against d(0x0B4)/dt and 0.95 against yaw × speed; a single channel gives only 0.72; the sensor also sees road grade). **Decoded**: `dynamics.longitudinal_accel_ms2` (+ = speeding up; replay r 0.905, slope 0.98) and `lateral_accel_ms2` (+ = left; r 0.87, slope 0.96, reads ≈ 0.35 m/s² high, not corrected) |
 | 0x025 | 13 | steering angle | 12-bit signed (low nibble of A, then B) × 1.5°, positive = left; E high nibble = a fraction (list: × 0.1°, unused) | Car (2026-11-13 drive): scale from the range (±650–660° at the stops); correlation 0.95 with the rear wheel-speed yaw, same sign as (right − left). Absolute sign = Toyota convention (G). Decoded in `can_decoder.py` (`decode_steering_deg`, shared by `dynamics.steering_angle` and the position feeder) |
 | 0x030 | 6 | brake pedal | E, 0–127; may read 0x7F at start-up with the brake held. B (signed) moves with regenerative braking (r −0.70 against 21C3 regen torque, G); A bit 0, B bits 6–7 and F bit 6 switch together with the brake (46–52 edges, 76 % at a `FE:29` brake edge, ?) | Car: E > 8 edges match BEAN `FE:29` brake bit (74/79 within 1 s) |
-| 0x038 | 8 | engine status | B > 0 seen only with the ICE turning (not an rpm), but B = 0 for 32 % of the time the ICE turns at low load (e.g. 1300 rpm warm-up): NOT an engine-running flag. B ≈ ICE power request, ≈ 0.23 kW per count (r 0.92 against 21C3 K,L, P). D signed ≈ drive torque / acceleration demand (r 0.78 against 21C3 MG2 torque, 0.80 against acceleration, G) | Car (2026-11-13 drive against OBD 010C; 2026-11-17 for B, D) |
+| 0x038 | 8 | engine status | B > 0 seen only with the ICE turning (not an rpm), but B = 0 for 32 % of the time the ICE turns at low load (e.g. 1300 rpm warm-up): NOT an engine-running flag. B ≈ ICE power request, ≈ 0.23 kW per count (r 0.92 against 21C3 K,L, P; replay r 0.93, slope 1.01; decoded as `vehicle.ice_power_request_kw`). D signed ≈ drive torque / acceleration demand (r 0.78 against 21C3 MG2 torque, 0.80 against acceleration, G) | Car (2026-11-13 drive against OBD 010C; 2026-11-17 for B, D) |
 | 0x039 | 8 | ICE coolant | A °C, no offset; 254/255 = sensor not ready | Car: within 1 °C of BEAN `FE:2C` (r = 0.995) |
 | 0x03B | 8 | HV battery current, voltage | current = low 12 bits of A,B signed × 0.1 A (> 0 discharge); voltage = 256C + D V | Car: voltage is 16-bit (byte D alone wraps at 256 V; the pack reaches ~260 V under hard regen) |
 | 0x0B1 / 0x0B3 | 13 | front / rear wheels (right A,B; left C,D) | (256A + B), (256C + D) × 0.01 km/h; E,F not decoded | Car (2026-11-13 drive): speed, not pulses: wheel mean = 0.978 (rear) / 0.981 (front) × 0x0B4; front and rear (right − left) correlate 0.97. Right/left labels G (consistent with 0x025's sign) |
-| 0x0B4 | 14 | vehicle speed | (256F + G) × 0.01 km/h; E bit 0 = moving: set at 7–14 km/h, cleared at ≤ 2 km/h (22 edges, 2026-11-17, P) | Car: true speed; the meter's trip distance agrees with it; the speedometer (`FE:24`) reads 12 % higher |
-| 0x120 | 17 | gear | byte F low nibble: 0 P, 1 R, 2 N, 3 D, 4 B (observed F = 0x20–0x23) | Car: P/R/N/D on 20 shifts, BEAN `FE:40` follows 45–110 ms later; B not observed. (The list's `{D:0-1}` does not match this car). **Byte E bit 7 = cruise engaged**: Car, every engage/cancel of 2026-11-16/17 (`10 → 90`); byte H is the checksum and changes with it ([`CRUISE_CONTROL.md`](CRUISE_CONTROL.md)) |
-| 0x244 | 25 | accelerator pedal; **MG2 speed** | G, 0–0xC8 (pedal); **E,F = MG2 rpm, signed 16-bit (256E + F), negative in reverse** | pedal G; MG2 rpm Car (2026-11-17: slope 1.00, r 0.999 against 21C3 MG2 speed, −161 in R): a broadcast, ~30 Hz source of MG2 speed and travel direction |
+| 0x0B4 | 14 | vehicle speed | (256F + G) × 0.01 km/h; E bit 0 = moving: set at 7–14 km/h, cleared at ≤ 2 km/h (22 edges, 2026-11-17, P; `vehicle.moving`) | Car: true speed; the meter's trip distance agrees with it; the speedometer (`FE:24`) reads 12 % higher |
+| 0x120 | 17 | gear | byte F low nibble: 0 P, 1 R, 2 N, 3 D, 4 B (observed F = 0x20–0x23) | Car: P/R/N/D on 20 shifts, BEAN `FE:40` follows 45–110 ms later; B not observed. (The list's `{D:0-1}` does not match this car). **Byte E bit 7 = cruise engaged**: Car, every engage/cancel of 2026-11-16/17 (`10 → 90`); byte H is the checksum and changes with it ([`CRUISE_CONTROL.md`](CRUISE_CONTROL.md)). Backend: the first `cruise_active` source, `21D3` D bit 6 while 0x120 is stale |
+| 0x244 | 25 | accelerator pedal; **MG2 speed** | G, 0–0xC8 (pedal); **E,F = MG2 rpm, signed 16-bit (256E + F), negative in reverse** | pedal G; MG2 rpm Car (2026-11-17: slope 1.00, r 0.999 against 21C3 MG2 speed, −161 in R): a broadcast, ~30 Hz source of MG2 speed and travel direction. Decoded: `vehicle.mg2_rpm` (21C3 only while 0x244 is stale) |
 | 0x3B6 | — | energy-monitor flow | bytes F, G bitmask | G (unvalidated; 0x528 carries the energy arrows, [`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §5) |
-| 0x3C8 | 70 | ICE speed | C ≈ rpm / 32 (r 0.99 against BEAN `FE:26`); D ? (the list's 256C + D does not fit) | Car (2026-11-17), redundant with `FE:26` |
-| 0x3CA | 108 | vehicle speed | C km/h, integer (true speed: slope 1.01, r 0.994 against 0x0B4) | Car (2026-11-16); not decoded, 0x0B4 is the speed source |
+| 0x3C8 | 70 | ICE speed | C ≈ rpm / 32 (r 0.99 against BEAN `FE:26`); D ? (the list's 256C + D does not fit) | Car (2026-11-17), P; replay r 0.995, slope 1.005. Decoded: third `rpm` source (BEAN `FE:26` → 0x348 → 0x3C8 → OBD 010C) |
+| 0x348 | 44 | ICE speed | C ≈ rpm / 25 (replay r 0.997, slope 1.00 against `FE:26`); A bit 2, B bits 0/5/6 = ICE running (P). Not a pack temperature | P. Decoded: second `rpm` source; with it fresh the OBD 010C poll (slot 0) stays suspended without BEAN |
+| 0x3CA | 108 | vehicle speed | C km/h, integer (true speed: slope 1.01, r 0.994 against 0x0B4) | Car (2026-11-16); decoded as the fallback speed source while 0x0B4 is stale (then the wheel mean, 2.2 % low, then OBD) |
 | 0x3CB | 108 | battery ECU | A discharge limit A; B charge limit A (nominal ~100 / 105 A below 51 °C); SOC = (256C + D)/2 %; E, F battery temperatures, signed °C | Car: SOC tracks the MFD SOC bars (`FE:29`); temperatures correlate with `98:EC` b4 |
-| 0x3CD | 108 | battery fault code, voltage | AB fault code; 256C + D = pack voltage V (median difference against 0x03B 1 V) | P (2026-11-16); 0x03B stays the voltage source |
+| 0x3CD | 108 | battery fault code, voltage | AB fault code; 256C + D = pack voltage V (median difference against 0x03B 1 V) | P (2026-11-16; replay r 0.98). 0x03B stays the voltage source; 0x3CD is used while 0x03B is stale, 21C3 AC (2 V steps) after it |
 | 0x3CF | 139 | ECM air temperatures | B = outside air °C, C = intake air °C, no offset (= OBD 0146 / 010F, median difference 0, r 0.975 / 0.988 over 4–10 °C). Decoded as signed; 0 °C and below not yet recorded | P. Replaces the OBD 0146 and 010F polls (`can_decoder.py` `AIR_TEMPS`); a value ≤ 0 °C leaves the poll running until the sign is verified |
+| 0x230 | 28 | distance counter, brake | A,B 16-bit counter, wraps, **102.85 counts per metre** of 0x0B4 distance (17 Nov, 10.8 km; counts up in reverse too); D bit 2 = brake pressed (C); F ? | P. Decoded: `vehicle.distance_total_km` (counter differences checked against the speed, speed integration while stale) and **our own odometer** `vehicle.odometer_km`; D bit 2 is the first `brake_switch` source (BEAN `FE:29` while stale) |
+| 0x03A | 8 | flags, voltage | E bit 4 = accelerator pressed (P: pedal > 0 in all 6,576 samples with it set; replay 3,207 / 9 false / 125 missed); E bit 0 + F ≈ pack V − 11.5 V (P, not decoded). NOT a yaw rate | `vehicle.accelerator_pressed` |
+| 0x484 | 1120 | coolant | B: 0.626 B − 0.6 °C (r 0.9998 against 0x039) | P. Third coolant source (0x039 → `FE:2C` → 0x484 → OBD) |
 | 0x4CE | — | constant `0F 00 01 01 00 00 …` on every drive: an index/configuration frame like 0x4C1…0x4D1, not a temperature | — | P (2026-11-16) |
 | 0x520 | 2231 | ECM fuel quantity per injection (gateway CAN → BEAN `62:20`); measured every 0.92 s, only while the ICE runs | header + 16-bit word 256B + C; fuel flow L/h = K × word × rpm, K = 2.69 × 10⁻⁶ (see below) | Car (BEAN copy; flow fitted to the meter) |
 | 0x526 | 530 | engine rpm (gateway CAN → BEAN `FE:26`) | header + word / 5.12 | Car (the list's "ignition timing B,C" is this rpm word) |
@@ -51,7 +55,7 @@ CAN 0x5xx: [`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §5.
 | 0x57F | 1050 | lamps (BEAN `FE:7F` → CAN) | `{B:3-5}`: 0x00 off, 0x10 parking, 0x30 low beam, 0x38 high beam; `{D:7}` = any door open | Car (parking, low beam, door) |
 | 0x5A4 | 3400 | fuel level (BEAN `52:A4` → CAN) | B; full tank read 0x2C (44), assumed litres | G (scale) |
 | 0x5B6 | 1050 | doors (BEAN `FE:B6` → CAN) | `{C:7}` driver door, `{C:6}` front passenger door, `{C:2}` rear or back door | Car (the list's "0x40 = other doors" is the passenger door only) |
-| 0x5C8 | 1050 | cruise control (gateway copy of BEAN `62:C8`, `24 00 xx`) | **`{C:4}` = cruise MAIN SWITCH on** (not "active", not a cancel event); A `A4` = immediate-copy header (first frame after a change, [`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §5) | Car (2026-11-16/17 cruise drives, [`CRUISE_CONTROL.md`](CRUISE_CONTROL.md)); leads `62:C8` by 40–60 ms (2026-11-17); the "~3 s lag" of 2026-11-16 was trip-log delivery delay (§8) |
+| 0x5C8 | 1050 | cruise control (gateway copy of BEAN `62:C8`, `24 00 xx`) | **`{C:4}` = cruise MAIN SWITCH on** (not "active", not a cancel event); A `A4` = immediate-copy header (first frame after a change, [`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §5) | Car (2026-11-16/17 cruise drives, [`CRUISE_CONTROL.md`](CRUISE_CONTROL.md)); leads `62:C8` by 40–60 ms (2026-11-17); the "~3 s lag" of 2026-11-16 was trip-log delivery delay (§8). Backend: the first `cruise_main` source (BEAN `62:C8`, then `21D3` D while stale); the `A4` header is masked |
 | 0x5CC | 272 | BEAN `98:CC` copy (not a temperature) | header `24` + 10-bit value | Car |
 
 **Fuel flow (0x520).** The word is the fuel quantity per injection, not a flow; the flow scales with
@@ -87,13 +91,12 @@ All gateway copies 0x5xx have byte 0 = header and bytes 1… = the BEAN data
 ([`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §5): 0x520/521/526/527/529/52C/540/591/5B2/5C8/5CC/5D4/5EC/5F8
 (CAN → BEAN) and 0x53F/553/554/56D/57F/5A4/5B6/5ED (BEAN → CAN).
 
-Partly read (2026-11-16 data crunch, P; none of them is decoded by the backend): 0x3CF A ?, D 0, E
-varies (B, C in §2). 0x484 B ≈ coolant, 0.626·B − 0.6 °C (r 0.9998 against 0x039, redundant). 0x230 D
-`04` = brake pressed. 0x348 B,C follow ICE speed (about 23.4 × C rpm, r 0.89), not a pack
-temperature. 0x4C1…0x4D1, 0x020, 0x423 constant.
+Partly read (2026-11-16 data crunch, P): 0x3CF A ?, D 0, E varies (B, C in §2). 0x4C1…0x4D1, 0x020,
+0x423 constant. (0x484 B, 0x230, 0x348: now in §2 and decoded.)
 
-Partly read (2026-11-17 drive, 29 min; none decoded by the backend). These IDs are unknown to the
-decoder and reach the trip log once a second only (§8), so fast behaviour is not visible:
+Partly read (2026-11-17 drive, 29 min). Since 2026-11-17 (evening) the backend decodes 0x230, 0x348,
+0x3CA, 0x484 and 0x03A E bit 4 (§2), so they reach the trip log at every change; the details below
+were read when they still came once a second (§8):
 
 * 0x230: A,B = 16-bit distance counter, wraps, 102.8 counts per metre of 0x0B4 distance over 10.8 km
   (P); D bit 2 = brake pressed (C: 85 edges, 99 % within 1.5 s of a `FE:29` brake edge); F a small
@@ -211,7 +214,7 @@ and stop-lamp bits in C/D) does **not** match this car:
 | B | **cruise set speed, km/h**: set at SET, follows RES/ACC and SET/COAST, kept after a cancel (resume speed), 0 once slower than ~35 km/h; the internal value moves in 1 mph steps and B is it floored to km/h | Car |
 | C | analog 0..107: rises while cruise pulls the car, 0 when coasting or off; probably the cruise drive request | Car (behaviour), G (meaning) |
 | D | bit 7 shift in D; bits 0–3 all set while the main switch is on; bit 6 cruise controlling the car; bits 4–5 never set | Car |
-| E | switch inputs at the poll: `10` SET/COAST, `08` RES/ACC, bits 0–2 brake pedal (`07` while pressed, `05`/`04`/`01` at press or release); `02` for two polls at power-off; CANCEL not yet sampled | Car (2026-11-17, 22 switch samples and 1,500 brake samples over all trips) |
+| E | switch inputs at the poll: `10` SET/COAST, `08` RES/ACC, bits 0–2 brake pedal (`07` while pressed, `05`/`04`/`01` at press or release); `02` for two polls at power-off; CANCEL not yet sampled | Car (2026-11-17, 22 switch samples and 1,500 brake samples over all trips). Decoded: `vehicle.cruise_switch_set_coast`, `cruise_switch_res_acc`, `cruise_brake_inputs` (raw bits 0–2); `02` at power-off is not used |
 
 The stalk switches are visible only here (sampled at the poll rate), not on broadcast CAN or BEAN.
 Details: [`CRUISE_CONTROL.md`](CRUISE_CONTROL.md).
@@ -269,9 +272,14 @@ Battery power = current × sum of block voltages.
 * **0x0B1/0x0B3 scale:** the wheels read 2.2 % below 0x0B4 (tyre size / ECU scaling); not corrected.
 * **0x025 fraction nibble** (E high nibble): not decoded; the angle has 1.5° resolution.
 * **0x120 B position** and **0x3B6 bits**: not observed / unvalidated.
-* **0x3CA, 0x244 pedal scalings**: third-party, unchecked. **0x022 yaw rate and 0x023 accelerations**
-  (2026-11-17, §2): scales P; a calibration needs GNSS course and speed, or a turn-table-free check:
-  a steady 360° circle (yaw integral = 2π).
+* **0x244 pedal scaling**: third-party, unchecked. **0x022 yaw rate and 0x023 accelerations**
+  (2026-11-17, §2): scales P, decoded with those scales; a calibration needs GNSS course and speed,
+  or a turn-table-free check: a steady 360° circle (yaw integral = 2π). The lateral channel reads
+  ≈ 0.35 m/s² high on average (camber or mounting), not corrected.
+* **Own odometer:** `vehicle.odometer_km` = a persisted value (`odometer.json` next to the metrics
+  database, `BACKEND_ODOMETER_FILE`) plus the 0x230 distance, never below BEAN `52:3F` (frozen at
+  299,999 km). It starts at 299,999 km on the first drive, so it is "km since the meter froze +
+  299,999": right for service intervals (differences), not the car's true total.
 * **Fuel figures:**
   * Absolute scale unverified: K is fitted to the combination meter, and the meter reads 14 % above
     the fuel derived from MAF and lambda (0.55 L against 0.48 L on the 2026-11-13 drive). Resolves

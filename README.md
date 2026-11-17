@@ -3,6 +3,47 @@
 Car computer for a Toyota Prius Gen 2 (NHW20): a headless backend on a POCO F1 phone, a pygame
 UI on the car's own MFD (480×240), and RP2040 boards that bridge the car buses.
 
+The system informs the driver and runs comfort functions. It does not steer, brake or accelerate.
+
+![The road scene on the Prius multi-display: lane lines, road edges, lead vehicle at 26 m with a 1.8 s gap](docs/images/mfd_curve_night.png)
+
+- **Road scene on the factory screen**: a chase view of the car with lane lines, road edges, the
+  lead vehicle with distance and time gap, traffic lights, warning signs and the speed limit, from
+  the [roadsense](https://github.com/PiotrTopa/roadsense) camera perception service on the same phone.
+- **Map layer**: next speed limit, tunnel exit distance, lane count and road shape beyond the
+  camera's range, from roadsense's OpenStreetMap matching (verified on synthetic drives so far).
+- **Driver alerts** in the status strip: speed limit with true speed, closing speed, headway, curve,
+  ice risk, service and new fault codes. Every alert type ships in shadow mode (logged only) until
+  it is switched on ([docs/FEATURES.md](docs/FEATURES.md)).
+- **Car state from its own buses**: AVC-LAN (climate control, nav emulation), CAN (hybrid power,
+  SOC, yaw and acceleration, factory cruise state and set speed), BEAN body bus (lamps, high beam,
+  doors, locks, cabin and outside temperature), Toyota diagnostics over OBD/UDS. Bus findings are
+  documented signal by signal ([docs/FINDINGS_LOG.md](docs/FINDINGS_LOG.md)).
+- **Web dashboard** for statistics away from the car: HV battery block health over months,
+  12 V battery, rides, diagnostics.
+
+## Screenshots
+
+Headless renders of the UI code in this repository with simulated vehicle and road data
+(`python -m cyberpunk_computer.ui.scene.demo --shots DIR`,
+`python -m cyberpunk_computer.ui.scene.alerts_demo --shots DIR`). The panel is 480×240; the images
+are scaled 4×.
+
+| | |
+|---|---|
+| ![Night drive on a left curve: lanes, lead vehicle at 26 m with a 1.8 s gap, street lamps](docs/images/mfd_curve_night.png) | ![Red traffic light 36 m ahead, lead vehicle braking at 16 m, regenerative braking in the status strip](docs/images/mfd_red_light_lead.png) |
+| Night drive: lanes and road edges, lead vehicle with distance and time gap, street lamps, signs in the top line | Red light 36 m ahead, lead vehicle at 16 m closing at 10 km/h; the strip shows regeneration (`CHG`) and the SOC gauge |
+| ![Closing-speed advisory in the status strip](docs/images/mfd_alert_closing.png) | ![Speed-limit notice with the true speed](docs/images/mfd_alert_speed_limit.png) |
+| Closing-speed advisory ([docs/ALERTS.md](docs/ALERTS.md)) | Speed-limit notice with the true speed (`REAL 62`) under the limit sign |
+| ![Map layer: tunnel with the exit distance](docs/images/mfd_tunnel_exit.png) | ![Cruise control engaged at 50 km/h](docs/images/mfd_cruise_active.png) |
+| Map layer in a tunnel: exit in 640 m, lamp rows | Factory cruise engaged with its set speed, shown only ([docs/CRUISE_CONTROL.md](docs/CRUISE_CONTROL.md)) |
+| ![Forest road by day: scenery band chosen from the camera's place label](docs/images/mfd_forest_day.png) | ![Parked with doors and hatch open](docs/images/mfd_parked_doors_open.png) |
+| Scenery follows the camera's place, light and weather labels (here: forest, day) | Parked: the car model opens the doors and the hatch that are open |
+| ![Climate screen: cabin view with air streams](docs/images/mfd_climate.png) | ![Dashboard battery tab, per-block view, simulated history](docs/images/dashboard_battery_blocks_demo.png) |
+| Climate screen over AVC-LAN: outlets, fan, A/C and intake drawn as air in the cabin | Dashboard, HV battery blocks (simulated 300-day history with one weak block, [docs/BATTERY_HEALTH.md](docs/BATTERY_HEALTH.md)) |
+
+Main screen layout and its data contract: [docs/MFD_MAIN_SCREEN.md](docs/MFD_MAIN_SCREEN.md).
+
 ## System
 
 ```
@@ -33,7 +74,9 @@ POCO F1 (postmarketOS, always on)
 
 The gateway firmware, the Pi image files and the per-day capture logs live in the sibling
 repository `cyberpunk-prius-gateway` (`gateway-rp2350/`, `raspberry_pi_config/`,
-`captures/<date>/CAPTURES.md`).
+`captures/<date>/CAPTURES.md`). The AVC-LAN protocol notes (framing, units, nav emulation
+dialogue, transceiver, standalone RP2040 firmware) are published separately as
+[prius-gen2-avclan](https://github.com/PiotrTopa/prius-gen2-avclan).
 
 ## Car buses and peripherals
 

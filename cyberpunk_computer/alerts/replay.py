@@ -34,7 +34,8 @@ from typing import Iterator, List, Optional, Tuple
 
 
 def _open(path: str):
-    return gzip.open(path, "rt") if path.endswith(".gz") else open(path, "r")
+    return (gzip.open(path, "rt", errors="replace") if path.endswith(".gz")
+            else open(path, "r", errors="replace"))
 
 
 def trip_events(path: str) -> Iterator[Tuple[float, str, object]]:
@@ -42,7 +43,7 @@ def trip_events(path: str) -> Iterator[Tuple[float, str, object]]:
     with _open(path) as fh:
         first = None
         for line in fh:
-            line = line.strip()
+            line = line.replace("\0", "").strip()      # NUL tail of a hard reset
             if not line or line.startswith("#"):
                 continue
             if line.startswith("{"):

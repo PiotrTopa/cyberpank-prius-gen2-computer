@@ -138,8 +138,11 @@ class BeanIngest:
                  engine_gate: Optional[Any] = None,
                  fuel_word_sink: Optional[Callable[[int], List[Action]]] = None,
                  wall: Callable[[], float] = time.time,
-                 cruise_fusion: Optional[Any] = None) -> None:
+                 cruise_fusion: Optional[Any] = None,
+                 odometer_sink: Optional[Callable[[float], List[Action]]] = None) -> None:
         self.sources = sources
+        #: BEAN 52:3F odometer -> our own odometer (io.dynamics_ingest)
+        self.odometer_sink = odometer_sink
         self._wall = wall
         self.cruise = cruise_log or CruiseRawLog()
         if cruise_fusion is None:
@@ -184,8 +187,15 @@ class BeanIngest:
             if not v:
                 continue
             for key, field in VEHICLE_FIELDS.items():
-                if key in v and self._changed("vehicle", field, v[key]):
+                if key not in v:
+                    continue
+                # brake switch: CAN 0x230 D bit 2 (28 ms) wins while fresh
+                if key == "brake_switch" and not (current and self.sources.offer("brake_switch", SRC, now)):
+                    continue
+                if self._changed("vehicle", field, v[key]):
                     vehicle[field] = v[key]
+            if "odometer_km" in v and self.odometer_sink is not None:
+                out.extend(self.odometer_sink(v["odometer_km"]))
             if "display_speed_kmh" in v:
                 self._display_speed_seen = now
             if "consumption_stopped" in v:

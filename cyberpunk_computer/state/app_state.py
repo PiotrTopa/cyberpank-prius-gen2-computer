@@ -155,7 +155,19 @@ class VehicleState:
     display_speed_kmh: Optional[float] = None
     speed_kmh: float = 0.0
     rpm: Optional[int] = None    # ICE RPM: BEAN FE:26, OBD 010C fallback (comm.source_priority)
-    brake_switch: Optional[bool] = None  # brake pedal switch (BEAN FE:29 b2 0x08)
+    brake_switch: Optional[bool] = None  # brake pedal switch: CAN 0x230 D bit 2, BEAN FE:29 b2 0x08
+    accelerator_pressed: Optional[bool] = None  # CAN 0x03A E bit 4 (P); None when stale
+    moving: Optional[bool] = None        # CAN 0x0B4 E bit 0: set 7-14 km/h, clear <= 2 km/h (P)
+    ice_power_request_kw: Optional[float] = None  # CAN 0x038 B x 0.23 kW (P); None when stale
+    # Distance (io.dynamics_ingest). distance_total_km: since backend start,
+    # from the CAN 0x230 counter (~102.8 counts/m, P) or, while it is stale,
+    # the integrated true speed; distance_source "can230" / "speed".
+    # odometer_km: OUR odometer (persisted, never below the meter's BEAN
+    # 52:3F, which is frozen at 299,999 km on this car): base for service
+    # intervals. None until the first anchor (52:3F or the persisted file).
+    distance_total_km: float = 0.0
+    distance_source: Optional[str] = None
+    odometer_km: Optional[float] = None
     ice_stopped: Optional[bool] = None   # ICE stopped while READY (BEAN 98:27 b0 0x08)
     
     # Pedals & Fuel
@@ -258,6 +270,11 @@ class VehicleState:
     cruise_main_switch: Optional[bool] = None # main switch on (62:C8 b1 0x10 / 0x5C8 b2 0x10 / 21D3 D 0x0F)
     cruise_drive_request: Optional[int] = None  # 21D3 C raw 0..~110: rises while cruise pulls,
                                               # 0 when coasting or not engaged (meaning probable)
+    # Stalk / brake as the HV ECU sees them at the last 21D3 poll (E byte, C;
+    # sampled at 1 Hz: short taps are mostly missed). None = unknown.
+    cruise_switch_set_coast: Optional[bool] = None   # E 0x10
+    cruise_switch_res_acc: Optional[bool] = None     # E 0x08
+    cruise_brake_inputs: Optional[int] = None        # E bits 0-2 raw (7 = pedal pressed)
     cruise_5c8_debug: Optional[str] = None    # Raw 0x5C8 debug: hex bytes + data[2] bits
     # PLACEHOLDER (no bit meanings known yet): raw BEAN 62:C8 and CAN 0x5C8
     # (its gateway copy) and their last changes, so a drive with cruise in
@@ -347,12 +364,21 @@ class DynamicsState:
     steering_angle: Optional[float] = None       # Steering wheel deg, + = left (CAN 0x025 x 1.5)
     steering_angle_raw: Optional[int] = None     # Raw 12-bit signed count
     
-    # Acceleration (0x022)
-    lateral_accel_raw: Optional[int] = None      # Raw offset value (uncalibrated)
-    longitudinal_accel_raw: Optional[int] = None # Raw offset value (uncalibrated)
-    
-    # Yaw Rate (0x03A)
-    yaw_rate_raw: Optional[int] = None           # Raw offset value (uncalibrated)
+    # Accelerations, CAN 0x023 (two channels P, Q at +-45 deg; scales P):
+    # longitudinal = 0.020 (P - Q) m/s², + = speeding up; lateral = 0.025
+    # (P + Q) m/s², + = towards the left; road grade is included.
+    longitudinal_accel_ms2: Optional[float] = None
+    lateral_accel_ms2: Optional[float] = None
+    lateral_accel_raw: Optional[int] = None      # P + Q counts (legacy raw view)
+    longitudinal_accel_raw: Optional[int] = None # P - Q counts (legacy raw view)
+
+    # Yaw rate, CAN 0x022 (two channels; ~0.25 deg/s per count, scale P),
+    # + = turning left, standstill offset removed (re-estimated at every
+    # standstill: io.dynamics_ingest). None when stale.
+    yaw_rate_dps: Optional[float] = None
+    yaw_rate_raw: Optional[int] = None           # channel 1 raw counts (no offset)
+    yaw_rate_raw_2: Optional[int] = None         # channel 2 raw counts (no offset)
+    yaw_offsets: Optional[tuple] = None          # (ch1, ch2) standstill offsets, counts
     
     # Wheel Speed (0x0B1 / 0x0B3, km/h per wheel)
     front_right_speed: float = 0.0

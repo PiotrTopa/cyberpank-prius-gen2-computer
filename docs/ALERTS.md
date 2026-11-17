@@ -84,8 +84,13 @@ frontend drops it after 5 s without a refresh. Tap = acknowledge, long press = m
 (`input_event` `mfd`/`alert_ack`). Frame pacing: `ScenePage.needs_frame` reports banner and chip
 changes. Shown on the main screen (all pages); other screens do not show it yet.
 
-Screenshots: `python -m cyberpunk_computer.ui.scene.alerts_demo --shots OUT --copy-to /home/piotr/filedrop/uploads`
+Screenshots: `python -m cyberpunk_computer.ui.scene.alerts_demo --shots OUT [--copy-to DIR]`
 (prefix `alerts_`).
+
+| | |
+|---|---|
+| ![Closing-speed advisory, red frame](images/mfd_alert_closing.png) | ![Speed-limit notice with the REAL chip](images/mfd_alert_speed_limit.png) |
+| `distance_warning` (warning, `ADVISORY`) | `speed_limit` (notice) with the `REAL 62` chip under the limit sign |
 
 ### 1.5 Sound and notifications
 

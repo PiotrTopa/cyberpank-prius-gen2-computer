@@ -33,6 +33,36 @@ from .ports import RawMessage, OutgoingCommand
 logger = logging.getLogger(__name__)
 
 
+def boot_id() -> Optional[str]:
+    """The kernel's boot id (changes at every boot), or None off Linux."""
+    try:
+        with open("/proc/sys/kernel/random/boot_id", "r") as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
+def iter_ndjson(fh):
+    """Records of an NDJSON log, tolerant of what a hard reset leaves
+    behind: NUL-filled tails (blocks allocated but never written), a torn
+    last line and other garbage lines are skipped. ``fh`` yields str or
+    bytes lines."""
+    for line in fh:
+        if isinstance(line, bytes):
+            line = line.replace(b"\0", b"").decode("utf-8", "replace")
+        else:
+            line = line.replace("\0", "")
+        line = line.strip()
+        if not line or line[0] != "{":
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict):
+            yield rec
+
+
 @dataclass
 class LogConfig:
     """Configuration for communication logger."""
@@ -136,14 +166,32 @@ class CommLogger:
             # Create directory if needed
             self._filepath.parent.mkdir(parents=True, exist_ok=True)
             
-            # Open file
-            self._file = open(self._filepath, 'w', encoding='utf-8')
+            # Open file: always a NEW file. 'x' never truncates or appends
+            # to a file of an earlier session (e.g. a name repeated because
+            # the clock came back at the same time after a reboot); a taken
+            # name gets a numeric suffix.
+            path = self._filepath
+            for n in range(1, 100):
+                try:
+                    self._file = open(path, 'x', encoding='utf-8')
+                    break
+                except FileExistsError:
+                    path = self._filepath.with_name("%s_%d%s" % (self._filepath.stem, n,
+                                                                 self._filepath.suffix))
+            else:
+                raise FileExistsError(str(self._filepath))
+            if path != self._filepath:
+                logger.warning("Log file %s exists; writing %s", self._filepath.name, path.name)
+                self._filepath = path
             
-            # Write header comment
+            # Write header comment (boot id + monotonic clock: a reader can
+            # tell sessions apart even when the wall clock was wrong)
             header = {
                 "meta": "comm_log",
                 "version": "1.0",
                 "created": datetime.now().isoformat(),
+                "boot_id": boot_id(),
+                "mono": round(time.monotonic(), 3),
                 "config": {
                     "include_system": self._config.include_system,
                     "include_can": self._config.include_can,

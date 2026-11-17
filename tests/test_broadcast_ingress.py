@@ -199,7 +199,7 @@ def _logged(ing):
 
 def test_undecoded_id_reaches_the_log_once_a_second():
     """Until 2026-11-16 an id the decoder does not know reached the trip log
-    3 times a minute (0x3CA, 0x3CF, 0x484 ...: 0.05 /s for 100 ms frames)."""
+    3 times a minute (0x3C9, 0x3CF, 0x484 ...: 0.05 /s for 100 ms frames)."""
     twin = create_test_twin()
     ing = twin.ingress
     seen = _logged(ing)
@@ -207,10 +207,10 @@ def test_undecoded_id_reaches_the_log_once_a_second():
     n = 0
     t = 0.0
     while t < 20.0:                       # a 100 ms frame with a changing byte
-        ing.ingest_broadcast_can(0x3CA, bytes([0, 0, n & 0xFF, 0, 0]), 0, 1000.0 + t, t0 + t)
+        ing.ingest_broadcast_can(0x3C9, bytes([0, 0, n & 0xFF, 0, 0]), 0, 1000.0 + t, t0 + t)
         n += 1
         t += 0.1
-    logged = [d for d in seen if d["i"] == "0x3CA"]
+    logged = [d for d in seen if d["i"] == "0x3C9"]
     assert 18 <= len(logged) <= 24        # 3 probes + one per second
     assert ing.stats.broadcast_unknown_logged >= 17
     assert twin.store.state is not None and ing.stats.broadcast_dispatched == 0

@@ -636,6 +636,17 @@ class BackendService:
         if cfg.recording.enabled:
             self._wire_recording(twin)
 
+        # Our own odometer (the meter's 52:3F is frozen at 299,999 km):
+        # persisted next to the metrics database, live data only.
+        if not cfg.replay_file:
+            try:
+                import os as _os
+                twin.ingress.set_odometer_file(
+                    _os.environ.get("BACKEND_ODOMETER_FILE")
+                    or _os.path.join(_os.path.dirname(cfg.db_path) or ".", "odometer.json"))
+            except Exception:
+                logger.exception("Own odometer file could not be attached")
+
         # Battery-health collector (docs/BATTERY_HEALTH.md): live data only.
         if not cfg.replay_file:
             try:

@@ -125,6 +125,10 @@ class AlertInputs:
     brake_level: Optional[float] = None    # 0..127
     throttle_pct: Optional[float] = None
     steering_deg: Optional[float] = None
+    yaw_dps: Optional[float] = None        # CAN 0x022, + = left (scale P)
+    lat_accel_ms2: Optional[float] = None  # CAN 0x023, + = left (P)
+    lon_accel_ms2: Optional[float] = None  # CAN 0x023, + = speeding up (P)
+    accelerator_pressed: Optional[bool] = None  # CAN 0x03A E bit 4 (P)
     turn_signal: str = "unknown"           # not decoded on any bus
     # ── climate ──
     outside_c: Optional[float] = None
@@ -141,6 +145,8 @@ class AlertInputs:
     lock_event_ts: Optional[float] = None  # wall ts of the last lock/unlock event frame
     door_ts: Optional[float] = None        # wall ts of the last door-state frame
     bean_frames: int = 0
+    # our odometer (vehicle.odometer_km: CAN 0x230 distance, never below the
+    # meter's 52:3F, which is frozen at 299,999 km); the raw 52:3F otherwise
     odometer_km: Optional[float] = None
     # ── power ──
     v12: Optional[float] = None
@@ -355,7 +361,10 @@ def build_inputs(state: Any, scene: Optional[Mapping], scene_age: Optional[float
                   "rear_defogger", "fan_speed", "air_direction", "target_temp", "status_source"):
             climate[k] = _get(cl, k)
     dtcs, dtc_seen, mil = _dtcs(_get(state, "diagnostics"))
-    odo = _num(bean_value(decoded, "odometer_km"))
+    odo = _num(_get(v, "odometer_km"))
+    if odo is None:
+        odo = _num(bean_value(decoded, "odometer_km"))
+    dyn = _get(state, "dynamics")
     pb_t = _num(_get(pb, "last_update_time"))
     rs_state = _get(state, "roadsense", "state")
     fields = dict(
@@ -365,6 +374,10 @@ def build_inputs(state: Any, scene: Optional[Mapping], scene_age: Optional[float
         gear=gear_name, ready=bool(_get(v, "ready_mode")), acc=acc, ig=bool(_get(v, "ig_on")),
         brake=brake, brake_level=bp, throttle_pct=_num(_get(v, "throttle_position")),
         steering_deg=_num(_get(state, "dynamics", "steering_angle")),
+        yaw_dps=_num(_get(dyn, "yaw_rate_dps")),
+        lat_accel_ms2=_num(_get(dyn, "lateral_accel_ms2")),
+        lon_accel_ms2=_num(_get(dyn, "longitudinal_accel_ms2")),
+        accelerator_pressed=_get(v, "accelerator_pressed"),
         outside_c=_num(_get(cl, "outside_temp")), climate_live=climate_live, climate=climate,
         climate_buttons_ts=bean_ts(decoded, "climate_buttons"),
         doors_locked=bean_value(decoded, "doors_locked"),

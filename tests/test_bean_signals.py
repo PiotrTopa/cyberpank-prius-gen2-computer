@@ -192,7 +192,7 @@ class TestSourceArbiter:
         rpm = [p for p in DEFAULT_POLICIES if p.signal == "rpm"][0]
         assert rpm.sources[0].name == "bean" and rpm.solicited_slots == (0,)
         coolant = [p for p in DEFAULT_POLICIES if p.signal == "coolant"][0]
-        assert [s.name for s in coolant.sources] == ["can", "bean", "obd"]
+        assert [s.name for s in coolant.sources] == ["can", "bean", "can484", "obd"]
 
 
 class TestSlotSuspender:
@@ -235,6 +235,8 @@ def make_ingress():
     ing._sources._clock = clk
     ing._bean._clock = clk
     ing._cruise._clock = clk
+    ing._dynamics._clock = clk
+    ing._dynamics.odometer._clock = clk
     return store, ing, clk
 
 
@@ -363,12 +365,15 @@ class TestIngressBean:
         feed_bean(ing, [("62", "C8", "0000")])
         feed_bean(ing, [("62", "C8", "0000")])
         feed_bean(ing, [("62", "C8", "0010")])           # main switch on
-        feed_can(ing, 0x5C8, [0x24, 0, 0])
+        feed_can(ing, 0x5C8, [0xA4, 0, 0x10])         # immediate-copy header A4
+        feed_can(ing, 0x5C8, [0x24, 0, 0x10])         # periodic copy: no raw change
         v = store.state.vehicle
         assert v.cruise_raw_62c8 == "0010"
-        assert v.cruise_main_switch is True        # BEAN beats the late 0x5C8 copy
+        assert v.cruise_main_switch is True
         assert [(c["src"], c["data"]) for c in v.cruise_raw_changes] == [
-            ("bean:62C8", "0000"), ("bean:62C8", "0010"), ("can:5C8", "24 00 00")]
+            ("bean:62C8", "0000"), ("bean:62C8", "0010"), ("can:5C8", "24 00 10")]
+        feed_can(ing, 0x5C8, [0xA4, 0, 0x00])         # CAN 0x5C8 leads BEAN (2026-11-17)
+        assert store.state.vehicle.cruise_main_switch is False
 
     def test_stale_frames_not_arbitrated(self):
         """Freshness is the frame's true age, not its arrival time."""

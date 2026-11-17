@@ -177,9 +177,9 @@ class FileInputPort(InputPort):
         raw_entries = []
         
         try:
-            with open(self.filepath, 'r') as f:
+            with open(self.filepath, 'r', errors='replace') as f:
                 for line_num, line in enumerate(f, 1):
-                    line = line.strip()
+                    line = line.replace("\0", "").strip()   # NUL tail of a hard reset
                     if not line:
                         continue
                     
@@ -282,9 +282,9 @@ class FileInputPort(InputPort):
         carrying ``ht`` and no top-level ``id``.
         """
         try:
-            with open(self.filepath, "r") as f:
+            with open(self.filepath, "r", errors="replace") as f:
                 for line in f:
-                    line = line.strip()
+                    line = line.replace("\0", "").strip()   # NUL tail of a hard reset
                     if not line:
                         continue
                     try:
@@ -326,9 +326,9 @@ class FileInputPort(InputPort):
         prev = 0.0
         skipped = 0
         try:
-            with open(self.filepath, "r") as f:
+            with open(self.filepath, "r", errors="replace") as f:
                 for line_num, line in enumerate(f, 1):
-                    line = line.strip()
+                    line = line.replace("\0", "").strip()   # NUL tail of a hard reset
                     if not line:
                         continue
                     try:

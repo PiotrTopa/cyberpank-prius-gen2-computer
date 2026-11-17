@@ -273,6 +273,10 @@ battery model) and refuses an existing file.
 
 ## 10. Reading the UI
 
+![Battery tab, Blocks view, on a simulated history](images/dashboard_battery_blocks_demo.png)
+
+*Blocks view on a `synth` history (300 days, weak block 9, leaky block 4; section 9), not a real pack.*
+
 * **Overview**: the indicators for the HV pack and the 12 V battery with level, value, a sparkline
   and the slope per 30 days with its interval; selecting one shows its series (grey dots = as
   measured, line = temperature-normalised), the limits, a change point if found, and what the

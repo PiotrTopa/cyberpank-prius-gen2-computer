@@ -985,44 +985,25 @@ class MainScreen(Screen):
         surface.blit(val_surf, (left_x + col_width - val_surf.get_width(), y))
         y += row_h
         
-        # Lateral Acceleration
-        lbl = font_label.render("LAT G", True, COLORS["text_secondary"])
-        surface.blit(lbl, (left_x, y))
-        if dyn.lateral_accel_raw is not None:
-            val_text = f"{dyn.lateral_accel_raw:+5d}"
-            color = COLORS["green_bright"] if abs(dyn.lateral_accel_raw) < 50 else COLORS["yellow"]
-        else:
-            val_text = "   --"
-            color = COLORS["text_dim"]
-        val_surf = font_value.render(val_text, True, color)
-        surface.blit(val_surf, (left_x + col_width - val_surf.get_width(), y))
-        y += row_h
-        
-        # Longitudinal Acceleration
-        lbl = font_label.render("LON G", True, COLORS["text_secondary"])
-        surface.blit(lbl, (left_x, y))
-        if dyn.longitudinal_accel_raw is not None:
-            val_text = f"{dyn.longitudinal_accel_raw:+5d}"
-            color = COLORS["green_bright"] if abs(dyn.longitudinal_accel_raw) < 50 else COLORS["yellow"]
-        else:
-            val_text = "   --"
-            color = COLORS["text_dim"]
-        val_surf = font_value.render(val_text, True, color)
-        surface.blit(val_surf, (left_x + col_width - val_surf.get_width(), y))
-        y += row_h
-        
-        # Yaw Rate
-        lbl = font_label.render("YAW", True, COLORS["text_secondary"])
-        surface.blit(lbl, (left_x, y))
-        if dyn.yaw_rate_raw is not None:
-            val_text = f"{dyn.yaw_rate_raw:+5d}"
-            color = COLORS["green_bright"] if abs(dyn.yaw_rate_raw) < 30 else COLORS["yellow"]
-        else:
-            val_text = "   --"
-            color = COLORS["text_dim"]
-        val_surf = font_value.render(val_text, True, color)
-        surface.blit(val_surf, (left_x + col_width - val_surf.get_width(), y))
-        y += row_h + 4
+        # Accelerations (CAN 0x023, m/s² -> g) and yaw rate (CAN 0x022,
+        # deg/s, + = left); scales probable (docs/prius_can.md §2)
+        for label, value, fmt, warn in (
+                ("LAT G", getattr(dyn, "lateral_accel_ms2", None), "{:+5.2f}", 2.5),
+                ("LON G", getattr(dyn, "longitudinal_accel_ms2", None), "{:+5.2f}", 2.5),
+                ("YAW", getattr(dyn, "yaw_rate_dps", None), "{:+5.1f}", 15.0)):
+            lbl = font_label.render(label, True, COLORS["text_secondary"])
+            surface.blit(lbl, (left_x, y))
+            if value is not None:
+                shown = value / 9.81 if label != "YAW" else value
+                val_text = fmt.format(shown)
+                color = COLORS["green_bright"] if abs(value) < warn else COLORS["yellow"]
+            else:
+                val_text = "   --"
+                color = COLORS["text_dim"]
+            val_surf = font_value.render(val_text, True, color)
+            surface.blit(val_surf, (left_x + col_width - val_surf.get_width(), y))
+            y += row_h
+        y += 4
         
         # ─── LEFT COLUMN: Wheel Pulses ───
         
