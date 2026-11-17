@@ -240,3 +240,57 @@ Facts of route A on this unit (2026-11-17):
 Open issue: the camera hub dropped and re-enumerated mid-drive twice on 2026-11-16 (17:47:17 and
 21:16:50 local time); the unit disappears with it. `hu-gnss-bridge` reconnects; interactive sessions must be
 restarted. Cause not known (hub power / relay ch4 / cable).
+
+## 8. Audio control and alert sounds (measured 2026-11-17)
+
+All over the phone's adb link (USB `1-1.4.2`, server owned by `prius-gnss-bridge.service`, §7.4).
+`cmd activity broadcast …` and `cmd activity start-foreground-service …` take 30–40 ms on the unit
+(a binder call); `am …`, `settings …` and `media …` start a JVM (0.5 s and more, the unit's load is
+~7): use only the `cmd` forms and `dumpsys` in anything periodic.
+
+### 8.1 Facts
+
+| Function | How | Verified |
+|---|---|---|
+| read volume and mute | `dumpsys audio` (40 ms): under `- STREAM_MUSIC:` the line `Muted: true/false` and `Current: 8 (headphone): 31, 40000000 (default): 30` — the first number after the device name is the master level 0..63 (same as `settings get system McuMainVolume`, `McuMuteState`) | yes |
+| set volume (absolute) | `cmd activity broadcast -a xy.android.gtpkey.volset --ei volset N` (0..63). The extra is named `volset`; without it the unit sets **20** (the default of `getIntExtra`); the values 100 / 101 are not levels (they switch the DSP's ADC) | yes: 31 → 20 → 31 |
+| volume step | `-a xy.android.gtpkey.voladd` / `xy.android.gtpkey.voldec` (±1, shows the unit's volume bar) | `voladd` yes |
+| mute toggle | `-a xy.android.gtpkey.mute` (a toggle; read the state back, there is no absolute form) | yes, both ways |
+| `media volume --stream 3 --set N` | logged as a level change but does not hold (the level reads back unchanged) | no effect |
+| media keys | `-a xy.android.gtpkey.playpause`, `.play`, `.pause`, `.frd` (next), `.rev` (previous), `.src` (source), also `xy.android.playpause`, `xy.android.nextmedia`, `xy.android.previousmedia` | names from the vendor framework; not exercised (needs a playing source and ears) |
+| now playing | `dumpsys media_session`: with CarPlay through ZLink only the Bluetooth session exists, `state=null`, no metadata | no title / artist available this way |
+| foreground app | `dumpsys activity activities`, line `mResumedActivity` (`com.zjinnova.zlink/…MainActivity` = CarPlay / Android Auto on screen) | yes |
+| speech engine | `com.google.android.tts` is installed; Polish works | yes |
+
+Source of the names: `/system/framework/oat/arm/mediatek-services.vdex` (dex 037 at offset 28,
+`dexdump -i -d`), receiver in `com.mediatek.server.NewkeypadMonitor`.
+
+### 8.2 Agent app (`tools/headunit/agent/`, package `pl.topa.priusagent`)
+
+A foreground service with no UI and no network permission, installed as a normal user app
+(`adb install -r build/prius-agent.apk`, built by `tools/headunit/agent/build.sh`). One intent per
+alert:
+
+```
+cmd activity start-foreground-service -n pl.topa.priusagent/.AlertService \
+    --es tone 880:150,0:80,1320:200 [--ef gain 0.8] [--es say "text"] [--es lang pl] \
+    [--es file /sdcard/x.ogg] [--es usage nav|alarm|media] [--es id abc]
+cmd activity start-foreground-service -n pl.topa.priusagent/.AlertService --ez stop true
+```
+
+* `tone`: comma list `frequency_hz:duration_ms`, frequency 0 = pause; rendered to one PCM buffer
+  with 4 ms edges (no clicks), at most 15 s. `say`: text for the unit's speech engine. `file`: a
+  sound file on the unit. One intent may carry all three: they play in the order tone, file, speech.
+* Alerts queue in arrival order; `stop` drops the queue and the sound in progress.
+* Each alert requests transient audio focus (`GAIN_TRANSIENT_MAY_DUCK`, usage navigation guidance by
+  default) and gives it back when done, so a player that honours focus lowers the music.
+* Result on logcat, tag `PriusAgent`, one JSON line: `{"event":"alert","id":"t1","ok":true,
+  "focus":true,"ms":692}`; also `started`, `tts`, `stopped`.
+* The first intent after a boot starts the process (0.5 s) and the speech engine; a double beep took
+  0.7 s from intent to done, a chime plus four spoken words 7.7 s.
+* The alert level follows the unit's master volume (the amplifier chain is behind it): at level 0
+  or muted an alert is silent unless the sender raises the level first.
+
+Open: whether the tones and the speech are audible in the cabin over CarPlay audio and whether
+CarPlay ducks (app side reports ok and focus granted; ears needed); the media-key broadcasts; start
+of the agent after a unit reboot (it starts on the first intent, so nothing is needed).

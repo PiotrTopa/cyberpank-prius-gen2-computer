@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Prius agent for the head unit: plays alert tones, speech and sound files on command
+     of the car computer (docs/HEADUNIT_INTEGRATION.md 8). No network, no UI. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="pl.topa.priusagent" android:versionCode="1" android:versionName="0.1">
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="27" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <application android:label="Prius Agent" android:allowBackup="false">
+        <service android:name=".AlertService" android:exported="true" />
+    </application>
+</manifest>
