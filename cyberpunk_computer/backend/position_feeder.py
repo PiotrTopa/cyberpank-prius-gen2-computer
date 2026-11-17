@@ -5,7 +5,7 @@ roadsense owns all position filtering, dead reckoning and map matching
 (roadsense docs/ARCHITECTURE.md "mapd", position input API v1). This module
 only delivers raw inputs to ``<rundir>/position.sock``:
 
-    panda reader thread ──on_frame──▶ CanMotionTap (latest 0x0B4/0x120/0x0B1/0x0B3/0x025)
+    panda reader thread ──on_frame──▶ CanMotionTap (latest 0x0B4/0x120/0x0B1/0x0B3/0x025/0x022)
     head unit ──POST /api/v1/position/gnss──▶ HeadunitGnssSource (queue)
                                                    │
                          PositionFeeder thread (motion_hz) ──PositionFeed──▶ position.sock
@@ -51,8 +51,14 @@ section 3. Summary:
   positive = left (scale from the full-lock range; sign third-party Toyota
   convention, consistent with the wheel-speed difference). Decoder shared with
   the state's ``dynamics.steering_angle`` (``comm/can_decoder.py``).
+* ``yaw_rate_rps`` (opt-in, yaw input ``gyro``) = CAN 0x022, the mean of its
+  two channels ((256A + B) - 0x200, (256C + D) - 0x200) minus their standstill
+  offsets, x 0.0044 rad/s per count, positive = left. The offsets (-2 / -7
+  counts on 2026-11-17) follow the reading whenever the car stands for 1 s.
+  mapd uses ``yaw_rate_rps`` before the wheel speeds. Not the default until
+  the scale is calibrated on a full circle (docs/prius_can.md).
 * CAN 0x03A is NOT a yaw rate (correlation 0.01 with the wheel-speed yaw on
-  the 2026-11-13 drive); no yaw-rate sensor is decoded.
+  the 2026-11-13 drive).
 """
 
 from __future__ import annotations
@@ -69,18 +75,33 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from ..comm.can_decoder import decode_steering_deg  # noqa: F401 (re-exported)
+from ..comm.can_decoder import YAW_RAD_S_PER_COUNT, YAW_STANDSTILL_OFFSETS
+from ..comm.can_decoder import decode_yaw_counts as _yaw_counts
 from .position_client import PositionFeed
 
 logger = logging.getLogger(__name__)
 
 SOURCES = ("headunit", "phone", "synthetic", "none")
 REAL_SOURCES = ("headunit", "phone")        # may be combined in a priority list
-YAW_INPUTS = ("wheels", "steer")
+YAW_INPUTS = ("wheels", "steer", "gyro")
 # Default: wheel speeds only. mapd prefers them anyway; steering_wheel_deg is
 # used by mapd only without wheel speeds, and its kinematic model (ratio 19.1,
 # wheelbase 2.70 m) over-predicts this car's yaw by ~10 % (all speeds) to ~50 %
 # (above 8 m/s) on the 2026-11-13 drive, so it is opt-in (BACKEND_POSITION_YAW).
 DEFAULT_YAW_INPUTS = ("wheels",)
+# "gyro" (opt-in): the yaw-rate sensor on CAN 0x022 as ``yaw_rate_rps``, which
+# mapd takes before the wheel speeds. Two redundant channels, about 0.0044
+# rad/s per count, positive = turning left (docs/prius_can.md; the scale is
+# from the ratio to the rear wheel-speed yaw, 0.0042-0.0046, and not yet
+# calibrated on a full circle, which is why it is not the default). The
+# standstill offset of each channel is learned whenever the car stands.
+# Scale, start offsets and the frame decode are the state decoder's
+# (comm/can_decoder.py; the state shows the same sensor as dynamics.yaw_rate_dps).
+# The feeder reads the frames itself because it needs them at the bus rate,
+# not at the state's publish rate.
+GYRO_RAD_PER_COUNT = YAW_RAD_S_PER_COUNT
+GYRO_OFFSETS = YAW_STANDSTILL_OFFSETS      # counts at standstill (AB, CD), 2026-11-17
+GYRO_MAX_COUNTS = 400                       # |value| beyond this (1.76 rad/s) is not a yaw rate
 FIXES = ("none", "2d", "3d", "dgps", "rtk", "dr")
 GEARS = ("P", "R", "N", "D", "B")
 
@@ -107,6 +128,9 @@ class PositionFeederConfig:
     yaw_inputs: Tuple[str, ...] = DEFAULT_YAW_INPUTS   # yaw fields with motion: wheels, steer
     stale_s: float = 0.3                   # 0x0B4 older than this -> no motion (CAN dark)
     pair_s: float = 0.1                    # yaw frames must be this close to the speed frame
+    gyro_rad_per_count: float = GYRO_RAD_PER_COUNT   # 0x022 scale ("gyro" yaw input)
+    gyro_zero_after_s: float = 1.0         # standing this long -> the 0x022 offsets follow the reading
+    gyro_zero_tau_s: float = 3.0           # ... with this time constant
     gear_stale_s: float = 1.0              # 0x120 older than this -> gear left out
     fix_timeout_s: float = 3.0             # no fix for this long -> "no fix" (mapd's own fix_timeout_s is 3 s)
     none_repeat_s: float = 5.0             # repeat fix "none" while there is no fix
@@ -156,6 +180,19 @@ def decode_speed_kmh(data: bytes) -> Optional[float]:
     return ((data[5] << 8) | data[6]) * 0.01
 
 
+def decode_yaw_counts(data: bytes) -> Optional[Tuple[int, int]]:
+    """0x022: the two yaw-rate channels in counts, (256A + B) - 0x200 and
+    (256C + D) - 0x200; positive = turning left. None when either is out of
+    range (not a plausible yaw rate)."""
+    y = _yaw_counts(data)
+    if y is None:
+        return None
+    a, b = y
+    if abs(a) > GYRO_MAX_COUNTS or abs(b) > GYRO_MAX_COUNTS:
+        return None
+    return a, b
+
+
 def decode_gear(data: bytes) -> Optional[str]:
     """0x120: byte F low nibble 0 P, 1 R, 2 N, 3 D, 4 B; anything else None."""
     if len(data) < 6:
@@ -181,7 +218,7 @@ class CanMotionTap:
     torn value.
     """
 
-    IDS = frozenset((0x0B4, 0x120, 0x0B1, 0x0B3, 0x025))
+    IDS = frozenset((0x0B4, 0x120, 0x0B1, 0x0B3, 0x025, 0x022))
 
     def __init__(self) -> None:
         self.speed: Optional[Tuple[float, float]] = None          # (km/h, t_mono)
@@ -189,6 +226,13 @@ class CanMotionTap:
         self.front: Optional[Tuple[float, float, float]] = None   # (right, left km/h, t_mono)
         self.rear: Optional[Tuple[float, float, float]] = None
         self.steer: Optional[Tuple[float, float]] = None          # (deg, t_mono)
+        self.gyro: Optional[Tuple[int, int, float]] = None        # (counts AB, counts CD, t_mono)
+        # driver intent (optional): the turn-signal lamps, set by whoever decodes them
+        # (set_turn_signal); nothing in the backend does yet (the lamps are on BEAN)
+        self.turn_signal: Optional[Tuple[str, float]] = None      # (off | left | right | both, t_mono)
+        self.gyro_offsets: Tuple[float, float] = GYRO_OFFSETS     # learned at standstill
+        self._still_since: Optional[float] = None
+        self._zero_t: Optional[float] = None
         self.frames = 0
 
     def on_frame(self, can_id: int, data: bytes, bus: int = 0,
@@ -212,11 +256,27 @@ class CanMotionTap:
             s = decode_steering_deg(data)
             if s is not None:
                 self.steer = (s, t)
+        elif can_id == 0x022:
+            y = decode_yaw_counts(data)
+            if y is not None:
+                self.gyro = (y[0], y[1], t)
         else:                               # 0x120
             g = decode_gear(data)
             if g is not None:
                 self.gear = (g, t)
         self.frames += 1
+
+    def set_turn_signal(self, side: Optional[str], now: Optional[float] = None) -> None:
+        """The turn-signal lamps as the driver set them: ``off``, ``left``,
+        ``right``, ``both`` (hazard), or None for unknown. Rides along in the
+        motion message as ``turn_signal`` while younger than 1.5 s, so the
+        caller repeats it at least once a second; roadsense uses it as the
+        driver's intent at the next junction (its docs/ARCHITECTURE.md,
+        topic ``roadgeom``). Call it from the place that decodes the lamps."""
+        if side in ("off", "left", "right", "both"):
+            self.turn_signal = (side, time.monotonic() if now is None else now)
+        else:
+            self.turn_signal = None
 
     def speed_mps(self, now: float, stale_s: float) -> Optional[float]:
         sp = self.speed
@@ -235,6 +295,9 @@ class CanMotionTap:
         g = self.gear
         if g is not None and now - g[1] <= cfg.gear_stale_s:
             m["gear"] = g[0]
+        ts = self.turn_signal
+        if ts is not None and now - ts[1] <= 1.5:
+            m["turn_signal"] = ts[0]
         if "wheels" in cfg.yaw_inputs:
             fr, rr = self.front, self.rear
             if fr is not None and rr is not None and abs(fr[2] - t) <= cfg.pair_s \
@@ -245,8 +308,35 @@ class CanMotionTap:
             st = self.steer
             if st is not None and abs(st[1] - t) <= cfg.pair_s:
                 m["steering_wheel_deg"] = round(st[0], 1)
+        if "gyro" in cfg.yaw_inputs:
+            gy = self.gyro
+            if gy is not None and abs(gy[2] - t) <= cfg.pair_s:
+                self._gyro_zero(gy, kmh, now, cfg)
+                off = self.gyro_offsets
+                counts = 0.5 * ((gy[0] - off[0]) + (gy[1] - off[1]))
+                m["yaw_rate_rps"] = round(counts * cfg.gyro_rad_per_count, 4)
         m["source"] = MOTION_TAG
         return m
+
+    def _gyro_zero(self, gy: Tuple[int, int, float], kmh: float, now: float,
+                   cfg: PositionFeederConfig) -> None:
+        """Standing (speed and every wheel exactly 0) for ``gyro_zero_after_s``:
+        the channel offsets follow the reading (a car that stands does not turn)."""
+        fr, rr = self.front, self.rear
+        still = kmh == 0.0 and (fr is None or (fr[0] == 0.0 and fr[1] == 0.0)) \
+            and (rr is None or (rr[0] == 0.0 and rr[1] == 0.0))
+        if not still:
+            self._still_since = self._zero_t = None
+            return
+        if self._still_since is None:
+            self._still_since = now
+        if now - self._still_since < cfg.gyro_zero_after_s:
+            return
+        dt = 0.0 if self._zero_t is None else max(0.0, now - self._zero_t)
+        self._zero_t = now
+        k = min(1.0, dt / max(0.1, cfg.gyro_zero_tau_s))
+        o = self.gyro_offsets
+        self.gyro_offsets = (o[0] + k * (gy[0] - o[0]), o[1] + k * (gy[1] - o[1]))
 
 
 # ── GNSS sources ─────────────────────────────────────────────────────────────
@@ -1057,7 +1147,8 @@ class PositionFeeder:
         if m["ts_mono_ns"] <= self._last_motion_ts:       # no new speed frame since the last send
             return
         self._last_motion_ts = m["ts_mono_ns"]
-        yaw = [k for k, f in (("wheels", "wheel_speeds_mps"), ("steer", "steering_wheel_deg")) if f in m]
+        yaw = [k for k, f in (("gyro", "yaw_rate_rps"), ("wheels", "wheel_speeds_mps"),
+                              ("steer", "steering_wheel_deg")) if f in m]
         self.yaw_input = "+".join(yaw) or None
         self._send(m, "motion")
 

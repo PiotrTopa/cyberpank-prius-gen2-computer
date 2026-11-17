@@ -52,7 +52,7 @@ about 1 Hz).
 | Powerbox (RP2040) | USB CDC NDJSON | `io/powerbox.py`, `io/multi_input.py` | device ids offset into 200-203; [powerbox/README.md](../powerbox/README.md) |
 | comma.ai panda | libusb-1.0 via ctypes (`bbaa:ddcc`) | `io/panda_can.py` | broadcast CAN only, see §3 |
 | MFD Pi | USB gadget `usb0`, ZMQ | `backend/mfd_power.py` | the backend powers the Pi via the hub port (uhubctl) and manages its boot/shutdown (`BACKEND_MFD_*`) |
-| roadsense | systemd + HTTP :8090 | `backend/roadsense_power.py`, `api/roadsense_proxy.py` | started/stopped on ACC |
+| roadsense | systemd + HTTP :8090 | `backend/roadsense_power.py`, `api/roadsense_proxy.py` | started/stopped on ACC; the camera hub (relay ch4) is powered already at the early start demand (BEAN: doors unlocked) for at most `BACKEND_ROADSENSE_EARLY_CAMERA_S` (180 s), without the stack: the dashcam leaves the USB bus once 23-39 s after power-up, for 4-5 s or, on the first drive after a long stand, for 122 s (journals of 2026-11-16 / 17: no road picture from 0:45 to 2:55 after ACC on), and that sequence should run before the drive. Sessions, tail, budget per parked period and the hand-over to ACC: [CAMERA_WARMUP.md](CAMERA_WARMUP.md) |
 | roadsense mapd | Unix socket `/run/roadsense/position.sock` (position input API v1) | `backend/position_feeder.py`, `backend/position_client.py` | off by default; [POSITION_FEEDER.md](POSITION_FEEDER.md) |
 | satellites | RS485 (gateway), BLE (`prius-bled`), Wi-Fi | `backend/satellite_registry.py`, `io/*_transport.py` | [SATELLITES.md](SATELLITES.md) |
 

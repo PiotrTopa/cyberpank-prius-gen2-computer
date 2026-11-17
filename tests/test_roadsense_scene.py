@@ -472,7 +472,7 @@ def test_feed_publishes_while_active_and_reconnects(server):
         assert server.accepted == 0 and not got        # idle: no connection at all
         feed.set_active(True)
         assert wait_for(lambda: len(got) >= 3)
-        assert server.paths[0] == "/ws?topics=road,lights,speed_limit,env,rules,fused,map,lead,lanes"
+        assert server.paths[0] == "/ws?topics=road,lights,speed_limit,env,rules,fused,map,lead,lanes,roadgeom"
         assert all(set(s) >= {"seq", "lanes", "edges", "lead"} for s in got)
         # roadsense restarts: the stream drops, the feed reconnects on its own
         n = len(got)
@@ -705,3 +705,128 @@ def test_builder_prefers_the_tracked_lanes_and_falls_back():
     b.feed(rl[3], 1.2)
     s = b.build(1.2)
     assert "lanes_src" not in s and any(x is not None for x in s["lanes"])
+
+
+def test_light_lane_assignment_fields():
+    """roadsense >= 2026-11-17: two signal groups, the ego light chosen by lane."""
+    ego = {"track_id": 1, "state": "green", "dist_m": 31.0, "lateral_m": -0.7, "relevance": 0.6, "agree": 1,
+           "held": False, "amb": False,
+           "assign": {"conflict": True, "confidence": 0.88, "basis": "lanes", "slot": -0.2,
+                      "alt": {"track_id": 3, "state": "red", "side": "left", "slot": -1.6}}}
+    out = lights_to_scene({"type": "lights", "ego": ego})
+    assert out["state"] == "green" and out["c"] == 0.88 and out["alt"] == {"s": "red", "side": "l"}
+    assert "q" not in out and "held" not in out
+    amb = lights_to_scene({"type": "lights", "ego": dict(ego, amb=True, held=True)})
+    assert amb["q"] is True and amb["held"] is True
+    # no conflict: no alt, the confidence still rides along
+    one = lights_to_scene({"type": "lights", "ego": dict(ego, assign={"conflict": False, "confidence": 1.0, "alt": None})})
+    assert "alt" not in one and one["c"] == 1.0
+
+
+def _map_msg(jv):
+    return {"type": "map", "available": True, "state": "good", "input": {"gnss": {"source": "headunit", "fix": "3d"}},
+            "ahead": {"junction_view": jv}}
+
+
+def test_junction_view_goes_out_compact_and_only_with_a_usable_map():
+    from cyberpunk_computer.backend.roadsense_scene import map_junction_to_scene
+    arm = lambda ang, **kw: dict({"angle_deg": ang, "class": "secondary", "name": None, "ref": None,   # noqa: E731
+                                  "exit": True, "entry": True, "path": False, "minor": False}, **kw)
+    jv = {"kind": "junction", "dist_m": 171.4, "confidence": 0.58, "control": "signals",
+          "approach": {"lanes": 2, "lanes_source": "tagged"},
+          "arms": [arm(-91.0, name="1 Maja", path=True), arm(7.0, **{"class": "tertiary"}),
+                   arm(90.0, exit=False, **{"class": "service"}, minor=True)], "ring": None}
+    out = map_junction_to_scene(_map_msg(jv))
+    assert out == {"k": "j", "m": 171, "c": 0.58, "ctl": "s", "ln": 2, "to": "1 Maja",
+                   "arms": [[-91, "xep", 0, 0], [7, "xe", 1, 0], [90, "em", 3, 0]]}
+    rb = {"kind": "roundabout", "dist_m": 52.0, "confidence": 1.0, "control": "give_way",
+          "approach": {"lanes": 1, "lanes_source": "assumed"},
+          "arms": [arm(124.0, exit_no=1), arm(-87.0, path=True, ref="DW414", exit_no=2),
+                   arm(180.0, exit=False, approach=True)],
+          "ring": {"radius_m": 8.2, "exits": 2, "path_exit_no": 2, "on_ring": False, "car_angle_deg": None}}
+    out = map_junction_to_scene(_map_msg(rb))
+    assert out["k"] == "r" and out["ctl"] == "g" and "ln" not in out and out["to"] == "DW414"
+    assert out["arms"] == [[124, "xe", 0, 1], [-87, "xep", 0, 2], [180, "ea", 0, 0]]
+    assert out["ring"] == {"r": 8, "n": 2, "p": 2}
+    on = dict(rb, ring=dict(rb["ring"], on_ring=True, car_angle_deg=70.0))
+    assert map_junction_to_scene(_map_msg(on))["ring"] == {"r": 8, "n": 2, "p": 2, "car": 70, "on": True}
+    for bad in (None, {}, {"kind": "junction", "dist_m": 10, "confidence": 0.9, "arms": []}):
+        assert map_junction_to_scene(_map_msg(bad)) is None
+    assert map_junction_to_scene({"type": "map", "ahead": None}) is None
+    # in the builder: rides inside "map" while the fused map layer is in use, never without it
+    road = next(ln for ln in load_lines() if peek_type(ln) == "road")
+    for ok in (True, False):
+        b = SceneBuilder(SceneFeedConfig())
+        b.feed(json.dumps({"type": "fused", "map": {"available": ok, "state": "good" if ok else "no_source"}}), 0.0)
+        b.feed(json.dumps(_map_msg(jv)), 0.0)
+        b.feed(road, 0.0)
+        scene = b.build(0.0)
+        assert ("jv" in scene["map"]) is ok
+        assert "map_jv" not in scene
+
+
+# ── fused road geometry (roadsense topic roadgeom -> scene "geo") ────────────
+
+def roadgeom_msg(**kw):
+    xs = [0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0] + [60.0 + 4.0 * i for i in range(1, 60)]
+    n = len(xs)
+    msg = {"type": "roadgeom", "seq": 5, "source": "vision+map", "lane_width_m": 3.42,
+           "map": {"used": True, "why": None, "synthetic": False},
+           "centre": {"s": xs, "x": xs, "y": [0.0] * 7 + [0.0 if x < 150 else round((x - 150) ** 2 / 300.0, 2) for x in xs[7:]],
+                      "conf": [0.9] * 30 + [0.55] * (n - 30), "src": "vvvvvbb" + "m" * (n - 7), "vision_to_m": 60.0,
+                      "end": "horizon"},
+           "branches": [{"dist_m": 80.0, "pts": [[80.0, 0.0], [80.0, 6.0], [80.0, 12.0], [80.0, 45.0]], "class": "tertiary",
+                         "minor": False, "exit": True, "entry": False, "lanes": 2, "ring": False, "way": False},
+                        {"dist_m": 150.0, "pts": [[150.0, 0.0], [150.0, -30.0]], "class": "service", "minor": True,
+                         "exit": True, "entry": True, "lanes": 1, "ring": False, "way": False}],
+           "ring": None, "way": {"source": "map", "confidence": 0.55}}
+    msg.update(kw)
+    return msg
+
+
+def test_roadgeom_becomes_the_compact_geo_block():
+    from cyberpunk_computer.backend.roadsense_scene import roadgeom_to_scene
+    g = roadgeom_to_scene(roadgeom_msg())
+    assert g["v"] == 60.0 and g["w"] == 3.4
+    assert g["p"][0][:2] == [60.0, 0.0]                      # starts where the camera's part ends
+    assert len(g["p"]) <= 28 and g["p"][-1][0] > 280.0
+    assert [q for _, _, q in g["p"]][0] == 9 and g["p"][-1][2] == 5
+    assert any(a[2] == 9 and b[2] == 5 and b[0] - a[0] <= 40.0 for a, b in zip(g["p"], g["p"][1:]))   # the confidence step
+    assert g["s"] > 150.0                                    # the path steers the picture into the bend
+    assert g["br"] == [["x", 1, 6.0, [80.0, 0.0, 80.0, 6.0, 80.0, 12.0, 80.0, 45.0]]]     # the far service road is left out
+    assert "ring" not in g and "way" not in g
+    assert len(json.dumps(g, separators=(",", ":"))) < 500
+    # a ring: the steering ends at its entry; intent is passed on
+    ring = roadgeom_msg(ring={"centre": [104.0, 0.0], "radius_m": 14.0, "lanes": None, "on_ring": False, "entry_m": 90.0,
+                              "exit_m": 134.0}, way={"source": "intent", "turn": "right", "branch": 0})
+    g = roadgeom_to_scene(ring)
+    assert g["ring"] == [104.0, 0.0, 14.0, 4.5, 0] and g["s"] <= 92.0 and g["way"] == "i"
+    # not used, synthetic, or the camera's part alone: no block
+    assert roadgeom_to_scene(roadgeom_msg(map={"used": False, "why": "disagree"})) is None
+    assert roadgeom_to_scene(roadgeom_msg(map={"used": True, "synthetic": True})) is None
+    vis = roadgeom_msg()
+    vis["centre"]["src"] = "v" * len(vis["centre"]["x"])
+    g = roadgeom_to_scene(vis)                               # ... but the junction's roads still come (turn signal: the lane ends there)
+    assert len(g["p"]) == 2 and g["br"]
+    vis["branches"] = []
+    assert roadgeom_to_scene(vis) is None
+    assert roadgeom_to_scene({"type": "roadgeom"}) is None
+
+
+def test_builder_attaches_geo_only_with_a_usable_fresh_map():
+    b = SceneBuilder(cfg(max_hz=50.0))
+    fused = {"type": "fused", "map": {"available": True, "state": "good", "match_confidence": 0.9}}
+
+    def scene_at(t, seq):
+        b.feed(json.dumps({"type": "road", "seq": seq, "lane_lines": [], "road_edges": [], "leads": []}), t)
+        return b.build(t)
+
+    b.feed(json.dumps(roadgeom_msg()), 0.0)
+    assert "geo" not in scene_at(0.0, 1)                     # no map block yet
+    b.feed(json.dumps(fused), 0.1)
+    b.feed(json.dumps(roadgeom_msg()), 0.1)
+    assert scene_at(0.1, 2)["geo"]["v"] == 60.0
+    assert "geo" not in scene_at(0.8, 3)                     # the topic is 0.7 s old: stale
+    b.feed(json.dumps(roadgeom_msg()), 0.9)
+    b.feed(json.dumps({"type": "map", "state": "good", "input": {"gnss": {"source": "synthetic"}, "synthetic": True}}), 0.9)
+    assert "geo" not in scene_at(0.9, 4)                     # a synthetic position never reaches the picture

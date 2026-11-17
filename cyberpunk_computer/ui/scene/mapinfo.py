@@ -53,6 +53,121 @@ class NextLimit(NamedTuple):
     src: str = ""                    # maxspeed (tagged) | implicit (statutory)
 
 
+class Arm(NamedTuple):
+    angle: float                     # degrees from straight on, RIGHT positive, 180 = behind
+    exit: bool = True                # can be driven into
+    entry: bool = True               # traffic comes out of it
+    path: bool = False               # the most likely way on
+    minor: bool = False
+    approach: bool = False           # roundabout: the arm the car comes from
+    rank: int = 2                    # 0 main road .. 3 service
+    exit_no: int = 0                 # roundabout exits in driving order
+
+
+class JunctionView(NamedTuple):
+    """The junction ahead on the most likely path (wire: map.jv)."""
+    kind: str                        # j | r
+    m: float                         # distance to it
+    conf: float                      # path confidence up to it
+    arms: Tuple[Arm, ...] = ()
+    control: str = ""                # s signals | g give way | t stop
+    lanes: int = 0                   # tagged lanes of the approach (own direction), 0 = unknown
+    to: str = ""                     # number or name of the road the way on takes
+    ring_exits: int = 0
+    ring_path: int = 0               # exit number of the way on (0 = unknown)
+    on_ring: bool = False
+    car_angle: Optional[float] = None
+
+
+def _junction(raw: Any) -> Optional[JunctionView]:
+    if not isinstance(raw, Mapping) or raw.get("k") not in ("j", "r"):
+        return None
+    m, c = _f(raw.get("m")), _f(raw.get("c"))
+    if m is None or c is None or m < 0:
+        return None
+    arms = []
+    for a in raw.get("arms") or ():
+        if not isinstance(a, (list, tuple)) or len(a) < 2:
+            continue
+        ang = _f(a[0])
+        fl = a[1] if isinstance(a[1], str) else ""
+        if ang is None:
+            continue
+        rank = _f(a[2]) if len(a) > 2 else None
+        no = _f(a[3]) if len(a) > 3 else None
+        arms.append(Arm(ang, "x" in fl, "e" in fl, "p" in fl, "m" in fl, "a" in fl,
+                        2 if rank is None else int(rank), 0 if no is None else int(no)))
+    if not arms:
+        return None
+    rg = raw.get("ring") if isinstance(raw.get("ring"), Mapping) else {}
+    ln = _f(raw.get("ln"))
+    ctl = raw.get("ctl")
+    return JunctionView(raw["k"], m, c, tuple(arms), ctl if ctl in ("s", "g", "t") else "",
+                        0 if ln is None else int(ln), str(raw.get("to") or ""),
+                        int(_f(rg.get("n")) or 0), int(_f(rg.get("p")) or 0), rg.get("on") is True,
+                        _f(rg.get("car")))
+
+
+class Branch(NamedTuple):
+    """A side road of the road ahead (wire: geo.br)."""
+    pts: Tuple[Tuple[float, float], ...]     # (x ahead of the camera, y LEFT) from its node outwards
+    width: float = 6.0
+    exit: bool = True                # can be driven into
+    minor: bool = False
+    ring: bool = False               # an arm of the roundabout
+    way: bool = False                # chosen by the driver's turn signal
+    rank: int = 2
+
+
+class Geo(NamedTuple):
+    """The fused road geometry beyond the camera's lanes (wire: scene ``geo``,
+    docs/MFD_MAIN_SCREEN.md 7.3). Lateral values LEFT positive."""
+    v: float                                 # the camera's lanes are drawn up to here (m)
+    width: float                             # ego lane width (m)
+    path: Tuple[Tuple[float, float, float], ...]     # (x, y, confidence) from the camera's reach on
+    steer: float                             # the path steers the picture up to this x
+    end: str = ""                            # i intent | d dead end | n no way on | p path end | h horizon
+    branches: Tuple[Branch, ...] = ()
+    ring: Optional[Tuple[float, float, float, float, bool]] = None   # centre x, y, radius, road width, on the ring
+    intent: bool = False                     # the way on was chosen by the turn signal
+
+
+_geo_last: List[Any] = [None, None]
+
+
+def parse_geo(raw_scene: Any) -> Optional[Geo]:
+    """The scene's ``geo`` block, only with a usable map block beside it. An
+    unchanged block returns the same object."""
+    if usable_map(raw_scene) is None:
+        return None
+    g = raw_scene.get("geo")
+    if not isinstance(g, Mapping):
+        return None
+    if g is _geo_last[0]:
+        return _geo_last[1]
+    out = None
+    try:
+        path = tuple((float(p[0]), -float(p[1]), float(p[2]) / 10.0 + 0.05) for p in g["p"])
+        v, w = float(g["v"]), float(g.get("w") or 3.4)
+        if len(path) >= 2 and v == v and 2.0 <= w <= 6.0:
+            brs = []
+            for b in g.get("br") or ():
+                fl, rank, bw, flat = b[0], int(b[1]), float(b[2]), b[3]
+                pts = tuple((float(flat[i]), -float(flat[i + 1])) for i in range(0, len(flat) - 1, 2))
+                if len(pts) >= 2:
+                    brs.append(Branch(pts, bw, "x" in fl, "m" in fl, "r" in fl, "w" in fl, rank))
+            rg = g.get("ring")
+            ring = None
+            if isinstance(rg, (list, tuple)) and len(rg) >= 5:
+                ring = (float(rg[0]), -float(rg[1]), float(rg[2]), float(rg[3]), bool(rg[4]))
+            out = Geo(v, w, path, float(g.get("s") or path[0][0]), str(g.get("end") or ""), tuple(brs), ring,
+                      g.get("way") == "i")
+    except (KeyError, TypeError, ValueError, IndexError):
+        out = None
+    _geo_last[0], _geo_last[1] = g, out
+    return out
+
+
 class MapInfo(NamedTuple):
     """The usable map block, normalised. Lateral values LEFT positive."""
     state: str = "good"              # good | dead_reckoning
@@ -70,6 +185,7 @@ class MapInfo(NamedTuple):
     junctions: Tuple[Tuple[float, float, str], ...] = ()   # (m, confidence, code j|r|x|d|n), nearest first
     shape_ds: float = 0.0            # metres of path between two shape points
     shape: Tuple[Tuple[float, float], ...] = ()            # (x forward, y left) from the matched position
+    junction: Optional[JunctionView] = None                # the junction view (map.jv)
 
 
 class Far(NamedTuple):
@@ -154,7 +270,7 @@ def _parse(mp: Mapping) -> MapInfo:
         road_cls=str(road.get("cls") or ""),
         lanes=lanes, lanes_conf=_f(ln.get("c")) or 0.0, onc_left=onc if isinstance(onc, bool) else None,
         tunnel_in=tunnel_in, tunnel_exit_m=exit_m if tunnel_in else None,
-        next_limit=nl, junctions=tuple(jn), shape_ds=ds, shape=shape)
+        next_limit=nl, junctions=tuple(jn), shape_ds=ds, shape=shape, junction=_junction(mp.get("jv")))
 
 
 _last: List[Any] = [None, None]
@@ -289,6 +405,12 @@ class MapDirector:
         self.max_hacc_m = float(g("map_max_hacc_m", 20.0))
         self.far_disagree_m = float(g("map_far_disagree_m", 8.0))
         self.far_max_m = float(g("map_far_max_m", 600))
+        self.on_geo = bool(g("road_geo", True))
+        self.geo: Optional[Geo] = None                   # the fused road geometry as drawn (roadgeo.py)
+        self._geo_n = 0
+        self._geo_seen: Optional[Geo] = None
+        self.on_junction = bool(g("map_junction", False))
+        self.junction_m = float(g("map_junction_m", 250))
         # ── shown (read by maplayer.py) ──
         self.mark = ""
         self.next_limit: Optional[NextLimit] = None      # m = the advanced distance
@@ -299,8 +421,11 @@ class MapDirector:
         self.lanes: Optional[LaneBoxes] = None
         self.onc_left = False
         self.label: Optional[RoadLabel] = None
+        self.junction: Optional[JunctionView] = None     # m = the advanced distance
         self.sig: tuple = ()
         # ── internal ──
+        self._jv = _Distance()
+        self._jv_on = False
         self._mi: Optional[MapInfo] = None
         self._age = 99.0
         self._lost_for = 0.0
@@ -332,6 +457,10 @@ class MapDirector:
         self.lanes = None
         self.onc_left = False
         self.label = None
+        self.junction = None
+        self.geo = None
+        self._jv.m = None
+        self._jv_on = False
         self._mi = None
         self._nl.m = self._tn.m = None
         self._nl_kmh = None
@@ -424,8 +553,34 @@ class MapDirector:
             t_m = None
         self.tunnel_exit_m = self._tn.step(t_m, fresh, moved, can_adv)
 
+        # ── junction view ──
+        # shown from junction_m on (hysteresis 1.2 x), a roundabout until the car has left
+        # its ring; needs a path that is still likely up to the junction and a good position
+        jv = mi.junction if (self.on_junction and accurate) else None
+        if jv is not None and jv.conf < self.min_conf and not jv.on_ring:
+            jv = None
+        jm = self._jv.step(jv.m if jv is not None else None, fresh, moved, can_adv)
+        if jv is None or jm is None:
+            self._jv_on = False
+            self.junction = None
+        else:
+            if jv.on_ring or jm <= self.junction_m:
+                self._jv_on = True
+            elif jm > self.junction_m * 1.2:
+                self._jv_on = False
+            self.junction = jv._replace(m=jm) if self._jv_on else None
+
+        # ── fused road geometry: the road beyond the camera, side roads, a roundabout ──
+        # roadsense has already matched it to the camera (it comes only while the two agree);
+        # here it passes the gates of every map element. It replaces the far road below.
+        geo = getattr(inp, "geo", None) if (self.on_geo and accurate and self._lost_for == 0.0) else None
+        if geo is not self._geo_seen:
+            self._geo_seen = geo
+            self._geo_n += 1
+        self.geo = geo
+
         # ── far road ──
-        if self.on_far and accurate and can_adv:
+        if self.on_far and accurate and can_adv and geo is None:
             if fresh:
                 self._far_src = far_path(mi, self.path_min_conf, self.far_max_m)
             far = self._far_src
@@ -503,4 +658,8 @@ class MapDirector:
         self.sig = (self.mark, None if nl is None else (nl.kmh, int(nl.m / 10.0), nl.src),
                     None if self.tunnel_exit_m is None else int(self.tunnel_exit_m / 10.0),
                     int(self.far_alpha * 4), self.far is not None and int(self.adv),
-                    self.lanes, self.onc_left, self.label)
+                    self.lanes, self.onc_left, self.label,
+                    None if self.junction is None else (self.junction.kind, int(self.junction.m / 5.0),
+                                                        self.junction.arms, self.junction.car_angle,
+                                                        self.junction.ring_path),
+                    self._geo_n if self.geo is not None else 0)

@@ -351,11 +351,87 @@ Deliberately not drawn:
 | road class, bridge, toll, one-way | no decision of the driver depends on them at a glance |
 | map state as text, match confidence, position source | a status display; the pin and its colour carry all of it. Numbers are on the dashboard's MAP tab |
 | distance to a tunnel entry | the tunnel is visible; only its end is not |
-| turn angle at the next junction, any arrow | would read as a navigation instruction; there is no route |
+| turn angle at the next junction, any arrow in the road picture | would read as a navigation instruction; there is no route. Since 2026-11-17 the junction itself can be shown as a schematic (section 6.6, off by default), where the most likely way on is marked and can be switched off (`map_junction_way`) |
 | street name by default | 182 px for a long name in the quietest corner; the car's position is not something the driver needs told. Kept as a variant |
 | a second or third limit change | one is the next decision |
 
 Cost: section 10.3. Demo shots 55..71 and the recorded drives: section 11.
+
+### 6.6 Junction view and the car's own traffic light (2026-11-17)
+
+**Junction view** (`maplayer.junction`, tuning `map_junction`, **off by default**: it has only been
+seen on demo data and on synthetic drives; the car has no position source yet). From `map_junction_m`
+(250 m) before the first major junction or roundabout on the most likely path, a 58 x 58 px panel at
+the left edge (x 3, y 62) shows it from above with the car coming from below:
+
+| element | drawn as |
+|---|---|
+| arm that can be driven into | a line in its direction: 3 px main road (secondary and above), 2 px tertiary / unclassified, 1 px residential; a service road 1 px and dim |
+| arm that cannot be entered (a one-way street towards the junction) | dashed, dim |
+| the way in and the most likely way on | 3 px in the ego-lane colour, an arrow head at its end. It is the map's guess (same road number, name and class, smallest turn), not a route; `map_junction_way = false` draws all arms alike |
+| control | top-right corner: a three-lamp head (signals), a triangle on its tip (give way), a red octagon (stop) |
+| roundabout | the ring, the arms where they meet it, the way round it against the clock to the exit of the most likely path, that exit's number (in driving order) in the middle |
+| on the ring | the same picture (it does not turn), the car as a white dot on the ring, the rest of the way to the exit |
+| under the panel | the distance (as for the next limit: whole 10 m steps, `m` / `km`), and the number or name of the road the way on takes (`map_junction_name`; 8 px type, Polish letters folded to ASCII) |
+
+Gates, all in `MapDirector`: the usable-map conditions of section 6.5 (match confidence, hold, a live
+road picture, no synthetic position), the path confidence up to the junction at least `map_min_conf`
+(a coin-toss path shows nothing; on the ring the picture stays), position accuracy within
+`map_max_hacc_m`. Junctions whose side branches are all service roads never get a view (roadsense
+leaves them out). The distance counts down by odometry between map messages. Without a position
+source nothing is drawn and nothing else changes: the scene is the vision-only picture.
+
+**The car's own traffic light.** roadsense assigns the light by lane when two signal groups show
+different states at once (a left-turn signal beside the one for straight on; roadsense
+docs/ARCHITECTURE.md "light provider", "Lane assignment"). The screen still shows one signal, the car's:
+
+* `light.alt` (the other group's state and side): a 7 x 15 px head with 1 px lamps, dimmed, on that
+  side of the signal (`light_alt`). It says "there is another signal here, and it is not yours".
+* `light.q` (roadsense marks its choice ambiguous: the two groups score nearly alike for the ego lane,
+  or the only light in view hangs over another lane): an amber `?` left of the signal
+  (`light_uncertain`). The state shown is still roadsense's best choice.
+
+Demo shots 70..79 (section 11).
+
+### 6.7 The road picture continues on the map (2026-11-17; `scene/roadgeo.py`)
+
+The main road drawing itself shows what the road ahead is: the lane beyond the camera's reach, side roads
+leaving it, a roundabout as a ring on the ground. Tuning `road_geo` (**on by default**; without a usable
+map it does nothing and the picture is the vision-only one). It needs roadsense's fused road geometry
+(topic `roadgeom`, roadsense docs/ARCHITECTURE.md; scene key `geo`, section 7.3), in which roadsense has
+already fitted the map's geometry to the camera's lanes in the car's frame and withholds it when the two
+disagree. The screen draws what it gets; the gates of the map layer (section 6.5: match confidence over
+3 s, a real position, accuracy, a live road picture) apply on top. With `geo` the far road of section 6.5
+is replaced; `road_geo = false` gives that far road back. The L16 schematic (section 6.6) is independent
+and stays off by default.
+
+| Situation | Picture |
+|---|---|
+| straight road | the camera's lanes to 100 m as before (bright, 2 px); from there the ego lane continues as a ribbon in the map's style (80-90 % fill, thin dim lines) along the map's road to 3 rows under the horizon (up to 400 m) |
+| a bend beyond the camera | the ribbon bends where the map's road bends, and the camera's lanes follow as the bend comes into their reach |
+| junction ahead | every side road that is not a service road (those only within 60 m, dim) leaves the road at its place as a ribbon in the tint of a neighbour lane with violet edges (the road-edge colour); a road that cannot be driven into has no fill and a red bar across its mouth. Far away a side road is a line across the picture, from about 40 m a band |
+| the way on is a guess | the ribbon ends at the first junction where the confidence of the most likely path falls under 0.5; a dead end ends in a bar |
+| roundabout ahead | the ring lies across the road as an ellipse (road surface in the neighbour-lane tint, violet edges, the island black with a small mark), its arms as ribbons; the camera's lanes end 3 m before the entry; the ego lane's ribbon runs into the ring, round it against the clock to the exit of the most likely path and on |
+| on the ring | the camera has no lane lines there: the ribbon starts at the car and follows the ring to the exit; the island's edge is on the left, the exits pass on the right; the part of the ring behind the car is cut off |
+| leaving the ring | the camera's lanes come back; roadsense withholds the map part until the two agree again (about 2 s on the synthetic drive): the vision-only picture for that moment |
+| turn signal (when a host feeds it; none does yet) | the side road or roundabout exit on that side is filled like the ego lane with bright edges, and the ego lane's ribbon ends at that junction (`road_geo_way`) |
+| no position source, synthetic position, poor match, camera and map disagree | no `geo` block: exactly the vision-only picture (tests `test_geo_block_is_parsed_only_beside_a_usable_map`, `test_without_a_usable_map_the_picture_is_the_vision_only_one`) |
+
+How it is drawn. A ground point (x m ahead, y m to the left) gets its row from x alone (the depth scale of
+section 5 up to 100 m, logarithmic in x beyond, as the far road had it) and its column from the road centre
+at that distance in true perspective plus its offset from the centre in the displayed scale: the rule the
+lane points follow. The road centre is the camera's up to `geo.v` and the map's path beyond, for as long as
+the path runs forward (`geo.s`: up to a ring's entry or the first turn of more than 40 degrees); from there
+on the geometry is drawn rigidly. The map's part is hung on the camera's lane centre where the two meet, so
+the ribbon always continues the lane. Beyond `geo.v` the lead vehicle, objects and the roadside scenery
+stand on the fused centre line; marker posts and trees are not drawn beyond it.
+
+What it does not show: lanes inside a junction, turn lanes, which lane leads to which exit (the map pack
+has none of it); the ring is a circle of the mean radius of its way with a width from its lane count; the
+position along the road is as good as the position (a few metres), which near a junction moves the side
+roads by that much.
+
+Screenshots: filedrop gallery `set=l17road` (synthetic drive over a made-up network, section 11.1).
 
 ### 6.3 Signs (`scene/signs.py`)
 
@@ -399,7 +475,8 @@ not changing, on the frontend clock.
  "path": {"y": [...]},                         # the model's planned path; may be shorter than "x"
  "lead": {"d": 34.2, "y": 0.3, "v_rel": -1.2, "a": -0.4, "prob": 0.93, "kind": "car"} | null,
  "objects": [{"kind": "car|truck|bus|van|person|bike|cone|lamp", "x": 41.0, "y": -3.4, "state": "on"}],
- "light": {"state": "red|yellow|red_yellow|green|off|unknown", "d": 34.0, "y": 2.1, "flashing": false, "rel": 0.71, "agree": 2} | null,
+ "light": {"state": "red|yellow|red_yellow|green|off|unknown", "d": 34.0, "y": 2.1, "flashing": false, "rel": 0.71, "agree": 2,
+           "c": 0.88, "q": true, "held": true, "alt": {"s": "red", "side": "l|r"}} | null,   // c, q, held, alt: only when set (section 6.6)
  "limit": {"kmh": 50, "src": "sign|default", "conf": 0.71} | null,
  "signs": {"on":    [{"id": "no_stopping", "s": "B-36", "v": 20, "side": "l|r", "q": true}],   # <= 6
            "ahead": [{"id": "roundabout_ahead", "s": "A-8", "m": 60}]},                         # <= 3
@@ -416,7 +493,7 @@ Every key is optional; a missing key means "not known" and nothing is drawn for 
 
 ### 7.1 Backend feed (`cyberpunk_computer/backend/roadsense_scene.py`)
 
-The backend reads roadsense's WebSocket `ws://127.0.0.1:8090/ws?topics=road,lights,speed_limit,env,rules,fused,map,lead`
+The backend reads roadsense's WebSocket `ws://127.0.0.1:8090/ws?topics=road,lights,speed_limit,env,rules,fused,map,lead,lanes,roadgeom`
 (roadsense's own API on loopback, not the backend's `/api/v1/roadsense/ws` front) with a stdlib
 RFC 6455 client in its own thread and publishes `roadsense_scene` on the ZMQ PUB channel only (not
 on the dashboard websocket, whose latest-only queue would let scenes displace state snapshots),
@@ -440,7 +517,7 @@ through a latest-only slot per event name (`ZmqServer.enqueue_latest_event`, com
 | `path.y` | `road.plan.y` at `road.plan.x` (33 points along the planned trajectory) | linear interpolation at the 11 distances, cut where the plan ends (short at low speed); left out when the plan is unusable |
 | `lead.kind` | not provided | not sent: the screen draws a car |
 | `objects` | not provided | not sent |
-| `light` | `lights.ego` (api annotation): `state`, `dist_m`, `lateral_m`, `flashing`, `relevance`, `agree` | `d` = `dist_m` (housing-size estimate, about +-30 %), `y` = `lateral_m`: offset from the planned path, not from the camera; `rel` / `agree` for the alert log (ALERTS.md); null when no light is relevant |
+| `light` | `lights.ego` (api annotation): `state`, `dist_m`, `lateral_m`, `flashing`, `relevance`, `agree` | `d` = `dist_m` (housing-size estimate, about +-30 %), `y` = `lateral_m`: offset from the planned path, not from the camera; `rel` / `agree` for the alert log (ALERTS.md); null when no light is relevant. From roadsense's lane assignment (2026-11-17): `c` = `assign.confidence`, `alt` = the other signal group while two groups disagree (`s` = its state, `side` = first letter of `assign.alt.side`), `q` when `ego.amb`, `held` when the state is a held one (up to 1.2 s old) |
 | `limit` | `speed_limit.limit_kmh`, `.source.kind`, `.confidence` | `{"kmh", "src", "conf"}`; null when the limit is unknown |
 | `signs.on` | `rules.in_effect[]` with `applies_to_car` not false, without `id: speed_limit` | `id`, `s` = `sign` (8 characters), `v` = `value`, `side` = first letter of `side`, `q` when `uncertain` is not empty; first 6 |
 | `signs.ahead` | `rules.ahead[]` (already nearest first) | `id`, `s`, `m` = `expected_in_m` rounded; first 3; `signs` is null when both lists are empty |
@@ -526,6 +603,7 @@ elements of section 6.5.
 | `built_up` | `fused.built_up.value`, `.source` | |
 | `ahead` | `fused.ahead` (null without the map) | `pc` = `path_confidence` (at the horizon); the nearest junction (`c` = its confidence), curve (`start_m`, `min_radius_m`, first letter of `direction`), speed-limit change (`src` = `source`, `c` = `confidence`: path up to it x the limit's own) and feature; m rounded. `jn`: up to 6 junctions within 700 m that have a side road which is not a service road, nearest first, as `[m, confidence, code]` with code `j` junction, `r` roundabout, `x` roundabout exit, `d` dead end, `n` no way on |
 | `shape` | mapd `map.ahead.shape` (`s`, `x`, `y`; `map_shape_to_scene`) | the road along the most likely path beyond camera range: every second point (`ds` = 40 m of path) up to 600 m, x forward along the matched bearing, y right, whole metres. Only while `ok` and the `map` topic is fresh. `fused` does not carry the shape, so it is taken from the `map` topic the feed already reads |
+| `jv` | mapd `map.ahead.junction_view` (`map_junction_to_scene`) | the junction view of section 6.6, only while `ok` and the `map` topic is fresh: `k` (`j` junction, `r` roundabout), `m` (metres), `c` (path confidence up to it), `ctl` (`s` signals, `g` give way, `t` stop; left out when unknown), `ln` (tagged lanes of the approach), `to` (number or name of the road the most likely path takes, 24 characters), `arms` = `[angle, flags, rank, exit_no]` (angle in degrees from straight on, right positive, 180 = behind; flags `x` can be driven into, `e` traffic comes out of it, `p` most likely path, `m` minor, `a` the approach arm of a roundabout; rank 0 main road .. 3 service; exit number in driving order or 0; at most 8), `ring` = `{r, n, p, on, car}` (radius m, exits, exit number of the path, on the ring, the car's angle on it). About 0.15-0.25 kB |
 | `pos` | `fused.position.source`, `.hacc_m` | no coordinates are passed on |
 | `lead` | `fused.lead` (roadsense lead tracker: `dist_m`, `lateral_m`, `v_rel_mps`, `v_lead_mps`, `a_lead_mps2`, `time_gap_s`, `ttc_s`, `standing`, `departed`, `mode`, `track_id`) | only when fused carries it; flags only when true. Not drawn. The same tracker's value at about 2/s: the alert functions read the top-level scene `lead` first when `lead_src` is `tracked` (section 7.1), this copy only without it, the raw `leads[0]` last |
 | `in` | `map.input.gnss.source`, `.fix`, `.age_s`; `map.input.motion.source`, `.tag` | what mapd hears from the position feeders; `gnss: "synthetic"` marks a synthetic drive. Left out while the `map` topic is stale |
@@ -535,6 +613,35 @@ Without a position source (no fix, no feeder, mapd absent) `ok` is false and eve
 vision value (e.g. `limit.src` `sign` / `vision_default`, `tunnel.src` `vision`): the screen can keep
 using `limit` and treat `map` as absent. The position input itself is [POSITION_FEEDER.md](POSITION_FEEDER.md).
 Size (compact JSON): about 0.65 kB with the map available (test example `FUSED_MAP`, without `in` and `shape`; `in` adds about 0.1 kB, a full `shape` up to 0.17 kB), 0.23 kB without.
+
+### 7.3 Road geometry key `geo` (`roadsense_scene.roadgeom_to_scene`)
+
+roadsense's `roadgeom` topic (one message per road frame, 2 kB) is cut down to what the screen draws and
+rides on the scene event while it is younger than 0.5 s, the map layer is in use (`map.ok`), roadsense
+uses the map part (`roadgeom.map.used`) and the position is not synthetic. Metres, x ahead of the camera,
+**y right** (the frontend flips it), one decimal.
+
+```
+"geo": {"v": 60.0,                  # the camera's lanes are drawn up to here
+        "w": 3.4,                   # lane width
+        "p": [[60.0, 0.1, 9], [120.0, 0.3, 9], [200.0, 6.0, 5]],   # the ego lane's centre from v on: x, y, confidence 0..9 (tenths)
+        "s": 200.0,                 # the path steers the picture up to this x (section 6.7)
+        "end": "h",                 # why p ends: h horizon (400 m), p path end, d dead end, n no way on, i the turn signal's junction
+        "br": [["xe", 1, 6.0, [80.0, 1.7, 80.0, 7.7, 80.2, 45.0]]],   # side roads: flags, rank, width m, points x,y,...
+        "ring": [44.0, -1.7, 14.0, 4.5, 0],     # roundabout: centre x, y, radius, road width, 1 = the car is on it
+        "way": "i"}                 # only when the way on was chosen by the turn signal
+```
+`p` is thinned (0.25 m tolerance within 120 m, 1 m beyond, at most 28 points; the points where the
+confidence steps are kept). `br` flags: `x` can be driven into, `e` traffic comes out of it, `m` service
+road, `r` an arm of the ring, `w` the way on by the turn signal; rank 0 main road .. 3 service; at most 8,
+nearest first, service roads only within 70 m. Size on the synthetic drive: 190 bytes in the median, 530
+at the 95th percentile (at a roundabout), 580 at most: the event grows from about 1.1 kB to 1.3-1.7 kB.
+Conversion in the backend: 0.06 ms per message on the laptop.
+
+Driver intent. `CanMotionTap.set_turn_signal("left" | "right" | "both" | "off")` (position feeder) puts
+`turn_signal` into the motion messages for mapd, which relays it; roadsense then selects the side road or
+exit on that side (`geo.br[].w`, `geo.way`). Nothing calls it yet: the turn-signal lamps are on BEAN and not
+decoded. The place that decodes them calls it once a second or on change; no other code has to change.
 
 ## 8. Requests
 
@@ -756,6 +863,29 @@ Rules that keep it there:
   `ui/scene`;
 * no numpy.
 
+### 10.4 Road geometry cost (2026-11-17)
+
+Desktop (same machine, best of 5 x 3000 redraws; `SceneRenderer._draw` alone):
+
+| Picture | Redraw | Against the far road of 6.5 |
+|---|---|---|
+| vision only | 0.069 ms | |
+| map: far road (6.5), no `geo` | 0.110 ms | |
+| `geo`: lane to 300 m and one side road | 0.156 ms | +0.05 ms |
+| `geo`: roundabout 30 m ahead with two arms | 0.234 ms | +0.12 ms |
+| worst frame of the synthetic drive (on the ring, four arms) | 0.30 ms | +0.19 ms |
+
+These are without the projection cache: the projected geometry is kept while the `geo` block is the same
+object (10 scene events against up to 20 redraws a second), so about half of the redraws pay only the
+polygons (0.05 ms). `parse_geo` 0.005 ms per event; one more attribute test per director pass.
+
+Pi Zero estimate at x70 (**not measured on the Pi**; the MFD was off, the car parked): on an open road
++3.5 ms on every second redraw and +1.5 ms on the others, about +4 % CPU at 18 redraws a second; at a
+roundabout (20-30 s) +8..13 ms on every second redraw, about +10..14 % CPU for that time, against the
+budget of section 10.3 (about 48 % with a usable map, 60 % allowed). To measure on the Pi:
+`tools/mfd_bench.py drive 30 --hz 10 --map` with a `geo` block in `MODS` (the demo timeline has none yet).
+Without a usable map the added work is one attribute test per redraw.
+
 ## 11. Demo and screenshots
 
 ```
@@ -764,7 +894,7 @@ python -m cyberpunk_computer.ui.scene.demo --live --scale 3                  # t
 python -m cyberpunk_computer.ui.scene.demo --bench                           # frame cost incl. the simulation
 ```
 
-`--shots` writes `NN_name.png` (native 480 x 240) and `NN_name@4x.png` for 71 cases: the states of
+`--shots` writes `NN_name.png` (native 480 x 240) and `NN_name@4x.png` for 81 cases (70..79: the junction view as a crossroads with signals, a T-junction, five arms, a roundabout before and on the ring, a low-confidence path that shows nothing; the traffic light with a second signal group, an ambiguous choice and a light over another lane; the two last map cases moved to 80..81): the states of
 section 4, the five lamp states on the road and three parked, 18 scenery variants covering every
 place, light and weather label, four lane layouts, the top line with the speed switched back on, a full sign row, the cruise slot states, the three speed-limit provenance styles, 17 map-layer cases (55..71: next limit in the top line, at the roadside and in the `beside` variant, far road with a roundabout and switched off, three lane layouts from the map, tunnel exit in metres, kilometres and with the mouth in view, dead reckoning, a poor position, the road-number variants, synthetic position = no map) and `signs_legend`
 with every pictogram. Shots 1..51 are byte-identical to the set before the map layer. `--copy-to` also writes the 4x images there as `<prefix>NN_name.png`
@@ -796,6 +926,12 @@ limit; the camera's lanes are derived from the map's own shape for the first 100
 a straight camera road). `--drop T0:T1` withholds the map messages of a window, `--tuning` takes overrides.
 Drives recorded 2026-11-15: `warsaw-s2-tunnel` (S2 with the 2.3 km tunnel), `opole-rural` (30 km, fix
 lost 600..690 s), `warsaw-city`, `krakow-city`. Sequences from them: filedrop gallery `set=mfdmap`.
+
+A recording of roadsense's `tools/roadgeom_drive.py --network tour --out REC` (a made-up network: a bend,
+a crossroads with signals, a roundabout, a side road; a synthetic camera with limited reach) carries the
+camera side too (`road`, `lanes`, `roadgeom`): `render` replays it as it is, so the picture shows what
+roadsense's fusion gives, including the moments it withholds the map. `--synthetic` on such a recording is
+the "no GPS" picture. Sequences: filedrop gallery `set=l17road`.
 
 What the recordings showed: on S2 and on the open road the map is steady (match 0.9..1.0); in the two
 city centres the match confidence is under 0.5 most of the time, so the map elements are mostly absent
@@ -842,6 +978,14 @@ ignored and logged.
 | `map_far_road` | true | the road beyond camera range |
 | `map_tunnel` | true | tunnel exit distance and the tunnel's mouth |
 | `map_lanes` | true | lane boxes and the oncoming tint from the map |
+| `road_geo` | true | the road picture continues on the map: lane beyond the camera, side roads, roundabout as a ring (section 6.7); nothing without roadsense's `roadgeom` and a usable map |
+| `road_geo_way` | true | ... a side road chosen by the turn signal drawn as the way on |
+| `map_junction` | false | the junction / roundabout ahead as a schematic at the left edge (section 6.6) |
+| `map_junction_m` | 250 | ... from this distance |
+| `map_junction_way` | true | ... with the most likely way on marked (arrow, exit number); false = all arms alike |
+| `map_junction_name` | true | ... with the number or name of the road the way on takes |
+| `light_uncertain` | true | `?` beside the traffic light when roadsense marks its lane assignment ambiguous |
+| `light_alt` | true | the other signal group as a small dim head on its side |
 | `map_road_label` | `off` | road number after a change: `off`, `ref`, `name` |
 | `map_road_label_s` | 8.0 | how long it shows |
 | `map_ahead_s` / `map_ahead_min_m` / `map_ahead_max_m` | 12.0 / 150 / 400 | the next limit appears this many seconds of driving ahead, bounded in metres |

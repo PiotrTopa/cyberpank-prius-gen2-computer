@@ -64,8 +64,9 @@ Message: `{"type":"motion","ts_mono_ns","speed_mps","gear","wheel_speeds_mps","s
 | `speed_mps` | CAN 0x0B4 | (256F + G) × 0.01 km/h / 3.6 | verified: true speed (meter trip distance agrees; speedometer +12 %). Not the display speed |
 | `gear` | CAN 0x120 | byte F low nibble 0 P, 1 R, 2 N, 3 D, 4 B; other values: left out; left out when older than 1 s | P/R/N/D verified on 20 shifts; B never observed |
 | `wheel_speeds_mps` `[FL, FR, RL, RR]` | CAN 0x0B1 (front), 0x0B3 (rear): right = A,B, left = C,D | × 0.01 km/h / 3.6; only when both frames are within 0.1 s of the speed frame | unit verified on the 2026-11-13 drive (wheel mean 0.978 × 0x0B4; front/rear (right − left) r = 0.97); left/right labels third-party |
+| `turn_signal` (hook, not fed yet) | `CanMotionTap.set_turn_signal()` | `off` / `left` / `right` / `both`, in the motion message while younger than 1.5 s | the lamps are on BEAN and not decoded; roadsense uses the field as the driver's intent at the next junction (docs/MFD_MAIN_SCREEN.md 7.3) |
 | `steering_wheel_deg` (opt-in) | CAN 0x025 | 12-bit signed (low nibble of A, B) × 1.5°, positive = left | scale verified by range (±650–660° at the stops); r = 0.95 with the rear wheel-speed yaw, sign consistent with the wheel labels; absolute sign third-party (Toyota convention) |
-| `yaw_rate_rps` | none | — | not sent: no yaw-rate sensor frame is decoded; 0x03A (named "yaw rate" in `can_decoder.py`) correlates 0.01 with the wheel-speed yaw |
+| `yaw_rate_rps` (opt-in, `BACKEND_POSITION_YAW=wheels,gyro`) | CAN 0x022, two channels | mean of ((256A + B) − 0x200) and ((256C + D) − 0x200), each minus its standstill offset, × 0.0044 rad/s, positive = left; the offsets (−2 / −7 counts on 2026-11-17) follow the reading whenever speed and all wheels are exactly 0 for 1 s (time constant 3 s) | scale probable, not calibrated: ratio to the rear wheel-speed yaw 0.0042–0.0046 over 15–80 km/h (docs/prius_can.md). mapd uses `yaw_rate_rps` before the wheel speeds, so a 5 % scale error becomes a 5 % heading error per turn until a fix or the map corrects it: not the default until the 360° calibration is done. One count is 0.25 °/s (the wheel-speed difference resolves 0.11 °/s); the gain is at low speed, at standstill and where the rear wheels slip or differ. 0x03A is not a yaw rate |
 
 Sign chain: mapd derives yaw from the rear pair as (RR − RL) / track, positive = counter-clockwise
 (left). Right wheel faster = left turn under the third-party labels. Steering positive (left) has the
@@ -224,7 +225,7 @@ The roadsense manager's unit mirror (`state.roadsense.units`) now includes `road
 | `BACKEND_RECORD_INCLUDE` token `position` | not set | trip files also get the fixes sent to mapd (section 12); `all` does not include it |
 | `BACKEND_POSITION_RUNDIR` | `/run/roadsense` | where `position.sock` is |
 | `BACKEND_POSITION_MOTION_HZ` | `10` | 5..50 |
-| `BACKEND_POSITION_YAW` | `wheels` | comma list of `wheels`, `steer`; empty = speed and gear only |
+| `BACKEND_POSITION_YAW` | `wheels` | comma list of `wheels`, `steer`, `gyro` (0x022 as `yaw_rate_rps`); empty = speed and gear only |
 | `BACKEND_POSITION_FIX_TIMEOUT_S` | `3` | head unit silent this long = no fix |
 | `BACKEND_POSITION_SYNTHETIC_ROUTE` | built-in | route file |
 | `BACKEND_POSITION_SYNTHETIC_DROPOUTS` | none | `t0:t1,...` |
@@ -274,7 +275,7 @@ Deploy (none of this was done):
   left turn, or a GNSS course, settles it.
 * 0x0B1/0x0B3 read 2.2 % below 0x0B4; 0x0B1/0x0B3 bytes E,F and the 0x025 fraction nibble are not
   decoded.
-* No yaw-rate sensor decoded; 0x03A is not one in the current reading.
+* The yaw-rate sensor (0x022) is decoded (the state shows it as `dynamics.yaw_rate_dps`; the feeder uses the same decode, scale and start offsets from `comm/can_decoder.py`, at the bus rate) but is opt-in as a position input (`gyro`): its scale is probable (slope 0.97-0.98 against the rear wheel-speed yaw), not calibrated on a full circle.
 * Replay mode (`--replay`) has no panda, so no motion; the feeder is a live-car feature.
 * Steering ratio / wheelbase in mapd are nominal (19.1 / 2.70 m); this car's effective ratio is
   speed-dependent (21–29, §3).

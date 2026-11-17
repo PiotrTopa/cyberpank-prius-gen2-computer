@@ -58,6 +58,30 @@ runs **only while ACC is on** and is stopped cleanly when the key goes away:
   (both use ``O_EXCL``). PREVIEW counts as "off" for :meth:`is_off` (no unit
   runs: the low CPU profile is allowed) but :meth:`holds_camera` is True, so
   a manual ``set_relay`` on ch4 is still refused.
+* **Early camera power** (:meth:`RoadsenseManager.set_early_camera`): the
+  early start demand that boots the MFD before ACC (every condition of
+  ``mfd_power.BeanWakeTrigger``: doors unlocked / a door open, or any bus
+  activity in its ``any`` mode; NOT the operator MFD hold) also enters
+  PREVIEW, so the dashcam's own power-up sequence (it leaves the USB bus
+  once, for 4 s or for 2 min) runs before the drive instead of during its
+  first minutes. One early *session* starts on a rising edge of the demand
+  (mode ``auto``, ACC off, not within ``early_camera_keyoff_holdoff_s`` of a
+  key-off: getting out of the car is not getting in) and ends when
+
+  - ACC comes: hand-over, PREVIEW -> STARTING with the hub left on (no
+    blip, no settle wait);
+  - the demand has been gone for ``early_camera_tail_s`` (the bus goes
+    quiet or the car is locked; the tail bridges a demand that drops a few
+    seconds before the key, as on 2026-11-17 13:19:54 -> 13:20:02);
+  - it has lasted ``early_camera_s``;
+  - the parked-period budget ``early_camera_budget_s`` is used up (sum of
+    every early session since the last ACC-on that lasted
+    ``early_camera_reset_acc_s``; repeated unlock/lock cycles cannot keep
+    the hub powered);
+  - the caller inhibits it (powerbox undervoltage / shutdown request).
+
+  A stop that finishes while a session is live keeps the hub (as for the
+  preview hold), so there is never an off-on blip inside one demand.
 
 The POCO ``low`` power profile (Gold cluster offline) must not be applied while
 modeld is pinned to cpu4-7, so the backend defers the key-off ``low`` switch
@@ -130,6 +154,12 @@ class RoadsenseConfig:
     api_timeout_s: float = 2.0
     camera_relay: bool = True        # power the camera hub (relay ch4) with the stack
     camera_settle_s: float = 8.0     # hub + dashcam enumerate ~6 s after power
+    early_camera_s: float = 180.0    # early demand (BEAN entry): one session powers the camera hub
+                                     # for at most this long before ACC, without the stack (0 = never)
+    early_camera_tail_s: float = 30.0    # hub kept this long after the demand ends (no ACC)
+    early_camera_budget_s: float = 900.0 # all early sessions of one parked period together (0 = no cap)
+    early_camera_reset_acc_s: float = 60.0   # ACC on this long = a real drive: budget refilled
+    early_camera_keyoff_holdoff_s: float = 120.0  # no new session this long after a key-off
     grace_s: float = 30.0            # key-off grace before the stop
     start_timeout_s: float = 120.0   # API must answer within this after the start
     stop_timeout_s: float = 60.0     # units must be inactive within this after the stop
@@ -232,6 +262,19 @@ class RoadsenseManager:
         # camera device (backend.camera_preview closes its O_EXCL reader).
         self.preview_release = preview_release
         self._preview_hold = False
+        # Early camera power (set_early_camera): the demand level as last
+        # reported, a pending rising edge, the live session and its budget.
+        self._early_demand = False
+        self._early_edge = False
+        self._early_inhibit = False
+        self._early_start: Optional[float] = None     # live session: when the hub went on for it
+        self._early_limit: float = 0.0                # its length cap (session cap or budget left)
+        self._early_gone: Optional[float] = None      # demand absent since (tail)
+        self._early_used_s: float = 0.0               # budget used in this parked period
+        self._early_sessions = 0                      # sessions in this parked period
+        self._early_last_end: Optional[str] = None    # why the last session ended
+        self._acc_on_since: Optional[float] = None    # manager's view of ACC (tick clock)
+        self._acc_off_at: Optional[float] = None      # last key-off seen
         self._publish = publish
         self._run = runner or self._default_runner
         self._camera = camera
@@ -428,11 +471,134 @@ class RoadsenseManager:
         self._last_tick = 0.0  # react on the next loop iteration
         return True
 
+    # ── early camera power ───────────────────────────────────────────────
+
+    def set_early_camera(self, on: bool, inhibit: bool = False) -> None:
+        """Early start demand (the BEAN entry signal that boots the MFD before
+        ACC; the caller passes it only while ACC is off). Called on every
+        engine loop pass with the current level; a rising edge asks for an
+        early session, which the next :meth:`tick` grants or refuses.
+        ``inhibit`` (undervoltage, shutdown request) ends a session at once
+        and refuses new ones.
+
+        Why: the dashcam (USB 1902:3241) drops off the bus once, 23-39 s after
+        it gets power, and comes back 4-5 s later, or 122 s later on the first
+        drive after a long stand (journals of 2026-11-16 / 17: both such drives
+        lost the road picture from 0:45 to 2:55 after ACC on). Nothing on the
+        phone can shorten that; powering the camera when somebody gets in
+        moves the whole sequence ahead of the drive by the time between the
+        door and the key (9-32 s on the recorded drives). It is the PREVIEW
+        state (hub on, no units), so the stack starts without the settle wait
+        when ACC comes. Rules: see the module docstring."""
+        on = bool(on)
+        inhibit = bool(inhibit)
+        if on and not self._early_demand:
+            self._early_edge = True
+            self._last_tick = 0.0          # react on the next loop pass
+        if inhibit and not self._early_inhibit and self._early_start is not None:
+            self._last_tick = 0.0
+        self._early_demand = on
+        self._early_inhibit = inhibit
+
+    def _early_enabled(self) -> bool:
+        return self.config.early_camera_s > 0 and self.config.camera_relay
+
+    def _early_budget_left(self) -> float:
+        cap = self.config.early_camera_budget_s
+        if cap <= 0:
+            return float("inf")
+        return max(0.0, cap - self._early_used_s)
+
+    def _early_end(self, now: float, why: str) -> None:
+        if self._early_start is None:
+            return
+        used = max(0.0, now - self._early_start)
+        self._early_used_s += used
+        self._early_start = None
+        self._early_gone = None
+        self._early_last_end = why
+        left = self._early_budget_left()
+        logger.info("roadsense: early camera session ends (%s) after %.0f s; budget used "
+                    "%.0f s%s", why, used, self._early_used_s,
+                    "" if left == float("inf") else ", %.0f s left" % left)
+
+    def _early_update(self, now: float, acc_on: bool) -> None:
+        """Advance the early-camera bookkeeping (called from :meth:`tick`)."""
+        cfg = self.config
+        # ACC as this manager sees it: hand-over, key-off hold-off, budget refill.
+        if acc_on:
+            if self._acc_on_since is None:
+                self._acc_on_since = now
+            if self._early_start is not None:
+                self._early_end(now, "ACC on")
+            if (now - self._acc_on_since >= cfg.early_camera_reset_acc_s
+                    and (self._early_used_s > 0 or self._early_sessions)):
+                logger.info("roadsense: early camera budget refilled (ACC on %.0f s)",
+                            now - self._acc_on_since)
+                self._early_used_s = 0.0
+                self._early_sessions = 0
+            self._early_edge = False       # nothing early about a demand with the key on
+            return
+        if self._acc_on_since is not None:
+            self._acc_off_at = now
+            self._acc_on_since = None
+
+        edge, self._early_edge = self._early_edge, False
+        live = self._early_start is not None
+
+        if live:
+            if self._early_inhibit or self._mode != MODE_AUTO or not self._early_enabled():
+                self._early_end(now, "inhibited" if self._early_inhibit else "disabled")
+                return
+            if self._early_demand:
+                self._early_gone = None
+            elif self._early_gone is None:
+                self._early_gone = now
+            if now - self._early_start >= self._early_limit:
+                self._early_end(now, "time limit")
+            elif self._early_gone is not None and now - self._early_gone >= cfg.early_camera_tail_s:
+                self._early_end(now, "demand gone")
+            return
+
+        if not edge or not self._early_demand:
+            return
+        why = None
+        if not self._early_enabled():
+            why = "disabled"
+        elif self._mode != MODE_AUTO:
+            why = "mode %s" % self._mode
+        elif self._early_inhibit:
+            why = "inhibited (undervoltage / shutdown)"
+        elif (self._acc_off_at is not None
+              and now - self._acc_off_at < cfg.early_camera_keyoff_holdoff_s):
+            why = "%.0f s after the key-off" % (now - self._acc_off_at)
+        elif self._early_budget_left() <= 0:
+            why = "parked-period budget of %.0f s used" % cfg.early_camera_budget_s
+        if why is not None:
+            logger.info("roadsense: early camera demand ignored (%s)", why)
+            return
+        self._early_start = now
+        self._early_gone = None
+        self._early_limit = min(cfg.early_camera_s, self._early_budget_left())
+        self._early_sessions += 1
+        logger.info("roadsense: early camera session %d: hub on for at most %.0f s "
+                    "(tail %.0f s)", self._early_sessions, self._early_limit,
+                    cfg.early_camera_tail_s)
+
+    def _early_camera(self) -> bool:
+        return self._early_start is not None
+
+    def _hub_held(self) -> bool:
+        """The camera hub is wanted without the stack (preview or early session)."""
+        return self._preview_hold or self._early_camera()
+
     def shutdown_preview(self) -> None:
-        """Backend shutdown: drop the hold and, if only the preview powers the
+        """Backend shutdown: drop the hold (and an early session) and, if only the preview powers the
         camera hub, cut it now (the stack itself is left alone, as on every
         backend restart; the next start's reconcile adopts or cuts)."""
         self._preview_hold = False
+        self._early_end(self._clock(), "backend shutdown")
+        self._early_demand = self._early_edge = False
         if self._state == STATE_PREVIEW:
             self._set_camera(False)
             self._enter(STATE_OFF)
@@ -476,6 +642,16 @@ class RoadsenseManager:
             "restarts": self._restarts,
             "last_error": self._last_error,
             "preview_hold": self._preview_hold,
+            "early_camera": {
+                "active": self._early_camera(),
+                "demand": self._early_demand,
+                "session_s": (round(self._clock() - self._early_start, 1)
+                              if self._early_start is not None else None),
+                "used_s": round(self._early_used_s, 1),
+                "budget_s": self.config.early_camera_budget_s,
+                "sessions": self._early_sessions,
+                "last_end": self._early_last_end,
+            },
             "deadline_in_s": (
                 max(0.0, self._deadline - self._clock())
                 if self._deadline is not None else None
@@ -485,7 +661,7 @@ class RoadsenseManager:
     def _emit(self) -> None:
         key = (self._state, self._mode, self._camera_power, self._api_ok,
                self._restarts, self._last_error, self._preview_hold,
-               tuple(sorted((self._units or {}).items())))
+               self._early_camera(), tuple(sorted((self._units or {}).items())))
         now = self._clock()
         if key == self._last_published and \
                 (now - self._last_publish_t) < self.PUBLISH_REFRESH_S:
@@ -536,8 +712,8 @@ class RoadsenseManager:
         self._enter(STATE_STOPPING, self.config.stop_timeout_s)
 
     def _finish_stop(self) -> None:
-        if self._preview_hold:
-            self._set_camera(True)   # the preview keeps the camera hub
+        if self._hub_held():
+            self._set_camera(True)   # the preview / an early session keeps the camera hub
         else:
             self._set_camera(False)
         self._api_ok = None
@@ -545,7 +721,7 @@ class RoadsenseManager:
         self._api_silent_since = None
         if self._probe is not None:
             self._probe.reset()
-        self._enter(STATE_PREVIEW if self._preview_hold else STATE_OFF)
+        self._enter(STATE_PREVIEW if self._hub_held() else STATE_OFF)
 
     def tick(self, acc_on: bool, acc_known: bool = True) -> None:
         """Advance the manager. ``acc_known`` is False until the powerbox has
@@ -591,11 +767,13 @@ class RoadsenseManager:
             elif not desired:
                 self._set_camera(False)
 
+        self._early_update(now, bool(acc_on))
+
         if self._state == STATE_OFF:
             self._units = None
             if desired:
                 self._begin_start()
-            elif self._preview_hold:
+            elif self._hub_held():
                 self._enter_preview()
 
         elif self._state == STATE_PREVIEW:
@@ -607,7 +785,7 @@ class RoadsenseManager:
                 self._set_camera(True)
                 self._start_target()
                 self._enter(STATE_STARTING, cfg.start_timeout_s)
-            elif not self._preview_hold:
+            elif not self._hub_held():
                 self._set_camera(False)
                 self._enter(STATE_OFF)
 

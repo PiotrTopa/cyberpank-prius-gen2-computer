@@ -86,6 +86,11 @@ class Tuning:
                                 # usable (camera sign held by the map, else the map's limit);
                                 # False = the camera-only limit as before
 
+    # ── traffic light (roadsense's lane assignment of the ego light) ──
+    light_uncertain = True      # "?" beside the signal when roadsense marks its choice ambiguous
+    light_alt = True            # the other signal group (e.g. the left-turn light) as a small dim
+                                # head on its side, while two groups show different states
+
     # ── map layer: ambient information from roadsense's map (docs/MFD_MAIN_SCREEN.md 6.5).
     #    Needs a usable map (as map_limit); without one the scene is the vision-only picture ──
     map_mark = True             # a small pin under the link LED while the map is in use
@@ -100,6 +105,18 @@ class Tuning:
     map_road_label = "off"      # the road's number plate for a while after it changed:
                                 # off | ref | name (number and street name)
     map_road_label_s = 8.0      # ... this long
+    road_geo = True             # the road picture itself continues on the map: the lane beyond
+                                # the camera's reach, side roads, a roundabout as a ring (the
+                                # camera's lanes then end where roadsense says they do); needs
+                                # roadsense's fused road geometry and a usable map, else nothing
+    road_geo_way = True         # ... a side road chosen by the turn signal drawn as the way on
+    map_junction = False        # the junction / roundabout ahead as a schematic at the left edge
+                                # (arms, the most likely way on, the exit number); off until
+                                # it has been seen on the road with a real position
+    map_junction_m = 250        # ... from this distance (m); a roundabout stays while on its ring
+    map_junction_way = True     # ... the most likely way on bright with an arrow head (it is the
+                                # map's guess, not a route); False = all arms alike, no exit number
+    map_junction_name = True    # ... with the number or name of the road the way on takes
     map_ahead_s = 12.0          # the next limit appears this many seconds of driving ahead,
     map_ahead_min_m = 150       # ... but not later than this (m)
     map_ahead_max_m = 400       # ... and not earlier than this (m)

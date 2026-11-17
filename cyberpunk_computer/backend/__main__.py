@@ -84,6 +84,11 @@ def _build_roadsense():
         BACKEND_ROADSENSE_API_HOST=127.0.0.1
         BACKEND_ROADSENSE_API_PORT=8090      # ROADSENSE_API_PORT on the phone (8080 is ours)
         BACKEND_ROADSENSE_CAMERA_RELAY=1     # power the camera hub (relay ch4) with the stack
+        BACKEND_ROADSENSE_EARLY_CAMERA_S=180   # BEAN entry: one early session powers the camera hub at most this long (0 = never)
+        BACKEND_ROADSENSE_EARLY_CAMERA_TAIL_S=30      # hub kept this long after the entry demand ends
+        BACKEND_ROADSENSE_EARLY_CAMERA_BUDGET_S=900   # all early sessions of one parked period (0 = no cap)
+        BACKEND_ROADSENSE_EARLY_CAMERA_RESET_ACC_S=60 # ACC on this long refills the budget
+        BACKEND_ROADSENSE_EARLY_CAMERA_HOLDOFF_S=120  # no early session this long after a key-off
         BACKEND_ROADSENSE_CAMERA_SETTLE_S=8
         BACKEND_ROADSENSE_GRACE_S=30         # key-off grace before the stop
         BACKEND_ACC_OFF_DEBOUNCE_S=3         # hold an ACC-off this long before anything acts on it
@@ -108,6 +113,11 @@ def _build_roadsense():
         camera_relay=env("BACKEND_ROADSENSE_CAMERA_RELAY", "1").strip().lower() in (
             "1", "true", "yes", "on"),
         camera_settle_s=float(env("BACKEND_ROADSENSE_CAMERA_SETTLE_S", "8")),
+        early_camera_s=float(env("BACKEND_ROADSENSE_EARLY_CAMERA_S", "180")),
+        early_camera_tail_s=float(env("BACKEND_ROADSENSE_EARLY_CAMERA_TAIL_S", "30")),
+        early_camera_budget_s=float(env("BACKEND_ROADSENSE_EARLY_CAMERA_BUDGET_S", "900")),
+        early_camera_reset_acc_s=float(env("BACKEND_ROADSENSE_EARLY_CAMERA_RESET_ACC_S", "60")),
+        early_camera_keyoff_holdoff_s=float(env("BACKEND_ROADSENSE_EARLY_CAMERA_HOLDOFF_S", "120")),
         grace_s=float(env("BACKEND_ROADSENSE_GRACE_S", "30")),
         start_timeout_s=float(env("BACKEND_ROADSENSE_START_TIMEOUT_S", "120")),
         stop_timeout_s=float(env("BACKEND_ROADSENSE_STOP_TIMEOUT_S", "60")),
@@ -143,7 +153,7 @@ def _build_position():
         BACKEND_POSITION_PHONE_POLL_HZ=4       # phone: ModemManager polls per second
         BACKEND_POSITION_RUNDIR=/run/roadsense # mapd's position.sock
         BACKEND_POSITION_MOTION_HZ=10          # 5..50
-        BACKEND_POSITION_YAW=wheels            # yaw fields with motion: wheels, steer (comma list; empty = none)
+        BACKEND_POSITION_YAW=wheels            # yaw fields with motion: wheels, steer, gyro (0x022) (comma list; empty = none)
         BACKEND_POSITION_FIX_TIMEOUT_S=3       # head unit silent this long -> fix "none"
         BACKEND_POSITION_SYNTHETIC_ROUTE=      # route JSON; empty = built-in Opole loop
         BACKEND_POSITION_SYNTHETIC_DROPOUTS=60:90,200:230   # s since start without a fix

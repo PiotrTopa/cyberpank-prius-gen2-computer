@@ -166,6 +166,9 @@ def as_real(msg: dict) -> dict:
             if isinstance(inp.get("motion"), dict):
                 inp["motion"]["tag"] = "prius-can"
             inp["synthetic"] = False
+    elif msg.get("type") == "roadgeom":
+        if isinstance(msg.get("map"), dict):
+            msg["map"]["synthetic"] = False
     elif msg.get("type") == "fused":
         sl = msg.get("speed_limit")
         if isinstance(sl, dict):
@@ -230,6 +233,10 @@ class Replay:
         self.fused = None
         self.speed = 0.0
         self.hacc_add = hacc_add
+        # a recording of roadsense's tools/roadgeom_drive.py carries the camera side too
+        # (road, lanes, roadgeom): it is replayed as it is, nothing is derived here
+        self.full = any(m.get("type") == "roadgeom" for _, m in self.msgs)
+        self._last_sc: dict = {}
 
     def seek(self, t: float) -> None:
         """Feed every message up to ``t`` (messages inside a drop window are withheld)."""
@@ -256,6 +263,16 @@ class Replay:
     def scene(self, t: float) -> dict:
         from cyberpunk_computer.ui.scene.inputs import DEFAULT_XS
         self.seek(t)
+        if self.full:
+            sc = self.builder.build(t)
+            if sc is not None:
+                road = (self.fused or {}).get("road") or {}
+                bu = ((self.fused or {}).get("built_up") or {}).get("map") or {}
+                sc["env"] = {"light": self.light, "weather": "clear",
+                             "place": PLACES.get(road.get("class"), "city_street" if bu.get("value") else "rural_road")}
+                sc.pop("limit", None)
+                self._last_sc = sc
+            return self._last_sc
         self.seq += 1
         self.builder.feed(json.dumps({"type": "road", "seq": self.seq, "lane_lines": [], "road_edges": [],
                                       "leads": []}), t)

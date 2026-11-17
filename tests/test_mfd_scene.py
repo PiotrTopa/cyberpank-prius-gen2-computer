@@ -1250,3 +1250,194 @@ def test_roadside_trees_keep_their_place_while_they_approach(monkeypatch):
         assert len(set(v)) == 1, v[:5]
     # and the trees do differ from one another
     assert len({v[0] for v in followed}) > 3
+
+
+# ── junction view and the lane assignment of the traffic light ───────────────
+
+_JV = {"k": "j", "m": 180, "c": 0.9, "ctl": "s", "to": "Ozimska",
+       "arms": [[-90, "xe", 0, 0], [0, "xep", 1, 0], [90, "e", 2, 0]]}
+_JV_RING = {"k": "r", "m": 140, "c": 0.9, "ctl": "g", "to": "DW414",
+            "arms": [[95, "xe", 1, 1], [3, "xep", 0, 2], [-88, "xe", 2, 3], [180, "ea", 0, 0]],
+            "ring": {"r": 16, "n": 3, "p": 2}}
+
+
+def test_junction_view_is_parsed():
+    from cyberpunk_computer.ui.scene.mapinfo import parse_map
+    jv = parse_map({"map": _map_full(jv=_JV)}).junction
+    assert jv.kind == "j" and jv.m == 180 and jv.control == "s" and jv.to == "Ozimska"
+    assert [a.angle for a in jv.arms] == [-90, 0, 90]
+    assert jv.arms[1].path and jv.arms[1].rank == 1 and not jv.arms[2].exit and jv.arms[2].entry
+    rg = parse_map({"map": _map_full(jv=dict(_JV_RING, ring={"r": 16, "n": 3, "p": 2, "on": True, "car": 70}))}).junction
+    assert rg.kind == "r" and rg.ring_exits == 3 and rg.ring_path == 2 and rg.on_ring and rg.car_angle == 70
+    assert rg.arms[3].approach and rg.arms[1].exit_no == 2
+    for bad in ({"k": "z", "m": 1, "c": 1, "arms": [[0, "x"]]}, {"k": "j", "m": 1, "c": 1, "arms": []}, "x", None):
+        assert parse_map({"map": _map_full(jv=bad)}).junction is None
+
+
+def test_junction_view_is_off_by_default_and_gated_by_distance_confidence_and_position():
+    assert map_director(_map_full(jv=_JV))[0].map.junction is None                 # tuning map_junction is off
+    d, _ = map_director(_map_full(jv=_JV), map_junction=True)
+    jv = d.map.junction
+    assert jv is not None and 130 < jv.m < 145                                     # 180 m, 3 s at 50 km/h driven
+    assert map_director(_map_full(jv=dict(_JV, m=600)), map_junction=True)[0].map.junction is None
+    assert map_director(_map_full(jv=dict(_JV, m=600)), map_junction=True, map_junction_m=700)[0].map.junction is not None
+    assert map_director(_map_full(jv=dict(_JV, c=0.3)), map_junction=True)[0].map.junction is None
+    assert map_director(_map_full(jv=_JV, pos={"src": "dead_reckoning", "hacc": 45.0}),
+                        map_junction=True)[0].map.junction is None
+    # on the ring the picture stays although the path confidence is gone
+    on = dict(_JV_RING, m=0, c=0.2, ring={"r": 16, "n": 3, "p": 3, "on": True, "car": 70})
+    assert map_director(_map_full(jv=on), map_junction=True)[0].map.junction.on_ring
+    # the map drops out: it goes with the other map elements
+    d, inp = map_director(_map_full(jv=_JV), seconds=1.5, map_junction=True)
+    live_step(d, inp._replace(map=None), 3.5)
+    assert d.map.junction is None
+
+
+def test_junction_view_draws_in_its_panel_only():
+    from cyberpunk_computer.ui.scene import maplayer
+    base = mdrawn(map_inputs(_map_full()), map_junction=True)[1].surface.copy()
+    for jv in (_JV, _JV_RING, dict(_JV_RING, m=0, ring={"r": 16, "n": 3, "p": 3, "on": True, "car": 70})):
+        surf = mdrawn(map_inputs(_map_full(jv=jv)), map_junction=True)[1].surface
+        x0, y0, w, h = maplayer.JV_X, maplayer.JV_Y, maplayer.JV_W + 40, maplayer.JV_H + 16
+        changed = [(x, y) for x in range(surf.get_width()) for y in range(surf.get_height())
+                   if surf.get_at((x, y)) != base.get_at((x, y))]
+        assert changed, jv
+        assert all(x0 <= x < x0 + w and y0 <= y < y0 + h for x, y in changed), jv
+        # the way on is drawn in the brightest lane colour
+        hot = pygame.Color(*mdrawn(map_inputs(_map_full()))[1].pal["lane_ego"])
+        assert any(surf.get_at(p) == hot for p in changed)
+    # flag off: the same picture as without a view
+    assert mdrawn(map_inputs(_map_full(jv=_JV)))[0] == mdrawn(map_inputs(_map_full()))[0]
+
+
+def test_light_uncertainty_and_other_group_are_shown():
+    from cyberpunk_computer.ui.scene.inputs import _traffic_light
+    lt = _traffic_light({"state": "green", "d": 34, "y": 0.4, "q": True, "alt": {"s": "red", "side": "l"}})
+    assert lt.uncertain and lt.alt_state == "red" and lt.alt_side == "l" and lt.lat_m == -0.4
+    plain = _traffic_light({"state": "green", "d": 34, "y": 0.4})
+    assert not plain.uncertain and plain.alt_state == "" and plain.alt_side == ""
+    a = mdrawn(drive_inputs(light=plain))[0]
+    assert mdrawn(drive_inputs(light=lt))[0] != a
+    # both extras switched off: the plain signal
+    assert mdrawn(drive_inputs(light=lt), light_uncertain=False, light_alt=False)[0] == a
+    assert mdrawn(drive_inputs(light=lt._replace(uncertain=False)), light_alt=False)[0] == a
+
+
+# ── fused road geometry: the road picture continues on the map (docs 6.7, 7.3) ──
+
+def _geo(**kw):
+    """A scene ``geo`` block: the camera to 60 m, the map's path on to 300 m, a side road to
+    the right at 80 m (wire: y right)."""
+    g = {"v": 60.0, "w": 3.4, "s": 300.0,
+         "p": [[60.0, 0.0, 9], [120.0, 0.0, 9], [200.0, 6.0, 9], [300.0, 30.0, 9]],
+         "br": [["xe", 1, 6.0, [80.0, 0.0, 80.0, 20.0, 80.0, 45.0]]]}
+    g.update(kw)
+    return g
+
+
+def _ring_geo():
+    """A roundabout 30 m ahead: ring of 14 m radius, the way half round it, two arms."""
+    import math
+    p = [[27.0, 0.0, 9], [30.0, 0.0, 9]]
+    p += [[round(44.0 - 14.0 * math.cos(a), 1), round(14.0 * math.sin(a), 1), 9] for a in (0.4, 0.8, 1.2, 1.6, 2.0, 2.4, 2.8, 3.14)]
+    p += [[90.0, 0.0, 9], [200.0, 0.0, 9]]
+    return {"v": 27.0, "w": 3.4, "s": 30.0, "p": p, "ring": [44.0, 0.0, 14.0, 4.5, 0],
+            "br": [["xer", 2, 6.0, [44.0, 14.0, 44.0, 40.0]], ["xer", 1, 6.0, [44.0, -14.0, 44.0, -40.0]]]}
+
+
+def geo_inputs(g, m=None, **kw):
+    from cyberpunk_computer.ui.scene.mapinfo import parse_geo, parse_map
+    raw = {"map": m or _map_full(), "geo": g}
+    return drive_inputs(limit_kmh=50, limit_source="map", map=parse_map(raw), geo=parse_geo(raw), **kw)
+
+
+def test_geo_block_is_parsed_only_beside_a_usable_map():
+    from cyberpunk_computer.ui.scene.mapinfo import parse_geo
+    g = _geo()
+    geo = parse_geo({"map": _map_full(), "geo": g})
+    assert geo.v == 60.0 and geo.steer == 300.0 and geo.width == 3.4
+    assert geo.path[-1][:2] == (300.0, -30.0)                       # wire y right -> left positive
+    assert geo.branches[0].pts[-1] == (80.0, -45.0) and geo.branches[0].exit and not geo.branches[0].ring
+    assert parse_geo({"map": _map_full(), "geo": g}) is geo          # the same block: the same object
+    ring = parse_geo({"map": _map_full(), "geo": _ring_geo()})
+    assert ring.ring == (44.0, -0.0, 14.0, 4.5, False) and all(b.ring for b in ring.branches)
+    for bad_map in (_map_full(ok=False), _map_full(syn=True), _map_full(**{"in": {"gnss": "synthetic"}})):
+        assert parse_geo({"map": bad_map, "geo": _geo()}) is None
+    assert parse_geo({"geo": _geo()}) is None
+    for bad in ({"v": 60.0}, {"v": 60.0, "p": [[1, 2]]}, "x", _geo(p=[[60.0, 0.0, 9]]), _geo(w=40)):
+        assert parse_geo({"map": _map_full(), "geo": bad}) is None, bad
+
+
+def test_geo_passes_the_gates_of_the_map_layer_and_replaces_the_far_road():
+    from cyberpunk_computer.ui.scene.tuning import Tuning
+    d = SceneDirector(Tuning())
+    inp = geo_inputs(_geo(), speed_kmh=50, real_speed_kmh=50)
+    live_step(d, inp, 3.0)
+    assert d.map.geo is inp.geo and d.map.far is None
+    # switched off: the far road of the map layer as before
+    d2 = SceneDirector(Tuning({"road_geo": False}))
+    live_step(d2, inp, 3.0)
+    assert d2.map.geo is None and d2.map.far is not None
+    # a doubtful match, an inaccurate position, a stale road picture: nothing
+    for m in (_map_full(conf=0.4), _map_full(pos={"src": "gnss", "hacc": 45.0})):
+        d3 = SceneDirector(Tuning())
+        live_step(d3, geo_inputs(_geo(), m), 3.0)
+        assert d3.map.geo is None
+    step(d, inp, 4.0)                                               # the same scene for 4 s: stale
+    assert d.vision == "stale" and d.map.geo is None
+
+
+def test_geo_continues_the_road_picture_and_ends_the_cameras_lanes():
+    plain = mdrawn(map_inputs(_map_full()), 3.0, map_far_road=False)
+    img, r = mdrawn(geo_inputs(_geo()), 3.0)
+    assert img != plain[0]
+    assert r._x_end == 60.0 and r._geo_p is not None
+    # the ribbon reaches beyond the 100 m row, and a side road leaves to the right of the lane
+    y100 = int(r._row(__import__("cyberpunk_computer.ui.scene.render", fromlist=["compress"]).compress(100.4))[0])
+    left, right = r._geo_p.way
+    assert min(p[1] for p in left) < y100 - 5
+    (b, (bl, br)), = r._geo_p.arms
+    assert max(p[0] for p in bl) > r.w * 0.75
+    # the camera's lane lines stop at geo.v: no bright ego-lane pixel above the 60 m row + margin
+    y60 = int(r._row(__import__("cyberpunk_computer.ui.scene.render", fromlist=["compress"]).compress(60.4))[0])
+    ego = r.pal["lane_ego"]
+    assert not any(r.surface.get_at((x, y))[:3] == ego for y in range(r.horizon_y + 2, y60 - 3) for x in range(40, 200))
+    assert any(r.surface.get_at((x, y60 + 6))[:3] == ego for x in range(40, 200))
+    # switched off, or without the block: the picture of before
+    assert mdrawn(geo_inputs(_geo()), 3.0, road_geo=False)[0] == mdrawn(map_inputs(_map_full()), 3.0)[0]
+
+
+def test_geo_roundabout_is_a_ring_on_the_road():
+    img, r = mdrawn(geo_inputs(_ring_geo()), 3.0)
+    p = r._geo_p
+    assert p.ring_out is not None and p.ring_in is not None and len(p.arms) == 2
+    xs = [q[0] for q in p.ring_out]
+    ys = [q[1] for q in p.ring_out]
+    assert max(xs) - min(xs) > 150 and 12 <= max(ys) - min(ys) <= 40      # a wide, flat ellipse across the road
+    assert abs((max(xs) + min(xs)) / 2 - r.w / 2) < 12                    # centred on the lane
+    ixs = [q[0] for q in p.ring_in]
+    assert min(xs) < min(ixs) and max(ixs) < max(xs)                      # the island inside the ring
+    # on the ring (the centre 14 m to the left of the car): cut off behind the car, still drawn
+    on = dict(_ring_geo(), v=0.0, s=0.0, ring=[2.0, -14.0, 14.0, 4.5, 1],
+              p=[[0.0, 0.0, 9], [5.0, -0.9, 9], [10.0, -4.0, 9], [14.0, -9.0, 9], [16.0, -14.0, 9]], br=[])
+    img2, r2 = mdrawn(geo_inputs(on), 3.0)
+    assert r2._x_end == 0.0 and r2._geo_p.ring_out is not None
+    assert all(-3000 <= q[0] <= 3000 and 0 <= q[1] <= r2.h + 150 for q in r2._geo_p.ring_out)
+
+
+def test_geo_redraws_when_it_changes_and_costs_nothing_without_it():
+    from cyberpunk_computer.ui.scene.render import SceneRenderer
+    from cyberpunk_computer.ui.scene.tuning import Tuning
+    tuning = Tuning()
+    r = SceneRenderer((238, 216), tuning=tuning)
+    d = SceneDirector(tuning)
+    inp = geo_inputs(_geo())
+    live_step(d, inp, 3.0)
+    s1 = r._signature(d, inp)
+    inp2 = geo_inputs(_geo(v=55.0))
+    d.map.update(inp2, d, 0.05)
+    assert r._signature(d, inp2) != s1
+    d0 = SceneDirector(tuning)
+    live_step(d0, drive_inputs(), 1.0)
+    r.render(d0, drive_inputs(), 10.0)
+    assert r._geo_p is None and r._x_end == 1e9

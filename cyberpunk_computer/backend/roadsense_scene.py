@@ -8,7 +8,7 @@ docs/MFD_MAIN_SCREEN.md section 7; consumer: ``ui/scene/inputs.SceneFeed``).
 This module builds that mapping from what the roadsense stack already
 publishes and hands it to the ZMQ event channel:
 
-    roadsense api  ws://127.0.0.1:8090/ws?topics=road,lights,speed_limit,env,rules,fused,map,lead,lanes
+    roadsense api  ws://127.0.0.1:8090/ws?topics=road,lights,speed_limit,env,rules,fused,map,lead,lanes,roadgeom
          │  (road 10-14/s ~16 kB, lights ~3/s, speed_limit and rules >= 1/s, env ~1/s,
          │   fused ~2/s, map 2/s ~4 kB, lead 10-14/s ~0.7 kB)
          ▼
@@ -57,7 +57,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 logger = logging.getLogger(__name__)
 
 EVENT_NAME = "roadsense_scene"
-TOPICS = ("road", "lights", "speed_limit", "env", "rules", "fused", "map", "lead", "lanes")
+TOPICS = ("road", "lights", "speed_limit", "env", "rules", "fused", "map", "lead", "lanes", "roadgeom")
 
 # Caps of the sign lists (payload and screen room: the MFD shows this many).
 MAX_SIGNS_ON = 6
@@ -84,6 +84,7 @@ class SceneFeedConfig:
     map_max_age_s: float = 3.0         # fused / map: ~2/s (roadsense's own map staleness is 3 s)
     lead_max_age_s: float = 0.5        # lead (tracker): one per road frame, 10-14/s; older -> road.leads[0]
     lanes_max_age_s: float = 0.5       # lanes (road-geometry tracker): one per road frame; older -> road.lane_lines
+    geo_max_age_s: float = 0.5         # roadgeom (fused road geometry): one per road frame; older -> no "geo"
     lane_min_prob: float = 0.2         # below this a lane line goes out as null (UI draws >= 0.3)
     lead_min_prob: float = 0.3         # below this the lead goes out as null (UI draws >= 0.5)
     connect_timeout_s: float = 3.0
@@ -299,6 +300,21 @@ def lights_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     agree = _num(ego.get("agree"))
     if agree is not None:
         out["agree"] = int(agree)
+    # lane assignment (roadsense >= 2026-11-17): two signal groups in view
+    # (``alt`` = the other group's state and side) and how sure the choice is
+    if ego.get("amb") is True:
+        out["q"] = True
+    asg = ego.get("assign")
+    if isinstance(asg, dict):
+        c = _num(asg.get("confidence"))
+        if c is not None:
+            out["c"] = round(c, 2)
+        alt = asg.get("alt")
+        if asg.get("conflict") and isinstance(alt, dict) and isinstance(alt.get("state"), str):
+            side = alt.get("side")
+            out["alt"] = {"s": alt["state"], "side": side[:1] if isinstance(side, str) and side else ""}
+    if ego.get("held") is True:
+        out["held"] = True
     return out
 
 
@@ -555,6 +571,203 @@ def map_shape_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return {"ds": int(round(ds)), "x": xs, "y": ys}
 
 
+_ROAD_RANK = {"motorway": 0, "motorway_link": 0, "trunk": 0, "trunk_link": 0, "primary": 0, "primary_link": 0,
+              "secondary": 0, "secondary_link": 0, "tertiary": 1, "tertiary_link": 1, "unclassified": 1,
+              "residential": 2, "living_street": 2, "service": 3, "track": 3}
+_CONTROL = {"signals": "s", "give_way": "g", "stop": "t"}
+JV_MAX_ARMS = 8
+
+
+def map_junction_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """mapd ``map`` message -> scene ``map.jv``: the junction view (roadsense
+    ``ahead.junction_view``, the first major junction or roundabout on the most
+    likely path), compact:
+
+        {"k": "j" | "r", "m": metres to it, "c": path confidence up to it,
+         "ctl": "s" signals | "g" give way | "t" stop (left out: not known),
+         "ln": lanes of the approach in the car's direction (tagged only),
+         "to": name or number of the road the most likely path takes,
+         "arms": [[angle, flags, rank, exit_no], ...],
+         "ring": {"r": radius m, "n": exits, "p": exit number of the path,
+                  "on": the car is on the ring, "car": its angle on the ring}}
+
+    ``angle``: degrees from "straight on", positive = right, 180 = where the
+    car comes from (for a roundabout: where the arm meets the ring, seen from
+    its centre). ``flags``: letters x (can be driven into), e (traffic comes
+    out of it), p (the most likely path), m (minor: service road), a (the
+    approach arm of a roundabout). ``rank``: 0 main roads .. 3 service.
+    ``exit_no``: roundabout exits in driving order (0 = not an exit).
+    None without a view."""
+    ah = msg.get("ahead")
+    jv = ah.get("junction_view") if isinstance(ah, dict) else None
+    if not isinstance(jv, dict) or jv.get("kind") not in ("junction", "roundabout"):
+        return None
+    m, c = _num(jv.get("dist_m")), _num(jv.get("confidence"))
+    if m is None or c is None:
+        return None
+    out: Dict[str, Any] = {"k": "r" if jv["kind"] == "roundabout" else "j", "m": int(round(m)), "c": round(c, 2)}
+    ctl = _CONTROL.get(jv.get("control"))
+    if ctl:
+        out["ctl"] = ctl
+    ap = jv.get("approach")
+    if isinstance(ap, dict) and ap.get("lanes_source") in ("tagged", "tagged_total"):
+        n = _num(ap.get("lanes"))
+        if n is not None and n >= 1:
+            out["ln"] = int(n)
+    arms: List[List[Any]] = []
+    for a in jv.get("arms") or ():
+        if not isinstance(a, dict):
+            continue
+        ang = _num(a.get("angle_deg"))
+        if ang is None:
+            continue
+        flags = "".join(ch for ch, key in (("x", "exit"), ("e", "entry"), ("p", "path"), ("m", "minor"),
+                                           ("a", "approach")) if a.get(key))
+        no = a.get("exit_no")
+        arms.append([int(round(ang)), flags, _ROAD_RANK.get(a.get("class"), 2),
+                     int(no) if isinstance(no, int) and not isinstance(no, bool) else 0])
+        if a.get("path"):
+            to = a.get("ref") or a.get("name")
+            if isinstance(to, str) and to:
+                out["to"] = to[:24]
+        if len(arms) >= JV_MAX_ARMS:
+            break
+    if not arms:
+        return None
+    out["arms"] = arms
+    rg = jv.get("ring")
+    if isinstance(rg, dict):
+        out["ring"] = _drop_none({"r": _r(rg.get("radius_m")), "n": _r(rg.get("exits")),
+                                  "p": _r(rg.get("path_exit_no")), "car": _r(rg.get("car_angle_deg"))})
+        if rg.get("on_ring"):
+            out["ring"]["on"] = True
+    return out
+
+
+# ── fused road geometry (roadsense topic "roadgeom") ─────────────────────────
+
+GEO_MAX_M = 400.0          # the centre line is passed on this far
+GEO_MAX_POINTS = 28
+GEO_BRANCH_MAX = 8
+GEO_BRANCH_M = 200.0       # side roads up to here; service roads up to GEO_MINOR_M
+GEO_MINOR_M = 70.0
+GEO_STEER_DEG = 40.0       # the centre line steers the picture while it runs within this of straight ahead
+_CLASS_RANK = {"motorway": 0, "trunk": 0, "primary": 0, "secondary": 0, "tertiary": 1, "unclassified": 1,
+               "residential": 2, "living_street": 2, "service": 3, "track": 3}
+_END_CODE = {"intent": "i", "dead_end": "d", "no_way_on": "n", "path_end": "p", "horizon": "h"}
+
+
+def _thin(pts: List[Tuple[float, float, float]], tol_near: float = 0.25, tol_far: float = 1.0) -> List[int]:
+    """Indices of a polyline's points that keep its shape (Douglas-Peucker; the
+    tolerance grows beyond 120 m, where a metre is a fraction of a pixel)."""
+    keep = [0, len(pts) - 1]
+    stack = [(0, len(pts) - 1)]
+    while stack:
+        a, b = stack.pop()
+        if b - a < 2:
+            continue
+        ax, ay, bx, by = pts[a][0], pts[a][1], pts[b][0], pts[b][1]
+        dx, dy = bx - ax, by - ay
+        n = math.hypot(dx, dy) or 1.0
+        worst, wi = 0.0, -1
+        for i in range(a + 1, b):
+            d = abs((pts[i][0] - ax) * dy - (pts[i][1] - ay) * dx) / n
+            if d > worst:
+                worst, wi = d, i
+        if wi >= 0 and worst > (tol_near if math.hypot(pts[wi][0], pts[wi][1]) < 120.0 else tol_far):
+            keep.append(wi)
+            stack.append((a, wi))
+            stack.append((wi, b))
+            continue
+        # straight enough: keep the points where the confidence steps (a junction on the path)
+        for i in range(a + 1, b + 1):
+            if abs(pts[i][2] - pts[i - 1][2]) > 0.1:
+                keep.append(i - 1)
+                keep.append(i)
+    return sorted(set(keep))
+
+
+def roadgeom_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """roadsense ``roadgeom`` -> the scene's ``geo`` block (docs/MFD_MAIN_SCREEN.md
+    7.3), or None when the map part is not in use (the camera's part alone is
+    what the scene's ``lanes`` already carry) or the position is synthetic."""
+    mp = msg.get("map")
+    cen = msg.get("centre")
+    if not isinstance(mp, dict) or mp.get("used") is not True or mp.get("synthetic") or not isinstance(cen, dict):
+        return None
+    xs, ys, cf, src, ss = cen.get("x"), cen.get("y"), cen.get("conf"), cen.get("src"), cen.get("s")
+    if not (isinstance(xs, list) and isinstance(ys, list) and isinstance(cf, list) and isinstance(src, str)
+            and isinstance(ss, list)) or not (len(xs) == len(ys) == len(cf) == len(src) == len(ss)):
+        return None
+    v = _num(cen.get("vision_to_m")) or 0.0
+    first = src.find("m")
+    if first < 0:
+        # the centre line ends within the camera's reach (the way on turns off at a junction):
+        # no map part of the lane, but the junction's roads still belong to the picture
+        if len(xs) < 2 or not (msg.get("branches") or msg.get("ring")):
+            return None
+        first = len(xs) - 1
+    start = max(first - 1, 0)                           # the last point of the camera's part: where the two join
+    pts = [(float(xs[i]), float(ys[i]), float(cf[i])) for i in range(start, len(xs)) if ss[i] <= GEO_MAX_M]
+    if len(pts) < 2:
+        return None
+    idx = _thin(pts)
+    if len(idx) > GEO_MAX_POINTS:
+        idx = idx[:GEO_MAX_POINTS]
+    # how far the centre line may steer the picture: while it runs forward (not round a ring, not into a turn)
+    steer = pts[0][0]
+    ring = msg.get("ring") if isinstance(msg.get("ring"), dict) else None
+    ring_in = None
+    if ring is not None:
+        ring_in = 0.0 if ring.get("on_ring") else _num(ring.get("entry_m"))
+    lim = math.tan(math.radians(GEO_STEER_DEG))
+    for i in range(1, len(pts)):
+        dx, dy = pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]
+        if dx <= 0.5 or abs(dy) > lim * dx or (ring_in is not None and pts[i][0] > ring_in + 1.0):
+            break
+        steer = pts[i][0]
+    out: Dict[str, Any] = {"v": round(v, 1), "w": _r(msg.get("lane_width_m"), 1) or 3.4,
+                           "p": [[round(pts[i][0], 1), round(pts[i][1], 1), int(max(0.0, min(0.99, pts[i][2])) * 10)]
+                                 for i in idx],
+                           "s": round(steer, 1)}
+    end = _END_CODE.get(cen.get("end") or "")
+    if end and len(idx) == len(_thin(pts)):
+        out["end"] = end
+    br = []
+    for b in msg.get("branches") or ():
+        bp = b.get("pts") if isinstance(b, dict) else None
+        if not isinstance(bp, list) or len(bp) < 2:
+            continue
+        try:
+            d0 = math.hypot(float(bp[0][0]), float(bp[0][1]))
+            flat = [round(float(c), 1) for pt in bp[:6] for c in pt[:2]]
+        except (TypeError, ValueError, IndexError):
+            continue
+        minor = bool(b.get("minor"))
+        if d0 > (GEO_MINOR_M if minor else GEO_BRANCH_M) or float(bp[0][0]) < -8.0:
+            continue
+        rank = 3 if minor else _CLASS_RANK.get(str(b.get("class") or "").replace("_link", ""), 2)
+        lanes = _num(b.get("lanes"))
+        width = 3.5 if minor else max(5.5, min(14.0, (lanes or 2) * 3.0))
+        flags = ("x" if b.get("exit") else "") + ("e" if b.get("entry") else "") + ("m" if minor else "") \
+            + ("r" if b.get("ring") else "") + ("w" if b.get("way") else "")
+        br.append((d0, [flags, rank, round(width, 1), flat]))
+    br.sort(key=lambda t: t[0])
+    if br:
+        out["br"] = [b for _, b in br[:GEO_BRANCH_MAX]]
+    if ring is not None and isinstance(ring.get("centre"), list) and len(ring["centre"]) == 2:
+        r = _num(ring.get("radius_m"))
+        cx, cy = _num(ring["centre"][0]), _num(ring["centre"][1])
+        if r and cx is not None and cy is not None and math.hypot(cx, cy) <= GEO_BRANCH_M + r:
+            lanes = _num(ring.get("lanes")) or 1
+            out["ring"] = [round(cx, 1), round(cy, 1), round(r, 1), round(max(4.5, min(9.0, lanes * 4.0)), 1),
+                           1 if ring.get("on_ring") else 0]
+    way = msg.get("way")
+    if isinstance(way, dict) and way.get("source") == "intent":
+        out["way"] = "i"
+    return out
+
+
 def map_input_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """mapd ``map`` message -> scene ``map.in``: what mapd hears from the
     position feeders (``gnss`` = the receiver's ``source`` tag, e.g.
@@ -641,6 +854,7 @@ class SceneBuilder:
         self._slow: Dict[str, Tuple[float, Optional[Dict[str, Any]]]] = {}
         self._lead: Optional[Tuple[float, Optional[Dict[str, Any]], bool]] = None
         self._lanes: Optional[Tuple[float, Optional[Dict[str, Any]]]] = None
+        self._geo: Optional[Tuple[float, Optional[Dict[str, Any]]]] = None
         self.decode_errors = 0
 
     def feed(self, line: str, now: float) -> None:
@@ -672,10 +886,13 @@ class SceneBuilder:
             self._lead = (now, lead_to_scene(msg), msg.get("departed") is True)
         elif mtype == "lanes":
             self._lanes = (now, lanes_to_scene(msg))
+        elif mtype == "roadgeom":
+            self._geo = (now, roadgeom_to_scene(msg))
         elif mtype == "map":
             self.taint.update(msg)
             self._slow["map_in"] = (now, map_input_to_scene(msg))
             self._slow["map_shape"] = (now, map_shape_to_scene(msg))
+            self._slow["map_jv"] = (now, map_junction_to_scene(msg))
 
     def time_to_due(self, now: float) -> Optional[float]:
         """Seconds until a pending road frame may be published; None if none."""
@@ -724,7 +941,7 @@ class SceneBuilder:
         ages = {"light": self.cfg.lights_max_age_s, "limit": self.cfg.limit_max_age_s,
                 "env": self.cfg.env_max_age_s, "signs": self.cfg.rules_max_age_s,
                 "map": self.cfg.map_max_age_s, "map_in": self.cfg.map_max_age_s,
-                "map_shape": self.cfg.map_max_age_s}
+                "map_shape": self.cfg.map_max_age_s, "map_jv": self.cfg.map_max_age_s}
         for key, (t, val) in self._slow.items():
             if now - t <= ages[key]:
                 scene[key] = val
@@ -736,8 +953,18 @@ class SceneBuilder:
         shape = scene.pop("map_shape", None)
         if shape and isinstance(scene.get("map"), dict) and scene["map"].get("ok"):
             scene["map"] = dict(scene["map"], shape=shape)
+        # the junction view on the most likely path, under the same condition
+        jv = scene.pop("map_jv", None)
+        if jv and isinstance(scene.get("map"), dict) and scene["map"].get("ok"):
+            scene["map"] = dict(scene["map"], jv=jv)
         if self.taint.tainted and isinstance(scene.get("map"), dict):
             scene["map"] = dict(scene["map"], syn=True)
+        # the fused road geometry (roadsense >= 2026-11-17): the road beyond the camera, side
+        # roads and a roundabout in the car's frame; only while the map layer is in use, the
+        # position is real and the topic is as fresh as the lanes it continues
+        if (self._geo is not None and self._geo[1] is not None and now - self._geo[0] <= self.cfg.geo_max_age_s
+                and isinstance(scene.get("map"), dict) and scene["map"].get("ok") and not self.taint.tainted):
+            scene["geo"] = self._geo[1]
         return scene
 
 

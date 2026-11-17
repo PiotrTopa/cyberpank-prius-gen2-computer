@@ -14,7 +14,8 @@ Layers, back to front (each one a function, so new elements slot in):
     tunnel / car-park frames                Scenery.draw_enclosure
     headlamp beams on the road              _draw_beams
     planned path, lane lines, road edges    _draw_path, _draw_road
-    road beyond camera range (map)          maplayer.far_road
+    road beyond the camera, side roads,     roadgeo.py (fused geometry), else
+      roundabout (map, fused by roadsense)    maplayer.far_road
     roadside scenery by place               _draw_roadside
     fog band                                Scenery.draw_fog
     world objects, lead vehicle             _draw_objects    (far -> near)
@@ -36,7 +37,7 @@ import pygame
 
 from ..colors import COLORS
 from ..fonts import get_mono_font, get_tiny_font
-from . import maplayer
+from . import maplayer, roadgeo
 from .car import CarRenderer, car_palette
 from .director import DOOR_STEPS, VIEW_STEPS, SceneDirector
 from .inputs import DOOR_KEYS, SceneInputs
@@ -220,6 +221,8 @@ class SceneRenderer:
         self._cen_xs: Sequence[float] = ()
         self._cen: List[float] = []
         self._cen_v = 0.0
+        self._x_end = 1e9              # the camera's lanes are drawn up to here (fused geometry: geo.v)
+        self._geo_p = None
         self._last_draw = -1.0
         # 0.8: on time when the UI loop runs at about the same rate
         self.min_redraw_s = 0.8 / max(0.1, tune.fps_scene)
@@ -426,8 +429,14 @@ class SceneRenderer:
         enclosed = fast and place in ENCLOSED
         road = road_k > 0.0 and d.vision in ("live", "stale")
         lines: list = []
+        self._x_end = 1e9
+        self._geo_p = None
         if road:
             self._set_centre(d, v)
+            # the fused road geometry (roadgeo.py): the camera's lanes end where it takes over
+            self._geo_p = roadgeo.prepare(self, d)
+            if self._geo_p is not None:
+                self._x_end = d.map.geo.v
             lines = self._lane_points(cam, d, v)
         else:
             self._cen = []
@@ -436,6 +445,7 @@ class SceneRenderer:
         if road:
             # lane fill under the floor lines: they double as speed stripes
             self._draw_lane_fill(s, lines, d, road_k)
+            roadgeo.fills(self, s, self._geo_p, d, road_k)
         self._draw_floor(s, cam, d, v)
         if enclosed:
             end = maplayer.tunnel_end(d) if place == "tunnel" else 100.0
@@ -448,6 +458,7 @@ class SceneRenderer:
             self._draw_road(s, cam, d, v, road_k, lines)
             if fast and not enclosed:
                 maplayer.far_road(self, s, d)
+                roadgeo.lines(self, s, self._geo_p, d, road_k)
         if fast and place and not enclosed and self.tune.roadside != "off":
             self._draw_roadside(s, d, place, inp.env_light)
         if fast and inp.env_weather == "fog" and self.tune.fog_band:
@@ -659,6 +670,9 @@ class SceneRenderer:
                 along = d.odo + off * 3.1
                 idx = int(along // pitch)
                 x = 100.0 - (along % pitch)
+                while x > self._x_end:
+                    x -= pitch
+                    idx -= 1
                 while x > 7.0:
                     for sgn in (1.0, -1.0):
                         h = (idx * 2654435761 + (1 if sgn > 0 else 2) * 40503 + int(off * 10) * 97) & 0xFFFF
@@ -676,6 +690,8 @@ class SceneRenderer:
             rail = place == "bridge"
             prev = {1.0: None, -1.0: None}
             x = 100.0 - (d.odo % pitch)
+            while x > self._x_end:
+                x -= pitch
             while x > 3.0:
                 for sgn in (1.0, -1.0):
                     g = self._place(None, x, side_y(x, sgn, 0.8), 1.0)
@@ -737,7 +753,16 @@ class SceneRenderer:
             cen = self._cen
             cx = self.w / 2.0
             pts.append((cx - rb[1] * (ys[0] + slope * back), rb[0]))
+            xe = self._x_end
             for i in range(n):
+                if xs[i] > xe:
+                    # the camera's part ends between two samples
+                    if i > 0 and xe > xs[i - 1] + 0.5:
+                        t = (xe - xs[i - 1]) / (xs[i] - xs[i - 1])
+                        g = self._place(None, xe, ys[i - 1] + (ys[i] - ys[i - 1]) * t, 1.0)
+                        if g is not None:
+                            pts.append((g[0], g[1]))
+                    break
                 sy, k, q = rows[i]
                 pts.append((cx - k * (ys[i] - cen[i] * q), sy))
             return pts
@@ -1050,6 +1075,17 @@ class SceneRenderer:
             else:
                 pygame.draw.circle(s, _k(cols[i], 0.22), c, r, 1)
 
+    def _draw_signal_small(self, s: pygame.Surface, x: int, y: int, state: str) -> None:
+        """A 7 x 15 signal head with 1 px lamps (top-left at x, y): the state of
+        the signal group that is NOT the car's (docs/MFD_MAIN_SCREEN.md 6.6)."""
+        pygame.draw.rect(s, (0, 0, 0), (x, y, 7, 15))
+        pygame.draw.rect(s, _k(self.pal["dim"], 0.7), (x, y, 7, 15), 1)
+        on = self.LIGHT_COLORS.get(state, ())
+        cols = self._lamp_colors()
+        for i in range(3):
+            if i in on:
+                pygame.draw.rect(s, _k(cols[i], 0.75), (x + 2, y + 2 + 4 * i, 3, 3))
+
     def _draw_light_world(self, s: pygame.Surface, cam: Camera, lt, d: SceneDirector, v: float) -> None:
         y = lt.lat_m if lt.lat_m is not None else -4.5
         g = self._place(cam, max(6.0, min(100.0, lt.dist_m)), y, v)
@@ -1227,8 +1263,22 @@ class SceneRenderer:
                              self.limit_style(inp.limit_source, inp.limit_conf))
             x_right -= 32
         if inp.light is not None and inp.light.state in self.LIGHT_COLORS:
-            self._draw_signal(s, x_right - 12, 3, 3, inp.light, d.clock)
+            lt = inp.light
+            alt = tune.light_alt and lt.alt_state in self.LIGHT_COLORS and lt.alt_side in ("l", "r")
+            if alt and lt.alt_side == "r":
+                # the other signal group (another lane's light) stands on its side, small and dim
+                self._draw_signal_small(s, x_right - 7, 9, lt.alt_state)
+                x_right -= 9
+            self._draw_signal(s, x_right - 12, 3, 3, lt, d.clock)
             x_right -= 16
+            if alt and lt.alt_side == "l":
+                self._draw_signal_small(s, x_right - 5, 9, lt.alt_state)
+                x_right -= 9
+            if tune.light_uncertain and lt.uncertain:
+                q = self.text("?", 14, pal["warn"])
+                pygame.draw.rect(s, (0, 0, 0), (x_right - q.get_width() - 1, 8, q.get_width() + 2, 14))
+                s.blit(q, (x_right - q.get_width(), 8))
+                x_right -= q.get_width() + 3
             if inp.light.dist_m is not None:
                 t = self.text("%d" % int(inp.light.dist_m + 0.5), 14, pal["text"])
                 pygame.draw.rect(s, (0, 0, 0), (x_right - t.get_width() - 1, 8, t.get_width() + 2, 14))
@@ -1242,6 +1292,7 @@ class SceneRenderer:
             xl, xr = maplayer.next_limit_top(self, s, d, self.TOP_ROW_Y, 4, x_right - 2)
             self._draw_sign_row(s, d, self.TOP_ROW_Y, xr, xl)
         maplayer.mark(self, s, d)
+        maplayer.junction(self, s, d)
         self._draw_lane_indicator(s, d)
         # bottom-left: lamps (tuning.lamp_chips), above them the perception status
         x = 4

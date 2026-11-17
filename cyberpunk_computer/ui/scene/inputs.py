@@ -27,7 +27,7 @@ import time
 from collections.abc import Mapping   # isinstance on typing.Mapping is several times slower
 from typing import Any, Callable, NamedTuple, Optional, Sequence, Tuple
 
-from .mapinfo import MapInfo, parse_map, usable_map
+from .mapinfo import Geo, MapInfo, parse_geo, parse_map, usable_map
 
 # Default sample distances (metres ahead of the camera) of lane/edge/path
 # polylines when the scene mapping carries no "x".
@@ -74,6 +74,9 @@ class TrafficLight(NamedTuple):
     dist_m: Optional[float] = None
     lat_m: Optional[float] = None    # LEFT positive
     flashing: bool = False
+    uncertain: bool = False          # roadsense: the choice between two signal groups is ambiguous
+    alt_state: str = ""              # the other signal group's state while two groups disagree
+    alt_side: str = ""               # ... and where it is: "l" | "r"
 
 
 class RoadScene(NamedTuple):
@@ -128,6 +131,7 @@ class SceneInputs(NamedTuple):
     env_place: Optional[str] = None
     env_weather: Optional[str] = None
     map: Optional[MapInfo] = None          # roadsense's map layer when usable (mapinfo.py)
+    geo: Optional[Geo] = None              # the fused road geometry beyond the camera (with a usable map only)
 
     @property
     def any_door_open(self) -> bool:
@@ -303,7 +307,13 @@ def _traffic_light(raw: Any) -> Optional[TrafficLight]:
         return None
     d = _num(raw.get("dist_m", raw.get("d")))
     y = _num(raw.get("lateral_m", raw.get("y")))
-    return TrafficLight(st, d, None if y is None else -y, bool(raw.get("flashing")))
+    alt = raw.get("alt")
+    alt_s, alt_side = "", ""
+    if isinstance(alt, Mapping) and isinstance(alt.get("s"), str):
+        alt_s = alt["s"]
+        alt_side = alt.get("side") if alt.get("side") in ("l", "r") else ""
+    return TrafficLight(st, d, None if y is None else -y, bool(raw.get("flashing")),
+                        raw.get("q") is True, alt_s, alt_side)
 
 
 _GEAR = {"PARK": "P", "REVERSE": "R", "NEUTRAL": "N", "DRIVE": "D", "B": "B"}
@@ -487,4 +497,5 @@ def read_perception(state: Any, feed: Optional[SceneFeed] = None, map_limit: boo
         env_place=env.get("place") if rs_ok else None,
         env_weather=env.get("weather") if rs_ok else None,
         map=parse_map(raw_scene) if (rs_ok and raw_scene) else None,
+        geo=parse_geo(raw_scene) if (rs_ok and raw_scene) else None,
     )
