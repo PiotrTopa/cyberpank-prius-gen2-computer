@@ -166,7 +166,8 @@ Gateway firmware 3.x forwards no passive frames unless `sniff` is on, and `sniff
   battery collector); an id the decoder does not know is logged once a second and not decoded; a bulk
   transfer of more than 64 frames is a backlog and is reduced to the newest frame per id (ids from
   0x700 up are all kept). The position feeder's tap sees every frame. Journal line
-  `Panda reader: …` once a minute: frames/s, busy %, largest batch, coalesced, dispatched/s;
+  `Panda reader: …` once a minute: frames/s, busy %, largest batch, coalesced, dispatched/s (first
+  drive with these filters, 2026-11-17: ~1690 frames/s at ~20 % busy);
 - heartbeat every second (the panda firmware power-saves its transceivers 2 s after the heartbeat stops);
 - without the panda: no broadcast values, solicited data unaffected; `connection.panda_*` in the state
   shows link, firmware, frame rate and per-bus counts. `--no-panda` / `BACKEND_PANDA_ENABLED=0` disables it.

@@ -6,8 +6,8 @@ wakes the POCO F1 through the phone's power button, switches the loads on an
 senses ACC, and hosts the BEAN body-bus receiver and the guarded BEAN
 transmitter. It talks NDJSON over USB-CDC to the backend on the POCO.
 
-Firmware in this directory: **2.4.1** (`VERSION` in `main.py`). On the car: **2.4.0**
-(flashed 2026-11-13). Confirm with `ver` from `POWERBOX_READY` / IDENT.
+Firmware in this directory: **2.4.2** (`VERSION` in `main.py`). On the car: **2.4.2** (`ver` in the
+2026-11-17 trip logs). Confirm with `ver` from `POWERBOX_READY` / IDENT.
 
 | File | Role |
 |---|---|
@@ -540,6 +540,7 @@ bus 1710–1719 capture words/s, ~52 frames/s, 33 words per frame on both 2026-1
 |---|---|---|---|
 | 2.4.0 | 535 (p10–p90 527–545) | 924 ‰ | no loss; ring backlog up to 690 words |
 | 2.4.1 | 583 (572–599, also in windows without an overflow) | 940 ‰ (pinned) | 284 overflows, 129 lost words/s, 7–9 % of frames lost, junk IDs from broken frames |
+| 2.4.2 | 260 (`cpu` median 442 ‰ ÷ 1699 edges/s; 2026-11-17 drive, 27 min) | 442 ‰ (p90 458, max 467) | 83,269 frames (51.6 /s), 0 bad, 1 overflow (1,564 lost words in 27 min), `lag` ≤ 284 ms; 1 s IDs at 1.00–1.03 /s, `98:CC` 3.90 /s |
 
 The bus load was the same on both days, so the loss is a 2.4.1 regression: +9 % per
 word on a receiver that already ran at 92 % duty. Cause: 2.4.1 added four `BeanRx`
@@ -562,6 +563,7 @@ constants are `const()` literals; the word clock is advanced inline
 state (formerly `_data()` + `_bits()`) runs inline in a native `_run`. Host model
 (car-calibrated, not an RP2040 timing): 42 probes per word, ~290 µs per word, ~50 %
 duty at the 16 Nov load; crediting only the attribute-table fix, ~450 µs and ~78 %.
+Measured on the car (2026-11-17 drive): ~260 µs per word, 44 % duty (table above).
 Compiled for `armv6m` with `mpy-cross` 1.26.1 (the board's MicroPython) without error.
 
 Idle (fw 2.4.0): with the decoder idle and nothing queued, a native fast path
@@ -800,7 +802,7 @@ run against `tests/bean_pio_sim.py`), `tests/test_bean_backend.py`.
 | Relays 5–8 never tested on this board (ch5 = RS485 rail). | Bench: switch each, confirm load and `rly`. |
 | Cause of spontaneous bench resets (during rewiring) unknown. | Watch `rc` / `boot_count` over a long run: rc 1 → power/wiring, rc 3 → firmware stall. |
 | BEAN TX on the car (fw 2.4.0): the bus wakes, but the `bean_wake` send reports `ok:0 err:"rx"`. `err:"rx"` is a pre-transmit refusal by `health()`; on 2.4.0 the edge-test pulse after a > 537 s sleep raises the tick overflow and marks the receiver unhealthy for 5 s (reproduced in `tests/test_bean_rx_wrap.py`). Whether 2.4.1 sends cleanly is not confirmed on the car; PIO load, `fifo_join=JOIN_TX`, 1 kHz `machine.Timer` and real rise/fall are not measured. | Flash 2.4.1, `bean_wake` on the parked car after > 10 min of bus sleep; read the reply `detail` and `exn`. |
-| fw 2.4.2 receiver cost on the car is a host-model figure (~50 % `cpu` with IG on), not measured. | Parked READY ≥ 5 min and one drive: `ovf` 0, `lost` 0, `cpu` with IG on, µs per word = `cpu` × 1000 ÷ edges/s, periodic 1-s IDs at 1.00 /s, `98:CC` ~3.9 /s, no `code` ≠ 0 frames. |
+| fw 2.4.2 on the car: one overflow in a 27-min drive (2026-11-17, 1,564 words lost, otherwise clean; 260 µs per word, `cpu` 44 %). What caused the single overflow (a main-loop stall?) is not known. | Watch `ovf` over further drives; if it recurs, correlate its time with `lag`/`stall` and the other NDJSON traffic. |
 | Receiver `cpu` asleep with fw 2.4.0 is 40–41 ‰, not the few ‰ the fast path was meant to give; where the time goes is not measured (each `poll()` call looks up methods on the then nearly full attribute table). | Read `cpu` asleep on 2.4.2; if still ~40 ‰, profile `poll()` on the bench with the bus idle (`_quick` vs full pass vs `produced()`). |
 | Main hub model and which sockets switch VBUS. `POCO/provision.sh` (backend.env seed) says main hub `1-1` = Terminus `1a40:0101`, 4 ports, powerbox on port 1; `backend/port_power.py`, `io/discovery.py` (`DEFAULT_PORT_ROLES = {5: powerbox, 2: gateway}`) and `prius-usb-power` describe an ActionStar `2101:8500` with real VBUS switching on internal port 5 only. Until settled, a hub-port cycle of the powerbox may be data-only. | `lsusb -t` + `uhubctl` on the car; cut port power and check whether `energy_mah` resets (true cold boot). |
 | POCO button MOSFET not fitted. | Fit it, then set `POCO_BTN_ACTIVE_HIGH` / `ACTIVE_HIGH`. |

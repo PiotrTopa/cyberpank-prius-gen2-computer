@@ -18,6 +18,9 @@ consistent observation); **G** = guess; **?** = unknown. Evidence is named in on
 
 The owner's top priority. A later phase plans an adaptive cruise by man-in-the-middling the cruise
 stalk, so the **set speed** matters most, then engaged/standby state and the stalk switches.
+**Engineering reference with everything measured (signals, latencies, state machine, tap quantum,
+stalk switch bits, open measurements for an interposer): [`CRUISE_CONTROL.md`](CRUISE_CONTROL.md).**
+This section keeps the BEAN view and the owner timeline of 2026-11-16.
 
 Decoded on the cruise drive of 2026-11-16 21:14–21:28 (experiment E5, partial: owner timeline below,
 BEAN, broadcast CAN and the `21D3` poll; recording `2026-11-16_cruise_drive.ndjson.gz`, §10).
@@ -27,9 +30,9 @@ Decoder: `comm/solicited_can.py` (`21D3`), `comm/bean.py` (`62:C8`), `comm/can_d
 | Source | Content | Confidence |
 |---|---|---|
 | BEAN `62:C8` (gateway → meter, PRI 6, 2 bytes, 1 s + on change, IG only) | **b1 `10` = cruise main switch on** (indicator lit). Set 21:16:59.4, cleared/set at the 1 s off/on 21:19:59.9/21:20:01.2, cleared 21:23:54.7, all at the owner's times; the fastest main-switch source. Everything else `00` | C |
-| CAN `0x5C8` (the gateway's copy of `62:C8`: `24 00 xx`) | b2 `10` = main switch, as above. In the trip log its content changed ~3 s after `62:C8` and missed the 1 s off/on (but see the timing caveat below). b0 bit 7 (`A4` instead of `24`) for 0.85 s at the refused SET at 37 km/h (21:20:02.3); also twice earlier that day (17:50:58, 17:52:29): meaning ? | main: C; b0 bit 7: ? |
-| CAN `0x120` b4 bit 7 (and b7 bit 7) | **cruise engaged**: set at every engage, cleared at every cancel (4 engages incl. the refused one) | C |
-| Solicited `0x7E2` mode 21 PID `D3`, reply `0x7EA` `07 61 D3 A B C D E`, polled 1 Hz | **A** = vehicle speed km/h (not a memory speed); **B** = set speed km/h (below); **C** = analog 0..107, rises while cruise pulls the car, 0 when it coasts or is off: probably the cruise drive (torque) request; **D** bit 7 = shift in D, bits 0–3 all set together while the main switch is on, bit 6 = cruise controlling the car; **E** not decoded (0, 1, 2, 5, 7, 8, 16 seen) | A, B, D: C; C: P (meaning) |
+| CAN `0x5C8` (the gateway's copy of `62:C8`: `24 00 xx`) | b2 `10` = main switch, as above; on 2026-11-17 0x5C8 changed 40–60 ms before `62:C8` at all 7 main-switch changes (the "~3 s behind" of 2026-11-16 was trip-log delivery delay). b0 `A4` instead of `24` = the gateway's immediate-copy header (§5): the first frame after each of the 7 main-switch changes of 2026-11-17, nothing else; the `A4` at the refused SET of 2026-11-16 was the late copy of the off/on 2 s earlier | C |
+| CAN `0x120` b4 bit 7 | **cruise engaged**: set at every engage, cleared at every cancel (7 engages on 2026-11-16/17 incl. the refused one); leads the `21D3` poll by 0.04–1.1 s. b7 is the Toyota checksum (it changes with b4; not a second engaged bit) | C |
+| Solicited `0x7E2` mode 21 PID `D3`, reply `0x7EA` `07 61 D3 A B C D E`, polled 1 Hz | **A** = vehicle speed km/h (not a memory speed); **B** = set speed km/h (below); **C** = analog 0..107, rises while cruise pulls the car, 0 when it coasts or is off: probably the cruise drive (torque) request; **D** bit 7 = shift in D, bits 0–3 all set together while the main switch is on, bit 6 = cruise controlling the car; **E** = the HV ECU's switch inputs at the poll: `10` SET/COAST, `08` RES/ACC, bits 0–2 brake pedal (`07` while pressed), CANCEL not yet sampled ([`CRUISE_CONTROL.md`](CRUISE_CONTROL.md) §3.1) | A, B, D, E `10`/`08`/`07`: C; C: P (meaning) |
 | Repair manual RM1076E 05-1678 | HV ECU → meter "cruise indicator" via the gateway on BEAN | = `62:C8` (C) |
 
 `21D3` B in detail: set at SET to the current speed; follows RES/ACC and SET/COAST while engaged; kept
@@ -39,15 +42,18 @@ to 0 once the car is slower than about 35 km/h (36 km/h kept, 32 km/h cleared). 
 per the owner's manual). The third-party bit list in [`prius_can.md`](prius_can.md) (main, ready,
 indicator, RES/ACC, SET/COAST, CANCEL, stop-lamp bits) does not match this car for C and D bits 0–5.
 
-Not found anywhere: the stalk switches (RES/ACC, SET/COAST, CANCEL) are on neither BEAN nor broadcast
-CAN (bit search over the whole session); they can only be inferred from B changes. No set speed on BEAN
-or broadcast CAN: `21D3` is the only set-speed source.
+The stalk switches (RES/ACC, SET/COAST, CANCEL) are on neither BEAN nor broadcast CAN (bit search
+over the 2026-11-16 and 2026-11-17 sessions). They are visible only in `21D3` E, sampled at the 1 Hz
+poll (found 2026-11-17: 22 switch samples, each at a logged SET, tap, hold or RES). No set speed on
+BEAN or broadcast CAN: `21D3` is the only set-speed source.
 
-**Timing caveat (trip log).** The gateway's passive CAN stream reaches the phone 0–5 s after the
-solicited replies (passive copies of the same `0x7EA` replies: median 0.6 s, p90 2.1 s, max 4.8 s
-later). So "0x120 ~2 s behind `21D3`" and "0x5C8 ~3 s behind `62:C8`" are at least partly delivery
-latency, not the car. The backend therefore takes `21D3` only from the reply itself, never from a
-passive copy of it, and prefers `21D3` over 0x120 for "engaged".
+**Timing caveat (trip logs before 2026-11-17).** The passive CAN stream (panda) reached the phone
+0–5 s after the solicited replies (passive copies of the same `0x7EA` replies: median 0.6 s, p90
+2.1 s, max 4.8 s later) because the panda reader could not keep up ([`prius_can.md`](prius_can.md)
+§8). So "0x120 ~2 s behind `21D3`" and "0x5C8 ~3 s behind `62:C8`" were delivery latency, not the car.
+Fixed 2026-11-17: on that drive 0x5C8 led `62:C8` by 40–60 ms and 0x120 led the `21D3` poll by
+0.04–1.1 s at every change. The backend takes `21D3` only from the reply itself, never from a passive
+copy of it.
 
 **Backend state** (`vehicle.*`): `cruise_main_switch` (`62:C8` → `21D3` → 0x5C8, best fresh source),
 `cruise_active` (`21D3` → 0x120), `cruise_set_speed` (B while engaged), `cruise_memory_speed` (B, the
@@ -78,14 +84,13 @@ Owner timeline (CET) and what the bus showed:
 **Set-speed steps** (`21D3` is polled once a second, so every step below is the change between two
 polls, and taps closer together than 1 s merge):
 
-* resolution: 1 km/h (integer, floored; see the tap-step table below). Smallest step seen +1 and −1 (21:17:06, 21:17:37, 21:17:29), which is
-  consistent with one tap = 1 km/h, but no isolated tap was logged as such.
+* resolution: 1 km/h (integer, floored); one tap = 1 mph (tap-step table below, settled 2026-11-17).
 * hold up: +13 km/h in 9 s (≈ 1.4–1.6 km/h per second, steps of +1/+2 per poll), set speed 2–4 km/h
   ahead of the car, which follows at ≈ 1.2 km/h/s.
 * hold down: the first poll −5, then −3, then flat for 4 s while the car slowed, then −2, −1: the set
   speed drops ahead of the car and then waits for it; no steady rate.
-* single −5 and +5 steps per poll also appear (45 → 40, 55 → 60); whether these are 5 fast taps, a
-  hold, or a 5 km/h step mode cannot be told at 1 Hz.
+* single −5 and +5 steps per poll also appear (45 → 40, 55 → 60): three taps of 1 mph within one
+  poll (4.8 km/h), see below.
 * C (drive request): integer 0..107 seen, smooth (1-count resolution), 70–80 in steady cruise at 42
   km/h, 85–107 while accelerating, falling to 0 while the set speed is below the car's speed.
 
@@ -109,32 +114,8 @@ poll (+3 → 53), then three single taps down 53 → 51 → 50 → 48, which fit
 53.2–53.6 = 50.0–50.4 + 2 × 1.609. The ±5 steps of 2026-11-16 are three taps (4.8 km/h), and the hold
 rate (≈ 1.4–1.6 km/h per second) is about 1 mph per second. The ECU keeps the set speed in mph-based
 units; `21D3` B is that value floored to km/h, so the MFD may show it one less than the internal value.
-The 21D3 E byte and 0x5C8 b0 bit 7 stay unknown. Rest of E5: stalk wiring (connector, which ECU reads it, signal levels per
-switch) from the wiring diagram plus a multimeter, before any interposer design.
-
----|---|---|
-| BEAN `62:C8` (gateway → meter, PRI 6, 2 bytes, 1 s, IG only) = CAN `0x5C8` (CAN→BEAN copy, §5) | `00 00` throughout the only IG-ON capture; cruise was not used in it | present: C; meaning: ? |
-| Repair manual RM1076E 05-1678 | HV ECU → meter "cruise indicator" travels via the gateway on BEAN (no ID given) | P that a cruise indicator frame exists; G that it is `62:C8` |
-| Third-party CAN list ([`prius_can.md`](prius_can.md)) | `0x5C8` byte C bit 4 (= `62:C8` b1 `10`) "cruise control on and active" | G (never seen set on this car) |
-| Comment in `cyberpunk_computer/comm/can_decoder.py` | the same bit read as a "cancel" event, `0x5C8` sparse (about 18 frames in 37 min) | contradicts the line above; unresolved |
-| Solicited PID `0x7E2` mode 21 PID `D3` ([`prius_can.md`](prius_can.md)) | b0 memory speed, **b1 set/resume speed km/h (0 below about 40 km/h)**, b2/b3 main switch, ready, indicator, RES/ACC, SET/COAST, CANCEL, active | G: third-party list, polled by the backend, never checked against an engaged cruise |
-
-No recording with cruise engaged exists (BEAN, CAN or solicited). Not known: whether the set speed
-appears on BEAN or broadcast CAN at all, which ECU reads the stalk, and the stalk's electrical
-interface.
-
-**Capture needed (experiment E5, §9):** a drive with the BEAN logger, CAN broadcast logging and the
-`21D3` poll running, every step marked with `bean_mark` and 10 s apart:
-
-1. Main switch on (indicator lit), wait. Main switch off, on again.
-2. SET at a steady 60 km/h (note the speedometer and, if available, GPS speed).
-3. RES/ACC tap ×3 (+1 km/h steps), SET/COAST tap ×3, hold RES/ACC for about 5 km/h, hold SET/COAST.
-4. CANCEL with the stalk; RES (resume); cancel with the brake pedal; RES; main switch off.
-5. Repeat SET at 80 km/h. Drop below 40 km/h with cruise in standby, then accelerate again.
-
-This settles `62:C8`/`0x5C8` bits, whether `21D3` b1 tracks the set speed, and whether any other
-BEAN or CAN ID carries it. A separate bench task: the stalk wiring (connector, which ECU reads it,
-signal levels per switch) from the wiring diagram plus a multimeter, before any interposer design.
+Rest of E5 (timed holds, CANCEL bit, brake cancel, stalk wiring) and the full state machine:
+[`CRUISE_CONTROL.md`](CRUISE_CONTROL.md) §5 and §8.
 
 ---
 
@@ -599,7 +580,7 @@ Ranked by what they settle. By owner priority **E5 (cruise control) comes first*
 | E2 | **Hard climate keys, parked READY.** Front defrost on/off, rear defogger on/off, two steering-pad temperature/mode steps | `FE:FC` b0 `10`/`08`, `52:ED` b1 `20`, a possible mirror-heater bit, `52:6D` b1 flags |
 | E3 | **Cabin thermometer during a cold start**, parked READY after a night soak, a reference thermometer, one reading per minute for 10 min | `52:6D` b0 offset only (scale P, 2026-11-16); whether `98:EC` b4 is cabin-related |
 | E4 | **Trip meter.** Note Trip A/B and average consumption at start and end of a drive; reset Trip A with IG on | which trip `52:76` is; whether `52:A2` resets with it |
-| E5 | **Cruise control** — PARTLY DONE 2026-11-16/17 (§1: main switch, engaged, set speed, `21D3` layout, tap step 1 mph). Left: timed holds; brake cancel; 0x5C8 b0 bit 7; stalk wiring | tap/hold step size, 0x5C8 b0 bit 7 |
+| E5 | **Cruise control** — PARTLY DONE 2026-11-16/17 (§1: main switch, engaged, set speed, `21D3` layout incl. the E switch bits, tap step 1 mph, 0x5C8 `A4` = immediate-copy header). Left: timed holds, CANCEL bit, brake vs stalk cancel, stalk wiring ([`CRUISE_CONTROL.md`](CRUISE_CONTROL.md) §8) | hold threshold and rate, CANCEL, wiring |
 | E6 | **GPS speed at steady 50 and 80 km/h** | `FE:24` = displayed (over-reading) speed |
 | E7 | **Flash, rear fog**, 10 s gaps (high beam seen 2026-11-16: `FE:7F` b0 `08`) | flash = the same bit?; whether rear fog has any bit |
 | E8 | `98:CC`, `40:59`, `52:CA`, `52:D0`, `FE:DB`: no cheap experiment. A K-line data list of the A/C amp (room, evaporator, inverter temperatures) next to a capture | `98:CC`, `98:EC` b4 |
@@ -620,17 +601,21 @@ Other open items:
   destination/LHD/options?).
 * B5 ↔ C1 role assignment; node `19` identity.
 * Does the gateway copy any BEAN ID to CAN besides §5, in other states (e.g. during cruise)?
-* Powerbox fw 2.4.1 receiver overflow (`ovf`/`lost`) loses 7–9 % of frames on a drive (2026-11-16
-  data crunch: 1 s IDs arrive at 0.91–0.98 /s); the BEAN capture file of that evening is lossier still
-  (frames batched with decoded vehicle actions were skipped, fixed in commit 79c4bb8).
-* Gateway passive CAN stream latency: in the trip log, passive CAN frames reach the phone 0–5 s after
-  the solicited replies (§1, timing caveat). CAN-vs-BEAN timing from trip logs needs this correction.
+* Resolved 2026-11-17: powerbox fw 2.4.1 lost 7–9 % of frames on a drive (receiver overflow); fw
+  2.4.2 on the 2026-11-17 drive: 83,269 frames in 27 min (51.6 /s), 0 bad, 1 `ovf` (1,564 lost
+  capture words), receiver `cpu` ~44 %, 1 s IDs at 1.00–1.03 /s, `98:CC` 3.9 /s
+  ([`powerbox/README.md`](../powerbox/README.md)). The BEAN capture files up to 2026-11-16 are lossier
+  (2.4.1 overflow; frames batched with decoded vehicle actions skipped, fixed in commit 79c4bb8).
+* Passive CAN stream latency (panda reader): trip logs before 2026-11-17 carry passive CAN frames
+  0–5 s late (§1, timing caveat); fixed 2026-11-17 (panda reader ~1690 frames/s at ~20 % busy on that
+  drive). CAN-vs-BEAN timing from older trip logs needs this correction.
 * Recording time base: in the drive capture (fw 2.4.0) the firmware `t_ms` runs 236.4 s ahead of
   `ticks_ms` (a jump at the bus wake-up, tick overflow, `powerbox/README.md` *Tick arithmetic*) and
   drifts while the bus is busy, so the age correction in `frame_from_wire()` is skipped and
   `BeanClock` times frames (§10). Delivery latency on that drive, BEAN receive time vs CAN: FE:24
   speed 0.6 s behind 0x0B4, FE:26 rpm 0.3 s behind OBD rpm (firmware 200 ms batching + queue).
-  fw 2.4.1 puts `t_ms` on the `ticks_ms` base (not yet confirmed on the car).
+  fw 2.4.1 puts `t_ms` on the `ticks_ms` base; confirmed with 2.4.2 on the 2026-11-17 drive (`t_ms`
+  advanced 1612.38 s while the phone clock advanced 1612.35 s, no jump).
 
 ---
 
@@ -646,6 +631,10 @@ removed. All frames have valid CRCs. Times are CET.
 | `2026-11-13_session30_doors_locks.ndjson.gz` | 16:29:49–16:37:06 (capture started 16:18:29; bus silent before) | 4,372 / 14 | car off | handle-touch unlock/lock, interior switch, every door, back door (timeline below) |
 | `2026-11-13_drive_ig_on.ndjson.gz` | 21:47:47–22:07:26 | 59,444 / 43 | IG-ON, READY, drive | power-on, scripted AVC climate run (21 marks, 21:58:00–21:59:25), lamps, wipers, seat belt, reversing, key-out warning, power-off, lock on leaving |
 | `2026-11-16_cruise_drive.ndjson.gz` | 21:14:24–21:28:48 | 40,990 / 42 | IG-ON, READY, drive | cruise control session (§1), 16 `mark` records with the owner's timeline (main, SET, holds, cancels, refused SET); rebuilt from the phone trip log (powerbox device 203 batches), not from the BEAN capture file, which lost frames (79c4bb8); 254 CRC/length-bad frames and 14 frames to `B5`/`C1` removed |
+
+Not in the repository (phone `logs/bean/`): `bean_20261117-101230_drive.ndjson`, 2026-11-17
+10:12:30–10:39, 83,269 frames, complete (powerbox 2.4.2; the last line is cut off), with the cruise
+sessions of [`CRUISE_CONTROL.md`](CRUISE_CONTROL.md) §10.
 
 session30 timeline (from the bus, owner's action list):
 

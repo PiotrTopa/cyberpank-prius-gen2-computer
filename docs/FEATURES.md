@@ -103,7 +103,7 @@ accelerates.
 | Function | Status | Needs | Code | Note / first step |
 |---|---|---|---|---|
 | Alert banner on the MFD | have | — | `ui/scene/alerts.py` | main screen; other screens: planned (app-level overlay) |
-| Cruise state on the MFD (main switch, engaged, set / resume speed) | have | `21D3` poll, BEAN `62:C8`, CAN 0x5C8 / 0x120 | `io/cruise_fusion.py`, cruise slot in `ui/scene/powerbox.py`, `SET nn` chip | decoded 2026-11-16 (BEAN_SIGNALS §1); stalk switches are on no bus |
+| Cruise state on the MFD (main switch, engaged, set / resume speed) | have | `21D3` poll, BEAN `62:C8`, CAN 0x5C8 / 0x120 | `io/cruise_fusion.py`, cruise slot in `ui/scene/powerbox.py`, `SET nn` chip | decoded 2026-11-16/17; reference incl. tap step (1 mph), state machine and the stalk switch bits in `21D3` E: [CRUISE_CONTROL.md](CRUISE_CONTROL.md); the switches are on no broadcast bus |
 | Main screen: road view while stopped in traffic | have | gear, READY / ACC, doors | `ui/scene/director.py` | parked view only in P, with power off or a door open (2026-11-16; was: after 2.5 s standing) |
 | HUD-style VFD display of alerts | planned | VFD satellite | — | first step: `alert` event to the VFD app |
 | Voice control | have (head unit) | — | — | own STT not planned |
@@ -121,8 +121,8 @@ accelerates.
 | 5 | Validated traffic-light ego state | green-light reminder (enable), red-light highlight | review `green_light` shadow log; roadsense L7 on own recordings | S–M |
 | 6 | Object tracks in roadsense (adjacent / oncoming, lead class, pedestrians) | better distance warning, cut-in handling, truck-ahead recirc | roadsense `objects[]` (MFD_MAIN_SCREEN 8.2) | M–L |
 | 7 | Rain / light / dew sensor in the car | rain awareness, fogging assist, lights reminder | VAG RLS on a LIN satellite (firmware exists from the bench) | M |
-| 8 | Yaw rate / calibrated acceleration | live curve check, smoothness score | correlate undecoded fast CAN ids with wheel-speed yaw; calibrate 0x022/0x023 | S–M |
-| 9 | Cruise stalk taps (state, set speed, engaged are verified 2026-11-16) | adaptive-cruise interposer design, exact tap/hold behaviour | `21D3` at 5–10 Hz with marked taps (BEAN_SIGNALS §1, E5 rest); stalk wiring | S |
+| 8 | Yaw rate / calibrated acceleration | live curve check, smoothness score | found 2026-11-17 (not decoded yet): 0x022 = yaw rate, 0x023 = two-channel acceleration sensor ([prius_can.md](prius_can.md) §2, scales P); next: decoder entries + a calibration drive (GNSS or a full circle) | S |
+| 9 | Cruise stalk wiring and hold timing (state, set speed, engaged, tap step 1 mph and the SET/RES switch bits are verified 2026-11-16/17) | adaptive-cruise interposer design | timed holds and CANCEL with `21D3` at 5–10 Hz; stalk connector and levels with the EWD and a multimeter ([CRUISE_CONTROL.md](CRUISE_CONTROL.md) §8) | S |
 | 10 | 21C3 torque units | absolute braking score | a braking test against 0x030 and deceleration | S |
 | 11 | Fuel level scale / LPG level and fuel select | range on LPG, true fuel statistics | inputs from the LPG changeover line and level sender | S–M |
 | 12 | Separate rear-door / hatch bits | door picture, rear-seat reminder | satellite input on the hatch switch or a further BEAN decode | S |

@@ -41,6 +41,8 @@ repository `cyberpunk-prius-gateway` (`gateway-rp2350/`, `raspberry_pi_config/`,
 |---|---|
 | [docs/prius_can.md](docs/prius_can.md) | CAN broadcast IDs and diagnostic PIDs with scaling |
 | [docs/BEAN_PROTOCOL.md](docs/BEAN_PROTOCOL.md), [docs/BEAN_SIGNALS.md](docs/BEAN_SIGNALS.md) | BEAN body bus: protocol and tap points; this car's signal map, CAN mirror, actuation, open gaps |
+| [docs/CRUISE_CONTROL.md](docs/CRUISE_CONTROL.md) | Factory cruise control: signals, latencies, state machine, tap step, stalk switch bits, open measurements for a stalk interposer |
+| [docs/FINDINGS_LOG.md](docs/FINDINGS_LOG.md) | Dated one-line index of findings about the car and its buses, with links |
 | [docs/AVC_BACKEND.md](docs/AVC_BACKEND.md) | AVC-LAN decoding, nav emulation, climate remote |
 | [docs/TOYOTA_DIAGNOSTICS.md](docs/TOYOTA_DIAGNOSTICS.md) | All-ECU diagnostics engine, DTC dictionary, safety rules |
 | [docs/MFD_VIDEO_TIMINGS.md](docs/MFD_VIDEO_TIMINGS.md) | MFD RGBS input: DPI timings, VGA666, sync wiring |

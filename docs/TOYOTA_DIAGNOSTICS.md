@@ -272,7 +272,9 @@ be read.
 ## 8. Gateway firmware 3.2.9: what it supports, what is missing
 
 Read from `cyberpunk-prius-gateway/gateway-rp2350/src/can_sol.c` and
-`commands.c`. Wire format: `docs/PROTOCOL.md`.
+`commands.c` at 3.2.9. The car runs 3.2.11 since 2026-11-17 (3.2.10/3.2.11 changed the transmit path
+and supervision, [prius_can.md](prius_can.md) §9); the table was not re-read for them. Wire format:
+`docs/PROTOCOL.md`.
 
 | Need | Firmware 3.2.9 | Used how |
 |---|---|---|

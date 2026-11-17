@@ -1,7 +1,9 @@
 # Gateway host protocol (NDJSON)
 
 The protocol between the backend and the RP2040 gateway, as the backend uses it with gateway
-firmware **3.x** (C, `cyberpunk-prius-gateway/gateway-rp2350/`, `FW_VERSION` 3.2.9). Authoritative
+firmware **3.x** (C, `cyberpunk-prius-gateway/gateway-rp2350/`; read at `FW_VERSION` 3.2.9, the car
+runs 3.2.11 since 2026-11-17: transmit path and `can_diag` fields `tx_retry`/`poll_bad` changed, see
+[prius_can.md](prius_can.md) §9). Authoritative
 descriptions: `cyberpunk-prius-gateway/PROTOCOL.md` (envelope, v2 base) and
 `gateway-rp2350/README.md` ("Protocol: what changed"). The firmware facts below were read from
 `gateway-rp2350/src/` (`can_sol.c`, `mcp2515.c`, `commands.c`).

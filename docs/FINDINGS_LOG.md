@@ -1,0 +1,62 @@
+# Findings log
+
+One line per finding about the car, its buses and our hardware, newest first, with a link to where it
+is documented. Times CET. Add a line whenever a doc gains a confirmed fact or loses a wrong one.
+
+## 2026-11-17
+
+* `21D3` E = the HV ECU's switch inputs: `10` SET/COAST, `08` RES/ACC, bits 0–2 brake pedal; the stalk
+  is visible nowhere else ([CRUISE_CONTROL.md](CRUISE_CONTROL.md) §3.1).
+* Cruise resume memory = vehicle speed at the cancel (6/6), cleared below ~33–35 km/h and by the main
+  switch; RES with no memory does nothing ([CRUISE_CONTROL.md](CRUISE_CONTROL.md) §5).
+* Cruise tap = 1 mph (1.609 km/h); `21D3` B = internal set speed floored to km/h; ±5 km/h steps = 3 taps
+  ([CRUISE_CONTROL.md](CRUISE_CONTROL.md) §5).
+* 0x5C8 `A4` = the gateway's immediate-copy header, not a cruise bit; 0x120 byte H = checksum
+  ([CRUISE_CONTROL.md](CRUISE_CONTROL.md) §3.2).
+* Cruise latencies with the panda fix: 0x5C8 leads BEAN `62:C8` by 40–60 ms; 0x120 engaged leads the
+  `21D3` poll by 0.04–1.1 s ([CRUISE_CONTROL.md](CRUISE_CONTROL.md) §4).
+* 0x022 = yaw rate (two channels, ≈ 0.25 °/s per count), 0x023 = acceleration sensor with two channels
+  at ±45° ([prius_can.md](prius_can.md) §2).
+* 0x244 E,F = MG2 rpm, signed (direction), at broadcast rate ([prius_can.md](prius_can.md) §2).
+* Last byte of every powertrain broadcast frame 0x022–0x3CF is a Toyota checksum
+  ([prius_can.md](prius_can.md) §1).
+* 0x230 A,B distance counter (~103 counts/m), D bit 2 brake; 0x348 ICE-running bits; 0x03A E bit 4
+  accelerator pressed; 0x038 B ICE power request; 0x3C8 C ≈ rpm/32; 0x0B4 E bit 0 moving
+  ([prius_can.md](prius_can.md) §2, §3).
+* Gateway CAN transmit errors were the firmware's SPI polling during its own frame, not hardware; fw
+  3.2.11 fixed it; first drive 5379/5379 answered, TEC 0, no bus-off ([prius_can.md](prius_can.md) §9;
+  gateway repo `gateway-rp2350/README.md`, `captures/2026-11-17/`).
+* Panda reader keeps up on the car: ~1690 frames/s at ~20 % busy; passive frames no longer late
+  ([prius_can.md](prius_can.md) §8, [ARCHITECTURE.md](ARCHITECTURE.md) §3).
+* Powerbox fw 2.4.2 on the car: BEAN receiver 44 % cpu, 1 overflow in 27 min, 51.6 frames/s complete
+  ([powerbox/README.md](../powerbox/README.md) "Cost"; [BEAN_SIGNALS.md](BEAN_SIGNALS.md) §9).
+* Undecoded CAN ids reach the trip log once a second only; nothing faster than 1 Hz is visible in them
+  ([prius_can.md](prius_can.md) §8).
+* Analysis report of the day: `filedrop/uploads/prius_data_compare_2026-11-17.md` (owner's drop folder).
+
+## 2026-11-16
+
+* Cruise decode: `62:C8`/0x5C8 main switch, 0x120 E bit 7 engaged, `21D3` A speed, B set speed, C drive
+  request, D state ([BEAN_SIGNALS.md](BEAN_SIGNALS.md) §1).
+* Passive CAN reached the phone 0–5 s late (panda reader overloaded); halved poll traffic, 0x3CF air
+  temperatures replace OBD 0146/010F ([prius_can.md](prius_can.md) §2, §8).
+* Powerbox fw 2.4.1 lost 7–9 % of BEAN frames (attribute-table regression), fixed in 2.4.2
+  ([powerbox/README.md](../powerbox/README.md)).
+* Cabin temperature = BEAN `52:6D` b0, 0.25 °C/count; `52:6D` b1 `20` blower on; `98:CC` raw outside
+  sensor; meter odometer `52:3F` frozen at 299,999 km ([BEAN_SIGNALS.md](BEAN_SIGNALS.md) §4).
+* High beam = `FE:7F` b0 `08` / 0x57F B `38` ([BEAN_SIGNALS.md](BEAN_SIGNALS.md) §4.1).
+* Power-up sequence ACC → IG → READY on BEAN, experiment E1 done ([BEAN_SIGNALS.md](BEAN_SIGNALS.md)
+  §4.5).
+
+## 2026-11-15
+
+* 0x025 steering angle × 1.5° verified ([prius_can.md](prius_can.md) §2).
+* BEAN recording time base and delivery latency ([BEAN_SIGNALS.md](BEAN_SIGNALS.md) §9).
+* Battery health collector and analysis ([BATTERY_HEALTH.md](BATTERY_HEALTH.md)).
+
+## 2026-11-13 / 14
+
+* BEAN ID map, gateway BEAN ↔ CAN copies, no BEAN lock command on this car
+  ([BEAN_SIGNALS.md](BEAN_SIGNALS.md) §4, §5, §7).
+* `62:20`/0x520 = fuel per injection, flow = K × word × rpm; meter works on true speed, speedometer
+  12 % high ([BEAN_SIGNALS.md](BEAN_SIGNALS.md) §4.3, §4.4, §4.6).
