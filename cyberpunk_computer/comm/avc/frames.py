@@ -9,8 +9,11 @@ gateway-rp2350/README.md "Protocol: what changed":
 
 ``m``/``s`` are 12-bit hex addresses, ``d`` the data bytes as hex strings.
 ``b`` = broadcast, ``nak`` = an individual frame with an unacknowledged slot,
-``echo`` = our own transmission seen back on the bus. Lines on ID 2 without
-``m`` (e.g. the auto-reply slot acks ``{"auto":0,"on":true}``) are not frames.
+``echo`` = our own transmission seen back on the bus. Firmware 3.3.0+ adds
+``au`` = the gateway's stored personality answered this frame (on an echo: the
+personality sent it), so the host must not answer it again. Lines on ID 2
+without ``m`` (e.g. the auto-reply slot acks ``{"auto":0,"on":true}``, or the
+early-frame buffer's ``{"q":{frame}}``) are not live frames.
 
 Physical units (AVC_MAP.md): 110 = display (EMV), 1C6 = climate / info ECU
 (logicals E0 climate, E4/E5 info), 178 = navigation ECU (logical 58).
@@ -55,6 +58,7 @@ class AvcFrame:
     broadcast: bool = False
     nak: bool = False
     echo: bool = False
+    auto: bool = False
 
     @classmethod
     def from_gateway(cls, d: Dict[str, Any]) -> Optional["AvcFrame"]:
@@ -73,6 +77,7 @@ class AvcFrame:
                 broadcast=bool(d.get("b")),
                 nak=bool(d.get("nak")),
                 echo=bool(d.get("echo")),
+                auto=bool(d.get("au")),
             )
         except (TypeError, ValueError):
             return None
@@ -91,7 +96,7 @@ class AvcFrame:
         return " ".join(f"{b:02X}" for b in self.data)
 
     def __str__(self) -> str:  # pragma: no cover - debug helper
-        flags = "".join(f" {k}" for k in ("broadcast", "nak", "echo") if getattr(self, k))
+        flags = "".join(f" {k}" for k in ("broadcast", "nak", "echo", "auto") if getattr(self, k))
         return f"{self.master:03X}->{self.slave:03X} {self.hex()}{flags}"
 
 

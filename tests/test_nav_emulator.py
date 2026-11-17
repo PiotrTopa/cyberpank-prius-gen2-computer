@@ -49,6 +49,7 @@ def test_configure_matches_nav_emu_fw_auto_fw_ack():
         (2, {"a": "auto", "slot": 1, "on": True, "m": "110", "s": "FFF", "d": ["12", "01", "01"],
              "tx": {"m": "178", "s": "110", "c": 15, "d": "00 01 12 12 58 28 29 32 60 74 A4 56".split()}}),
         (0, {"a": "avc_cfg", "ack": "178"}),
+        (0, {"a": "whoami"}),       # feature detection (personality: fw >= 3.3.0)
     ]
     assert not any("pol" in p for _, _, p in bus.sent)      # polarity never touched
     bus.sent.clear()

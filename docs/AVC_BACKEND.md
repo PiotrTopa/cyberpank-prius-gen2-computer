@@ -118,8 +118,44 @@ On every serial (re)connect and on `GATEWAY_READY` the backend sends, in nav_emu
 | `00 25 58 84 KK 00` (KK ≠ 00) | `00 58 12 50 02 01` (+4 ms) |
 | `00 25 58 80 KK 00 00` | `00 58 12 50 02 01` |
 
-**Late start (2026-11-17).** The gateway is powered with ACC and its auto-reply slots are installed about 3 s later (`drop: 54` in the first heartbeat: frames lost before the host was connected). The display runs its roll call inside those 3 s and, if the nav screen was the last one shown, switches to it unanswered (`12 01 60 58`), then leaves it after ~2 s (`12 01 46`, `12 01 60 00`: "check external system"). Seen at 19:09:26: screen 58 at gateway uptime 3.5 s, screen 00 at 5.4 s, our announce at 7 s, setup dialogue done at 7.6 s. **Fix: the gateway is powered before ACC.** The entry signal that boots the MFD (doors unlocked / a door open on BEAN) now also holds the gateway's power (wake-lock `entry`, `state/rules/satellite_power.EntryHold`), and it stays on for `BACKEND_GATEWAY_ENTRY_GRACE_S` seconds after the last of entry signal and ACC. The code default is 0 = off (gateway starts with ACC); the car's `/etc/prius/backend.env` sets 300 as a workaround until gateway firmware 3.3.0 answers the dialogue from its own flash, then the line is removed (owner 2026-11-17: start with ACC, keep it configurable), so the auto-reply slots are installed long before the display's roll call. The same wake-lock powers the panda (same hub) and the RS485 rail. The gateway's CAN side then sees a sleeping bus, which firmware 3.2.10+ handles (`CAN_BUS_QUIET`: one unacknowledged probe per second, no retries, no bus-off from missing ACKs). Measured gap without it: ACC 26.39, relay acknowledged 27.37, hub enumerated 28.35, gateway 29.08, host connected and slots installed 30.31. A start with no entry signal (key turned more than 300 s after the last one, doors never unlocked) still has the gap; the fix for that is a gateway that answers the whole start-up dialogue from its own flash (the display finishes it within 1.2 s of the roll call: `12 01 01` at +1.02 s, identification and setup at +1.1 s, cold starts of 2026-10-14). A screen recall by the emulator (`00 58 12 50 02 01` unsolicited) was written and dropped the same day (owner: forcing the switch is the dirty way). **Not verified on the car yet.**
+**Late start (2026-11-17).** The gateway is powered with ACC and its auto-reply slots are installed about 3 s later (`drop: 54` in the first heartbeat: frames lost before the host was connected). The display runs its roll call inside those 3 s and, if the nav screen was the last one shown, switches to it unanswered (`12 01 60 58`), then leaves it after ~2 s (`12 01 46`, `12 01 60 00`: "check external system"). Seen at 19:09:26: screen 58 at gateway uptime 3.5 s, screen 00 at 5.4 s, our announce at 7 s, setup dialogue done at 7.6 s. **Fix: the gateway is powered before ACC.** The entry signal that boots the MFD (doors unlocked / a door open on BEAN) now also holds the gateway's power (wake-lock `entry`, `state/rules/satellite_power.EntryHold`), and it stays on for `BACKEND_GATEWAY_ENTRY_GRACE_S` seconds after the last of entry signal and ACC. The code default is 0 = off (gateway starts with ACC); the car's `/etc/prius/backend.env` sets 300 as a workaround until gateway firmware 3.3.0 answers the dialogue from its own flash, then the line is removed (owner 2026-11-17: start with ACC, keep it configurable), so the auto-reply slots are installed long before the display's roll call. The same wake-lock powers the panda (same hub) and the RS485 rail. The gateway's CAN side then sees a sleeping bus, which firmware 3.2.10+ handles (`CAN_BUS_QUIET`: one unacknowledged probe per second, no retries, no bus-off from missing ACKs). Measured gap without it: ACC 26.39, relay acknowledged 27.37, hub enumerated 28.35, gateway 29.08, host connected and slots installed 30.31. A start with no entry signal (key turned more than 300 s after the last one, doors never unlocked) still has the gap; gateway firmware 3.3.0 closes it: the gateway answers the whole start-up dialogue from a personality stored in its own flash, from power-on (see "Gateway personality" below; the display finishes the dialogue within 1.2 s of the roll call: `12 01 01` at +1.02 s, identification and setup at +1.1 s, cold starts of 2026-10-14). Built and tested on the host only (replay of the accepted 2026-10-14 sessions: identical replies); **not flashed, not verified on the car**. A screen recall by the emulator (`00 58 12 50 02 01` unsolicited) was written and dropped the same day (owner: forcing the switch is the dirty way). **Not verified on the car yet.**
 
+
+**Gateway personality (firmware 3.3.0, `comm/avc/personality.py`).** The gateway keeps a rule
+table in flash and answers the display itself from power-on, before the backend is connected
+(format and commands: `cyberpunk-prius-gateway/gateway-rp2350/README.md`, "Personality").
+`personality.nav_rules()` is the table above as rules, with the same delays: 21 rules, 918 bytes,
+crc `5B267644` for `--nav-lang 02` (it changes with the language). On every connect the emulator
+sends `whoami`; with firmware >= 3.3.0 it then
+
+1. asks for the early-frame buffer (`{"a":"early"}`): frames the gateway received while no host was
+   connected, with gateway-uptime `ts` and `au`. They update the session state only (roll call seen
+   and answered, display talks to 178, screen, grant) and are never answered; the log line
+   `early buffer: N frames, L lost, … roll call at T ms` records when the display's roll call came
+   after gateway power-on;
+2. reads `{"a":"pers"}` and compares CRC, rule count, enable flag and stored ACK address with the
+   wanted set. Equal: nothing is written. Different: `clear`, 21 × `set`, `avc_cfg ack 178`,
+   `enable`, `save` (the gateway skips the flash write when the sector already holds the same
+   bytes), then the status again. At most one write per connection; a rejected rule → `failed`,
+   a save that did not reach the flash → `ram_only`; in both cases the host keeps answering whatever
+   is not tagged;
+3. when verified (`personality: active` in `status()`): clears the two RAM auto-reply slots, sets
+   the gateway clock from the phone (`op:"clock"`, every 10 min again).
+
+No double answers: frames the personality answered arrive with `"au":1`; the emulator updates its
+state from them but sends nothing; `au` echoes get no NAK retry (the gateway retries itself); a
+grant with `au` means the gateway sends the heartbeats. Requests without `au` are answered by the
+host as before. Firmware 3.2.x: `whoami` reports the version, nothing else changes. At shutdown with
+an active personality only the RAM slots are cleared; the ACK 178 stays (the personality needs it).
+`--no-nav-personality` (`BackendConfig.nav_personality = False`): nothing is installed, an
+installed personality is switched off in RAM for the session (it still answers after the next
+gateway power-on until the backend connects).
+
+What the gateway does without the host: time reply from its clock (00:00:00 at power-on until the
+backend sets it, as the real nav before its GPS fix), screen grant and heartbeats (the display asks
+for screen 58 ~4.2 s after the roll call when it was the last screen, `run1_nav`, i.e. when the host
+is only just connecting). What stays here: the live announcement after a backend restart, climate
+remote presses, decoding.
 
 Heartbeats `178->1FF 58 31 F1 02 00` and 0.6 s later `178->FFF 58 01 DB 00 00 00 00 00 00` every 5 s,
 **only while the display shows screen 58**.
@@ -173,7 +209,13 @@ captures), and playback is paced by `ht`. Nav emulation is off in replay.
 * The recirculation button is assumed to toggle back to fresh air (only fresh → recirc is captured).
 * Live re-announcement after a backend restart follows the real nav's behaviour but has not been
   tried with the emulator in the car.
-* Time reply uses the phone's local clock (`00 01 01 HH MM SS FF`, as nav_emu.py does).
+* Time reply uses the phone's local clock (`00 01 01 HH MM SS FF`, as nav_emu.py does); with the
+  3.3.0 personality the gateway's clock, set from the phone at connect (00:00:00 + uptime before).
+  Whether the display shows or uses that time anywhere is unverified.
+* Gateway personality (3.3.0): host-tested only. Unverified on the car: that the display accepts the
+  gateway's answers from power-on (expected: they are byte-identical to the accepted 2026-10-14
+  sessions and ~1–4 ms earlier), the flash save in the car, the early-buffer timestamps, and the
+  time the gateway needs from ACC to its first answer (estimate: tens of ms after the MCU starts).
 * `pol` is never sent: the gateway detects the RX polarity at boot (`avc_pol` in `GATEWAY_READY`).
   The 2026-10-14 car sessions forced `pol hi` from nav_emu.py; whether boot detection picks the same
   on this PHY is unconfirmed (check `avc_pol` in the banner on the car). If it disagrees, the

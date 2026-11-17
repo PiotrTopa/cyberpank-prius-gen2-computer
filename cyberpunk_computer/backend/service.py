@@ -144,6 +144,10 @@ class BackendConfig:
     # gateway only (never in replay).
     nav_emulation: bool = True
     nav_lang: str = "02"        # B7 LL: 02 English (2026-10-14), 06 Dutch (run1)
+    # Gateway fw >= 3.3.0: install/verify the nav personality in the gateway's
+    # flash (it then answers the display from power-on). False: host answers
+    # only, and an active gateway personality is switched off (RAM) per session.
+    nav_personality: bool = True
 
     # ── Trip recording ───────────────────────────────────────────────────────
     # Record live (or replayed) traffic to rotating per-trip NDJSON files.
@@ -1079,7 +1083,8 @@ class BackendService:
                 include_cmd=False))
 
         self._nav_scheduler = ThreadScheduler(name="avc-nav")
-        nav = NavEmulator(_send, self._nav_scheduler, lang=self.config.nav_lang)
+        nav = NavEmulator(_send, self._nav_scheduler, lang=self.config.nav_lang,
+                          use_personality=self.config.nav_personality)
         serial_port.add_rx_hook(nav.on_gateway_line)
         serial_port.add_connect_hook(nav.configure)
         self.nav_emulator = nav

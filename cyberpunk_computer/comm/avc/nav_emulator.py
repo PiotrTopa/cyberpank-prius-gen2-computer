@@ -26,6 +26,31 @@ What it does
   setup dialogue (``00 12 01 03``, ``12 01 01`` …), which the normal handlers
   answer.
 
+Gateway personality (firmware 3.3.0+)
+-------------------------------------
+The gateway can answer the whole dialogue itself from rules in its flash
+(:mod:`.personality`), from power-on, before this backend is connected. On
+every connect the emulator asks ``whoami``; with firmware >= 3.3.0 it
+
+1. fetches the early-frame buffer (frames the gateway received before the
+   host connected) and folds it into its session state (roll call seen and
+   answered, display talking to 178, current screen) without answering any of
+   them (they are stale);
+2. reads the stored personality (``{"a":"pers"}``) and compares its CRC, rule
+   count, enable flag and ACK address with :func:`.personality.nav_blobs` for
+   the configured language; only when they differ it writes the rules and
+   saves them (one flash write per change, never at every connect);
+3. once verified: clears the two RAM auto-reply slots (the personality
+   answers the roll call), sets the gateway clock (time reply) and resyncs it
+   every 10 min.
+
+No double answers: a frame the personality answered arrives tagged ``"au":1``
+and is never answered here (state is still tracked); an ``au`` echo is a
+frame the gateway sent (no NAK retry here, the firmware retries itself); a
+screen grant answered by the gateway means the gateway owns the 5 s
+heartbeats. Untagged requests are answered as before. Older firmware (3.2.x)
+gets exactly the previous behaviour.
+
 Transmission is through a ``send(device_id, payload)`` callable that writes one
 gateway JSON line (``{"id": device_id, "d": payload}``).
 """
@@ -39,6 +64,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .frames import (AvcFrame, BCAST_1FF, BCAST_FFF, CLIMATE, DISPLAY, NAV,
                      parse_hex, tx_payload)
+from . import personality as _pers
 
 logger = logging.getLogger(__name__)
 
@@ -46,11 +72,11 @@ SendFn = Callable[[int, Dict[str, Any]], bool]
 
 # Identification reply to 00 12 58 8F (bytes after 00 58 12 9F). nav_emu.py
 # default = the 2026-10-14 English set; IDENT_NL = run1 2026-10-07.
-IDENT_EN = "02 F9 D1 13 0A 58 A6 9A 80 80"
-IDENT_NL = "02 F9 D1 3D 0A 58 A6 E4 80 8C"
+IDENT_EN = _pers.IDENT_EN
+IDENT_NL = _pers.IDENT_NL
 
-ROLL_CALL_REPLY = "00 01 12 10 58 24 85"                     # "I host logicals 58, 24, 85"
-ROLL_CALL_1_REPLY = "00 01 12 12 58 28 29 32 60 74 A4 56"
+ROLL_CALL_REPLY = _pers.ROLL_CALL_REPLY                      # "I host logicals 58, 24, 85"
+ROLL_CALL_1_REPLY = _pers.ROLL_CALL_1_REPLY
 LIVE_ANNOUNCE = "01 12 13 58 24 85"                          # 178->1FF, real nav 2026-10-14 15:07:09
 
 #: Gateway auto-reply slots (fw 3.2.0), exactly as nav_emu.py --fw-auto installs them.
@@ -60,6 +86,16 @@ AUTO_SLOTS = (
 )
 
 SOFT_BUTTONS = {0x01: "maintenance", 0x08: "calendar", 0x40: "language"}
+
+#: First gateway firmware with the stored personality and the early-frame buffer.
+PERSONALITY_MIN_VER = (3, 3, 0)
+
+
+def parse_version(v: Any) -> Optional[tuple]:
+    try:
+        return tuple(int(x) for x in str(v).split(".")[:3])
+    except (TypeError, ValueError):
+        return None
 
 
 def bcd(n: int) -> str:
@@ -82,6 +118,8 @@ class NavEmulator:
     ANNOUNCE_RETRY_S = 5.0
     ANNOUNCE_MAX = 3
     RC_RETRIES = 3
+    #: Gateway clock resync period while the personality is active.
+    CLOCK_RESYNC_S = 600.0
 
     def __init__(
         self,
@@ -96,6 +134,7 @@ class NavEmulator:
         ack_release: bool = True,
         clock: Callable[[], float] = time.localtime,
         on_status: Optional[Callable[[Dict[str, Any]], None]] = None,
+        use_personality: bool = True,
     ) -> None:
         self._send = send
         self._sched = scheduler
@@ -108,6 +147,10 @@ class NavEmulator:
         self._localtime = clock
         self._on_status = on_status
         self._lock = threading.RLock()
+        self.use_personality = use_personality
+        self._desired = _pers.nav_blobs(lang=lang, ident=ident, time_fmt=time_fmt, burst=burst,
+                                        btn_ack=btn_ack, ack_release=ack_release)
+        self._desired_crc = _pers.body_crc(self._desired)
 
         self.screen: Optional[int] = None     # display's active screen (12 01 60 XX)
         self.periodic_on = False
@@ -127,9 +170,24 @@ class NavEmulator:
         self._last_announce: float = 0.0
         self._tick_running = False
 
+        # Gateway firmware / personality (3.3.0+).
+        self.fw_ver: Optional[tuple] = None
+        self.pers = "unknown"        # unknown|unsupported|checking|writing|active|ram_only|failed|disabled
+        self.pers_status: Optional[Dict[str, Any]] = None
+        self.early: Optional[Dict[str, Any]] = None     # last early-buffer summary
+        self.early_rollcall_ms: Optional[int] = None    # gateway uptime of the roll call (early buffer)
+        self._pers_writes = 0
+        self._fw_periodic = False    # the gateway sends the 5 s heartbeats
+        self._suppress = False       # handling a frame the gateway already answered
+        self._screen_live = False    # screen known from a live frame (early frames must not override)
+        self._last_clock: Optional[float] = None
+
     # ── io ────────────────────────────────────────────────────────────────
 
     def _tx(self, slave: int, data: str, bcast: bool = False, delay: float = 0.0) -> None:
+        if self._suppress:          # the gateway's personality answered this request
+            return
+
         def go() -> None:
             if not self.enabled:
                 return
@@ -162,6 +220,8 @@ class NavEmulator:
             "registered": self._display_talks,
             "tx": self.n_tx,
             "announces": self._announces,
+            "fw": ".".join(map(str, self.fw_ver)) if self.fw_ver else None,
+            "personality": self.pers,
         }
 
     # ── gateway configuration ─────────────────────────────────────────────
@@ -179,8 +239,18 @@ class NavEmulator:
                     "tx": tx_payload(NAV, DISPLAY, reply),
                 })
             self._send(0, {"a": "avc_cfg", "ack": f"{NAV:03X}"})
+            # Feature detection: IDENT carries the firmware version (3.3.0+:
+            # stored personality, early-frame buffer). Every version answers it.
+            self._send(0, {"a": "whoami"})
             self.configured = True
             self.rc_retries = 0
+            self.fw_ver = None
+            self.pers = "unknown"
+            self.pers_status = None
+            self._pers_writes = 0
+            self._fw_periodic = False
+            self._screen_live = False
+            self._last_clock = None
             # A fresh connection: re-evaluate whether the display knows us.
             self._session_start = None
             self._last_frame_t = None
@@ -195,6 +265,14 @@ class NavEmulator:
         """Undo :meth:`configure` (nav_emu.py does this at exit)."""
         with self._lock:
             if not self.configured:
+                return
+            if self.pers in ("active", "ram_only"):
+                # The gateway is the nav now (rules in its flash, answered from
+                # power-on): keep its 178 ACK, without it the display's unicasts die.
+                for slot, _m, _r in AUTO_SLOTS:
+                    self._send(2, {"a": "auto", "slot": slot, "on": False})
+                self.configured = False
+                self._note("gateway deconfigured (personality and ACK 178 stay in the gateway)")
                 return
             self._send(0, {"a": "avc_cfg", "ack": "000"})
             for slot, _m, _r in AUTO_SLOTS:
@@ -220,8 +298,9 @@ class NavEmulator:
                 self.periodic_on = False
                 return
             # Only while the display is on the nav screen (run1_nav; emu6 2026-10-14:
-            # otherwise the display asks 00 12 58 43 02 00 every second).
-            if self.screen == 0x58:
+            # otherwise the display asks 00 12 58 43 02 00 every second), and
+            # not when the gateway's personality sends them.
+            if self.screen == 0x58 and not self._fw_periodic:
                 self._tx(BCAST_1FF, "58 31 F1 02 00", bcast=True)
                 self._tx(BCAST_FFF, "58 01 DB 00 00 00 00 00 00", bcast=True, delay=0.6)
             self._sched.call_later(5.0, beat)
@@ -263,12 +342,35 @@ class NavEmulator:
                 # Gateway rebooted: its RAM tables are gone.
                 self._note("GATEWAY_READY -> reconfigure")
                 self.configure()
+            if msg in ("IDENT", "GATEWAY_READY", "GW_HB") and "ver" in d:
+                self._on_version(d.get("ver"))
             return
         if dev != 2 or not isinstance(d, dict):
             return
-        frame = AvcFrame.from_gateway(d)
-        if frame is not None:
-            self.on_frame(frame)
+        if "m" in d:
+            frame = AvcFrame.from_gateway(d)
+            if frame is not None:
+                self.on_frame(frame)
+        elif isinstance(d.get("q"), dict):
+            frame = AvcFrame.from_gateway(d["q"])
+            if frame is not None:
+                self.on_early_frame(frame, obj.get("ts"))
+        elif isinstance(d.get("pers"), dict):
+            self._on_pers_status(d["pers"])
+        elif "pers_save" in d:
+            self._on_pers_save(d)
+        elif "pers_set" in d and d.get("ok") is False:
+            with self._lock:
+                self.pers = "failed"
+                self._note(f"personality rule {d.get('pers_set')} rejected (err {d.get('err')}): host answers")
+            self._status()
+        elif isinstance(d.get("early"), dict):
+            with self._lock:
+                self.early = d["early"]
+                rc = self.early_rollcall_ms
+                self._note(f"early buffer: {d['early'].get('n')} frames, {d['early'].get('lost')} lost, "
+                           f"gateway now {d['early'].get('now')} ms"
+                           + (f", roll call at {rc} ms" if rc is not None else ", no roll call"))
 
     def on_frame(self, f: AvcFrame) -> None:
         with self._lock:
@@ -287,7 +389,9 @@ class NavEmulator:
                 self.n_echo += 1
                 # Roll-call answer not acknowledged by the display: resend
                 # (2026-10-14 cold start: first answer NAKed, never retried).
-                if f.nak and f.master == NAV and _hex(f.data) == ROLL_CALL_REPLY \
+                # An "au" echo was sent by the gateway's personality, which
+                # retries on its own.
+                if f.nak and not f.auto and f.master == NAV and _hex(f.data) == ROLL_CALL_REPLY \
                         and self.rc_retries < self.RC_RETRIES:
                     self.rc_retries += 1
                     self._note(f"roll-call answer NAKed -> retry {self.rc_retries}")
@@ -297,12 +401,17 @@ class NavEmulator:
                 return
             if f.slave == NAV:
                 self._display_talks = True
-            self._handle(f)
+            self._suppress = f.auto
+            try:
+                self._handle(f)
+            finally:
+                self._suppress = False
 
     def _handle(self, f: AvcFrame) -> None:
         b = f.data
         data = _hex(b)
         if data.startswith("12 01 60 ") and len(b) >= 4:
+            self._screen_live = True
             if b[3] != self.screen:
                 self.screen = b[3]
                 self._note(f"display screen -> {self.screen:02X}")
@@ -313,7 +422,8 @@ class NavEmulator:
             return
         if data == "12 01 00":
             self._rollcall_seen = True
-            self._note("roll call 12 01 00 (gateway auto-reply slot 0 answers)")
+            self._note("roll call 12 01 00 (gateway answers: %s)"
+                       % ("personality" if f.auto else "auto-reply slot 0"))
             return
         if data == "12 01 01":
             return                                  # gateway auto-reply slot 1 answers
@@ -346,13 +456,18 @@ class NavEmulator:
             self._tx(DISPLAY, "00 58 12 52 02 01")
             self._tx(BCAST_1FF, "58 31 F1 02 00", bcast=True, delay=0.004)
             self.screen = 0x58
-            self._start_periodic()
+            self._screen_live = True
+            if f.auto:
+                self._fw_periodic = True            # the gateway's periodic rule beats
+            else:
+                self._start_periodic()
             self._status()
         elif data == "00 12 58 43 02 00":           # screen release request
             if self.ack_release:
                 self._tx(DISPLAY, "00 58 12 53 02 00")
                 self._tx(BCAST_1FF, "58 31 F1 00 00", bcast=True, delay=0.002)
             self.screen = None
+            self._screen_live = True
             self._status()
         elif data.startswith("00 25 58 80") and len(b) >= 5:   # info soft buttons
             self._note("soft button %02X (%s)" % (b[4], SOFT_BUTTONS.get(b[4], "?")))
@@ -361,6 +476,121 @@ class NavEmulator:
         elif data.startswith("00 25 58 84") and len(b) >= 5:   # hardware buttons
             if b[4] != 0 and self.btn_ack:
                 self._tx(DISPLAY, "00 58 12 50 02 01", delay=0.004)
+
+    # ── gateway personality (fw 3.3.0+) ────────────────────────────────────
+
+    def _on_version(self, ver: Any) -> None:
+        v = parse_version(ver)
+        with self._lock:
+            if v is None or self.fw_ver is not None or not self.configured:
+                return
+            self.fw_ver = v
+            if v < PERSONALITY_MIN_VER:
+                self.pers = "unsupported"
+                self._note(f"gateway {ver}: no personality (host answers, RAM auto-reply slots)")
+                return
+            # Frames the gateway kept while we were not connected, then the stored rules.
+            self._send(2, {"a": "early"})
+            self.pers = "checking"
+            self._send(2, {"a": "pers"})
+        self._status()
+
+    def _desired_matches(self, st: Dict[str, Any], stored: bool) -> bool:
+        src = (st.get("stored") or {}) if stored else st
+        try:
+            crc = int(str(src.get("crc")), 16)
+        except (TypeError, ValueError):
+            return False
+        ok = crc == self._desired_crc and src.get("n") == len(self._desired) and bool(src.get("on"))
+        if stored:
+            ok = ok and str(src.get("ack", "")).upper() == f"{NAV:03X}"
+        return ok
+
+    def _on_pers_status(self, st: Dict[str, Any]) -> None:
+        with self._lock:
+            self.pers_status = st
+            if self.pers in ("unknown", "unsupported") or not self.configured:
+                return
+            ram_ok = self._desired_matches(st, stored=False)
+            stored_ok = self._desired_matches(st, stored=True)
+            if not self.use_personality:
+                if st.get("active"):
+                    self._send(2, {"a": "pers", "op": "enable", "on": False})     # RAM only
+                    self._note("gateway personality disabled for this session (use_personality=False)")
+                self.pers = "disabled"
+            elif ram_ok and stored_ok:
+                if self.pers != "active":
+                    self.pers = "active"
+                    self._fw_periodic = True
+                    # One source of truth: the personality answers the roll call.
+                    for slot, _m, _r in AUTO_SLOTS:
+                        self._send(2, {"a": "auto", "slot": slot, "on": False})
+                    self._send_clock()
+                    self._note(f"gateway personality verified ({len(self._desired)} rules, "
+                               f"crc {self._desired_crc:08X}, flash {st.get('flash')})")
+            elif self._pers_writes >= 1:
+                # Written once this connection and still not right: do not loop on flash writes.
+                self.pers = "ram_only" if ram_ok and st.get("active") else "failed"
+                self._note(f"gateway personality not verified after writing ({self.pers}); host answers "
+                           "whatever the gateway does not tag")
+            else:
+                self._pers_writes += 1
+                self.pers = "writing"
+                if not ram_ok:
+                    self._send(2, {"a": "pers", "op": "clear"})
+                    for i, blob in enumerate(self._desired):
+                        self._send(2, {"a": "pers", "op": "set", "i": i, "r": blob.hex().upper()})
+                self._send(0, {"a": "avc_cfg", "ack": f"{NAV:03X}"})
+                self._send(2, {"a": "pers", "op": "enable", "on": True})
+                self._send(2, {"a": "pers", "op": "save"})
+                self._note(f"gateway personality differs (ram {'ok' if ram_ok else 'differs'}, stored "
+                           f"{'ok' if stored_ok else 'differs'}): writing {len(self._desired)} rules + save")
+        self._status()
+
+    def _on_pers_save(self, d: Dict[str, Any]) -> None:
+        with self._lock:
+            self._note(f"gateway personality save: {d.get('pers_save')} ({d.get('ms')} ms)")
+            if self.configured:
+                self._send(2, {"a": "pers"})                 # verify
+
+    def _send_clock(self) -> None:
+        lt = self._localtime()
+        self._send(2, {"a": "pers", "op": "clock", "s": lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec})
+        self._last_clock = self._sched.now()
+
+    def on_early_frame(self, f: AvcFrame, ts: Any = None) -> None:
+        """A frame from the gateway's early buffer (received before we were
+        connected): session state only, never answered (it is stale)."""
+        with self._lock:
+            if not self.enabled:
+                return
+            now = self._sched.now()
+            if self._last_frame_t is None:
+                self._last_frame_t = now
+                self._session_start = now
+            if f.echo or f.master != DISPLAY:
+                return
+            b = f.data
+            data = _hex(b)
+            if f.slave == NAV:
+                self._display_talks = True
+            if data == "12 01 00":
+                if isinstance(ts, int):
+                    self.early_rollcall_ms = ts
+                # Answered by the personality: the display set up the nav. Not
+                # answered: leave it to the live announcement (display re-runs setup).
+                if f.auto:
+                    self._rollcall_seen = True
+            if self._screen_live:
+                return
+            if data.startswith("12 01 60 ") and len(b) >= 4:
+                self.screen = b[3]
+            elif data == "00 12 58 42 02 01" and f.auto:
+                self.screen = 0x58
+                self._fw_periodic = True
+            elif data == "00 12 58 43 02 00" and f.auto:
+                self.screen = None
+        self._status()
 
     # ── live-bus announcement supervisor ──────────────────────────────────
 
@@ -382,6 +612,9 @@ class NavEmulator:
 
     def tick(self) -> None:
         with self._lock:
+            if self.enabled and self.configured and self.pers == "active" and self._last_clock is not None \
+                    and self._sched.now() - self._last_clock >= self.CLOCK_RESYNC_S:
+                self._send_clock()
             if not (self.enabled and self.configured) or self._session_start is None:
                 return
             now = self._sched.now()

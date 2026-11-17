@@ -489,6 +489,7 @@ def _build_config(args: argparse.Namespace) -> BackendConfig:
         replay_loop=args.replay_loop,
         nav_emulation=not args.no_nav_emu,
         nav_lang=args.nav_lang,
+        nav_personality=not args.no_nav_personality,
         recording=_build_recording(args),
         powerbox_enabled=not args.no_powerbox,
         power_mode_flag=args.power_mode_flag,
@@ -598,6 +599,11 @@ def main() -> None:
     avc.add_argument(
         "--nav-lang", default="02",
         help="display UI language the emulated nav sets (B7 LL): 02 English, 06 Dutch",
+    )
+    avc.add_argument(
+        "--no-nav-personality", action="store_true",
+        help="gateway fw >= 3.3.0: do not install the nav personality in the gateway's flash; "
+             "switch an installed one off for this session (RAM) and answer from the host",
     )
 
     # Trip recording (rotating per-trip NDJSON logs)

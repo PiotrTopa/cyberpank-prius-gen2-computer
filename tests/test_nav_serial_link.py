@@ -35,7 +35,7 @@ def test_configure_on_connect_and_fast_reply():
     svc._wire_nav_emulator(port)
     try:
         assert port.start()
-        cfg = read_lines(master, want=3)
+        cfg = read_lines(master, want=4)
         assert cfg == [
             {"id": 2, "d": {"a": "auto", "slot": 0, "on": True, "m": "110", "s": "FFF",
                             "d": ["12", "01", "00"],
@@ -46,6 +46,7 @@ def test_configure_on_connect_and_fast_reply():
                             "tx": {"m": "178", "s": "110", "c": 15,
                                    "d": "00 01 12 12 58 28 29 32 60 74 A4 56".split()}}},
             {"id": 0, "d": {"a": "avc_cfg", "ack": "178"}},
+            {"id": 0, "d": {"a": "whoami"}},
         ]
         t0 = time.time()
         os.write(master, (json.dumps({"id": 2, "ts": 1, "d": {
