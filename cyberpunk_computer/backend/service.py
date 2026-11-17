@@ -1078,7 +1078,9 @@ class BackendService:
                 include_cmd=False))
 
         self._nav_scheduler = ThreadScheduler(name="avc-nav")
-        nav = NavEmulator(_send, self._nav_scheduler, lang=self.config.nav_lang)
+        # BACKEND_NAV_RECALL=0 turns the screen recall after a late start off.
+        nav = NavEmulator(_send, self._nav_scheduler, lang=self.config.nav_lang,
+                          recall=os.environ.get("BACKEND_NAV_RECALL", "1") != "0")
         serial_port.add_rx_hook(nav.on_gateway_line)
         serial_port.add_connect_hook(nav.configure)
         self.nav_emulator = nav

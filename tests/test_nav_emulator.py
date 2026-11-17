@@ -186,3 +186,56 @@ def test_replies_equal_nav_emu_recording(rel, kw, later):
                 for _, p in tx_records(path)]
     assert len(recorded) > 50
     assert ours == recorded
+
+
+def _late_start(recall=True):
+    """Car start of 2026-11-17 19:09:26 as the gateway delivered it: no roll call
+    (lost while the gateway booted), screen 58 unanswered, screen 00 after 1.9 s,
+    our announce, then the setup dialogue."""
+    bus, emu = make(recall=recall)
+    emu.configure()
+    bus.sent.clear()
+    feed(emu, bus, 0x1C6, 0x110, "00 E4 00 95 00")
+    feed(emu, bus, 0x110, 0xFFF, "12 01 60 58 01 00 05", dt=0.6, broadcast=True)
+    feed(emu, bus, 0x110, 0xFFF, "12 01 60 00 05 00 05", dt=1.9, broadcast=True)
+    for _ in range(12):
+        feed(emu, bus, 0x1C6, 0x110, "00 E4 5F B9 00 00 00", dt=0.1)
+    assert ("1FF", "01 12 13 58 24 85", True) in bus.frames()
+    feed(emu, bus, 0x110, 0x178, "00 12 01 02 11 00 17 82")
+    return bus, emu
+
+
+def test_late_start_recalls_the_nav_screen_once():
+    bus, emu = _late_start()
+    assert ("110", "00 58 12 50 02 01", False) not in bus.frames()     # not before the burst is out
+    bus.sched.advance(2.0)
+    assert bus.frames().count(("110", "00 58 12 50 02 01", False)) == 1
+    # the display answers with a screen request -> grant, heartbeats on
+    feed(emu, bus, 0x110, 0x178, "00 12 58 42 02 01")
+    assert ("110", "00 58 12 52 02 01", False) in bus.frames()
+    assert emu.periodic_on
+    # a second setup dialogue in the same session does not recall again
+    feed(emu, bus, 0x110, 0x178, "00 12 58 43 02 00")
+    feed(emu, bus, 0x110, 0x178, "00 12 01 02 11 00 17 82")
+    bus.sched.advance(5.0)
+    assert bus.frames().count(("110", "00 58 12 50 02 01", False)) == 1
+
+
+def test_no_recall_when_not_wanted_or_already_back_or_disabled():
+    # setup dialogue without the display ever showing 58: nothing to recall
+    bus, emu = make()
+    emu.configure()
+    bus.sent.clear()
+    feed(emu, bus, 0x110, 0xFFF, "12 01 00", broadcast=True)
+    feed(emu, bus, 0x110, 0x178, "00 12 01 02 11 00 17 82")
+    bus.sched.advance(5.0)
+    assert ("110", "00 58 12 50 02 01", False) not in bus.frames()
+    # the driver pressed MAP before the recall fired: screen 58 again -> no frame
+    bus, emu = _late_start()
+    feed(emu, bus, 0x110, 0x178, "00 12 58 42 02 01", dt=0.5)
+    bus.sched.advance(5.0)
+    assert ("110", "00 58 12 50 02 01", False) not in bus.frames()
+    # switch
+    bus, emu = _late_start(recall=False)
+    bus.sched.advance(5.0)
+    assert ("110", "00 58 12 50 02 01", False) not in bus.frames()

@@ -25,6 +25,14 @@ What it does
   ``178->1FF 01 12 13 58 24 85`` (broadcast). The display then re-runs the
   setup dialogue (``00 12 01 03``, ``12 01 01`` …), which the normal handlers
   answer.
+* Late start (car start of 2026-11-17 19:09:26): the gateway is powered with
+  ACC and needs about 3 s until its auto-reply slots are installed. The display
+  runs its roll call and, if the nav screen was the last one shown, switches to
+  screen 58 inside those 3 s; nobody answers, and 2 s later it leaves the screen
+  ("check external system"; ``12 01 60 58`` then ``12 01 60 00``). Once the
+  setup dialogue has run after all, the emulator asks for the screen back with
+  the frame the nav sends after a button press (``00 58 12 50 02 01``), to
+  which the display answers with a normal screen request.
 
 Transmission is through a ``send(device_id, payload)`` callable that writes one
 gateway JSON line (``{"id": device_id, "d": payload}``).
@@ -82,6 +90,11 @@ class NavEmulator:
     ANNOUNCE_RETRY_S = 5.0
     ANNOUNCE_MAX = 3
     RC_RETRIES = 3
+    #: Screen recall after a late start: only this soon after the bus woke up,
+    #: sent this long after the setup dialogue (the initial burst takes 1 s).
+    RECALL_WINDOW_S = 30.0
+    RECALL_DELAY_S = 1.5
+    SCREEN_PLEASE = "00 58 12 50 02 01"
 
     def __init__(
         self,
@@ -94,6 +107,7 @@ class NavEmulator:
         burst: bool = True,
         btn_ack: bool = True,
         ack_release: bool = True,
+        recall: bool = True,
         clock: Callable[[], float] = time.localtime,
         on_status: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> None:
@@ -105,6 +119,7 @@ class NavEmulator:
         self.burst = burst
         self.btn_ack = btn_ack
         self.ack_release = ack_release
+        self.recall = recall
         self._localtime = clock
         self._on_status = on_status
         self._lock = threading.RLock()
@@ -126,6 +141,9 @@ class NavEmulator:
         self._announces = 0
         self._last_announce: float = 0.0
         self._tick_running = False
+        # Late start: the display showed screen 58 before we could grant it.
+        self._nav_wanted = False
+        self._recalls = 0
 
     # ── io ────────────────────────────────────────────────────────────────
 
@@ -281,6 +299,8 @@ class NavEmulator:
                 self._rollcall_seen = False
                 self._display_talks = False
                 self._announces = 0
+                self._nav_wanted = False
+                self._recalls = 0
             self._last_frame_t = now
 
             if f.echo:
@@ -303,6 +323,8 @@ class NavEmulator:
         b = f.data
         data = _hex(b)
         if data.startswith("12 01 60 ") and len(b) >= 4:
+            if b[3] == 0x58 and not self.periodic_on:
+                self._nav_wanted = True             # shown without our grant (late start)
             if b[3] != self.screen:
                 self.screen = b[3]
                 self._note(f"display screen -> {self.screen:02X}")
@@ -332,6 +354,7 @@ class NavEmulator:
         elif data.startswith("00 12 01 02 11 00 17 82"):
             self._note("setup done -> initial burst")
             self._initial_burst()
+            self._maybe_recall()
         elif data == "00 32 58 E0":
             self._tx(DISPLAY, "00 58 32 F0 C9 00 00 01")
         elif data == "00 6E 58 E0":
@@ -361,6 +384,27 @@ class NavEmulator:
         elif data.startswith("00 25 58 84") and len(b) >= 5:   # hardware buttons
             if b[4] != 0 and self.btn_ack:
                 self._tx(DISPLAY, "00 58 12 50 02 01", delay=0.004)
+
+    # ── screen recall after a late start ──────────────────────────────────
+
+    def _maybe_recall(self) -> None:
+        """The display wanted the nav screen before we were ready and has left
+        it: ask for it back, once per bus session."""
+        if not self.recall or not self._nav_wanted or self._recalls:
+            return
+        if self._session_start is None or \
+                self._sched.now() - self._session_start > self.RECALL_WINDOW_S:
+            return
+        self._recalls += 1
+
+        def go() -> None:
+            with self._lock:
+                if not self.enabled or self.screen == 0x58 or self.periodic_on:
+                    return                          # the display came back by itself
+                self._note("late start: display left screen 58 unanswered -> screen recall")
+                self._tx(DISPLAY, self.SCREEN_PLEASE)
+
+        self._sched.call_later(self.RECALL_DELAY_S, go)
 
     # ── live-bus announcement supervisor ──────────────────────────────────
 
