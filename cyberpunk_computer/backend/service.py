@@ -1802,16 +1802,18 @@ class BackendService:
     def _entry_hold_tick(self, active: bool, pb) -> None:
         """Gateway power before ACC: hold the ``"entry"`` wake-lock from the
         entry signal that boots the MFD (doors unlocked / a door open) or ACC,
-        until BACKEND_GATEWAY_ENTRY_GRACE_S (300 s) after the last of them;
-        0 turns it off (gateway with ACC only, as before 2026-11-17). Not
+        until BACKEND_GATEWAY_ENTRY_GRACE_S seconds after the last of them.
+        Default 0 = off: the gateway starts with ACC (the intended setting once
+        gateway firmware 3.3.0 answers the display from its own flash); the car
+        runs with 300 until then. Not
         acquired on an entry signal alone while the 12 V supply is low."""
         hold = getattr(self, "_entry_hold", None)
         if hold is None:
             from ..state.rules.satellite_power import EntryHold
             try:
-                grace = float(os.environ.get("BACKEND_GATEWAY_ENTRY_GRACE_S", "300"))
+                grace = float(os.environ.get("BACKEND_GATEWAY_ENTRY_GRACE_S", "0"))
             except ValueError:
-                grace = 300.0
+                grace = 0.0
             hold = self._entry_hold = EntryHold(grace)
         if hold.grace_s <= 0 or self.twin is None:
             return
