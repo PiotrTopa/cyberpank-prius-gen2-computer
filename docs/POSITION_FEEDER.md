@@ -2,8 +2,10 @@
 
 The backend delivers raw GNSS fixes and vehicle motion to roadsense's map daemon `mapd` over its
 position input API v1 (roadsense docs/ARCHITECTURE.md, "mapd"). roadsense owns all position
-filtering, dead reckoning and map matching; the backend only feeds. Status: built 2026-11-15 on the
-dev box, not deployed; no real GNSS source exists yet. The phone's own receiver (`phone`, section 11)
+filtering, dead reckoning and map matching; the backend only feeds. Status: on the car; since
+2026-11-17 the head unit's GPS is the real source (`prius-gnss-bridge.service`,
+[HEADUNIT_INTEGRATION.md](HEADUNIT_INTEGRATION.md) §7.4; first check parked: 1 Hz, `hAcc` 1–4 m,
+mapd `good`; a drive with it is still to be evaluated). The phone's own receiver (`phone`, section 11)
 is built and runs as a fallback behind the head unit, but in the car (phone in its box) it tracked no
 satellite in 20 min on 2026-11-15.
 
@@ -265,8 +267,9 @@ Deploy (none of this was done):
 
 ## 9. Open gaps
 
-* No real GNSS source: the head-unit side (agent app sending §4) does not exist; its fix latency,
-  `age_ms` availability and accuracy fields are untested. The phone's receiver got no fix in the car
+* The head unit is the GNSS source since 2026-11-17 (parked check only): fix quality while driving,
+  in street canyons and after tunnels, the map match on real roads and the map features on the MFD
+  are still to be evaluated on a drive. No `utc_ms`, speed or course accuracy from this route. The phone's receiver got no fix in the car
   (section 11.3); a fix, its accuracy, latency and the UERE factor are unmeasured.
 * Motion is untested against a running mapd on the car; timestamps are panda receipt times (bus
   delay assumed a few ms, not measured).

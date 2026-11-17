@@ -12,7 +12,10 @@ leaves the car computer.
 Limits (see docs/HEADUNIT_INTEGRATION.md §7):
 * ``dumpsys`` only shows a fresh GPS fix while some app on the unit requests GPS
   updates (a navigation app, or MediaTek's YGPS: ``hu-gnss-bridge --start-ygps``).
-* Poll rate ~1 Hz; a 5/10 Hz receiver is decimated.
+* Poll every 0.4 s (one dumpsys costs the unit 30 ms); the unit's receiver gives 1 Hz,
+  so a fix is 0..0.4 s old when sent and ``age_ms`` says how old.
+* Measured on the car 2026-11-17: the unit's launcher holds a permanent GPS request,
+  so no app is needed.
 
 Usage:
   hu-gnss-bridge                    dry run: print the fixes it would send (default)
@@ -20,6 +23,8 @@ Usage:
   hu-gnss-bridge --once             one sample, print and exit (with --post: send it)
   hu-gnss-bridge --provider fused   another provider than gps
   hu-gnss-bridge --log FILE         also append every raw sample block to FILE
+  hu-gnss-bridge --post --quiet     service mode (prius-gnss-bridge.service): no line per
+                                    fix, one statistics line per minute and on state edges
   hu-gnss-bridge --start-ygps       start MediaTek YGPS on the unit first (a UI app;
                                     changes the screen, needs --write as well)
   hu-gnss-bridge --source logcat    read fixes from the PriusGnss app's logcat lines
@@ -208,6 +213,110 @@ def post(url: str, token: str, fix: Dict) -> Tuple[int, str]:
         return 0, str(e)
 
 
+class Stats:
+    """Counters for the service log: one line per minute while fixes flow."""
+
+    def __init__(self) -> None:
+        self.t0 = time.monotonic()
+        self.sent = self.ok = self.failed = self.stale = 0
+        self.last_err = ""
+        self.last: Dict = {}
+
+    def count(self, code: int, body: str, fix: Dict) -> None:
+        self.sent += 1
+        accepted = code == 200 and '"accepted":1' in body.replace(" ", "")
+        if accepted:
+            self.ok += 1
+        else:
+            self.failed += 1
+            self.last_err = "%s %s" % (code, body.strip()[:120])
+        self.last = fix
+
+    def tick(self, quiet: bool, period: float = 60.0) -> None:
+        if not quiet or time.monotonic() - self.t0 < period:
+            return
+        print("fixes: sent %d accepted %d failed %d stale %d; last hacc %s m sats %s age %s ms%s" % (
+            self.sent, self.ok, self.failed, self.stale, self.last.get("hacc_m"), self.last.get("sats"),
+            self.last.get("age_ms"), ("; last error " + self.last_err) if self.last_err else ""),
+            file=sys.stderr, flush=True)
+        self.__init__()
+
+
+USBDEVFS_RESET = 0x5514          # _IO('U', 20)
+
+
+def usb_node(vendor: str = "0e8d", sysfs: str = "/sys/bus/usb/devices") -> Optional[str]:
+    """/dev/bus/usb path of the head unit when it is enumerated, else None."""
+    try:
+        names = sorted(os.listdir(sysfs))
+    except OSError:
+        return None
+    for name in names:
+        d = os.path.join(sysfs, name)
+        try:
+            with open(os.path.join(d, "idVendor")) as f:
+                if f.read().strip() != vendor:
+                    continue
+            with open(os.path.join(d, "busnum")) as f:
+                bus = int(f.read())
+            with open(os.path.join(d, "devnum")) as f:
+                dev = int(f.read())
+        except (OSError, ValueError):
+            continue
+        return "/dev/bus/usb/%03d/%03d" % (bus, dev)
+    return None
+
+
+def usb_reset(node: str) -> str:
+    """USB port reset of the unit (the udev rule gives the plugdev group write access)."""
+    import fcntl
+    try:
+        fd = os.open(node, os.O_WRONLY)
+    except OSError as e:
+        return "open failed: %s" % e
+    try:
+        fcntl.ioctl(fd, USBDEVFS_RESET, 0)
+        return "done"
+    except OSError as e:
+        return "ioctl: %s" % e          # ENODEV = the unit re-enumerated during the reset
+    finally:
+        os.close(fd)
+
+
+class Recovery:
+    """The unit is on USB but adb does not get a connection (seen 2026-11-17: adb's
+    CNXN write ends in EPROTO / a timeout after the adb server was replaced a few
+    times; a USB reset of the unit cured it). Steps, each after the unit has been
+    enumerated but unreachable for `wait_s`: a USB reset, then an adb server
+    restart, then again with the wait doubled up to `max_wait_s`."""
+
+    def __init__(self, wait_s: float = 20.0, max_wait_s: float = 300.0) -> None:
+        self.base = self.wait = wait_s
+        self.max_wait = max_wait_s
+        self.since: Optional[float] = None
+        self.step = 0
+
+    def ok(self) -> None:
+        self.since, self.step, self.wait = None, 0, self.base
+
+    def due(self, present: bool, now: float) -> Optional[str]:
+        """Name of the step to run now ("usb_reset" / "adb_restart"), else None."""
+        if not present:
+            self.since = None
+            return None
+        if self.since is None:
+            self.since = now
+            return None
+        if now - self.since < self.wait:
+            return None
+        self.since = now
+        action = "usb_reset" if self.step % 2 == 0 else "adb_restart"
+        self.step += 1
+        if self.step % 2 == 0:
+            self.wait = min(self.wait * 2, self.max_wait)
+        return action
+
+
 def adb_cmd(serial: Optional[str]) -> List[str]:
     adb = os.environ.get("ADB", "adb")
     if not shutil.which(adb):
@@ -222,7 +331,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--provider", default="gps")
     ap.add_argument("--source", choices=("dumpsys", "logcat"), default="dumpsys",
                     help="dumpsys = poll `dumpsys location` (no app); logcat = PriusGnss app lines")
-    ap.add_argument("--interval", type=float, default=1.0, help="remote poll sleep, s")
+    ap.add_argument("--interval", type=float, default=0.4, help="remote poll sleep, s")
+    ap.add_argument("--max-age-ms", type=int, default=2000,
+                    help="do not send a fix older than this (the last known location after a "
+                         "tunnel or at start; the backend rejects 2.5 s and older)")
+    ap.add_argument("--quiet", action="store_true", help="statistics once a minute, no line per fix")
     ap.add_argument("--api", default=os.environ.get("PRIUS_API", "http://127.0.0.1:8080"))
     ap.add_argument("--serial", default=os.environ.get("HU_SERIAL") or None)
     ap.add_argument("--log")
@@ -241,13 +354,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     log = open(a.log, "a") if a.log else None
 
     last_et = [None]
+    st = Stats()
 
     def emit(fix: Dict) -> None:
+        if fix.get("age_ms", 0) > a.max_age_ms:
+            st.stale += 1
+            st.tick(a.quiet)
+            return
         if a.post:
             code, body = post(url, token, fix)
-            print("%s -> %s %s" % (json.dumps(fix), code, body.strip()[:200]), flush=True)
+            st.count(code, body, fix)
+            if not a.quiet:
+                print("%s -> %s %s" % (json.dumps(fix), code, body.strip()[:200]), flush=True)
         else:
             print("DRY " + json.dumps(fix), flush=True)
+        st.tick(a.quiet)
 
     def run(stream: Iterable[str]) -> Optional[int]:
         """Consume one stream; returns an exit code for --once, None when the stream ended."""
@@ -285,19 +406,40 @@ def main(argv: Optional[List[str]] = None) -> int:
         if a.stdin:
             return run(sys.stdin) or 0
         base = adb_cmd(a.serial)
+        last_state: List[Optional[str]] = [None]
+        recovery = Recovery()
         if a.start_ygps and not a.write:
             print("hu-gnss-bridge: --start-ygps changes the head unit's screen: add --write", file=sys.stderr)
             return 6
         while True:
-            st = subprocess.run(base + ["get-state"], capture_output=True, text=True, timeout=10).stdout.strip()
-            if st != "device":
-                msg = "head unit not reachable over adb (state %s)" % (st or "absent")
+            try:
+                state = subprocess.run(base + ["get-state"], capture_output=True, text=True,
+                                       timeout=10).stdout.strip()
+            except subprocess.TimeoutExpired:
+                state = "timeout"
+            if state != "device":
+                msg = "head unit not reachable over adb (state %s)" % (state or "absent")
                 if a.once:
                     print("hu-gnss-bridge: " + msg, file=sys.stderr)
                     return 3
-                print(msg + "; retrying in 5 s", file=sys.stderr)
+                if state != last_state[0]:              # log the edge, not every retry
+                    print(msg + "; retrying every 5 s", file=sys.stderr, flush=True)
+                last_state[0] = state
+                node = usb_node()
+                action = recovery.due(node is not None, time.monotonic())
+                if action == "usb_reset" and node:
+                    print("unit on USB but adb has no connection: USB reset (%s)" % usb_reset(node),
+                          file=sys.stderr, flush=True)
+                elif action == "adb_restart":
+                    print("unit on USB but adb has no connection: restarting the adb server",
+                          file=sys.stderr, flush=True)
+                    subprocess.run(base[:1] + ["kill-server"], capture_output=True, timeout=10)
                 time.sleep(5)
                 continue
+            if state != last_state[0]:
+                print("head unit connected, reading %s" % a.source, file=sys.stderr, flush=True)
+            last_state[0] = state
+            recovery.ok()
             if a.start_ygps:
                 subprocess.run(base + ["shell", "monkey -p com.mediatek.ygps -c android.intent.category.LAUNCHER 1"],
                                capture_output=True, timeout=15)
@@ -313,7 +455,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 return rc
             if a.once:
                 return 1
-            print("adb stream ended (unit gone? hub re-enumerated?); reconnecting", file=sys.stderr)
+            print("adb stream ended (unit gone? hub re-enumerated?); reconnecting", file=sys.stderr, flush=True)
+            last_state[0] = "stream-ended"
             time.sleep(2)
     except KeyboardInterrupt:
         return 0

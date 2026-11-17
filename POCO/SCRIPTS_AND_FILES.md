@@ -58,6 +58,7 @@ and installed with `sync.sh` / `provision.sh` ([PROVISIONING.md](PROVISIONING.md
 | `prius-sim-unlock.service` | oneshot | yes | SIM PIN over QMI |
 | `prius-clock-fallback.service` / `.timer` | oneshot / timer | timer yes | 2 min after boot, every 5 min |
 | `prius-bled.service` | simple | yes | BLE satellites |
+| `prius-gnss-bridge.service` | simple | yes | head-unit GPS over ADB to the backend position API (`hu-gnss-bridge --post --quiet`, user `user`, owns the adb server); tools installed by `tools/headunit/install.sh` |
 | `backlight-off.service` | oneshot | yes | backlight 0 at boot |
 | `systemd-backlight@backlight:backlight.service` | — | masked | no backlight restore |
 | `systemd-battery-check.service` | — | masked | phantom battery must not gate boot |

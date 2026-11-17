@@ -58,10 +58,11 @@ image backups are kept outside the repo).
 8. **GNSS for the map layer.** The unit's GPS is the car's position source: the agent posts every
    raw fix to `POST /api/v1/position/gnss` on the backend, which feeds roadsense mapd. The backend
    side is built (off by default); contract, fields and clock handling:
-   [POSITION_FEEDER.md](POSITION_FEEDER.md) §4. Not measured yet: whether the unit has a GNSS
-   receiver with a usable antenna, its fix rate and accuracy fields. The unit runs MediaTek's GNSS
-   stack (`ro.mtk_gps_support=1`, `mnld`, `/dev/gps`, `/dev/stpgps`, YGPS test app). Interim
-   sender without an app: `hu-gnss-bridge` on the car computer (§7.4).
+   [POSITION_FEEDER.md](POSITION_FEEDER.md) §4. The unit runs MediaTek's GNSS
+   stack (`ro.mtk_gps_support=1`, `mnld`, `/dev/gps`, `/dev/stpgps`, YGPS test app). **Running
+   since 2026-11-17** without an app on the unit: `hu-gnss-bridge` on the car computer as
+   `prius-gnss-bridge.service` (§7.4). Measured parked in the open: 1 Hz fixes, 7–9 satellites,
+   `hAcc` 1–4 m.
 
 ## 3. Architecture (design)
 
@@ -175,18 +176,42 @@ appears and `hu-status` stays `unauthorized`:
 
 ### 7.4 GNSS sender design
 
-Three routes; the first needs nothing on the unit and runs today:
+Three routes; the first needs nothing on the unit and is the one in service
+(`prius-gnss-bridge.service` on the car computer, enabled by `POCO/provision.sh`, tools from
+`tools/headunit/install.sh`):
 
 | Route | How | State |
 |---|---|---|
-| A. `hu-gnss-bridge` (default `--source dumpsys`) | one long `adb shell` loop prints the "Last Known Locations" block of `dumpsys location` and `/proc/uptime` every second; the bridge parses `Location[gps lat,lon hAcc= et= vel= bear= …]`, sends a fix when `et` changes, `age_ms` = unit uptime − `et` (both CLOCK_BOOTTIME on the unit, no clock sync); POSTs to `127.0.0.1:8080` (loopback, no token); reconnects after USB drops | built, parser unit-tested on Android 8.1's `Location.toString` layout (`tests/test_hu_gnss_bridge.py`); not run against the unit |
-| B. PriusGnss app + `hu-gnss-bridge --source logcat` | a foreground service on the unit requests GPS updates and logs each fix as backend-format JSON (tag `PriusGnss`); the bridge reads `adb logcat` and POSTs; full fix rate, exact `age_ms`, keeps GPS on with no UI app | skeleton in `tools/headunit/apk/` (manifest, service, boot receiver, Gradle-free `build.sh`); not built: the P52 has a JRE and `adb` only. Needs (apt, a few hundred MB, owner's go): `openjdk-21-jdk-headless aapt dalvik-exchange apksigner google-android-platform-27-installer` |
+| A. `hu-gnss-bridge` (default `--source dumpsys`) | one long `adb shell` loop prints the "Last Known Locations" block of `dumpsys location` and `/proc/uptime` every 0.4 s (one `dumpsys` costs the unit 30 ms); the bridge parses `Location[gps lat,lon hAcc= et= vel= bear= …]`, sends a fix when `et` changes, `age_ms` = unit uptime − `et` (both CLOCK_BOOTTIME on the unit, no clock sync); POSTs to `127.0.0.1:8080` (loopback, no token); reconnects after USB drops | **in service since 2026-11-17**: 58–62 fixes per minute accepted by the backend, `age_ms` 100–500 at sending, mapd `state: good` with the fix used (`tests/test_hu_gnss_bridge.py` holds the unit's real line layout) |
+| B. PriusGnss app + `hu-gnss-bridge --source logcat` | a foreground service on the unit requests GPS updates and logs each fix as backend-format JSON (tag `PriusGnss`); the bridge reads `adb logcat` and POSTs; full fix rate, exact `age_ms`, keeps GPS on with no UI app | skeleton in `tools/headunit/apk/` (manifest, service, boot receiver, Gradle-free `build.sh`); the APK builds on the P52 (`build/prius-gnss.apk`) but is not installed on the unit: route A turned out to be enough. Would add `utc_ms`, speed / course accuracy and a 0 ms sampling delay |
 | C. App posting directly | the app POSTs to `http://127.0.0.1:8080` over `adb reverse` or to the phone over RNDIS / Wi-Fi with the bearer token | later; puts the token on the unit |
 
-Limit of A: `dumpsys` only shows fresh GPS fixes while an app on the unit requests GPS (a navigation
-app, or MediaTek's YGPS: `hu-gnss-bridge --start-ygps --write`), and it samples at ~1 Hz. The
-backend's feeder must run the `headunit` source (`BACKEND_POSITION_FEEDER=1`, default source) for
-the POST to be accepted.
+Facts of route A on this unit (2026-11-17):
+
+* `dumpsys` only shows fresh GPS fixes while an app on the unit requests GPS. The unit's launcher
+  (`com.android.launcher`, interval 0) and `com.xygala.canbus` (3 s) hold a request all the time
+  ("5978 of the last 5978 minutes"), so nothing has to be started. YGPS (`--start-ygps --write`)
+  stays as a fallback.
+* The unit reports `hAcc`, altitude, speed, bearing and the satellite count; `vAcc`, `sAcc`, `bAcc`
+  are "???" (not reported) and there is no UTC time in `dumpsys`, so the backend times every fix by
+  `age_ms`.
+* A fix older than 2 s is not sent (the last known location at start or after a tunnel); the
+  backend then sees silence and reports "no fix" after 3 s.
+* The backend's feeder must run the `headunit` source (`BACKEND_POSITION_FEEDER=1`, default source)
+  for the POST to be accepted.
+* Service log (`journalctl -u prius-gnss-bridge`): connect / disconnect edges and one line per minute
+  (`fixes: sent 62 accepted 62 failed 0 stale 0; last hacc 4.0 m sats 8 age 190 ms`).
+* **The adb server belongs to the service.** On 2026-11-17 the unit's ADB link wedged (unit
+  enumerated, `adb devices` empty, adb log `write terminated: Protocol error` / `Operation timed out`,
+  kernel `can't set config #1, error -71`) after the adb server had been replaced several times in two
+  minutes: a server started from an ssh session dies with the session, the next client starts a new
+  one. A USB reset of the unit cured it; `unbind` / `bind` and an adb restart alone did not. The unit
+  now starts the server itself (`ExecStartPre`), and the bridge recovers alone: unit on USB but no adb
+  connection for 20 s → `USBDEVFS_RESET` on its node (no root needed, the udev rule gives `plugdev`
+  write access), 20 s later an adb server restart, then the same with the wait doubled up to 5 min.
+  In an interactive session never run `adb kill-server` while the service runs.
+* Relay ch4 cannot be toggled by hand while roadsense owns it (the backend ignores the command), so
+  a hub power cycle is not a recovery path during a drive.
 
 ### 7.5 On-site session checklist
 

@@ -70,3 +70,62 @@ def test_logcat_source():
     (obj, t), = list(bridge.logcat_fixes(lines))
     fix = bridge.logcat_to_fix(obj, t, now=t + 0.01)
     assert fix["age_ms"] == 50 and fix["fix"] == "3d" and "et_ms" not in fix and fix["sats"] == 11
+
+
+REAL_8227L = """\
+@@HU_LOC_BEGIN
+  Last Known Locations:
+    fused: Location[fused 50.061000,19.937000 hAcc=5 et=+1m14s92ms alt=45.1 vel=0.04478083 vAcc=10 sAcc=??? bAcc=??? {Bundle[{noGPSLocation=Location[fused 50.061000,19.937000 hAcc=5 et=+1m14s92ms alt=45.1 vel=0.04478083 vAcc=10 sAcc=??? bAcc=???]}]}]
+    gps: Location[gps 50.061234,19.937654 hAcc=2 et=+4d3h38m36s513ms alt=10.1 vel=0.0 bear=109.59 vAcc=??? sAcc=??? bAcc=??? {Bundle[{satellites=9, maxCn0=35, meanCn0=26}]}]
+    passive: Location[gps 50.061234,19.937654 hAcc=2 et=+4d3h38m36s513ms alt=10.1 vel=0.0 bear=109.59 vAcc=??? sAcc=??? bAcc=??? {Bundle[{satellites=9, maxCn0=35, meanCn0=26}]}]
+  Last Known Locations Coarse Intervals:
+    gps: Location[gps 50.061000,19.937000 hAcc=7 et=+4d3h33m56s474ms alt=7.3 vel=0.14772528 bear=240.49 vAcc=??? sAcc=??? bAcc=??? {Bundle[{satellites=0, maxCn0=0, meanCn0=0}]}]
+@@HU_LOC_END 358717.01 1000.00
+"""
+
+
+def test_real_unit_layout():
+    """Line layout captured from the car's unit on 2026-11-17 (coordinates replaced)."""
+    (locs, up, t), = list(bridge.samples(REAL_8227L.splitlines(True)))
+    gps = locs["gps"]
+    assert gps["et_ms"] == ((4 * 24 + 3) * 3600 + 38 * 60 + 36) * 1000 + 513
+    assert gps["hacc_m"] == 2 and gps["sats"] == 9 and gps["course_deg"] == 109.59
+    assert "vacc_m" not in gps and "speed_acc_mps" not in gps      # "???" = not reported
+    fix = bridge.to_fix(gps, up, t, now=t)
+    assert fix["age_ms"] == 497 and fix["speed_mps"] == 0.0
+
+
+def test_stats_counts_accepts_and_failures(capsys):
+    st = bridge.Stats()
+    st.count(200, '{"accepted":1,"rejected":[],"has_fix":true}', {"hacc_m": 2.0})
+    st.count(200, '{"accepted":0,"rejected":[{"index":0,"reason":"old"}]}', {"hacc_m": 3.0})
+    st.count(0, "connection refused", {})
+    assert (st.sent, st.ok, st.failed) == (3, 1, 2)
+    st.t0 -= 61
+    st.tick(True)
+    assert "sent 3 accepted 1 failed 2" in capsys.readouterr().err
+    assert st.sent == 0
+
+
+def test_recovery_ladder():
+    r = bridge.Recovery(wait_s=20, max_wait_s=300)
+    assert r.due(True, 0) is None                 # first sighting starts the clock
+    assert r.due(True, 19) is None
+    assert r.due(True, 21) == "usb_reset"
+    assert r.due(True, 30) is None
+    assert r.due(True, 42) == "adb_restart"       # then the wait doubles
+    assert r.due(True, 70) is None
+    assert r.due(True, 83) == "usb_reset"
+    assert r.due(False, 90) is None               # unit left USB (ACC off): clock stops
+    assert r.due(True, 500) is None
+    r.ok()
+    assert r.wait == 20 and r.step == 0
+
+
+def test_usb_node(tmp_path):
+    d = tmp_path / "1-1.4.2"
+    d.mkdir()
+    (d / "idVendor").write_text("0e8d\n"); (d / "busnum").write_text("1\n"); (d / "devnum").write_text("50\n")
+    (tmp_path / "usb1").mkdir()
+    assert bridge.usb_node(sysfs=str(tmp_path)) == "/dev/bus/usb/001/050"
+    assert bridge.usb_node(vendor="ffff", sysfs=str(tmp_path)) is None

@@ -220,11 +220,11 @@ if command -v udevadm >/dev/null 2>&1; then
     log "reloaded udev rules"
 fi
 if [ "$CORE" = 1 ]; then
-    UNITS="prius-power.service prius-power.path prius-backend.service prius-bled.service"
+    UNITS="prius-power.service prius-power.path prius-backend.service prius-bled.service prius-gnss-bridge.service"
     PATHS="prius-power.path"
 else
     UNITS="prius-power.service prius-power.path prius-wifi.service prius-wifi.path \
-           prius-backend.service prius-bled.service backlight-off.service \
+           prius-backend.service prius-bled.service prius-gnss-bridge.service backlight-off.service \
            prius-clock-fallback.timer prius-sim-unlock.service prius-lifeline.service"
     PATHS="prius-power.path prius-wifi.path prius-clock-fallback.timer"
 fi

@@ -1,0 +1,32 @@
+[Unit]
+Description=Prius GNSS bridge (head-unit GPS over ADB -> backend position API)
+Documentation=file:///home/user/cyberpunk/docs/HEADUNIT_INTEGRATION.md
+# Reads the head unit's fixes with `adb shell dumpsys location` and POSTs them
+# to the backend on loopback (docs/POSITION_FEEDER.md 4). The head unit is on
+# USB only with ACC on and the camera hub powered; without it the bridge asks
+# adb for the state every 5 s and sends nothing.
+After=prius-backend.service
+
+[Service]
+Type=simple
+# adb's key is ~user/.android/adbkey (authorised on the unit); tools from
+# tools/headunit/install.sh
+User=user
+Environment=HOME=/home/user
+# The adb server belongs to this unit: a server started from a login session
+# dies with the session, and replacing it under a running stream wedged the
+# unit's ADB link on 2026-11-17 (the bridge recovers with a USB reset).
+ExecStartPre=-/usr/bin/adb start-server
+ExecStart=/usr/local/bin/hu-gnss-bridge --post --quiet
+Restart=always
+RestartSec=5
+
+Slice=prius.slice
+MemoryHigh=48M
+MemoryMax=96M
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
