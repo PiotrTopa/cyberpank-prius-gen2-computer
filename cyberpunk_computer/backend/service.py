@@ -431,6 +431,7 @@ class BackendService:
         self._gw_stale: bool = False
 
         self._poco_poll_last: float = 0.0
+        self._thermal_sampler = None   # backend.thermal_sampler.ThermalSampler, lazy
 
         # Chassis fan controller state.
         self._fan_last_tick: float = 0.0
@@ -2370,7 +2371,14 @@ class BackendService:
         except (OSError, ValueError):
             pass
 
-        cpu_temp, gpu_temp, batt_temp = self._read_poco_thermals()
+        # Peak-held over the last 2.5 s (thermal_sampler): a 1 Hz read is phase-locked
+        # to the once-per-second load bursts and misses the hot peaks for a minute.
+        if self._thermal_sampler is None:
+            from .thermal_sampler import ThermalSampler
+            self._thermal_sampler = ThermalSampler()
+            self._thermal_sampler.sample_once()
+            self._thermal_sampler.start()
+        cpu_temp, gpu_temp, batt_temp = self._thermal_sampler.read()
 
         if self.twin and self.twin.store:
             from ..state.actions import SetPocoTelemetryAction
