@@ -201,15 +201,24 @@ Facts of route A on this unit (2026-11-17):
   for the POST to be accepted.
 * Service log (`journalctl -u prius-gnss-bridge`): connect / disconnect edges and one line per minute
   (`fixes: sent 62 accepted 62 failed 0 stale 0; last hacc 4.0 m sats 8 age 190 ms`).
-* **The adb server belongs to the service.** On 2026-11-17 the unit's ADB link wedged (unit
-  enumerated, `adb devices` empty, adb log `write terminated: Protocol error` / `Operation timed out`,
-  kernel `can't set config #1, error -71`) after the adb server had been replaced several times in two
-  minutes: a server started from an ssh session dies with the session, the next client starts a new
-  one. A USB reset of the unit cured it; `unbind` / `bind` and an adb restart alone did not. The unit
-  now starts the server itself (`ExecStartPre`), and the bridge recovers alone: unit on USB but no adb
-  connection for 20 s → `USBDEVFS_RESET` on its node (no root needed, the udev rule gives `plugdev`
-  write access), 20 s later an adb server restart, then the same with the wait doubled up to 5 min.
-  In an interactive session never run `adb kill-server` while the service runs.
+* **adb does not see USB hot-plug on the car computer.** Its server lists only the devices present
+  when it started (its netlink parser logs `Netlink: SUBSYSTEM not found` on this system). Every
+  time the unit appears (ACC on) or re-enumerates, the server has to be restarted. The service owns
+  the server (`ExecStartPre`, a server started from an ssh session dies with the session) and the
+  bridge restarts it when the unit is on USB but not listed for 4 s.
+* **The unit re-enumerates by itself with protocol errors** (15:39:47 on 2026-11-17: `device
+  descriptor read/64, error -71`, then `can't set config #1, error -71`; the DVR camera on the same
+  hub shows the same error class): the device is then listed with no configuration and no
+  interface, and `USBDEVFS_RESET` / `SETCONFIGURATION` answer ENODEV / EPROTO. De-authorising and
+  authorising it in sysfs enumerates it again. The udev rule makes `authorized` writable for
+  `plugdev`, and the bridge does it when the unit is unconfigured, and on every third failed try.
+* Recovery ladder of the bridge: first step 4 s after the unit is seen without an adb connection,
+  then 12 s, doubling to 2 min; `adb_restart` for a configured unit, `reenumerate` for an
+  unconfigured one. Measured: a forced re-enumeration was back in service after 13 s; the unaided
+  recovery of the 15:39 drop took 2 min 10 s with the first version of the ladder. The first wedge
+  of the day (15:14, four minutes) was the same thing, not the adb restarts it was first blamed on.
+* Other clients (the backend) talk to the same server on `127.0.0.1:5037` and must never start or
+  kill one; they see "no device" for a few seconds during a recovery.
 * Relay ch4 cannot be toggled by hand while roadsense owns it (the backend ignores the command), so
   a hub power cycle is not a recovery path during a drive.
 
@@ -294,3 +303,68 @@ cmd activity start-foreground-service -n pl.topa.priusagent/.AlertService --ez s
 Open: whether the tones and the speech are audible in the cabin over CarPlay audio and whether
 CarPlay ducks (app side reports ok and focus granted; ears needed); the media-key broadcasts; start
 of the agent after a unit reboot (it starts on the first intent, so nothing is needed).
+
+### 8.3 Backend and MFD (2026-11-17)
+
+Module `cyberpunk_computer/backend/headunit.py`, off unless `BACKEND_HEADUNIT=1`.
+
+* **Transport.** A pure-Python adb smart-socket client talks to the server of
+  `prius-gnss-bridge.service` on `127.0.0.1:5037` (`host:devices` → the configured serial if it is in
+  state `device`, else the first such device; `host:transport:<serial>`; `shell:<cmd>`; connect
+  timeout 0.5 s, command 3 s). It never runs the `adb` binary and never starts or kills a server
+  (§7.4). No server or no device in state `device` = unit absent: one log line per edge, nothing else.
+  Checked read-only on the car 2026-11-17: `host:devices` → `MJU8DY59WS8LMB85 device`, `dumpsys audio`
+  over the client 91 ms (23 kB), parsed level 32, not muted.
+* **Worker.** One thread (`headunit-adb`). Volume requests coalesce (latest wins); mute is absolute
+  (read, toggle only if different, read back; an error in `headunit.error` if the unit did not
+  follow, no retry loop) or `toggle`; media keys and alerts queue (at most 8). `dumpsys audio` every
+  2 s while present and right after each command; presence checked every 5 s while absent. Only the
+  `cmd activity …` and `dumpsys audio` forms run on the unit. Every intent argument is validated
+  and shell-quoted (speech text: no control characters, at most 300 characters).
+* **One table each** in the module: `MEDIA_KEYS` (`play_pause` → `.playpause`, `next` → `.frd`,
+  `prev` → `.rev`: still unverified), `PRESETS` (`info`, `chime`, `notice`, `warning`, `critical`
+  tone patterns, gain 0.5–0.8), `ALERT_SOUND_PRESETS` (alert sound id `soft`/`notice`/`warning` →
+  preset) and `SEVERITY_PRESETS`. Gain is capped at 0.8 (`GAIN_MAX`); the backend never raises the
+  volume for an alert, so an alert is silent while the unit is muted or at 0.
+
+| Env (`/etc/prius/backend.env`) | Default | Meaning |
+|---|---|---|
+| `BACKEND_HEADUNIT` | `0` | `1` turns the module on |
+| `BACKEND_HEADUNIT_ALERT_SOUNDS` | `0` | `1`: the alert framework's sound sink is the head unit |
+| `BACKEND_HEADUNIT_SERIAL` | `MJU8DY59WS8LMB85` | preferred adb serial |
+| `BACKEND_HEADUNIT_ADB` | `127.0.0.1:5037` | adb server |
+| `BACKEND_HEADUNIT_POLL_S` | `2` | state poll while present |
+| `BACKEND_HEADUNIT_ALERT_GAP_S` | `3` | minimum gap between two alert sounds |
+
+Commands (`POST /api/v1/commands/<name>`, also over ZMQ):
+
+| Command | Params |
+|---|---|
+| `headunit_volume` | `level` 0..63 or `delta` −63..63 (from the unit's current level) |
+| `headunit_mute` | `on`: `true` / `false` (absolute) / `"toggle"` |
+| `headunit_media` | `key`: `play_pause` / `next` / `prev` |
+| `headunit_alert` | `sound` (preset) or `tone` (`hz:ms,…`), `say`, `lang`, `gain` (≤ 0.8), `id` |
+| `headunit_alert_stop` | — |
+| `set_volume` / `set_mute` | the existing audio commands (MFD) are routed to the unit as well |
+
+State section `headunit`: `enabled`, `present`, `serial`, `volume` (0..63), `muted`, `last_seen`
+(wall time of the last good `dumpsys`), `agent` (last alert intent sent: `ts`, `id`, `tone`, `say`,
+`sent`; no logcat is read, so "sent" is not "played"), `error`, `counters` (`commands`, `polls`,
+`errors`, `alerts`, `absent_edges`), `sound` (alert sink: `played`, `skipped` {absent, rate,
+same_id}, `last`). While present the level and mute are mirrored into `audio.volume` / `audio.muted`.
+The AVC-LAN audio path stays unconnected (`io/egress.py`).
+
+Alert hook: the framework calls the sink when an alert in mode `on` is first shown (all types ship
+in `shadow`, so nothing sounds until a type is set to `on` on the dashboard). The sink plays the
+preset of the alert's sound id (or its severity), at most once per alert id per 30 s, at most one
+sound per 3 s overall, nothing while the unit is absent; an alert clearing does not cut its sound.
+Speech for alerts is not wired (presets only); `headunit_alert` with `say` is available by command.
+
+MFD: the AUDIO box shows the unit's level (bar and VOL now on the 0..63 scale, encoder ±2 per
+detent), `MUTE` when muted and `--` when the module is on but the unit is absent. The audio
+settings page has two new rows, `MUTE` (OFF/ON, absolute) and `MEDIA` (turn picks PLAY/PAUSE /
+NEXT / PREV, OK sends), and a head-unit status in its header (`HU 32` / `HU MUTE` / `NO HEAD UNIT`).
+The frontend sends `set_volume`, `set_mute` and `headunit_media` over the ZMQ command channel.
+Bass / mid / treble / balance / fader stay UI values only.
+
+Open: the media-key names; the audible level of the presets in the cabin over CarPlay (ears needed).

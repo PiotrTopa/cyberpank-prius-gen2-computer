@@ -108,18 +108,32 @@ def test_stats_counts_accepts_and_failures(capsys):
 
 
 def test_recovery_ladder():
-    r = bridge.Recovery(wait_s=20, max_wait_s=300)
-    assert r.due(True, 0) is None                 # first sighting starts the clock
-    assert r.due(True, 19) is None
-    assert r.due(True, 21) == "usb_reset"
-    assert r.due(True, 30) is None
-    assert r.due(True, 42) == "adb_restart"       # then the wait doubles
-    assert r.due(True, 70) is None
-    assert r.due(True, 83) == "usb_reset"
-    assert r.due(False, 90) is None               # unit left USB (ACC off): clock stops
-    assert r.due(True, 500) is None
+    r = bridge.Recovery(first_s=4, retry_s=12, max_wait_s=120)
+    assert r.due(True, True, 0) is None               # first sighting starts the clock
+    assert r.due(True, True, 3) is None
+    assert r.due(True, True, 5) == "adb_restart"      # adb does not see hot-plug
+    assert r.due(True, True, 10) is None
+    assert r.due(True, True, 18) == "adb_restart"
+    assert r.due(True, True, 43) == "reenumerate"     # every third try
+    assert r.due(True, False, 92) == "reenumerate"    # not configured: adb cannot help
+    assert r.due(False, False, 95) is None            # unit left USB (ACC off): start over
+    assert r.due(True, True, 500) is None
+    assert r.due(True, True, 505) == "adb_restart"
     r.ok()
-    assert r.wait == 20 and r.step == 0
+    assert r.tries == 0 and r.wait == 4
+
+
+def test_usb_info_configured(tmp_path):
+    d = tmp_path / "1-1.4.2"
+    d.mkdir()
+    (d / "idVendor").write_text("0e8d\n"); (d / "busnum").write_text("1\n"); (d / "devnum").write_text("54\n")
+    (d / "bConfigurationValue").write_text("\n")
+    assert bridge.usb_info(sysfs=str(tmp_path))["configured"] is False
+    (d / "bConfigurationValue").write_text("1\n")
+    info = bridge.usb_info(sysfs=str(tmp_path))
+    assert info["configured"] is True and info["node"] == "/dev/bus/usb/001/054"
+    (d / "authorized").write_text("1")
+    assert bridge.usb_reenumerate(info) == "re-authorised"
 
 
 def test_usb_node(tmp_path):

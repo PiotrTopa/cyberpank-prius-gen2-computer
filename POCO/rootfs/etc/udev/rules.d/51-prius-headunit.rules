@@ -3,3 +3,6 @@
 # ids appear when its USB function set changes (rndis,adb), so match the vendor.
 # The user is in plugdev. ModemManager must not probe it. Symlink /dev/prius-headunit.
 SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0e8d", MODE="0660", GROUP="plugdev", TAG+="uaccess", SYMLINK+="prius-headunit", ENV{ID_MM_DEVICE_IGNORE}="1"
+# The GNSS bridge (user, plugdev) re-enumerates the unit when the kernel could not
+# configure it ("can't set config #1, error -71"): make `authorized` group-writable.
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0e8d", RUN+="/bin/sh -c 'chgrp plugdev /sys%p/authorized; chmod 0664 /sys%p/authorized'"

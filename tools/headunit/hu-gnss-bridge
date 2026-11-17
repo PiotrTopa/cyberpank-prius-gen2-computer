@@ -245,8 +245,10 @@ class Stats:
 USBDEVFS_RESET = 0x5514          # _IO('U', 20)
 
 
-def usb_node(vendor: str = "0e8d", sysfs: str = "/sys/bus/usb/devices") -> Optional[str]:
-    """/dev/bus/usb path of the head unit when it is enumerated, else None."""
+def usb_info(vendor: str = "0e8d", sysfs: str = "/sys/bus/usb/devices") -> Optional[Dict]:
+    """The head unit on USB: {"node", "dir", "configured"}, or None when not enumerated.
+    "configured" is False when the kernel could not set its configuration
+    ("can't set config #1, error -71"): the device is listed but has no interface."""
     try:
         names = sorted(os.listdir(sysfs))
     except OSError:
@@ -263,8 +265,18 @@ def usb_node(vendor: str = "0e8d", sysfs: str = "/sys/bus/usb/devices") -> Optio
                 dev = int(f.read())
         except (OSError, ValueError):
             continue
-        return "/dev/bus/usb/%03d/%03d" % (bus, dev)
+        try:
+            with open(os.path.join(d, "bConfigurationValue")) as f:
+                configured = bool(f.read().strip())
+        except OSError:
+            configured = False
+        return {"node": "/dev/bus/usb/%03d/%03d" % (bus, dev), "dir": d, "configured": configured}
     return None
+
+
+def usb_node(vendor: str = "0e8d", sysfs: str = "/sys/bus/usb/devices") -> Optional[str]:
+    info = usb_info(vendor, sysfs)
+    return info["node"] if info else None
 
 
 def usb_reset(node: str) -> str:
@@ -276,33 +288,55 @@ def usb_reset(node: str) -> str:
         return "open failed: %s" % e
     try:
         fcntl.ioctl(fd, USBDEVFS_RESET, 0)
-        return "done"
+        return "reset done"
     except OSError as e:
-        return "ioctl: %s" % e          # ENODEV = the unit re-enumerated during the reset
+        return "reset ioctl: %s" % e    # ENODEV on an unconfigured device
     finally:
         os.close(fd)
 
 
-class Recovery:
-    """The unit is on USB but adb does not get a connection (seen 2026-11-17: adb's
-    CNXN write ends in EPROTO / a timeout after the adb server was replaced a few
-    times; a USB reset of the unit cured it). Steps, each after the unit has been
-    enumerated but unreachable for `wait_s`: a USB reset, then an adb server
-    restart, then again with the wait doubled up to `max_wait_s`."""
+def usb_reenumerate(info: Dict) -> str:
+    """Make the kernel enumerate the unit again: de-authorise and authorise it in sysfs
+    (works on an unconfigured device; the udev rule makes `authorized` group-writable),
+    else a port reset."""
+    path = os.path.join(info["dir"], "authorized")
+    try:
+        with open(path, "w") as f:
+            f.write("0")
+        time.sleep(1.5)
+        with open(path, "w") as f:
+            f.write("1")
+        return "re-authorised"
+    except OSError:
+        return usb_reset(info["node"])
 
-    def __init__(self, wait_s: float = 20.0, max_wait_s: float = 300.0) -> None:
-        self.base = self.wait = wait_s
-        self.max_wait = max_wait_s
-        self.since: Optional[float] = None
-        self.step = 0
+
+class Recovery:
+    """The unit is on USB but adb has no connection. Two causes, both seen 2026-11-17:
+
+    * adb's server on the car computer does not notice USB hot-plug (its netlink
+      parser logs "SUBSYSTEM not found"): it lists only what was there when it
+      started. Every time the unit appears (ACC on) or re-enumerates, the server has
+      to be restarted. -> "adb_restart", first after `first_s`.
+    * the kernel could not configure the unit after a re-enumeration ("can't set
+      config #1, error -71"; this hub branch has protocol errors). -> "reenumerate".
+
+    A configured unit gets adb restarts, every third try a re-enumeration; the wait
+    doubles from `retry_s` to `max_wait_s`."""
+
+    def __init__(self, first_s: float = 4.0, retry_s: float = 12.0, max_wait_s: float = 120.0) -> None:
+        self.first, self.retry, self.max_wait = first_s, retry_s, max_wait_s
+        self.ok()
 
     def ok(self) -> None:
-        self.since, self.step, self.wait = None, 0, self.base
+        self.since: Optional[float] = None
+        self.tries = 0
+        self.wait = self.first
 
-    def due(self, present: bool, now: float) -> Optional[str]:
-        """Name of the step to run now ("usb_reset" / "adb_restart"), else None."""
+    def due(self, present: bool, configured: bool, now: float) -> Optional[str]:
+        """The step to run now: "adb_restart", "reenumerate" or None."""
         if not present:
-            self.since = None
+            self.ok()
             return None
         if self.since is None:
             self.since = now
@@ -310,11 +344,11 @@ class Recovery:
         if now - self.since < self.wait:
             return None
         self.since = now
-        action = "usb_reset" if self.step % 2 == 0 else "adb_restart"
-        self.step += 1
-        if self.step % 2 == 0:
-            self.wait = min(self.wait * 2, self.max_wait)
-        return action
+        self.tries += 1
+        self.wait = self.retry if self.tries == 1 else min(self.wait * 2, self.max_wait)
+        if not configured or self.tries % 3 == 0:
+            return "reenumerate"
+        return "adb_restart"
 
 
 def adb_cmd(serial: Optional[str]) -> List[str]:
@@ -423,18 +457,20 @@ def main(argv: Optional[List[str]] = None) -> int:
                     print("hu-gnss-bridge: " + msg, file=sys.stderr)
                     return 3
                 if state != last_state[0]:              # log the edge, not every retry
-                    print(msg + "; retrying every 5 s", file=sys.stderr, flush=True)
+                    print(msg + "; waiting", file=sys.stderr, flush=True)
                 last_state[0] = state
-                node = usb_node()
-                action = recovery.due(node is not None, time.monotonic())
-                if action == "usb_reset" and node:
-                    print("unit on USB but adb has no connection: USB reset (%s)" % usb_reset(node),
-                          file=sys.stderr, flush=True)
+                info = usb_info()
+                action = recovery.due(info is not None, bool(info and info["configured"]), time.monotonic())
+                if action == "reenumerate" and info:
+                    print("unit on USB%s but adb has no connection: %s" % (
+                        "" if info["configured"] else " (not configured)", usb_reenumerate(info)),
+                        file=sys.stderr, flush=True)
                 elif action == "adb_restart":
-                    print("unit on USB but adb has no connection: restarting the adb server",
+                    print("unit on USB but adb does not list it: restarting the adb server",
                           file=sys.stderr, flush=True)
                     subprocess.run(base[:1] + ["kill-server"], capture_output=True, timeout=10)
-                time.sleep(5)
+                    subprocess.run(base[:1] + ["start-server"], capture_output=True, timeout=15)
+                time.sleep(2)
                 continue
             if state != last_state[0]:
                 print("head unit connected, reading %s" % a.source, file=sys.stderr, flush=True)
