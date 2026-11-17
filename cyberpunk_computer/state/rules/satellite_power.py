@@ -51,6 +51,43 @@ logger = logging.getLogger(__name__)
 
 HOLDER_ACC = "acc"
 HOLDER_QUEUE = "queue"
+HOLDER_ENTRY = "entry"
+
+
+class EntryHold:
+    """Wake-lock ``"entry"``: gateway (and rail) up before ACC and for a grace
+    period after it.
+
+    Why (car start of 2026-11-17 19:09:26): powered only with ACC, the gateway
+    needs about 4 s until it can answer for the navigation unit (relay 1 s, USB
+    enumeration 2 s, host connect 1 s). The display runs its roll call and asks
+    for its last screen inside that gap, gets no answer and shows "check
+    external system". The same entry signal that boots the MFD before ACC
+    (doors unlocked / a door open, ``mfd_power.BeanWakeTrigger``) now powers the
+    gateway too, and it stays on for ``grace_s`` after the last of entry signal
+    and ACC, so a restart shortly after key-off finds it ready as well.
+
+    Pure: ``update(active, now)`` returns True (acquire), False (release) or
+    None (no change).
+    """
+
+    def __init__(self, grace_s: float = 300.0) -> None:
+        self.grace_s = grace_s
+        self.held = False
+        self._last_active: Optional[float] = None
+
+    def update(self, active: bool, now: float) -> Optional[bool]:
+        if active:
+            self._last_active = now
+            if not self.held:
+                self.held = True
+                return True
+            return None
+        if self.held and (self._last_active is None
+                          or now - self._last_active >= self.grace_s):
+            self.held = False
+            return False
+        return None
 
 
 class SatelliteAccHoldRule(StateRule):

@@ -467,3 +467,29 @@ class TestApiCommands:
         from cyberpunk_computer.api.commands import build_command, CommandError
         with pytest.raises(CommandError):
             build_command("satellite_send", {"device_id": 201, "payload": {}})
+
+
+def test_entry_hold_acquires_early_and_releases_after_grace():
+    from cyberpunk_computer.state.rules.satellite_power import EntryHold
+    h = EntryHold(grace_s=300.0)
+    assert h.update(False, 0.0) is None            # nothing yet
+    assert h.update(True, 10.0) is True            # doors unlocked: acquire
+    assert h.update(True, 11.0) is None
+    assert h.update(False, 40.0) is None           # entry signal over, ACC not yet: keep
+    t = 46.0
+    while t <= 600.0:                              # ACC on from 46 s to 600 s
+        assert h.update(True, t) is None
+        t += 1.0
+    assert h.update(False, 601.0) is None          # key off: grace runs
+    assert h.update(False, 899.0) is None
+    assert h.update(False, 900.5) is False         # 300 s after the last active sample
+    assert h.update(False, 901.0) is None
+    assert h.update(True, 950.0) is True           # next entry
+
+
+def test_entry_hold_released_without_acc_after_grace():
+    from cyberpunk_computer.state.rules.satellite_power import EntryHold
+    h = EntryHold(grace_s=300.0)
+    assert h.update(True, 0.0) is True
+    assert h.update(False, 299.0) is None
+    assert h.update(False, 300.0) is False
