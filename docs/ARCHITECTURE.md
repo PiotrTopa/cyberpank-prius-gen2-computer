@@ -26,7 +26,7 @@ The UI code is identical in the frontend and the standalone app; only the data s
 | zmq | `ZmqServer` socket IO |
 | panda reader | broadcast CAN frames → `IngressController.ingest_broadcast_can` → `Store.dispatch` (the store holds a re-entrant lock for this path); with the position feeder on, `CanMotionTap.on_frame` sees each frame first |
 | roadsense-scene | roadsense `/ws` reader → ZMQ event `roadsense_scene` (`backend/roadsense_scene.py`) |
-| position-feeder | only with `BACKEND_POSITION_FEEDER=1`: CAN motion + GNSS → roadsense mapd `position.sock` (`backend/position_feeder.py`, [POSITION_FEEDER.md](POSITION_FEEDER.md)) |
+| position-feeder | only with `BACKEND_POSITION_FEEDER=1`: CAN motion, driver controls, body signals + GNSS → roadsense mapd `position.sock` (`backend/position_feeder.py`, [POSITION_FEEDER.md](POSITION_FEEDER.md)) |
 | headunit-adb | only with `BACKEND_HEADUNIT=1`: head unit volume / mute / media keys / alert sounds over the phone's adb server (smart-socket client, never the `adb` binary; `backend/headunit.py`, [HEADUNIT_INTEGRATION.md](HEADUNIT_INTEGRATION.md) §8.3) |
 
 `api/bridge.py::StoreBridge` is the boundary: API/ZMQ commands are queued and dispatched on the
@@ -54,7 +54,7 @@ about 1 Hz).
 | comma.ai panda | libusb-1.0 via ctypes (`bbaa:ddcc`) | `io/panda_can.py` | broadcast CAN only, see §3 |
 | MFD Pi | USB gadget `usb0`, ZMQ | `backend/mfd_power.py` | the backend powers the Pi via the hub port (uhubctl) and manages its boot/shutdown (`BACKEND_MFD_*`) |
 | roadsense | systemd + HTTP :8090 | `backend/roadsense_power.py`, `api/roadsense_proxy.py` | started/stopped on ACC; the camera hub (relay ch4) is powered already at the early start demand (BEAN: doors unlocked) for at most `BACKEND_ROADSENSE_EARLY_CAMERA_S` (180 s), without the stack: the dashcam leaves the USB bus once 23-39 s after power-up, for 4-5 s or, on the first drive after a long stand, for 122 s (journals of 2026-11-16 / 17: no road picture from 0:45 to 2:55 after ACC on), and that sequence should run before the drive. Sessions, tail, budget per parked period and the hand-over to ACC: [CAMERA_WARMUP.md](CAMERA_WARMUP.md) |
-| roadsense mapd | Unix socket `/run/roadsense/position.sock` (position input API v1) | `backend/position_feeder.py`, `backend/position_client.py` | off by default; [POSITION_FEEDER.md](POSITION_FEEDER.md) |
+| roadsense mapd | Unix socket `/run/roadsense/position.sock` (roadsense vehicle input API 1.1; v1 against an older roadsense) | `backend/position_feeder.py`, `backend/position_client.py` | off by default; [POSITION_FEEDER.md](POSITION_FEEDER.md) |
 | satellites | RS485 (gateway), BLE (`prius-bled`), Wi-Fi | `backend/satellite_registry.py`, `io/*_transport.py` | [SATELLITES.md](SATELLITES.md) |
 
 Gateway and powerbox are told apart by `{"id":0,"d":{"a":"whoami"}}` → `IDENT` with `role`

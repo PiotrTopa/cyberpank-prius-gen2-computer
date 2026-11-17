@@ -1,8 +1,13 @@
-# Position feeder (backend -> roadsense mapd)
+# Vehicle feeder (backend -> roadsense mapd): position, motion, controls, body
 
-The backend delivers raw GNSS fixes and vehicle motion to roadsense's map daemon `mapd` over its
-position input API v1 (roadsense docs/ARCHITECTURE.md, "mapd"). roadsense owns all position
-filtering, dead reckoning and map matching; the backend only feeds. Status: on the car; since
+The backend delivers raw GNSS fixes, vehicle motion, driver controls and body signals to roadsense's
+daemon `mapd` over roadsense's vehicle input API 1.1 (roadsense docs/VEHICLE_API.md; a superset of the
+position input API v1 this feeder was built on, and the file keeps its name). Against an older roadsense
+it speaks v1 as before; which one is decided per connection from mapd's hello reply (section 13).
+roadsense owns all position filtering, dead reckoning and map matching and decides what it does with
+the rest; the backend only feeds. Status of the vehicle API part (2026-11-17): built and tested on the
+dev box against the roadsense checkout and replayed on the day's trip logs; **not deployed**. Status of
+the position part: on the car; since
 2026-11-17 the head unit's GPS is the real source (`prius-gnss-bridge.service`,
 [HEADUNIT_INTEGRATION.md](HEADUNIT_INTEGRATION.md) §7.4; first check parked: 1 Hz, `hAcc` 1–4 m,
 mapd `good`; a drive with it is still to be evaluated). The phone's own receiver (`phone`, section 11)
@@ -22,14 +27,16 @@ satellite in 20 min on 2026-11-15.
 | env | `backend/__main__.py` (`_build_position`) |
 | map / fused consumption (scene key `map`) | `backend/roadsense_scene.py`, contract [MFD_MAIN_SCREEN.md](MFD_MAIN_SCREEN.md) §7.2 |
 | dashboard MAP tab (section 10) | `dashboard/src/tabs/MapTab.tsx`, `components/MiniMap.tsx`, `lib/mapLayer.ts` |
-| tests | `tests/test_position_feeder.py`, `tests/test_position_synthetic_control.py`, `tests/test_position_mapd_e2e.py`, `tests/test_phone_gnss.py` |
+| tests | `tests/test_position_feeder.py`, `tests/test_position_synthetic_control.py`, `tests/test_position_mapd_e2e.py`, `tests/test_phone_gnss.py`, `tests/test_vehicle_feeder.py` (vehicle API) |
+| trip log -> the stream the feeder would have sent (replay input for roadsense `tools/vehicle_replay.py`) | `tools/trip_vehicle_input.py` |
 
 Nothing is imported from roadsense; the e2e test runs the roadsense checkout as external processes.
 
 ## 2. Data flow and rules
 
 ```
-panda reader thread ─on_frame tee─▶ CanMotionTap (latest 0x0B4, 0x120, 0x0B1, 0x0B3, 0x025 + receipt time)
+panda reader thread ─on_frame tee─▶ CanMotionTap (latest 0x0B4, 0x120, 0x0B1, 0x0B3, 0x025, 0x022, 0x023, 0x230, 0x244, 0x5C8, 0x57F + receipt time)
+backend loop ─set_state_value─────▶ CanMotionTap (cruise set speed, outside temperature: only the state has them)
                     └────────────▶ ingress (unchanged)
 head unit ─POST /api/v1/position/gnss─▶ HeadunitGnssSource (validate, time -> CLOCK_MONOTONIC, queue) ─┐
 ModemManager ─GetLocation (NMEA)─▶ phone-gnss thread ─▶ PhoneGnssSource (queue) ─────────────────────┤
@@ -57,8 +64,9 @@ PositionFeeder thread, motion_hz (10) ──────────────
 
 ## 3. Motion fields and their signals
 
-Message: `{"type":"motion","ts_mono_ns","speed_mps","gear","wheel_speeds_mps","source":"prius-can"}`
-(`steering_wheel_deg` too with `BACKEND_POSITION_YAW=wheels,steer`).
+Message against a v1 roadsense: `{"type":"motion","ts_mono_ns","speed_mps","gear","wheel_speeds_mps","source":"prius-can"}`
+(`steering_wheel_deg` too with `BACKEND_POSITION_YAW=wheels,steer`). Against the vehicle API every motion
+signal goes out with a quality (section 13).
 
 | Field | Signal | Decode | State |
 |---|---|---|---|
@@ -227,7 +235,9 @@ The roadsense manager's unit mirror (`state.roadsense.units`) now includes `road
 | `BACKEND_RECORD_INCLUDE` token `position` | not set | trip files also get the fixes sent to mapd (section 12); `all` does not include it |
 | `BACKEND_POSITION_RUNDIR` | `/run/roadsense` | where `position.sock` is |
 | `BACKEND_POSITION_MOTION_HZ` | `10` | 5..50 |
-| `BACKEND_POSITION_YAW` | `wheels` | comma list of `wheels`, `steer`, `gyro` (0x022 as `yaw_rate_rps`); empty = speed and gear only |
+| `BACKEND_POSITION_YAW` | `wheels` | comma list of `wheels`, `steer`, `gyro` (0x022 as `yaw_rate_rps`); empty = speed and gear only. With the vehicle API all motion signals go out and only `gyro` matters: with it the yaw-rate sensor is offered for use (`uncalibrated`), without it for roadsense's calibration estimate only (`unverified`) |
+| `BACKEND_POSITION_VEHICLE_API` | `1` | `0` = speak position input API v1 whatever roadsense offers |
+| `BACKEND_POSITION_CAMERA_MOUNT` | (unset) | `x,y,z` in m: the roadsense camera in the vehicle frame (x ahead of the rear axle, y left, z above the ground), sent in the `vehicle` description. Not measured on the car yet |
 | `BACKEND_POSITION_FIX_TIMEOUT_S` | `3` | head unit silent this long = no fix |
 | `BACKEND_POSITION_SYNTHETIC_ROUTE` | built-in | route file |
 | `BACKEND_POSITION_SYNTHETIC_DROPOUTS` | none | `t0:t1,...` |
@@ -284,6 +294,10 @@ Deploy (none of this was done):
   speed-dependent (21–29, §3).
 * The MFD draws only the fused speed limit from the scene `map` key ([MFD_MAIN_SCREEN.md](MFD_MAIN_SCREEN.md) 4).
 * No raw-fix trail: the dashboard trail is of filtered positions, kept by the browser while the MAP tab is open.
+* Vehicle API (section 13): not deployed; turn signals wait for the indicator-lamp satellite, the radar
+  for hardware (both have entry points, 13.3); the yaw-rate scale is now estimated by roadsense against
+  the GNSS course, which needs a better receiver than the head unit's was on 2026-11-17, or the 360°
+  circle; camera mount not measured.
 * The reset (5.1) is checked against mapd on the dev box only; the phone's mapd gets it once roadsense
   862bee3 or later is deployed there (until then the feeder sends none, `why` `not_accepted`).
 * roadsense reference client gap (reported, roadsense not changed): `tools/position_client.py`
@@ -409,3 +423,110 @@ It is never part of `all`, never opens a trip and does not keep one alive; repla
 (`FileInputPort`) skips `POS` lines. Default: off. Reason: `all` was chosen when trips held bus
 traffic only, and a location track is personal data of a different kind; recording it should be a
 decision, not a side effect of a new source.
+
+## 13. roadsense vehicle input API 1.1 (2026-11-17)
+
+Contract: roadsense `docs/VEHICLE_API.md`. Built here: `backend/position_feeder.py` (`CanMotionTap.sample`
+with `full`, `.controls`, `.body`, `PositionFeeder._vehicle`, `vehicle_description`, the tables
+`SIGNAL_QUALITY` and `PROVIDES`), `backend/position_client.py` (hello with `provides`).
+
+### 13.1 Negotiation
+
+The feeder's hello declares what it provides (`PROVIDES`). mapd's reply lists what it accepts; the feeder
+reads it on every connection:
+
+| mapd's `accepts` | The feeder sends |
+|---|---|
+| has `controls`, `body`, `vehicle` (roadsense from 2026-11-17) | `vehicle` once per connection; `motion` with every motion signal and a `quality` per signal; `controls` on a change and once a second; `body` on a change and every 5 s; `objects` when something submits scans; `gnss`, `reset` as before |
+| `gnss`, `motion`, `reset` (older), no reply yet, or `BACKEND_POSITION_VEHICLE_API=0` | exactly the v1 messages of sections 2-5 |
+
+Status: `vehicle_api` (true / false), `controls_sent`, `body_sent`, `vehicle_sent`, `objects_sent`,
+`mapd_accepts` (section 6). `motion.yaw_input` names the yaw signals roadsense may use.
+
+### 13.2 Signal mapping
+
+Qualities are roadsense's words: `good` = used as it is; `uncalibrated` = used, roadsense may apply its own
+scale estimate; `unverified` = shown on roadsense's `vehicle` topic and calibrated there, not acted on.
+State: C = verified on the car, P = probable, G = third-party / guess (docs/prius_can.md).
+
+| roadsense signal | Message | Source | Decode | Quality sent | State |
+|---|---|---|---|---|---|
+| `speed_mps` | motion | CAN 0x0B4 | (256F + G) × 0.01 km/h / 3.6 | good | C: true speed |
+| `gear` | motion | CAN 0x120 F low nibble | 0 P, 1 R, 2 N, 3 D, 4 B | good | C (P/R/N/D); B never observed |
+| `wheel_speeds_mps` [FL, FR, RL, RR] | motion | CAN 0x0B1, 0x0B3 | × 0.01 km/h / 3.6 | uncalibrated | unit C; reads 2.2 % below 0x0B4; L/R labels G. On straights the rear pair's yaw is biased by −0.6 °/s (2026-11-17, a tyre difference) |
+| `steering_wheel_deg` | motion | CAN 0x025 | 12-bit signed × 1.5°, + = left | good | scale C (lock-to-lock range); sign G, consistent with the wheels |
+| `yaw_rate_rps` | motion | CAN 0x022, mean of two channels minus standstill offsets | × 0.0044 rad/s, + = left | unverified; uncalibrated with `BACKEND_POSITION_YAW=…,gyro` | scale P (0.0042–0.0046 against the wheel yaw), not calibrated on a full circle. On straights: mean 0.02–0.11 °/s, noise 0.3 °/s |
+| `accel_long_mps2` | motion | CAN 0x023, P − Q | × 0.020 m/s², + = speeding up | uncalibrated | P (r 0.93 against d(speed)/dt); includes the road grade |
+| `accel_lat_mps2` | motion | CAN 0x023, P + Q | × 0.025 m/s², + = left | uncalibrated | P (r 0.95); reads about 0.35 m/s² high, not corrected |
+| `brake` | controls | CAN 0x230 D bit 2 | pressed | good | C (85 edges, 99 % within 1.5 s of the BEAN brake bit) |
+| `accelerator` | controls | CAN 0x244 G | G / 200 (0..1) | unverified | G: third-party scaling, unchecked |
+| `cruise` | controls | CAN 0x120 E bit 7 (engaged), 0x5C8 C bit 4 (main switch) | engaged → `active`; main on → `standby`; main off → `off` | good | C (every engage / cancel of 16–17 Nov) |
+| `cruise_set_speed_mps` | controls | state `vehicle.cruise_set_speed` (solicited 21D3 B, 1 Hz), only while `active` | km/h / 3.6 | uncalibrated | C as a number; whole km/h floored from an mph-based value |
+| `turn_signal` | controls (v1: motion) | **hook** `CanMotionTap.set_turn_signal()` | off / left / right / both | (the caller's) | not on any bus; nothing feeds it (section 13.3) |
+| `low_beam`, `parking_lights`, `fog_front` | body | CAN 0x57F byte B: 0x20, 0x10, 0x01 | lit | good | C |
+| `high_beam` | body | CAN 0x57F byte B 0x08 | lit | unverified | G: public decode, seen only during a flash |
+| `door_open` | body | CAN 0x57F byte D bit 7 | any door | good | C |
+| `outside_temp_c` | body | state `climate.outside_temp` (AVC-LAN E0 5D F7) | °C | good | C (the display's own value) |
+| vehicle description | vehicle | constants `VEHICLE_DESCRIPTION` | wheelbase 2.70 m, rear track 1.48 m, front 1.505 m, steering ratio 19.1, 4.45 × 1.725 × 1.49 m | | catalogue values, not measured; effective steering ratio 21–29 (section 3) |
+| camera mount | vehicle | `BACKEND_POSITION_CAMERA_MOUNT` | x, y, z | | unset: not measured |
+| range-sensor scans | objects | **hook** `PositionFeeder.submit_objects()` / `set_sensors()` | | | no radar yet (section 13.3) |
+
+Not sent, although the car has it: brake pedal travel (0x030 E: it is travel, not pressure, and reads
+0x7F at start-up), MG2 speed, per-door switches, cabin signals. Not on any bus of this car: wipers, rain
+and light sensors, parking brake, rear fog lamp.
+
+Freshness: motion signals ride along when their frame is within 0.1 s of the speed frame; brake, pedal and
+0x120 older than 0.5 s, the 1 Hz frames (0x57F, 0x5C8) older than 3 s and state values older than 5 s are
+left out. A signal that is left out is "unknown" at roadsense after its hold time, never a default.
+Timestamps are the panda receipt times of the frames (in the day's logs transfers arrive 2.5 ms apart in
+the median, 12 ms at p95, 24 ms at p99); state values carry the time the backend loop pushed them.
+
+### 13.3 Entry points for what is still to come
+
+| Future source | Entry point | What happens then |
+|---|---|---|
+| indicator-lamp satellite (turn signals) | `service.position_feeder.tap.set_turn_signal("left" / "right" / "both" / "off")`, repeated at least once a second while known; `None` = unknown | `controls.turn_signal` (v1: in `motion`); roadsense uses it as the driver's intent at the next junction / roundabout exit (topic `roadgeom`) and relays it in `ego`. The satellite has to hold the side through the dark half of the blink cycle |
+| radar (object list: range, range rate, azimuth) | `feeder.set_sensors([{"id": "front_radar", "kind": "radar", "x_m": …, "y_m": …, "z_m": …, "yaw_deg": 0}])` once, then `feeder.submit_objects("front_radar", [{"id", "range_m", "azimuth_deg", "range_rate_mps"}], kind="radar", t_mono=…)` per scan (thread-safe; azimuth positive left, range rate negative = closing; an empty list = nothing seen) | `objects` messages; with the camera mount set and `{"radar_fusion": true}` in roadsense's `lead.json` the lead's distance and closing speed come from the radar, with the camera as fallback |
+| rain / light sensor (the VAG RLS on LIN) | not built: add `rain` / `ambient_light_lux` to `CanMotionTap.body()` through `set_state_value` | `body`; roadsense reports them, no use yet |
+| yaw-rate calibration | none needed here | roadsense estimates the scale against the GNSS course turn by turn (`/v1/vehicle` → `calibration.yaw_rate.scale`) and applies it by itself once converged while the signal is sent as `uncalibrated` (`BACKEND_POSITION_YAW=wheels,gyro`). Needs fixes with `course_deg` and a receiver good enough to be a reference |
+
+### 13.4 Tests and replay (dev box, 2026-11-17)
+
+| Test | Result |
+|---|---|
+| `tests/test_vehicle_feeder.py`: decode of 0x023 / 0x230 / 0x244 / 0x120 E / 0x5C8 / 0x57F on recorded bytes, staleness, v1 against an older or silent mapd, switch-off, description once per connection and after a reconnect, controls on change + heartbeat, body every 5 s, gyro quality by yaw input, turn-signal and range-sensor hooks, env | 12 pass |
+| same file, end to end: the real feeder against the roadsense checkout (mapd + api): hello offers the vehicle API; `/v1/vehicle` shows the car's signals with quality and source, the description from the feeder, yaw source `wheel_speeds` with the gyroscope `unverified`; `/v1/lead` carries `ego.brake` | pass |
+| existing `test_position_feeder.py`, `test_position_synthetic_control.py`, `test_position_mapd_e2e.py`, `test_phone_gnss.py` against the new roadsense | 62 pass, unchanged |
+| full suite `pytest tests --ignore=tests/test_pointer_ui.py` | pass (exit 0) |
+| the day's trip logs (110 min, 30 min moving) through the real feeder code (`tools/trip_vehicle_input.py`): 36,004 `motion`, 9,705 `controls`, 1,229 `body`, all accepted by roadsense's engine, none rejected | motion 10 Hz while moving (the logs keep changed frames only), controls 1.1–2.3 per second, body 0.2 |
+| the same drive as v1 messages through roadsense before and after the change (Poland pack) | identical at every one of 9,169 steps |
+
+Results of the replay on roadsense's side (dead reckoning, yaw sources, cost): roadsense
+`docs/lanes/L18-vehicle-api.md`. In short: the day's receiver was too weak to measure dead-reckoning drift
+by position; on straights the wheel yaw is biased by −0.6 °/s and three to four times noisier than the
+yaw-rate sensor.
+
+### 13.5 Deploy (not done)
+
+1. roadsense first (its `scripts/sync-phone.sh` / `install-phone.sh`; restart `roadsense-mapd.service` and
+   `roadsense-api.service`, or let the next ignition cycle start them). An old backend keeps working
+   against it (it speaks v1).
+2. Backend: sync, restart `prius-backend.service`. No env change is needed: `BACKEND_POSITION_VEHICLE_API`
+   defaults to `1` and takes effect only when mapd offers the API.
+3. Check with the stack running: `GET /api/v1/position` → `vehicle_api` true, `controls_sent` and
+   `body_sent` rising, `errors` 0; roadsense `GET /v1/vehicle` → `feeders[0].name` `prius-backend`,
+   `controls.brake` follows the pedal, `body.low_beam` the lamps, `motion.yaw_source` `wheel_speeds`,
+   `signals.yaw_rate_rps.quality` `unverified`.
+4. Optional, after a look at `calibration` on a drive: `BACKEND_POSITION_YAW=wheels,gyro` makes roadsense
+   use the yaw-rate sensor (`motion.yaw_source` `yaw_rate`).
+
+### 13.6 Not verified on the car
+
+* Nothing of section 13 has run on the phone. CPU cost of the extra messages on the phone (backend and
+  mapd) is unmeasured. On the dev box: feeder cycle 40 µs against 16 µs for v1 (without the socket write),
+  1.4 µs per tapped frame for about 150 more frames a second (0x023, 0x230, 0x244), mapd 13–17 µs per
+  `controls` / `body` message.
+* `cruise` `standby` / `active` and `cruise_set_speed_mps` end to end (the decode is verified, the path
+  through the state push is not); `high_beam`; `accelerator` scaling.
+* Sign of `accel_lat_mps2` and its 0.35 m/s² offset; roadsense does not use the accelerations yet.
+* The live rate of `controls` with a moving accelerator (up to the motion rate, 10 per second).
