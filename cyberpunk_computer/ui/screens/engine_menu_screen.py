@@ -3,6 +3,7 @@ Engine menu screen.
 
 Settings/diagnostics hub accessed via light press on ENGINE frame.
 Provides navigation to:
+- Fuel log (fill-ups, full-to-full consumption, cost; docs/FUEL_LOG.md)
 - Chart Settings (time base for graphs)
 - Error Codes / DTC diagnostics
 - AVC-LAN status (decoded state, read-only)
@@ -41,7 +42,7 @@ class EngineMenuScreen(Screen):
     """
 
     HEADER_HEIGHT = 26
-    ITEM_HEIGHT = 28
+    ITEM_HEIGHT = 23   # 7 rows fit above the footer (was 28 for 6)
     SIDE_MARGIN = 16
 
     def __init__(
@@ -57,6 +58,7 @@ class EngineMenuScreen(Screen):
         self._last_activity = time.time()
 
         self._items: List[_MenuEntry] = [
+            _MenuEntry("FUEL LOG", "Fill-ups, l/100 km, cost (LPG + petrol)", "fuel_log"),
             _MenuEntry("DATA SOURCES", "Select which CAN PIDs to fetch", "data_sources"),
             _MenuEntry("CHART SETTINGS", "Graph time base configuration", "chart_settings"),
             _MenuEntry("EV / HYBRID", "Hybrid temps, motor RPMs, block dV", "ev"),
@@ -107,7 +109,12 @@ class EngineMenuScreen(Screen):
         if not self.app:
             return
 
-        if item.action_key == "data_sources":
+        if item.action_key == "fuel_log":
+            from .fuel_log_screen import FuelLogScreen
+            self.app.push_screen(FuelLogScreen(
+                (self.width, self.height), self.app, store=self._store))
+
+        elif item.action_key == "data_sources":
             from .data_sources_screen import DataSourcesScreen
             screen = DataSourcesScreen(
                 (self.width, self.height),
@@ -187,7 +194,7 @@ class EngineMenuScreen(Screen):
         font_label = get_mono_font(12)
         font_desc = get_mono_font(9)
 
-        y = self.HEADER_HEIGHT + 8
+        y = self.HEADER_HEIGHT + 6
 
         for i, item in enumerate(self._items):
             is_selected = i == self._selected_index
@@ -204,17 +211,17 @@ class EngineMenuScreen(Screen):
             # Chevron indicator
             if is_selected:
                 chevron = get_mono_font(12).render(">", True, COLORS["cyan"])
-                surface.blit(chevron, (item_rect.x + 4, y + 4))
+                surface.blit(chevron, (item_rect.x + 4, y + 1))
 
             # Label
             label_color = COLORS["cyan"] if is_selected else COLORS["text_secondary"]
             label_surf = font_label.render(item.label, True, label_color)
-            surface.blit(label_surf, (item_rect.x + 18, y + 2))
+            surface.blit(label_surf, (item_rect.x + 18, y))
 
             # Description
             desc_color = COLORS["text_tertiary"]
             desc_surf = font_desc.render(item.description, True, desc_color)
-            surface.blit(desc_surf, (item_rect.x + 18, y + 16))
+            surface.blit(desc_surf, (item_rect.x + 18, y + 14))
 
             y += self.ITEM_HEIGHT + 3
 
@@ -242,7 +249,7 @@ class EngineMenuScreen(Screen):
         add_menu_list(
             self,
             x=self.SIDE_MARGIN, width=self.width - self.SIDE_MARGIN * 2,
-            first_y=self.HEADER_HEIGHT + 8, stride=self.ITEM_HEIGHT + 3,
+            first_y=self.HEADER_HEIGHT + 6, stride=self.ITEM_HEIGHT + 3,
             row_h=self.ITEM_HEIGHT, bottom=self.height - 22,
             count=lambda: len(self._items),
         )

@@ -313,13 +313,13 @@ def test_engine_menu_tap_opens_entry():
     em = EngineMenuScreen(SIZE, app)
     app.push_screen(em)
     pc, clock = make(lambda: app.current_screen)
-    # Row 1 = CHART SETTINGS
-    y = em.HEADER_HEIGHT + 8 + 1 * (em.ITEM_HEIGHT + 3) + 12
+    # Row 2 = CHART SETTINGS (row 0 = FUEL LOG since 2026-11-17)
+    y = em.HEADER_HEIGHT + 6 + 2 * (em.ITEM_HEIGHT + 3) + 11
     assert tap(pc, clock, 200, y) == "click"
     assert type(app.current_screen).__name__ == "EngineScreen"
     tap(pc, clock, 20, 232)           # BACK chip
     assert app.current_screen is em
-    assert em._selected_index == 1
+    assert em._selected_index == 2
 
 
 def test_engine_menu_avc_status_screen():

@@ -78,6 +78,7 @@ accelerates.
 | EV-mode hints | planned | EV state, map | — | first step: info type |
 | Warm-up awareness | planned | coolant temperature | — | first step: info type at READY below 40 °C |
 | Fuel and trip statistics | have | — | metrics, trip fuel rules | LPG gap |
+| Fuelling log (LPG + petrol fills, full-to-full l/100 km, energy-equivalent combined figure, cost/100 km) | have | backend odometer | `fuel_log/`, `ui/screens/fuel_log_screen.py` | [FUEL_LOG.md](FUEL_LOG.md); fills entered by the driver (MFD or `fuel_log_add`) |
 | HV battery health trends | in progress (separate lane) | 21CE/21D0 | — | `feat/battery-health` |
 | Inverter cooling health | planned | 21C3 temperatures, MG2 power | — | first step: trend metric in the battery-health style |
 | 12 V battery health (trend) | in progress (separate lane) / partly built | INA219 | `guardian.py` (`low_12v` resting event) | trend belongs to the health lane |

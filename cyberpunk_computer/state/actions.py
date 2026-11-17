@@ -174,6 +174,10 @@ class ActionType(Enum):
     CLEAR_DTCS = auto()            # Clear all DTCs (Mode 04)
     DIAG_COMMAND = auto()          # all-ECU diagnostics request (diag.actions.DiagCommandAction)
     SET_DIAG_STATE = auto()        # all-ECU diagnostics results (diag.actions.SetDiagStateAction)
+
+    # Fuelling log (cyberpunk_computer/fuel_log, docs/FUEL_LOG.md)
+    FUEL_LOG_COMMAND = auto()      # add / undo / edit_last (fuel_log.actions.FuelLogCommandAction)
+    SET_FUEL_LOG_STATE = auto()    # entries + figures (fuel_log.actions.SetFuelLogStateAction)
     
     # Batch action
     BATCH = auto()

@@ -968,6 +968,11 @@ from ..diag.commands import register as _register_diag_commands  # noqa: E402
 
 _register_diag_commands(COMMANDS, CommandError)
 
+# Fuelling log (fuel_log_add, fuel_log_undo, fuel_log_edit_last): cyberpunk_computer/fuel_log.
+from ..fuel_log.commands import register as _register_fuel_log_commands  # noqa: E402
+
+_register_fuel_log_commands(COMMANDS, CommandError)
+
 
 def build_command(name: str, params: Dict[str, Any]) -> Action:
     """Build the Action for ``name`` from ``params``.

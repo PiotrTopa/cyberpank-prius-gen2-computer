@@ -396,6 +396,7 @@ class BackendService:
         self.recorder: Optional[TripRecorder] = None
         self.battery = None         # battery.service.BatteryHealthService
         self.diag = None            # diag.wiring.Diagnostics (all-ECU diagnostics engine)
+        self.fuel_log = None        # fuel_log.service.FuelLogService (fuelling log)
         self._unsubscribe = None
         self._unsubscribe_powerbox = None
 
@@ -690,6 +691,20 @@ class BackendService:
         # controllers exist — its VBUS goes through powerbox relay ch2.)
 
         db = MetricsDatabase(cfg.db_path)
+
+        # Fuelling log (docs/FUEL_LOG.md): fuel_log.db next to the metrics
+        # database, fuel_log_* commands, state.fuel_log. Live data only.
+        if not cfg.replay_file:
+            try:
+                import os as _os
+                from ..fuel_log.service import wire_fuel_log
+                self.fuel_log = wire_fuel_log(
+                    twin, _os.environ.get("BACKEND_FUEL_LOG_DB")
+                    or _os.path.join(_os.path.dirname(cfg.db_path) or ".", "fuel_log.db"),
+                    metrics_db=db)
+            except Exception:
+                logger.exception("Fuel log could not be wired; disabled")
+
         sink = MetricsSink(
             twin.store,
             db,

@@ -1003,6 +1003,27 @@ class SatellitesState:
 
 
 @dataclass(frozen=True)
+class FuelLogState:
+    """Fuelling log (cyberpunk_computer/fuel_log, docs/FUEL_LOG.md).
+
+    Published by the backend's FuelLogService after every change and every
+    ~30 s while the odometer moves. JSON-friendly mappings:
+    ``entries`` = the last fills, newest first (id, ts, fuel, litres,
+    price_per_l, total, full, odometer_km, odometer_source, ...);
+    ``figures`` = fuel_log.model.compute_figures(); ``defaults`` = the add-flow
+    defaults per fuel (last price / litres / total); ``last_command`` = result
+    of the last fuel_log_* command ({op, ok, error, id, ts, warnings}).
+    """
+    enabled: bool = False
+    entries: tuple = ()
+    figures: Optional[Mapping[str, object]] = None
+    defaults: Optional[Mapping[str, object]] = None
+    last_command: Optional[Mapping[str, object]] = None
+    count: int = 0
+    updated_at: float = 0.0
+
+
+@dataclass(frozen=True)
 class AppState:
     """
     Complete application state.
@@ -1029,6 +1050,7 @@ class AppState:
     roadsense: RoadsenseState = field(default_factory=RoadsenseState)
     bean: BeanState = field(default_factory=BeanState)
     headunit: HeadunitState = field(default_factory=HeadunitState)
+    fuel_log: FuelLogState = field(default_factory=FuelLogState)
 
     # UI-only state (not from vehicle)
     screen_brightness: int = 100

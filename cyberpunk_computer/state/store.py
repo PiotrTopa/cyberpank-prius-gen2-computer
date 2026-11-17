@@ -64,6 +64,7 @@ class StateSlice(Enum):
     ROADSENSE = auto()  # roadsense perception stack on this computer (backend.roadsense_power)
     BEAN = auto()  # BEAN body bus: message table, known values, capture status (device 203)
     HEADUNIT = auto()  # Android head unit over adb: presence, volume, mute (backend.headunit)
+    FUEL_LOG = auto()  # fuelling log: entries + figures (fuel_log.service)
     ALL = auto()
 
 
@@ -929,6 +930,14 @@ class Store:
                 diagnostics=replace(self._state.diagnostics, **action.fields)
             )
             affected.add(StateSlice.DIAGNOSTICS)
+
+        elif action.type == ActionType.SET_FUEL_LOG_STATE:
+            # Fuelling log entries + figures (fuel_log.actions.SetFuelLogStateAction).
+            self._state = replace(
+                self._state,
+                fuel_log=replace(self._state.fuel_log, **action.fields)
+            )
+            affected.add(StateSlice.FUEL_LOG)
         
         # Dynamics reducers
         elif action.type == ActionType.SET_STEERING_ANGLE:
