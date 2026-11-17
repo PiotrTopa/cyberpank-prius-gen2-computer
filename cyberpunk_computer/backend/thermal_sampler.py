@@ -8,7 +8,8 @@ fan at 0 % for 50 s at a time while the hottest core peaked at 94-96 °C, and
 the phone hard-reset shortly after.
 
 The sampler reads the zones every ``period_s`` (not a divisor of 1 s) in its
-own thread and reports the maximum over the last ``hold_s`` seconds, so the
+own thread and reports the maximum over the last ``hold_s`` seconds (10 s, the cadence of
+the fan loop: the owner wants no faster fan changes), so the
 policy sees the real peaks whatever their phase.
 """
 from __future__ import annotations
@@ -88,7 +89,7 @@ class PeakHold:
 class ThermalSampler:
     """Background reader: ``read()`` -> (cpu peak, gpu peak, battery) in °C."""
 
-    def __init__(self, period_s: float = 0.19, hold_s: float = 2.5,
+    def __init__(self, period_s: float = 0.19, hold_s: float = 10.0,
                  zones: Optional[Dict[str, List[str]]] = None,
                  clock: Callable[[], float] = time.monotonic) -> None:
         self.period_s = period_s

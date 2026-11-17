@@ -346,7 +346,7 @@ class BackendConfig:
     # override, box purge) lives in backend/fan_policy.py; every number in it
     # follows from the bench campaign in docs/THERMAL_MODEL.md.
     chassis_fan_enabled: bool = True
-    chassis_fan_tick_s: float = 2.0       # control loop cadence (seconds)
+    chassis_fan_tick_s: float = 10.0      # control loop cadence (s); owner 2026-11-17: no faster than 10 s
     fan_policy: FanPolicyConfig = field(default_factory=FanPolicyConfig)
 
     # ── Dashcam vision (io.dashcam_ingest, docs/DASHCAM_70MAI.md) ────────────
@@ -2371,7 +2371,7 @@ class BackendService:
         except (OSError, ValueError):
             pass
 
-        # Peak-held over the last 2.5 s (thermal_sampler): a 1 Hz read is phase-locked
+        # Peak-held over the last 10 s (thermal_sampler; the fan loop runs every 10 s): a 1 Hz read is phase-locked
         # to the once-per-second load bursts and misses the hot peaks for a minute.
         if self._thermal_sampler is None:
             from .thermal_sampler import ThermalSampler

@@ -43,7 +43,7 @@ def test_one_hz_reader_is_blind_but_sampler_is_not(tmp_path):
         clock["t"] = t
         zone.write_text(str(int(burst(t) * 1000)))
         s.sample_once()
-        if t > 3.0 and math.isclose((t % 1.0), 0.5, abs_tol=0.1):
+        if t > 11.0 and math.isclose((t % 1.0), 0.5, abs_tol=0.1):
             seen.append(s.read()[0])
         t += s.period_s
     assert seen and min(seen) == 95.0
