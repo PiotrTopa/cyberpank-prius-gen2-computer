@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# hu-rndis — USB networking (RNDIS gadget) between the head unit and the car computer.
+#
+#   hu-rndis                  status, read-only: the unit's USB config, the rndis
+#                             entries of its init rc, and car-computer net interfaces
+#                             that belong to the head unit's USB device
+#   hu-rndis --enable --write    setprop sys.usb.config rndis,adb (NOT persistent; a
+#                             power cycle returns to adb only). adb drops and the unit
+#                             re-enumerates with a new product id; run hu-rndis again.
+#   hu-rndis --disable --write   setprop sys.usb.config adb
+# The interface lands as usbN on the car computer (usb0 is pinned to the MFD Pi by MAC);
+# the backend firewall accepts usb*. Addressing is not set up by this tool.
+set -u
+. "$(dirname "$(readlink -f "$0")")/hu-common.sh"
+
+action=status; write=0
+for a in "$@"; do
+    case "$a" in
+        -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+        --enable) action=enable ;;
+        --disable) action=disable ;;
+        --write) write=1 ;;
+        *) hu_die 2 "unknown arg $a" ;;
+    esac
+done
+
+car_side() {
+    echo "== car computer: net interfaces on the head unit's USB port =="
+    local found=0 n dev
+    for n in /sys/class/net/*; do
+        dev=$(readlink -f "$n/device" 2>/dev/null) || continue
+        case "$dev" in
+            */usb*/"${HU_PORT:-1-1.4.2}"/*|*/usb*/"${HU_PORT:-1-1.4.2}":*)
+                found=1
+                echo "$(basename "$n") driver=$(basename "$(readlink -f "$n/device/driver")") $(ip -br addr show "$(basename "$n")" 2>/dev/null)" ;;
+        esac
+    done
+    [ $found = 1 ] || echo "(none)"
+    echo "USB ids now at ${HU_PORT:-1-1.4.2}: $(cat /sys/bus/usb/devices/${HU_PORT:-1-1.4.2}/idVendor 2>/dev/null):$(cat /sys/bus/usb/devices/${HU_PORT:-1-1.4.2}/idProduct 2>/dev/null)"
+}
+
+if [ $action = status ]; then
+    car_side
+    hu_require
+    echo "== head unit =="
+    hu_sh 'echo "sys.usb.config=$(getprop sys.usb.config) state=$(getprop sys.usb.state) persist=$(getprop persist.sys.usb.config) configfs=$(getprop sys.usb.configfs) controller=$(getprop sys.usb.controller)"
+           f=/sys/class/android_usb/android0/functions; [ -r $f ] && echo "android_usb functions=$(cat $f) enable=$(cat /sys/class/android_usb/android0/enable 2>/dev/null)"
+           ip -o link 2>/dev/null | grep -E "rndis|usb" ' | tr -d '\r'
+    echo "-- init rc rndis entries (via su, read-only) --"
+    hu_su 'grep -n "rndis" /init*.rc /vendor/etc/init/*.rc /system/etc/init/*.rc 2>/dev/null | head -n 40' | tr -d '\r'
+    exit 0
+fi
+
+[ $write = 1 ] || hu_die $E_REFUSED "--$action changes the head unit's USB mode: add --write"
+hu_require
+if [ $action = enable ]; then
+    hu_su 'setprop sys.usb.config rndis,adb'
+else
+    hu_su 'setprop sys.usb.config adb'
+fi
+echo "requested; the unit re-enumerates. Wait ~5 s, then: hu-rndis"

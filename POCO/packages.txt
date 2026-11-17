@@ -69,3 +69,8 @@ bluez-btmon
 py3-dbus
 py3-gobject3
 py3-cryptography
+
+# --- head unit over ADB (tools/headunit, docs/HEADUNIT_INTEGRATION.md §7) ---
+android-tools
+curl
+jq

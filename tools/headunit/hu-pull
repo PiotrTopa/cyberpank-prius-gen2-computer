@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# hu-pull — copy files FROM the head unit (read-only on the unit).
+#
+#   hu-pull REMOTE [LOCAL_DIR]        default LOCAL_DIR ~/headunit/pull/<timestamp>/
+#   hu-pull --root REMOTE [LOCAL_DIR] for files only root can read: copied via
+#                                     `su 0 cat` (single regular file only)
+set -u
+. "$(dirname "$(readlink -f "$0")")/hu-common.sh"
+
+root=0
+case "${1:-}" in
+    -h|--help|"") sed -n '2,7p' "$0"; exit 0 ;;
+    --root) root=1; shift ;;
+esac
+remote="$1"; dest="${2:-$HU_DATA/pull/$(hu_ts)}"
+hu_require
+mkdir -p "$dest"
+if [ $root = 1 ]; then
+    out="$dest/$(basename "$remote")"
+    hu_adb exec-out "su 0 cat $(hu_q "$remote")" > "$out" || hu_die 1 "root read of $remote failed"
+    echo "$out ($(wc -c < "$out") bytes)"
+else
+    hu_adb pull "$remote" "$dest/" && echo "$dest"
+fi

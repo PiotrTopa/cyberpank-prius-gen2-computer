@@ -114,7 +114,7 @@ accelerates.
 
 | # | Gap | Unlocks | How to close it | Effort |
 |---|---|---|---|---|
-| 1 | GNSS position source | map limit for ISA, curve notice, eco hints with the map, tunnel by map, limit preview, wrong-way, geofences, finder, logbook, tow alert, POI | phone GNSS on postmarketOS (lane `feat/phone-gnss`), USB u-blox on the hub, or the head-unit agent posting `/api/v1/position/gnss` | S–M |
+| 1 | GNSS position source | map limit for ISA, curve notice, eco hints with the map, tunnel by map, limit preview, wrong-way, geofences, finder, logbook, tow alert, POI | phone GNSS on postmarketOS (lane `feat/phone-gnss`), USB u-blox on the hub, or the head-unit agent posting `/api/v1/position/gnss` (ADB tooling and the app-less `hu-gnss-bridge` ready since 2026-11-17, untested on the unit: [HEADUNIT_INTEGRATION.md](HEADUNIT_INTEGRATION.md) §7) | S–M |
 | 2 | Sound output | every alert type's sound id | head-unit agent (Android sound with ducking) or a piezo on a satellite / spare powerbox output, behind `SoundSink` | S–M |
 | 3 | Turn-signal state | lane departure (enable), lane-change awareness, indicator-left-on reminder | opto-isolated input on the indicator lamp lines into a satellite / powerbox; or a CAN/BEAN decode | S |
 | 4 | Push channel | parked-car guardian delivery, DTC / maintenance push | notifier on the phone over LTE to a self-hosted topic, behind `NotificationSink` | S |

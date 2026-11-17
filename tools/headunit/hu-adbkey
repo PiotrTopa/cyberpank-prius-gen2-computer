@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# hu-adbkey — ADB RSA key authorisation helpers.
+#
+#   hu-adbkey                         fingerprint of this computer's key (as the head
+#                                     unit's "Allow USB debugging?" prompt shows it) and,
+#                                     if adb is already authorised, whether the key is in
+#                                     the unit's /data/misc/adb/adb_keys (read via su)
+#   hu-adbkey install --write [PUB]   append PUB (default ~/.android/adbkey.pub) to the
+#                                     unit's adb_keys through su, if not there yet. Needs an
+#                                     already-authorised adb session: run it from the P52
+#                                     (its key was accepted on 2026-10-19) with
+#                                     PUB = tools/headunit/keys/poco_adbkey.pub when the
+#                                     prompt never appears for the phone.
+set -u
+. "$(dirname "$(readlink -f "$0")")/hu-common.sh"
+
+cmd=status; write=0; pub="$HOME/.android/adbkey.pub"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+        status|install) cmd="$1"; shift ;;
+        --write) write=1; shift ;;
+        *) pub="$1"; shift ;;
+    esac
+done
+[ -r "$pub" ] || hu_die 1 "no public key $pub (adb creates ~/.android/adbkey{,.pub} on first start)"
+key=$(cut -d' ' -f1 "$pub")
+fp=$(printf '%s' "$key" | base64 -d | md5sum | cut -c1-32)
+fp_colon=$(printf '%s' "$fp" | sed 's/../&:/g; s/:$//' | tr a-f A-F)
+echo "key        : $pub ($(cut -d' ' -f2- "$pub"))"
+echo "fingerprint: $fp_colon   (the prompt shows this MD5)"
+
+if [ $cmd = status ]; then
+    hu_adb_server
+    [ "$(hu_adb_state)" = device ] || { echo "on the unit: unknown (adb not authorised / unit absent)"; exit 0; }
+    n=$(hu_su "grep -c $(hu_q "$key") /data/misc/adb/adb_keys 2>/dev/null" | tr -d '\r')
+    echo "on the unit: ${n:-0} matching line(s) in /data/misc/adb/adb_keys"
+    exit 0
+fi
+
+[ $write = 1 ] || hu_die $E_REFUSED "install writes /data/misc/adb/adb_keys on the head unit: add --write"
+hu_require
+if [ "$(hu_su "grep -c $(hu_q "$key") /data/misc/adb/adb_keys 2>/dev/null" | tr -d '\r')" -gt 0 ] 2>/dev/null; then
+    echo "already present"; exit 0
+fi
+line=$(head -n1 "$pub")
+hu_su "f=/data/misc/adb/adb_keys; [ -f \$f ] && cp \$f \$f.bak-$(hu_ts); echo $(hu_q "$line") >> \$f; chown system:shell \$f 2>/dev/null; chmod 640 \$f; wc -l \$f" | tr -d '\r'
+echo "installed; adbd reads adb_keys on each new connection (replug or: adb kill-server on the other host)"

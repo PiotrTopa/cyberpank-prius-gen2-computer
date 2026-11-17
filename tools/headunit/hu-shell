@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# hu-shell — adb shell on the head unit.
+#
+#   hu-shell                 interactive shell (uid shell)
+#   hu-shell --root          interactive root shell (su 0)
+#   hu-shell CMD...          run one command, e.g. hu-shell getprop ro.build.display.id
+#   hu-shell --root CMD...   run one command as root
+#
+# NOT guarded: whatever you type runs. The other hu-* tools are read-only by default.
+set -u
+. "$(dirname "$(readlink -f "$0")")/hu-common.sh"
+
+root=0
+case "${1:-}" in
+    -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
+    --root) root=1; shift ;;
+esac
+hu_require
+if [ $# -eq 0 ]; then
+    if [ $root = 1 ]; then hu_adb shell -t su 0; else hu_adb shell; fi
+    exit $?
+fi
+if [ $root = 1 ]; then hu_su "$*"; else hu_sh "$*"; fi

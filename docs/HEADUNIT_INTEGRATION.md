@@ -11,7 +11,7 @@ image backups are kept outside the repo).
 | Item | Fact | Evidence |
 |---|---|---|
 | SoC / OS | MediaTek Autochips AC8227L, Android 8.1 (SDK 27; `ro.build.version.release` claims 10.0), build `9520_00033_V001`, kernel 3.18.79 | `headunit/getprop.txt` |
-| Access | Second USB port is a dual-role OTG port in ADB device mode (0e8d:201c, ADB only). `adb devices` authorises without a prompt. `su 0` gives uid 0 (su is 4750 root:shell), SELinux permissive, dm-verity disabled, `/system` remounts rw. `adb root` is refused, but `service.adb.root=1` + adbd restart makes adbd root | CAPTURES.md "Root inventory" |
+| Access | Second USB port is a dual-role OTG port in ADB device mode (0e8d:201c, product "9520", serial `MJU8DY59WS8LMB85`, ADB only). On the car computer it enumerates at USB `1-1.4.2` behind the camera hub (`1-1.4`, VIA 2109:2817, powerbox relay ch4), ~3 s after relay 4 on and only with ACC on (seen at every ACC start on 2026-11-16). From the P52 on 2026-10-19 `adb devices` authorised without a prompt (`ro.adb.secure=1`, so the phone's own key may still get one). `su 0` gives uid 0 (su is 4750 root:shell), SELinux permissive, dm-verity disabled, `/system` remounts rw. `adb root` is refused, but `service.adb.root=1` + adbd restart makes adbd root | CAPTURES.md "Root inventory" |
 | Screen | 1280×720, 160 dpi | `wm size` |
 | Vendor stack | "xy"/"xyauto"/"acloud" framework inside `system_server` (`com.mediatek.server.NewkeypadMonitor`, `CanbusMonitor`, `CanbusService`), Autochips `AudioSettings`/`Audio1701Settings`, launcher `com.android.launcher` (xyauto), ZLink `com.zjinnova.zlink` (CarPlay / Android Auto), CAN-box apps `com.xygala.canbus`, `com.xygala.pvcanset` | decompiled `mediatek-services`, `framework`, APKs |
 | MCU link | `/dev/ttyMT2`, 115200 baud, opened by `NewkeypadMonitor` (native `libSerial_key.so`); reopened on every QuickBoot power cycle (`autochips.intent.action.QB_POWEROFF/QB_POWERON`) | decompiled `NewkeypadMonitor`, strace |
@@ -59,7 +59,9 @@ image backups are kept outside the repo).
    raw fix to `POST /api/v1/position/gnss` on the backend, which feeds roadsense mapd. The backend
    side is built (off by default); contract, fields and clock handling:
    [POSITION_FEEDER.md](POSITION_FEEDER.md) §4. Not measured yet: whether the unit has a GNSS
-   receiver with a usable antenna, its fix rate and accuracy fields.
+   receiver with a usable antenna, its fix rate and accuracy fields. The unit runs MediaTek's GNSS
+   stack (`ro.mtk_gps_support=1`, `mnld`, `/dev/gps`, `/dev/stpgps`, YGPS test app). Interim
+   sender without an app: `hu-gnss-bridge` on the car computer (§7.4).
 
 ## 3. Architecture (design)
 
@@ -114,3 +116,102 @@ Decisions (owner):
 Measurements (step 2 of section 5): that every listed broadcast fires; that `xy.android.gtpkey.volset`,
 the `canbus.intent.action.cmd` LED frame and `xy.android.lightscreen` act; overlay behaviour over ZLink
 with Android Auto running; the amplifier-button trace left on the unit.
+
+## 7. ADB from the car computer (tooling, 2026-11-17)
+
+Everything needed to work on the unit from the POCO over its USB cable, installed and tested with no
+unit attached (the unit was off): the "absent" paths on the phone, the "present" paths on the P52
+against a fake `adb`. Nothing has talked to the real unit from the phone yet.
+
+### 7.1 Installed on the POCO
+
+| What | Where |
+|---|---|
+| `adb` 1.0.41 (Alpine `android-tools` 37.0.0), `curl`, `jq` | apk (`POCO/packages.txt`) |
+| udev rule: vendor 0e8d → group `plugdev` 0660, `/dev/prius-headunit`, ModemManager ignore | `/etc/udev/rules.d/51-prius-headunit.rules` (repo `POCO/rootfs/etc/udev/rules.d/`) |
+| ADB key of the phone (user `user`) | `~user/.android/adbkey{,.pub}`; backup vault key `poco_adbkey_b64` (base64 of the PEM); public key also in `tools/headunit/keys/poco_adbkey.pub`; prompt fingerprint `C1:77:87:D1:4F:28:72:89:7F:DE:E4:01:70:70:0D:52` |
+| tools `hu-*` | `/usr/local/lib/prius-headunit/`, symlinks in `/usr/local/bin`; source `tools/headunit/`, reinstall from the P52 with `dotinfra vault exec poco_user_password -- tools/headunit/install.sh --sudo-stdin` |
+| captures | `~user/headunit/{info,logcat,pull}/<timestamp>` |
+
+Restore the key on a reflashed phone: `dotinfra vault exec poco_adbkey_b64 -- sh -c 'base64 -d | ssh
+user@10.200.0.14 "umask 077; mkdir -p .android; cat > .android/adbkey"'` then `ssh user@10.200.0.14
+'adb pubkey .android/adbkey > .android/adbkey.pub'`.
+
+### 7.2 Commands
+
+All tools are read-only on the unit unless a `--write` flag is given; exit 3 = unit absent, 4 =
+unauthorised, 5 = adb offline, 6 = write refused. `-h` prints the usage.
+
+| Command | Does |
+|---|---|
+| `hu-status` | backend ACC / relay ch4 / roadsense camera power, camera hub `1-1.4`, unit on USB, adb state, build, uptime, USB config, SELinux, `su 0 id`, location providers, foreground app, port forwards |
+| `hu-shell [--root] [CMD]` | `adb shell` / `su 0` (not guarded: whatever you type runs) |
+| `hu-pull [--root] REMOTE [DIR]` | copy from the unit (`--root` reads one file through `su 0 cat`) |
+| `hu-push --write LOCAL [REMOTE]` | copy to the unit, default `/data/local/tmp/`; `/system`, `/vendor`, `/data/misc`, `/data/system` also need `--system` |
+| `hu-info` | facts dump: getprop, packages, `dumpsys location`, GNSS HAL, `mnld`/`gnss` processes, `/dev/ttyMT*` `/dev/gps*` and which process holds them, MTK GPS config (`mnl.prop`), init rc rndis/gps lines, `adb_keys` fingerprints, toolbox (`nc`?), USB/network/display, GPS-filtered and tail logcat, dmesg, screenshot; `SUMMARY.txt` + tarball |
+| `hu-logcat [-t S] [--dump] [-- ARGS]` | logcat of all buffers to a file |
+| `hu-fwd reverse [8080]` / `forward L R` / `list` / `clear` / `test` | adb port forwarding; `test` makes the unit GET `/login` through the tunnel and prints the HTTP status line |
+| `hu-rndis` / `--enable --write` / `--disable --write` | RNDIS status (unit's `sys.usb.config`, init rc entries, car-side interfaces on `1-1.4.2`); enable = `setprop sys.usb.config rndis,adb` (not persistent) |
+| `hu-adbkey` / `install --write [PUB]` | key fingerprint; whether it is in the unit's `adb_keys`; append it through `su` |
+| `hu-gnss-bridge` | GNSS sender running on the car computer (§7.4); dry run unless `--post` |
+
+Security: the backend trusts loopback without a token (`BACKEND_AUTH_TRUSTED`, [AUTH.md](AUTH.md)).
+`hu-fwd reverse 8080` therefore gives every app on the unit the full API, commands included (relays).
+Open it only for a session; a permanent agent on the unit gets a token or a narrower route.
+
+### 7.3 Authorisation (the RSA prompt)
+
+`ro.adb.secure=1`. The phone's key is new, so the unit may show "Allow USB debugging?" with the
+fingerprint above on its first connection: tick "Always allow from this computer", OK. If no prompt
+appears and `hu-status` stays `unauthorized`:
+
+1. Unit Settings → Developer options → "Revoke USB debugging authorisations", replug (camera hub
+   relay or ACC cycle), wait for the prompt.
+2. From the P52 (its key was accepted on 2026-10-19): move the unit's cable to the P52, then
+   `tools/headunit/hu-adbkey install --write tools/headunit/keys/poco_adbkey.pub` (appends the phone's
+   public key to `/data/misc/adb/adb_keys` through `su`, backup `adb_keys.bak-<ts>`), cable back.
+3. Last resort: copy the P52's authorised key to the phone (`~/.android/adbkey` on the P52 →
+   phone `~/.android/adbkey`, then `adb kill-server`); two machines then share one key.
+
+### 7.4 GNSS sender design
+
+Three routes; the first needs nothing on the unit and runs today:
+
+| Route | How | State |
+|---|---|---|
+| A. `hu-gnss-bridge` (default `--source dumpsys`) | one long `adb shell` loop prints the "Last Known Locations" block of `dumpsys location` and `/proc/uptime` every second; the bridge parses `Location[gps lat,lon hAcc= et= vel= bear= …]`, sends a fix when `et` changes, `age_ms` = unit uptime − `et` (both CLOCK_BOOTTIME on the unit, no clock sync); POSTs to `127.0.0.1:8080` (loopback, no token); reconnects after USB drops | built, parser unit-tested on Android 8.1's `Location.toString` layout (`tests/test_hu_gnss_bridge.py`); not run against the unit |
+| B. PriusGnss app + `hu-gnss-bridge --source logcat` | a foreground service on the unit requests GPS updates and logs each fix as backend-format JSON (tag `PriusGnss`); the bridge reads `adb logcat` and POSTs; full fix rate, exact `age_ms`, keeps GPS on with no UI app | skeleton in `tools/headunit/apk/` (manifest, service, boot receiver, Gradle-free `build.sh`); not built: the P52 has a JRE and `adb` only. Needs (apt, a few hundred MB, owner's go): `openjdk-21-jdk-headless aapt dalvik-exchange apksigner google-android-platform-27-installer` |
+| C. App posting directly | the app POSTs to `http://127.0.0.1:8080` over `adb reverse` or to the phone over RNDIS / Wi-Fi with the bearer token | later; puts the token on the unit |
+
+Limit of A: `dumpsys` only shows fresh GPS fixes while an app on the unit requests GPS (a navigation
+app, or MediaTek's YGPS: `hu-gnss-bridge --start-ygps --write`), and it samples at ~1 Hz. The
+backend's feeder must run the `headunit` source (`BACKEND_POSITION_FEEDER=1`, default source) for
+the POST to be accepted.
+
+### 7.5 On-site session checklist
+
+1. Key on (ACC). The backend turns relay ch4 on with the roadsense stack (or PREVIEW); the unit
+   appears ~3 s later.
+2. `ssh user@10.200.0.14` (or over the car AP) → `hu-status`. Expect `camera hub: 2109:2817`,
+   `head unit : USB 1-1.4.2 id=0e8d:201c`, `adb state : device`.
+   - `absent` with the hub absent: relay ch4 is off (stack not started yet; wait / check the
+     dashboard). Do not toggle relay 4 by hand while roadsense owns it.
+   - `unauthorized`: accept the prompt on the unit's screen (fingerprint `C1:77:87:D1:…:0D:52`,
+     "Always allow"); no prompt → §7.3.
+3. `hu-info` → read `~/headunit/info/<ts>/SUMMARY.txt`: GPS providers and last fix, `mnld`, who
+   holds `/dev/gps`/`ttyMT*`, location apps, whether the unit has `nc`.
+4. GPS check: start a navigation app or `hu-gnss-bridge --start-ygps --write` (YGPS on screen),
+   then `hu-gnss-bridge` (dry run): fixes with `age_ms` < 1500 and sane `hacc_m` mean route A works.
+   Parked under a roof the fix may never come; drive or park in the open.
+5. `hu-gnss-bridge --post` and watch `curl -s http://127.0.0.1:8080/api/v1/position | jq` (or the dashboard)
+   for the accepted-fix count rising; Ctrl-C to stop. `--log ~/headunit/gnss-<date>.ndjson` keeps raw samples.
+6. `hu-logcat -t 120` while pressing wheel keys / changing volume (with `settings put system
+   newkeypad_debug 1` via `hu-shell` if the MCU bytes are wanted) — the §5 step 2 measurements.
+7. Optional: `hu-fwd reverse 8080` + `hu-fwd test` (expect an HTTP status line), then `hu-fwd clear`.
+8. Optional: `hu-rndis` (status); `hu-rndis --enable --write` only when trying the USB network
+   (adb drops and comes back with a new product id; a power cycle restores plain adb).
+9. Copy captures to the laptop: `scp -r user@10.200.0.14:headunit/info/<ts> …`.
+
+Open issue: the camera hub dropped and re-enumerated mid-drive twice on 2026-11-16 (17:47:17 and
+21:16:50 local time); the unit disappears with it. `hu-gnss-bridge` reconnects; interactive sessions must be
+restarted. Cause not known (hub power / relay ch4 / cable).

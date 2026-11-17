@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# hu-fwd — adb port forwarding between the car computer and the head unit.
+# Forwards live in the adb server / adbd only (nothing written to the unit's
+# storage) and vanish when the cable or adb server goes away.
+#
+#   hu-fwd reverse [PORT]          head unit 127.0.0.1:PORT -> car computer 127.0.0.1:PORT
+#                                  (default 8080 = backend REST; apps on the unit reach
+#                                  http://127.0.0.1:8080/api/v1/... ; the firewall accepts it
+#                                  because adb connects on lo)
+#   hu-fwd forward LOCAL REMOTE    car computer 127.0.0.1:LOCAL -> head unit tcp:REMOTE
+#   hu-fwd list                    show both directions
+#   hu-fwd clear                   remove all reverse + forward rules of this unit
+#   hu-fwd test [PORT]             from the head unit, GET http://127.0.0.1:PORT/login
+#                                  through the reverse tunnel (prints the HTTP status line,
+#                                  e.g. "HTTP/1.1 303 See Other"; empty = no backend)
+set -u
+. "$(dirname "$(readlink -f "$0")")/hu-common.sh"
+
+cmd="${1:-list}"; shift || true
+case "$cmd" in -h|--help) sed -n '2,16p' "$0"; exit 0 ;; esac
+hu_require
+case "$cmd" in
+    reverse)
+        p="${1:-8080}"
+        hu_adb reverse "tcp:$p" "tcp:$p" && echo "reverse tcp:$p -> car computer tcp:$p" ;;
+    forward)
+        [ $# -eq 2 ] || hu_die 2 "usage: hu-fwd forward LOCAL REMOTE"
+        hu_adb forward "tcp:$1" "tcp:$2" && echo "forward 127.0.0.1:$1 -> head unit tcp:$2" ;;
+    list)
+        echo "reverse:"; hu_adb reverse --list | tr -d '\r'
+        echo "forward:"; hu_adb forward --list | tr -d '\r' ;;
+    clear)
+        hu_adb reverse --remove-all; hu_adb forward --remove-all; echo "cleared" ;;
+    test)
+        p="${1:-8080}"
+        hu_adb reverse --list | grep -q "tcp:$p" || hu_die 1 "no reverse for tcp:$p (run: hu-fwd reverse $p)"
+        # toybox nc on Android 8.1; busybox fallback; print the status line only
+        hu_sh "printf 'GET /login HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n' | (timeout 5 toybox nc 127.0.0.1 $p 2>/dev/null || timeout 5 nc 127.0.0.1 $p) | head -n1" | tr -d '\r' ;;
+    *) hu_die 2 "unknown command $cmd (reverse|forward|list|clear|test)" ;;
+esac

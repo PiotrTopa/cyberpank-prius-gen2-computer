@@ -1,0 +1,5 @@
+# Android head unit (MediaTek Autochips AC8227L, vendor 0e8d) on the camera hub
+# (1-1.4.2): adb as the desktop user without root. Product id 201c = adb only; other
+# ids appear when its USB function set changes (rndis,adb), so match the vendor.
+# The user is in plugdev. ModemManager must not probe it. Symlink /dev/prius-headunit.
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0e8d", MODE="0660", GROUP="plugdev", TAG+="uaccess", SYMLINK+="prius-headunit", ENV{ID_MM_DEVICE_IGNORE}="1"

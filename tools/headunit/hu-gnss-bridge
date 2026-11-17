@@ -1,0 +1,326 @@
+#!/usr/bin/env python3
+"""hu-gnss-bridge — head-unit GPS fixes to the backend, with no app on the head unit.
+
+Runs on the car computer. One long ``adb shell`` loop on the head unit prints, about
+once per second, the "Last Known Locations" block of ``dumpsys location`` followed by
+the unit's ``/proc/uptime`` (CLOCK_BOOTTIME, the same clock as Location's ``et=``).
+Every new fix (new ``et``) becomes one ``POST /api/v1/position/gnss`` to the local
+backend (contract: docs/POSITION_FEEDER.md §4) with ``age_ms`` computed from the two
+clocks of the head unit itself, so no clock sync is needed. The backend token never
+leaves the car computer.
+
+Limits (see docs/HEADUNIT_INTEGRATION.md §7):
+* ``dumpsys`` only shows a fresh GPS fix while some app on the unit requests GPS
+  updates (a navigation app, or MediaTek's YGPS: ``hu-gnss-bridge --start-ygps``).
+* Poll rate ~1 Hz; a 5/10 Hz receiver is decimated.
+
+Usage:
+  hu-gnss-bridge                    dry run: print the fixes it would send (default)
+  hu-gnss-bridge --post             send them to $PRIUS_API (default http://127.0.0.1:8080)
+  hu-gnss-bridge --once             one sample, print and exit (with --post: send it)
+  hu-gnss-bridge --provider fused   another provider than gps
+  hu-gnss-bridge --log FILE         also append every raw sample block to FILE
+  hu-gnss-bridge --start-ygps       start MediaTek YGPS on the unit first (a UI app;
+                                    changes the screen, needs --write as well)
+  hu-gnss-bridge --source logcat    read fixes from the PriusGnss app's logcat lines
+                                    (tools/headunit/apk; full fix rate, exact age)
+  hu-gnss-bridge --stdin            parse a recorded stream from stdin (tests)
+Without --once it waits for the unit and reconnects after a USB drop (the camera hub
+re-enumerated mid-drive twice on 2026-11-16). Exit 3 = unit absent (--once).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from typing import Dict, Iterable, Iterator, List, Optional, Tuple
+
+BEGIN = "@@HU_LOC_BEGIN"
+END = "@@HU_LOC_END"   # followed by the unit's /proc/uptime, e.g. "@@HU_LOC_END 12345.67 2345.12"
+
+# remote loop: kept POSIX/toybox-sh simple; sed cuts the first "Last Known Locations:" block
+REMOTE_LOOP = (
+    "while true; do echo " + BEGIN + "; "
+    "dumpsys location | sed -n '/Last Known Locations:/,/Last Known Locations Coarse/p'; "
+    "echo " + END + " $(cat /proc/uptime); sleep {interval}; done"
+)
+
+_LOC_RE = re.compile(r"^\s*(?P<key>[\w.-]+): Location\[(?P<body>.*)\]\s*$")
+_HEAD_RE = re.compile(r"^(?P<prov>\S+) (?P<lat>-?\d+(?:\.\d+)?),(?P<lon>-?\d+(?:\.\d+)?)")
+_DUR_RE = re.compile(r"^([+-])?(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m(?!s))?(?:(\d+)s)?(?:(\d+)ms)?$")
+_FLOAT = r"(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)"
+
+
+def parse_duration_ms(text: str) -> Optional[int]:
+    """android.util.TimeUtils.formatDuration output ("+1d2h3m4s567ms", "0") -> ms."""
+    if text in ("0", "+0"):
+        return 0
+    m = _DUR_RE.match(text)
+    if not m or not any(m.groups()[1:]):
+        return None
+    sign, d, h, mi, s, ms = m.groups()
+    total = ((int(d or 0) * 24 + int(h or 0)) * 60 + int(mi or 0)) * 60_000 + int(s or 0) * 1000 + int(ms or 0)
+    return -total if sign == "-" else total
+
+
+def _num(body: str, key: str) -> Optional[float]:
+    m = re.search(r"\b" + re.escape(key) + "=" + _FLOAT, body)
+    return float(m.group(1)) if m else None
+
+
+def parse_location(body: str) -> Optional[Dict]:
+    """Body of Location.toString() (API 26/27 layout) -> dict, None if unparseable."""
+    head = _HEAD_RE.match(body.strip())
+    if not head:
+        return None
+    out: Dict = {"provider": head.group("prov"), "lat": float(head.group("lat")),
+                 "lon": float(head.group("lon"))}
+    m = re.search(r"\bet=(\S+)", body)
+    out["et_ms"] = parse_duration_ms(m.group(1)) if m and m.group(1) != "?!?" else None
+    for key, name in (("hAcc", "hacc_m"), ("alt", "alt_m"), ("vel", "speed_mps"), ("bear", "course_deg"),
+                      ("vAcc", "vacc_m"), ("sAcc", "speed_acc_mps"), ("bAcc", "course_acc_deg")):
+        v = _num(body, key)
+        if v is not None:
+            out[name] = v
+    m = re.search(r"\bsatellites=(\d+)", body)
+    if m:
+        out["sats"] = int(m.group(1))
+    out["mock"] = bool(re.search(r"\smock\b", body))
+    return out
+
+
+def parse_block(lines: Iterable[str]) -> Dict[str, Dict]:
+    """Lines of the Last Known Locations block -> {provider_key: location}."""
+    locs: Dict[str, Dict] = {}
+    for line in lines:
+        m = _LOC_RE.match(line.rstrip("\r\n"))
+        if m:
+            loc = parse_location(m.group("body"))
+            if loc is not None:
+                locs.setdefault(m.group("key"), loc)   # first block only
+    return locs
+
+
+def samples(stream: Iterable[str]) -> Iterator[Tuple[Dict[str, Dict], Optional[float], float]]:
+    """Yield (locations, unit_uptime_s, local_monotonic_at_end) per sample block."""
+    block: Optional[List[str]] = None
+    for raw in stream:
+        line = raw.rstrip("\r\n")
+        if line.startswith(BEGIN):
+            block = []
+        elif line.startswith(END):
+            parts = line.split()
+            up = None
+            if len(parts) >= 2:
+                try:
+                    up = float(parts[1])
+                except ValueError:
+                    up = None
+            yield parse_block(block or []), up, time.monotonic()
+            block = None
+        elif block is not None:
+            block.append(line)
+
+
+def to_fix(loc: Dict, unit_uptime_s: Optional[float], t_sample: float, now: Optional[float] = None) -> Dict:
+    """Location dict -> backend fix object (POSITION_FEEDER.md §4)."""
+    now = time.monotonic() if now is None else now
+    fix: Dict = {"lat": round(loc["lat"], 7), "lon": round(loc["lon"], 7), "fix": "3d"}
+    if loc.get("et_ms") is not None and unit_uptime_s is not None:
+        age = unit_uptime_s * 1000.0 - loc["et_ms"] + (now - t_sample) * 1000.0
+        fix["age_ms"] = max(0, int(round(age)))
+    for k in ("hacc_m", "speed_mps", "course_deg", "alt_m", "vacc_m", "speed_acc_mps", "course_acc_deg", "sats"):
+        if k in loc:
+            fix[k] = loc[k]
+    return fix
+
+
+LOGCAT_TAG = "PriusGnss"
+LOGCAT_CMD = ["logcat", "-v", "raw", "-T", "1", "-s", LOGCAT_TAG + ":I"]
+
+
+def logcat_fixes(stream: Iterable[str]) -> Iterator[Tuple[Dict, float]]:
+    """JSON lines of the PriusGnss app (tools/headunit/apk) -> (fix, local_monotonic_at_arrival).
+    Event lines ({"event": ...}) are skipped; fix fields pass through unchanged."""
+    for raw in stream:
+        line = raw.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and "lat" in obj and "lon" in obj:
+            yield obj, time.monotonic()
+
+
+def logcat_to_fix(obj: Dict, t_arrival: float, now: Optional[float] = None) -> Dict:
+    now = time.monotonic() if now is None else now
+    fix = {k: v for k, v in obj.items() if k not in ("et_ms", "event")}
+    if "age_ms" in fix:
+        fix["age_ms"] = max(0, int(round(fix["age_ms"] + (now - t_arrival) * 1000.0)))
+    fix.setdefault("fix", "3d")
+    return fix
+
+
+def read_token() -> str:
+    tok = os.environ.get("PRIUS_API_TOKEN", "").strip()
+    if tok:
+        return tok
+    for path in (os.path.expanduser("~/.config/prius/api-token"), "/etc/prius/backend-auth.env"):
+        try:
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("BACKEND_AUTH_TOKEN="):
+                        return line.split("=", 1)[1]
+                    if line and "=" not in line:
+                        return line
+        except OSError:
+            continue
+    try:
+        out = subprocess.run(["sudo", "-n", "sed", "-n", "s/^BACKEND_AUTH_TOKEN=//p", "/etc/prius/backend-auth.env"],
+                             capture_output=True, text=True, timeout=5)
+        return out.stdout.strip().splitlines()[0] if out.returncode == 0 and out.stdout.strip() else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def post(url: str, token: str, fix: Dict) -> Tuple[int, str]:
+    req = urllib.request.Request(url, data=json.dumps(fix).encode(), method="POST",
+                                 headers={"Content-Type": "application/json"})
+    if token:
+        req.add_header("Authorization", "Bearer " + token)
+    try:
+        with urllib.request.urlopen(req, timeout=2) as r:
+            return r.status, r.read(500).decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read(500).decode("utf-8", "replace")
+    except (urllib.error.URLError, OSError) as e:
+        return 0, str(e)
+
+
+def adb_cmd(serial: Optional[str]) -> List[str]:
+    adb = os.environ.get("ADB", "adb")
+    if not shutil.which(adb):
+        sys.exit("hu-gnss-bridge: adb not installed")
+    return [adb] + (["-s", serial] if serial else ["-d"])
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--post", action="store_true", help="send fixes to the backend (default: dry run)")
+    ap.add_argument("--once", action="store_true")
+    ap.add_argument("--provider", default="gps")
+    ap.add_argument("--source", choices=("dumpsys", "logcat"), default="dumpsys",
+                    help="dumpsys = poll `dumpsys location` (no app); logcat = PriusGnss app lines")
+    ap.add_argument("--interval", type=float, default=1.0, help="remote poll sleep, s")
+    ap.add_argument("--api", default=os.environ.get("PRIUS_API", "http://127.0.0.1:8080"))
+    ap.add_argument("--serial", default=os.environ.get("HU_SERIAL") or None)
+    ap.add_argument("--log")
+    ap.add_argument("--stdin", action="store_true")
+    ap.add_argument("--start-ygps", action="store_true")
+    ap.add_argument("--write", action="store_true", help="allow --start-ygps (changes the unit's screen)")
+    a = ap.parse_args(argv)
+
+    url = a.api.rstrip("/") + "/api/v1/position/gnss"
+    token = read_token() if a.post else ""
+    if a.post and not token and not re.match(r"https?://(127\.|localhost|\[::1\])", a.api):
+        # loopback is a trusted peer of the backend (BACKEND_AUTH_TRUSTED, docs/AUTH.md):
+        # no token needed on the car computer itself; elsewhere expect 401 without one
+        print("hu-gnss-bridge: no backend token found (PRIUS_API_TOKEN, ~/.config/prius/api-token, "
+              "or sudo -n); posting without one", file=sys.stderr)
+    log = open(a.log, "a") if a.log else None
+
+    last_et = [None]
+
+    def emit(fix: Dict) -> None:
+        if a.post:
+            code, body = post(url, token, fix)
+            print("%s -> %s %s" % (json.dumps(fix), code, body.strip()[:200]), flush=True)
+        else:
+            print("DRY " + json.dumps(fix), flush=True)
+
+    def run(stream: Iterable[str]) -> Optional[int]:
+        """Consume one stream; returns an exit code for --once, None when the stream ended."""
+        if a.source == "logcat":
+            for obj, t in logcat_fixes(stream):
+                if log:
+                    log.write(json.dumps({"t": time.time(), "logcat": obj}) + "\n")
+                    log.flush()
+                emit(logcat_to_fix(obj, t))
+                if a.once:
+                    return 0
+            return None
+        for locs, up, t in samples(stream):
+            if log:
+                log.write(json.dumps({"t": time.time(), "uptime": up, "locs": locs}) + "\n")
+                log.flush()
+            loc = locs.get(a.provider)
+            if loc is None:
+                print("no %s location (providers: %s)" % (a.provider, ",".join(locs) or "-"), file=sys.stderr)
+                if a.once:
+                    return 1
+                continue
+            if loc.get("et_ms") is not None and loc["et_ms"] == last_et[0]:
+                continue                                    # same fix as last time
+            last_et[0] = loc.get("et_ms")
+            fix = to_fix(loc, up, t)
+            if loc.get("mock"):
+                print("note: mock location", file=sys.stderr)
+            emit(fix)
+            if a.once:
+                return 0
+        return None
+
+    try:
+        if a.stdin:
+            return run(sys.stdin) or 0
+        base = adb_cmd(a.serial)
+        if a.start_ygps and not a.write:
+            print("hu-gnss-bridge: --start-ygps changes the head unit's screen: add --write", file=sys.stderr)
+            return 6
+        while True:
+            st = subprocess.run(base + ["get-state"], capture_output=True, text=True, timeout=10).stdout.strip()
+            if st != "device":
+                msg = "head unit not reachable over adb (state %s)" % (st or "absent")
+                if a.once:
+                    print("hu-gnss-bridge: " + msg, file=sys.stderr)
+                    return 3
+                print(msg + "; retrying in 5 s", file=sys.stderr)
+                time.sleep(5)
+                continue
+            if a.start_ygps:
+                subprocess.run(base + ["shell", "monkey -p com.mediatek.ygps -c android.intent.category.LAUNCHER 1"],
+                               capture_output=True, timeout=15)
+            remote = (["logcat"] + LOGCAT_CMD[1:]) if a.source == "logcat" else \
+                ["shell", REMOTE_LOOP.format(interval=a.interval)]
+            proc = subprocess.Popen(base + remote,
+                                    stdout=subprocess.PIPE, text=True, bufsize=1)
+            try:
+                rc = run(proc.stdout)
+            finally:
+                proc.terminate()
+            if rc is not None:
+                return rc
+            if a.once:
+                return 1
+            print("adb stream ended (unit gone? hub re-enumerated?); reconnecting", file=sys.stderr)
+            time.sleep(2)
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        if log:
+            log.close()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

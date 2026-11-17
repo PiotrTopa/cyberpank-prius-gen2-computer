@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# hu-status — is the head unit reachable? Read-only.
+#
+# Prints: backend ACC / relay ch4 (when the API answers), camera hub presence,
+# head-unit USB presence, adb state, and (when adb is authorised) a few
+# getprop basics, root and SELinux state, USB config and active port forwards.
+# Exit: 0 adb ready, 3 absent, 4 unauthorized, 5 offline/other, 2 no adb.
+set -u
+. "$(dirname "$(readlink -f "$0")")/hu-common.sh"
+
+case "${1:-}" in -h|--help) sed -n '2,8p' "$0"; exit 0 ;; esac
+
+echo "== car computer side =="
+if st=$(hu_api_get /api/v1/state 2>/dev/null) && [ -n "$st" ]; then
+    printf '%s' "$st" | python3 -c '
+import json, sys
+s = json.load(sys.stdin).get("state", {})
+pb = s.get("powerbox") or {}
+rl = pb.get("relays") or []
+r4 = rl[4] if len(rl) > 4 else None
+rs = s.get("roadsense") or {}
+print("backend   : up   acc_on=%s  relay4(camera hub)=%s  roadsense.camera_power=%s" % (
+    pb.get("acc_on"), r4, rs.get("camera_power")))' 2>/dev/null || echo "backend   : answered, state not parsed"
+else
+    if curl -s -m 3 -o /dev/null "$PRIUS_API/login" 2>/dev/null; then
+        echo "backend   : up, but /api/v1/state refused (no token: set PRIUS_API_TOKEN or ~/.config/prius/api-token)"
+    else
+        echo "backend   : not answering at $PRIUS_API"
+    fi
+fi
+hub=$(hu_hub_id)
+echo "camera hub: ${hub:-absent} at $HU_HUB_PATH${hub:+ (relay ch4 on)}"
+usb=$(hu_usb_find)
+if [ -n "$usb" ]; then
+    printf '%s\n' "$usb" | while read -r path id prod ser speed; do
+        echo "head unit : USB $path id=$id product=$prod serial=$ser speed=${speed}M"
+    done
+else
+    echo "head unit : not on USB ($HU_VIDPID)"
+fi
+
+echo "== adb =="
+if ! hu_have_adb; then echo "adb       : NOT INSTALLED"; exit 2; fi
+hu_adb_server
+state=$(hu_adb_state)
+echo "adb state : $state${HU_SERIAL:+ (serial $HU_SERIAL)}"
+case "$state" in
+    device) ;;
+    unauthorized) echo "hint      : accept the RSA prompt on the head-unit screen ('Always allow from this computer')"; exit $E_UNAUTH ;;
+    absent) exit $E_ABSENT ;;
+    *) exit $E_OFFLINE ;;
+esac
+
+echo "== head unit =="
+hu_sh '
+echo "build     : $(getprop ro.build.display.id)  sdk=$(getprop ro.build.version.sdk)  model=$(getprop ro.product.model)"
+echo "uptime    : $(cut -d" " -f1 /proc/uptime) s   date=$(date "+%Y-%m-%d %H:%M:%S %Z")"
+echo "usb config: $(getprop sys.usb.config) (state $(getprop sys.usb.state))"
+echo "selinux   : $(getenforce 2>/dev/null)"
+echo "location  : providers_allowed=$(settings get secure location_providers_allowed 2>/dev/null) mode=$(settings get secure location_mode 2>/dev/null)"
+if [ -x /system/xbin/su ]; then echo "su        : $(su 0 id 2>&1 | head -n1)"; else echo "su        : /system/xbin/su missing"; fi
+echo "fg app    : $(dumpsys window windows 2>/dev/null | grep -m1 mCurrentFocus | sed "s/^ *//")"
+' 2>&1 | tr -d '\r'
+echo "reverse   : $(hu_adb reverse --list 2>/dev/null | tr -d '\r' | tr '\n' ';')"
+echo "forward   : $(hu_adb forward --list 2>/dev/null | tr -d '\r' | tr '\n' ';')"
+exit 0

@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# hu-info — dump head-unit facts for later analysis. Read-only (su is used only to READ).
+#
+#   hu-info [--no-root] [--no-screenshot] [--logcat-lines N]
+#
+# Output: ~/headunit/info/<timestamp>/ (one file per probe) + <timestamp>.tar.gz next to
+# it + SUMMARY.txt (the GNSS-relevant lines). Copy to the laptop with
+#   scp -r user@10.200.0.14:headunit/info/<timestamp> .
+set -u
+. "$(dirname "$(readlink -f "$0")")/hu-common.sh"
+
+root=1; shot=1; lines=3000
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
+        --no-root) root=0; shift ;;
+        --no-screenshot) shot=0; shift ;;
+        --logcat-lines) lines="$2"; shift 2 ;;
+        *) hu_die 2 "unknown arg $1" ;;
+    esac
+done
+hu_require
+ts=$(hu_ts); dir="$HU_DATA/info/$ts"; mkdir -p "$dir"
+echo "collecting into $dir"
+
+# name | command (run as the adb shell user)
+probe() { local name="$1"; shift; hu_sh "$*" 2>&1 | tr -d '\r' > "$dir/$name.txt"; printf '  %-28s %6s lines\n' "$name" "$(wc -l < "$dir/$name.txt")"; }
+# name | command (run as root through su 0)
+rprobe() { local name="$1"; shift; [ $root = 1 ] || return 0; hu_su "$*" 2>&1 | tr -d '\r' > "$dir/$name.txt"; printf '  %-28s %6s lines (root)\n' "$name" "$(wc -l < "$dir/$name.txt")"; }
+
+{ echo "collected: $(date -Is) by $(hostname)"; echo "serial: ${HU_SERIAL:-?}"; hu_usb_find; } > "$dir/meta.txt"
+
+probe getprop                 getprop
+probe id_selinux              'id; getenforce; ls -l /system/xbin/su /system/bin/su /sbin/su 2>&1'
+probe uptime_clock            'cat /proc/uptime; date "+%s %Y-%m-%dT%H:%M:%S%z"; getprop persist.sys.timezone'
+probe packages                'pm list packages -f'
+probe packages_location       'pm list packages -f | grep -iE "gps|gnss|location|nav|map|ygps|igo|sygic|amap|baidu|waze|osm"'
+probe features                'pm list features'
+probe location_settings       'settings get secure location_providers_allowed; settings get secure location_mode; settings list secure | grep -i -E "location|mock"'
+probe dumpsys_location        'dumpsys location'
+probe dumpsys_gnss_hal        'dumpsys android.hardware.gnss@1.0::IGnss/default 2>&1 | head -n 50; lshal 2>/dev/null | grep -i gnss'
+probe services                'service list'
+probe ps                      'ps -A 2>/dev/null || ps'
+probe gps_processes           '(ps -A 2>/dev/null || ps) | grep -iE "mnld|gnss|gps|location"'
+probe dev_tty_gps             'ls -l /dev/ttyMT* /dev/ttyGS* /dev/ttyS* /dev/gps* /dev/stpgps /dev/socket/mnld /dev/socket/agps* 2>&1'
+probe usb                     'getprop | grep -E "usb|adb"; dumpsys usb 2>&1 | head -n 80'
+probe network                 'ip addr; ip route; getprop | grep -E "net\.|dhcp|wifi"'
+probe display                 'wm size; wm density; dumpsys window windows | grep -E "mCurrentFocus|mFocusedApp"'
+probe df_mounts               'df; cat /proc/mounts'
+probe cpuinfo_mem             'cat /proc/cpuinfo; cat /proc/meminfo | head -n 5'
+probe toolbox                 'ls /system/bin /system/xbin; which nc curl wget busybox toybox sh'
+probe logcat_gps              "logcat -d -b all -v threadtime | grep -iE 'gps|gnss|nmea|mnld|location|lbs' | tail -n $lines"
+probe logcat_tail             "logcat -d -b all -v threadtime | tail -n $lines"
+
+rprobe gps_config             'for f in /vendor/etc/mnl.prop /system/etc/mnl.prop /data/misc/gps/mnl.prop /vendor/etc/gps.conf /system/etc/gps.conf /etc/gps.conf /system/etc/gps_debug.conf; do [ -f "$f" ] && { echo "### $f"; cat "$f"; }; done; ls -la /data/misc/gps /data/gps_mnl /data/vendor/gps /sdcard/mtklog 2>&1'
+rprobe gps_node_owners        'ls -l /dev/gps /dev/stpgps /dev/ttyMT* 2>&1; for p in /proc/[0-9]*; do ls -l $p/fd 2>/dev/null | grep -qE "ttyMT|gps" && echo "$(basename $p) $(cat $p/cmdline | tr "\0" " "): $(ls -l $p/fd 2>/dev/null | grep -oE "/dev/(ttyMT[0-9]|gps|stpgps)" | sort -u | tr "\n" " ")"; done'
+rprobe init_rc_usb_gps        'grep -n -E "rndis|sys.usb.config|mnld|gnss|gps" /init*.rc /vendor/etc/init/*.rc /system/etc/init/*.rc 2>/dev/null'
+rprobe adb_keys               'f=/data/misc/adb/adb_keys; if [ -f $f ]; then echo "lines: $(wc -l < $f)"; while read -r k c; do echo "$(echo "$k" | base64 -d 2>/dev/null | md5sum | cut -c1-32) $c"; done < $f; else echo "no $f"; fi'
+rprobe dmesg                  'dmesg | tail -n 400'
+
+if [ $shot = 1 ]; then
+    hu_adb exec-out screencap -p > "$dir/screen.png" 2>/dev/null && echo "  screen.png"
+fi
+
+{
+    echo "== GNSS summary ($ts) =="
+    grep -E "ro.mtk_gps|gnss|gps" "$dir/getprop.txt" | head -n 20
+    echo "-- providers / last known --"
+    grep -nE "Location\[|provider|Last Known|gps:|network:|passive:|fused:|enabled=|Records" "$dir/dumpsys_location.txt" | head -n 40
+    echo "-- gps processes --"; cat "$dir/gps_processes.txt"
+    echo "-- tty / gps nodes --"; cat "$dir/dev_tty_gps.txt"
+    [ -f "$dir/gps_node_owners.txt" ] && { echo "-- who holds them --"; cat "$dir/gps_node_owners.txt"; }
+    echo "-- location apps --"; cat "$dir/packages_location.txt"
+    [ -f "$dir/adb_keys.txt" ] && { echo "-- adb_keys (md5 comment) --"; cat "$dir/adb_keys.txt"
+        [ -f "$HOME/.android/adbkey.pub" ] && echo "this computer's key md5: $(cut -d' ' -f1 "$HOME/.android/adbkey.pub" | base64 -d | md5sum | cut -c1-32)"; }
+    echo "-- nc on the unit --"; grep -E "nc|curl|wget|busybox|toybox" "$dir/toolbox.txt" | tr '\n' ' '; echo
+} > "$dir/SUMMARY.txt" 2>&1
+tar -C "$HU_DATA/info" -czf "$HU_DATA/info/$ts.tar.gz" "$ts"
+echo "done: $dir/SUMMARY.txt  ($HU_DATA/info/$ts.tar.gz)"

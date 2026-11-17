@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# hu-logcat — capture the head unit's logcat to a timestamped file. Read-only.
+#
+#   hu-logcat                    follow all buffers until Ctrl-C
+#   hu-logcat -t SECONDS         follow for SECONDS, then stop
+#   hu-logcat --dump             dump what is buffered now and exit
+#   hu-logcat [...] -- ARGS      extra logcat args, e.g. -- -s GpsLocationProvider:V
+# Output: ~/headunit/logcat/<timestamp>.log (path printed at the end); also to the
+# terminal when it is interactive.
+set -u
+. "$(dirname "$(readlink -f "$0")")/hu-common.sh"
+
+secs=0; dump=0; extra=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+        -t) secs="$2"; shift 2 ;;
+        --dump) dump=1; shift ;;
+        --) shift; extra=("$@"); break ;;
+        *) hu_die 2 "unknown arg $1" ;;
+    esac
+done
+hu_require
+mkdir -p "$HU_DATA/logcat"
+out="$HU_DATA/logcat/$(hu_ts).log"
+args=(logcat -v threadtime -b all)
+[ $dump = 1 ] && args+=(-d)
+args+=("${extra[@]}")
+if [ "$secs" -gt 0 ] 2>/dev/null; then
+    hu_sel
+    timeout "$secs" "$ADB" "${HU_SEL[@]}" "${args[@]}" > "$out"
+elif [ -t 1 ]; then
+    hu_adb "${args[@]}" | tee "$out"
+else
+    hu_adb "${args[@]}" > "$out"
+fi
+echo "$out ($(wc -l < "$out") lines)" >&2

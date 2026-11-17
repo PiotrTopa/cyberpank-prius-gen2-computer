@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# hu-push — copy a file TO the head unit. Refuses without --write.
+#
+#   hu-push --write LOCAL [REMOTE]    default REMOTE /data/local/tmp/ (scratch, survives
+#                                     reboot, not /system). Anything under /system,
+#                                     /vendor or /data/misc needs --write --system as well
+#                                     and is never done by this tool through su: use
+#                                     hu-shell --root deliberately for that.
+set -u
+. "$(dirname "$(readlink -f "$0")")/hu-common.sh"
+
+write=0; system=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
+        --write) write=1; shift ;;
+        --system) system=1; shift ;;
+        *) break ;;
+    esac
+done
+[ $# -ge 1 ] || { sed -n '2,8p' "$0"; exit 2; }
+local_f="$1"; remote="${2:-/data/local/tmp/}"
+[ $write = 1 ] || hu_die $E_REFUSED "refusing to write to the head unit without --write (target $remote)"
+case "$remote" in
+    /system*|/vendor*|/data/misc*|/data/system*)
+        [ $system = 1 ] || hu_die $E_REFUSED "$remote is a system path: add --system if you really mean it" ;;
+esac
+[ -e "$local_f" ] || hu_die 1 "no such local file: $local_f"
+hu_require
+hu_adb push "$local_f" "$remote"
