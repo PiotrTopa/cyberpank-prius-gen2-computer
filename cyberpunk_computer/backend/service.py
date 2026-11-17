@@ -979,6 +979,17 @@ class BackendService:
             return
         rs = self.roadsense_power
         feeder.set_active(rs is None or rs.state in ("starting", "running", "grace"))
+        # Signals that are on no broadcast frame reach the feeder's tap from
+        # the state (roadsense vehicle input API: `controls` / `body`).
+        tap = feeder.tap
+        if tap is not None and feeder.active and self.twin is not None:
+            try:
+                st = self.twin.store.state
+                kmh = st.vehicle.cruise_set_speed if st.vehicle.cruise_active else None
+                tap.set_state_value("cruise_set_speed_mps", None if not kmh else kmh / 3.6)
+                tap.set_state_value("outside_temp_c", st.climate.outside_temp)
+            except Exception:  # noqa: BLE001 - never disturb the backend loop
+                logger.exception("position feeder: state values failed")
 
     def _wire_bean(self, twin: VirtualTwin) -> None:
         """BEAN monitor: frame ring for GET /api/v1/bean/frames + capture log

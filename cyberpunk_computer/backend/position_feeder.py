@@ -1,9 +1,24 @@
 """
-Prius position feeder: GNSS fixes and vehicle motion -> roadsense ``mapd``.
+Prius vehicle feeder: GNSS fixes, vehicle motion, driver controls and body
+signals -> roadsense ``mapd``.
 
-roadsense owns all position filtering, dead reckoning and map matching
-(roadsense docs/ARCHITECTURE.md "mapd", position input API v1). This module
-only delivers raw inputs to ``<rundir>/position.sock``:
+roadsense owns all position filtering, dead reckoning and map matching and
+decides what it does with the rest (roadsense docs/VEHICLE_API.md: vehicle
+input API 1.1, a superset of the position input API v1). This module only
+delivers raw inputs to ``<rundir>/position.sock``. What goes out depends on
+the roadsense at the other end, read from its hello reply on every connection:
+
+* an older roadsense (``accepts`` without ``controls``, or no reply): ``gnss``,
+  ``motion`` (speed, gear, the yaw inputs chosen by ``BACKEND_POSITION_YAW``)
+  and ``reset``, exactly as before;
+* vehicle input API 1.1: ``motion`` with every motion signal the car has
+  (speed, gear, wheel speeds, steering angle, yaw rate, accelerations) and a
+  ``quality`` per signal, ``controls`` (brake, accelerator, cruise, turn
+  signal hook), ``body`` (lamps, door, outside temperature), the static
+  ``vehicle`` description once per connection, and ``objects`` for range
+  sensors (hook, nothing feeds it yet).
+
+Data flow:
 
     panda reader thread ──on_frame──▶ CanMotionTap (latest 0x0B4/0x120/0x0B1/0x0B3/0x025/0x022)
     head unit ──POST /api/v1/position/gnss──▶ HeadunitGnssSource (queue)
@@ -76,6 +91,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from ..comm.can_decoder import decode_steering_deg  # noqa: F401 (re-exported)
 from ..comm.can_decoder import YAW_RAD_S_PER_COUNT, YAW_STANDSTILL_OFFSETS
+from ..comm.can_decoder import decode_accel_counts
 from ..comm.can_decoder import decode_yaw_counts as _yaw_counts
 from .position_client import PositionFeed
 
@@ -117,6 +133,49 @@ TRACK_M = 1.48
 WHEELBASE_M = 2.70
 STEERING_RATIO = 19.1
 
+# ── roadsense vehicle input API 1.1 (roadsense docs/VEHICLE_API.md) ──────────
+# Static description of the car, sent once per connection (`vehicle` message).
+# Catalogue values of the NHW20 (not measured on this car); the effective
+# steering ratio is speed-dependent (21-29, docs/POSITION_FEEDER.md section 3).
+VEHICLE_DESCRIPTION: Dict[str, Any] = {
+    "name": "Toyota Prius NHW20",
+    "wheelbase_m": WHEELBASE_M, "track_m": TRACK_M, "track_front_m": 1.505,
+    "steering_ratio": STEERING_RATIO, "length_m": 4.45, "width_m": 1.725, "height_m": 1.49,
+}
+# Accelerations, CAN 0x023: two channels at +-45 deg (docs/prius_can.md).
+ACCEL_LONG_PER_COUNT = 0.020        # m/s² per (P - Q), + = speeding up
+ACCEL_LAT_PER_COUNT = 0.025         # m/s² per (P + Q), + = towards the left
+ACCEL_MAX_COUNTS = 500
+# Verification state of every signal as a roadsense quality (its vocabulary:
+# good = act on it; uncalibrated = plausible, scale or offset not calibrated,
+# roadsense may apply its own estimate; unverified = reported, not acted on).
+# The yaw rate's quality depends on BACKEND_POSITION_YAW (see _motion_quality).
+SIGNAL_QUALITY: Dict[str, str] = {
+    "speed_mps": "good",              # 0x0B4, true speed, verified against the trip distance
+    "gear": "good",                   # 0x120, P/R/N/D verified on 20 shifts (B never observed)
+    "wheel_speeds_mps": "uncalibrated",   # 0x0B1/0x0B3: unit verified, read 2.2 % below 0x0B4; L/R labels third-party
+    "steering_wheel_deg": "good",     # 0x025: scale verified by the lock-to-lock range; sign Toyota convention
+    "accel_long_mps2": "uncalibrated",    # 0x023: scale probable (r 0.93), includes the road grade
+    "accel_lat_mps2": "uncalibrated",     # 0x023: scale probable (r 0.95), reads about 0.35 m/s² high
+    "brake": "good",                  # 0x230 D bit 2: 85 edges, 99 % within 1.5 s of the BEAN brake bit
+    "accelerator": "unverified",      # 0x244 G / 200: third-party scaling, unchecked
+    "cruise": "good",                 # 0x120 E bit 7 (engaged) + 0x5C8 C bit 4 (main switch), verified 16/17 Nov
+    "cruise_set_speed_mps": "uncalibrated",   # 21D3 B: whole km/h floored from an mph-based value
+    "turn_signal": "unverified",      # hook: nothing decodes the lamps yet (indicator-lamp satellite planned)
+    "low_beam": "good", "parking_lights": "good", "fog_front": "good",   # 0x57F, confirmed on the car
+    "high_beam": "unverified",        # 0x57F bit 0x08: public decode, seen only during a flash
+    "door_open": "good",              # 0x57F D bit 7
+    "outside_temp_c": "good",         # AVC-LAN E0 5D F7 (the display's own value)
+}
+PROVIDES: Dict[str, List[str]] = {
+    "gnss": ["lat", "lon", "hacc_m", "speed_mps", "course_deg", "sats"],
+    "motion": ["speed_mps", "gear", "wheel_speeds_mps", "steering_wheel_deg", "yaw_rate_rps",
+               "accel_long_mps2", "accel_lat_mps2"],
+    "controls": ["brake", "accelerator", "cruise", "cruise_set_speed_mps"],
+    "body": ["low_beam", "high_beam", "parking_lights", "fog_front", "door_open", "outside_temp_c"],
+}
+VEHICLE_API_TYPES = ("controls", "body", "vehicle")     # in mapd's hello `accepts` = vehicle input API 1.1
+
 
 @dataclass
 class PositionFeederConfig:
@@ -139,6 +198,14 @@ class PositionFeederConfig:
     max_batch: int = 20                    # fixes per POST
     status_s: float = 2.0                  # status mirror cadence (on change)
     retry_s: float = 2.0                   # mapd reconnect period
+    # roadsense vehicle input API 1.1 (controls, body, vehicle description, signal quality)
+    vehicle_api: bool = True               # use it when mapd's hello offers it (False = always speak v1)
+    controls_repeat_s: float = 1.0         # `controls`: on every change and this often
+    body_repeat_s: float = 5.0             # `body`: on every change and this often
+    fast_stale_s: float = 0.5              # brake / pedal / gear-cruise frames older than this are left out
+    slow_stale_s: float = 3.0              # 1 Hz frames (lamps, cruise main switch) older than this are left out
+    state_stale_s: float = 5.0             # values pushed from the backend state older than this are left out
+    camera_mount: Optional[Tuple[float, float, float]] = None   # roadsense camera x, y, z in the vehicle frame (m)
     # source selection (priority list)
     switch_up_s: float = 5.0               # a higher-priority source needs a fix this long before it takes over
     # phone source (backend/phone_gnss.py; ModemManager location)
@@ -218,7 +285,8 @@ class CanMotionTap:
     torn value.
     """
 
-    IDS = frozenset((0x0B4, 0x120, 0x0B1, 0x0B3, 0x025, 0x022))
+    IDS = frozenset((0x0B4, 0x120, 0x0B1, 0x0B3, 0x025, 0x022,
+                     0x023, 0x230, 0x244, 0x5C8, 0x57F))
 
     def __init__(self) -> None:
         self.speed: Optional[Tuple[float, float]] = None          # (km/h, t_mono)
@@ -230,6 +298,15 @@ class CanMotionTap:
         # driver intent (optional): the turn-signal lamps, set by whoever decodes them
         # (set_turn_signal); nothing in the backend does yet (the lamps are on BEAN)
         self.turn_signal: Optional[Tuple[str, float]] = None      # (off | left | right | both, t_mono)
+        # vehicle input API 1.1: accelerations, driver controls, body
+        self.accel: Optional[Tuple[float, float, float]] = None   # (long, lat m/s², t_mono), 0x023
+        self.brake: Optional[Tuple[bool, float]] = None           # 0x230 D bit 2
+        self.pedal: Optional[Tuple[float, float]] = None          # 0x244 G / 200 (0..1)
+        self.cruise_engaged: Optional[Tuple[bool, float]] = None  # 0x120 E bit 7
+        self.cruise_main: Optional[Tuple[bool, float]] = None     # 0x5C8 C bit 4
+        self.lamps: Optional[Tuple[int, bool, float]] = None      # (0x57F lamp byte, a door is open, t_mono)
+        # values that only the backend state has (set_state_value): name -> (value, t_mono)
+        self.state_values: Dict[str, Tuple[Any, float]] = {}
         self.gyro_offsets: Tuple[float, float] = GYRO_OFFSETS     # learned at standstill
         self._still_since: Optional[float] = None
         self._zero_t: Optional[float] = None
@@ -260,11 +337,40 @@ class CanMotionTap:
             y = decode_yaw_counts(data)
             if y is not None:
                 self.gyro = (y[0], y[1], t)
-        else:                               # 0x120
+        elif can_id == 0x120:
             g = decode_gear(data)
             if g is not None:
                 self.gear = (g, t)
+            if len(data) >= 5:
+                self.cruise_engaged = (bool(data[4] & 0x80), t)
+        elif can_id == 0x023:
+            pq = decode_accel_counts(data)
+            if pq is not None and abs(pq[0]) <= ACCEL_MAX_COUNTS and abs(pq[1]) <= ACCEL_MAX_COUNTS:
+                self.accel = (ACCEL_LONG_PER_COUNT * (pq[0] - pq[1]), ACCEL_LAT_PER_COUNT * (pq[0] + pq[1]), t)
+        elif can_id == 0x230:
+            if len(data) >= 4:
+                self.brake = (bool(data[3] & 0x04), t)
+        elif can_id == 0x244:
+            if len(data) >= 7 and data[6] <= 0xC8:
+                self.pedal = (data[6] / 200.0, t)
+        elif can_id == 0x5C8:
+            if len(data) >= 3:
+                self.cruise_main = (bool(data[2] & 0x10), t)
+        else:                               # 0x57F: lamps + "a door is open" (gateway copy of BEAN FE:7F)
+            if len(data) >= 4:
+                self.lamps = (data[1], bool(data[3] & 0x80), t)
         self.frames += 1
+
+    def set_state_value(self, name: str, value: Any, now: Optional[float] = None) -> None:
+        """A signal that is on no broadcast frame and comes from the backend
+        state instead: ``cruise_set_speed_mps`` (solicited 21D3, 1 Hz) and
+        ``outside_temp_c`` (AVC-LAN). ``None`` = unknown now. The caller
+        repeats it (the backend loop does, every tick); a value older than
+        ``state_stale_s`` is left out."""
+        if value is None:
+            self.state_values.pop(name, None)
+        else:
+            self.state_values[name] = (value, time.monotonic() if now is None else now)
 
     def set_turn_signal(self, side: Optional[str], now: Optional[float] = None) -> None:
         """The turn-signal lamps as the driver set them: ``off``, ``left``,
@@ -284,8 +390,14 @@ class CanMotionTap:
             return None
         return sp[0] / 3.6
 
-    def sample(self, now: float, cfg: PositionFeederConfig) -> Optional[Dict[str, Any]]:
-        """The motion message for the newest speed frame, or None (stale / none)."""
+    def sample(self, now: float, cfg: PositionFeederConfig, full: bool = False) -> Optional[Dict[str, Any]]:
+        """The motion message for the newest speed frame, or None (stale / none).
+
+        ``full`` (roadsense vehicle input API 1.1): every motion signal of the
+        car with a ``quality`` per signal; ``yaw_inputs`` then only decides
+        whether the yaw-rate sensor is offered for use (``uncalibrated``) or
+        for roadsense's calibration estimate only (``unverified``). Without
+        ``full`` the message is the v1 one: only the chosen yaw inputs."""
         sp = self.speed
         if sp is None or now - sp[1] > cfg.stale_s:
             return None
@@ -296,26 +408,90 @@ class CanMotionTap:
         if g is not None and now - g[1] <= cfg.gear_stale_s:
             m["gear"] = g[0]
         ts = self.turn_signal
-        if ts is not None and now - ts[1] <= 1.5:
-            m["turn_signal"] = ts[0]
-        if "wheels" in cfg.yaw_inputs:
+        if ts is not None and now - ts[1] <= 1.5 and not full:
+            m["turn_signal"] = ts[0]                      # v1 place; with the vehicle API it goes out in `controls`
+        if full or "wheels" in cfg.yaw_inputs:
             fr, rr = self.front, self.rear
             if fr is not None and rr is not None and abs(fr[2] - t) <= cfg.pair_s \
                     and abs(rr[2] - t) <= cfg.pair_s:
                 m["wheel_speeds_mps"] = [round(fr[1] / 3.6, 3), round(fr[0] / 3.6, 3),
                                          round(rr[1] / 3.6, 3), round(rr[0] / 3.6, 3)]
-        if "steer" in cfg.yaw_inputs:
+        if full or "steer" in cfg.yaw_inputs:
             st = self.steer
             if st is not None and abs(st[1] - t) <= cfg.pair_s:
                 m["steering_wheel_deg"] = round(st[0], 1)
-        if "gyro" in cfg.yaw_inputs:
+        if full or "gyro" in cfg.yaw_inputs:
             gy = self.gyro
             if gy is not None and abs(gy[2] - t) <= cfg.pair_s:
                 self._gyro_zero(gy, kmh, now, cfg)
                 off = self.gyro_offsets
                 counts = 0.5 * ((gy[0] - off[0]) + (gy[1] - off[1]))
                 m["yaw_rate_rps"] = round(counts * cfg.gyro_rad_per_count, 4)
+        if full:
+            ac = self.accel
+            if ac is not None and abs(ac[2] - t) <= cfg.pair_s:
+                m["accel_long_mps2"] = round(ac[0], 3)
+                m["accel_lat_mps2"] = round(ac[1], 3)
+            q = {k: v for k, v in _motion_quality(cfg).items() if k in m and v != "good"}
+            if q:
+                m["quality"] = q
         m["source"] = MOTION_TAG
+        return m
+
+    def controls(self, now: float, cfg: PositionFeederConfig) -> Optional[Dict[str, Any]]:
+        """The ``controls`` message (driver intent and controls) from what is
+        fresh now, or None when nothing is. ``ts_mono_ns`` is the receipt time
+        of the newest frame in it."""
+        m: Dict[str, Any] = {}
+        t = 0.0
+        b = self.brake
+        if b is not None and now - b[1] <= cfg.fast_stale_s:
+            m["brake"], t = b[0], max(t, b[1])
+        p = self.pedal
+        if p is not None and now - p[1] <= cfg.fast_stale_s:
+            m["accelerator"], t = round(p[0], 3), max(t, p[1])
+        ce, cm = self.cruise_engaged, self.cruise_main
+        engaged = ce[0] if ce is not None and now - ce[1] <= cfg.fast_stale_s else None
+        main = cm[0] if cm is not None and now - cm[1] <= cfg.slow_stale_s else None
+        if engaged:
+            m["cruise"], t = "active", max(t, ce[1])
+        elif main is not None and engaged is not None:
+            m["cruise"], t = ("standby" if main else "off"), max(t, cm[1])
+        sv = self.state_values.get("cruise_set_speed_mps")
+        if sv is not None and now - sv[1] <= cfg.state_stale_s and m.get("cruise") == "active":
+            m["cruise_set_speed_mps"], t = round(float(sv[0]), 2), max(t, sv[1])
+        ts = self.turn_signal
+        if ts is not None and now - ts[1] <= 1.5:
+            m["turn_signal"], t = ts[0], max(t, ts[1])
+        if not m:
+            return None
+        q = {k: v for k, v in SIGNAL_QUALITY.items() if k in m and v != "good"}
+        if "turn_signal" in m:
+            q.pop("turn_signal", None)                    # whoever calls set_turn_signal vouches for it
+        if q:
+            m["quality"] = q
+        m.update(type="controls", ts_mono_ns=int(t * 1e9), source=MOTION_TAG)
+        return m
+
+    def body(self, now: float, cfg: PositionFeederConfig) -> Optional[Dict[str, Any]]:
+        """The ``body`` message (lamps, door, outside temperature), or None."""
+        m: Dict[str, Any] = {}
+        t = 0.0
+        la = self.lamps
+        if la is not None and now - la[2] <= cfg.slow_stale_s:
+            lamp = la[0]
+            m.update(low_beam=bool(lamp & 0x20), high_beam=bool(lamp & 0x08), parking_lights=bool(lamp & 0x10),
+                     fog_front=bool(lamp & 0x01), door_open=la[1])
+            t = la[2]
+        ot = self.state_values.get("outside_temp_c")
+        if ot is not None and now - ot[1] <= cfg.state_stale_s:
+            m["outside_temp_c"], t = round(float(ot[0]), 1), max(t, ot[1])
+        if not m:
+            return None
+        q = {k: v for k, v in SIGNAL_QUALITY.items() if k in m and v != "good"}
+        if q:
+            m["quality"] = q
+        m.update(type="body", ts_mono_ns=int(t * 1e9), source=MOTION_TAG)
         return m
 
     def _gyro_zero(self, gy: Tuple[int, int, float], kmh: float, now: float,
@@ -337,6 +513,27 @@ class CanMotionTap:
         k = min(1.0, dt / max(0.1, cfg.gyro_zero_tau_s))
         o = self.gyro_offsets
         self.gyro_offsets = (o[0] + k * (gy[0] - o[0]), o[1] + k * (gy[1] - o[1]))
+
+
+def _motion_quality(cfg: PositionFeederConfig) -> Dict[str, str]:
+    """Quality per motion signal. The yaw-rate sensor (0x022, scale probable,
+    not calibrated on a full circle) is offered for use only with the ``gyro``
+    yaw input; otherwise roadsense gets it as ``unverified``: shown, used for
+    its own scale estimate against GNSS, not for the position."""
+    q = dict(SIGNAL_QUALITY)
+    q["yaw_rate_rps"] = "uncalibrated" if "gyro" in cfg.yaw_inputs else "unverified"
+    return q
+
+
+def vehicle_description(cfg: PositionFeederConfig, sensors: Sequence[Dict[str, Any]] = ()) -> Dict[str, Any]:
+    """The ``vehicle`` message: static description of this car (+ the mounts
+    of the roadsense camera and of range sensors when they are known)."""
+    d: Dict[str, Any] = dict(VEHICLE_DESCRIPTION, type="vehicle", source=MOTION_TAG)
+    if cfg.camera_mount is not None:
+        d["camera"] = {"x_m": cfg.camera_mount[0], "y_m": cfg.camera_mount[1], "z_m": cfg.camera_mount[2]}
+    if sensors:
+        d["sensors"] = [dict(x) for x in sensors]
+    return d
 
 
 # ── GNSS sources ─────────────────────────────────────────────────────────────
@@ -936,7 +1133,8 @@ class PositionFeeder:
         self._session_until = 0.0                          # mono time it expires
         self.last_session_end: Optional[Dict[str, Any]] = None
         self.tap = tap
-        self.feed = feed or PositionFeed(cfg.rundir, name="prius-backend", retry_s=cfg.retry_s)
+        self.feed = feed or PositionFeed(cfg.rundir, name="prius-backend", retry_s=cfg.retry_s,
+                                         provides=PROVIDES)
         self._clock = clock
         self._publish_status = publish_status
         self._active = False
@@ -950,7 +1148,14 @@ class PositionFeeder:
         self._last_status: Optional[Dict[str, Any]] = None
         self._was_connected = False
         self.suspended: Optional[str] = None
-        self.counts = {"motion": 0, "gnss": 0, "none": 0, "reset": 0}
+        self.counts = {"motion": 0, "gnss": 0, "none": 0, "reset": 0,
+                       "controls": 0, "body": 0, "vehicle": 0, "objects": 0}
+        # roadsense vehicle input API 1.1 (per connection, from mapd's hello)
+        self._described_conn: Optional[int] = None      # feed.connects of the connection the description went to
+        self._last_controls: Tuple[Optional[Dict[str, Any]], float] = (None, -1e9)
+        self._last_body: Tuple[Optional[Dict[str, Any]], float] = (None, -1e9)
+        self._sensors: List[Dict[str, Any]] = []        # range-sensor mounts for the description (set_sensors)
+        self._objects: deque = deque(maxlen=8)          # scans waiting to go out (submit_objects)
         # roadsense position-input `reset` owed to mapd after a synthetic
         # session started / ended: sent once the connection's hello lists it
         self._reset_pending: Optional[str] = None
@@ -1106,6 +1311,74 @@ class PositionFeeder:
                 logger.exception("position feeder: closing the GNSS source failed")
         self.feed.close()
 
+    # ── vehicle input API 1.1 ────────────────────────────────────────────
+
+    def vehicle_api(self) -> bool:
+        """True while the connected roadsense takes the vehicle input API 1.1
+        messages (its hello reply lists them). An older roadsense, no reply
+        yet, or ``vehicle_api`` off in the config: the feeder speaks v1."""
+        if not self.cfg.vehicle_api:
+            return False
+        accepts = getattr(self.feed, "accepts", None)
+        return accepts is not None and all(t in accepts for t in VEHICLE_API_TYPES)
+
+    def set_sensors(self, sensors: Sequence[Dict[str, Any]]) -> None:
+        """Declare the car's range sensors for the ``vehicle`` description:
+        ``[{"id": "front_radar", "kind": "radar", "x_m": 3.6, "y_m": 0.0,
+        "z_m": 0.5, "yaw_deg": 0.0}]`` (vehicle frame of roadsense
+        docs/VEHICLE_API.md: x forward from the rear axle, y left). Entry
+        point for a future radar; the description is sent again."""
+        with self._lock:
+            self._sensors = [dict(x) for x in sensors]
+            self._described_conn = None
+
+    def submit_objects(self, sensor: str, objects: Sequence[Dict[str, Any]], kind: Optional[str] = None,
+                       t_mono: Optional[float] = None, tracked: Optional[bool] = None) -> None:
+        """One scan of a range sensor (radar object list: ``range_m``,
+        ``azimuth_deg`` positive left, ``range_rate_mps`` negative = closing,
+        optional ``id``; an empty list = the sensor sees nothing). Thread-safe;
+        goes out on the next feeder cycle, the newest 8 scans at most. Entry
+        point for a future radar: nothing calls it yet."""
+        m: Dict[str, Any] = {"type": "objects", "sensor": str(sensor), "objects": [dict(o) for o in objects],
+                             "ts_mono_ns": int((self._clock() if t_mono is None else t_mono) * 1e9),
+                             "source": MOTION_TAG}
+        if kind is not None:
+            m["kind"] = kind
+        if tracked is not None:
+            m["tracked"] = bool(tracked)
+        self._objects.append(m)
+
+    def _vehicle(self, now: float) -> None:
+        """Description once per connection, `controls` / `body` on change and
+        as a heartbeat, pending range-sensor scans. Only with a roadsense that
+        accepts them."""
+        if not self.vehicle_api():
+            self._objects.clear()
+            return
+        f = self.feed
+        conn = getattr(f, "connects", 0)
+        if self._described_conn != conn:
+            if self._send(vehicle_description(self.cfg, self._sensors), "vehicle"):
+                self._described_conn = conn
+                self._last_controls = self._last_body = (None, -1e9)
+        tap = self.tap
+        if tap is not None:
+            for kind, build, attr, repeat in (("controls", tap.controls, "_last_controls", self.cfg.controls_repeat_s),
+                                              ("body", tap.body, "_last_body", self.cfg.body_repeat_s)):
+                m = build(now, self.cfg)
+                if m is None:
+                    continue
+                sig = {k: v for k, v in m.items() if k != "ts_mono_ns"}
+                last, t_last = getattr(self, attr)
+                if sig != last or now - t_last >= repeat:
+                    if self._send(m, kind):
+                        setattr(self, attr, (sig, now))
+        if "objects" in (getattr(f, "accepts", None) or ()):
+            while self._objects:
+                self._send(self._objects.popleft(), "objects")
+        else:
+            self._objects.clear()
+
     # ── one cycle ────────────────────────────────────────────────────────
 
     def _send(self, msg: Dict[str, Any], kind: str) -> bool:
@@ -1122,7 +1395,7 @@ class PositionFeeder:
                 # a run-time session never survives real motion: end it, CAN motion takes over
                 logger.warning("position feeder: the real car moves (%.1f m/s on CAN)", real)
                 self.stop_synthetic("car_moving", now)
-                m = self.tap.sample(now, self.cfg) if self.tap is not None else None
+                m = self.tap.sample(now, self.cfg, full=self.vehicle_api()) if self.tap is not None else None
                 if m is not None and m["ts_mono_ns"] > self._last_motion_ts:
                     self._last_motion_ts = m["ts_mono_ns"]
                     self._send(m, "motion")
@@ -1138,7 +1411,7 @@ class PositionFeeder:
                 self.suspended = None
             m = src.motion(now)
         elif self.tap is not None:
-            m = self.tap.sample(now, self.cfg)
+            m = self.tap.sample(now, self.cfg, full=self.vehicle_api())
         else:
             m = None
         if m is None:
@@ -1147,8 +1420,9 @@ class PositionFeeder:
         if m["ts_mono_ns"] <= self._last_motion_ts:       # no new speed frame since the last send
             return
         self._last_motion_ts = m["ts_mono_ns"]
+        unused = [k for k, v in (m.get("quality") or {}).items() if v in ("unverified", "invalid")]
         yaw = [k for k, f in (("gyro", "yaw_rate_rps"), ("wheels", "wheel_speeds_mps"),
-                              ("steer", "steering_wheel_deg")) if f in m]
+                              ("steer", "steering_wheel_deg")) if f in m and f not in unused]
         self.yaw_input = "+".join(yaw) or None
         self._send(m, "motion")
 
@@ -1182,6 +1456,7 @@ class PositionFeeder:
                 self.stop_synthetic("expired", now)
             self._motion(now)
             self._gnss(now)
+            self._vehicle(now)
         conn = self.feed.connected
         if conn != self._was_connected:
             logger.info("position feeder: %s %s", "connected to" if conn else "lost", self.feed.path)
@@ -1217,6 +1492,9 @@ class PositionFeeder:
                 "reset_sent": self.counts["reset"], "reset_pending": self._reset_pending is not None,
                 "last_reset": self.last_reset,
                 "mapd_accepts": list(f.accepts) if getattr(f, "accepts", None) is not None else None,
+                "vehicle_api": self.vehicle_api(),
+                "controls_sent": self.counts["controls"], "body_sent": self.counts["body"],
+                "vehicle_sent": self.counts["vehicle"], "objects_sent": self.counts["objects"],
                 "motion": motion, "gnss": self.source.status(now)}
 
     def raw_fix(self, now: Optional[float] = None) -> Optional[Dict[str, Any]]:

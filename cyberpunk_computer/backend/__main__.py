@@ -156,7 +156,13 @@ def _build_position():
         BACKEND_POSITION_PHONE_POLL_HZ=4       # phone: ModemManager polls per second
         BACKEND_POSITION_RUNDIR=/run/roadsense # mapd's position.sock
         BACKEND_POSITION_MOTION_HZ=10          # 5..50
-        BACKEND_POSITION_YAW=wheels            # yaw fields with motion: wheels, steer, gyro (0x022) (comma list; empty = none)
+        BACKEND_POSITION_YAW=wheels            # yaw fields with motion: wheels, steer, gyro (0x022) (comma list; empty = none).
+                                               # With a roadsense that speaks the vehicle input API every motion signal
+                                               # goes out; `gyro` then decides whether the yaw-rate sensor is offered
+                                               # for use (uncalibrated) or for roadsense's calibration only (unverified)
+        BACKEND_POSITION_VEHICLE_API=1         # 0 = speak position input API v1 only (speed, gear, yaw inputs, GNSS)
+        BACKEND_POSITION_CAMERA_MOUNT=         # roadsense camera in the vehicle frame "x,y,z" m (x ahead of the rear
+                                               # axle, y left, z above ground); unset = not declared
         BACKEND_POSITION_FIX_TIMEOUT_S=3       # head unit silent this long -> fix "none"
         BACKEND_POSITION_SYNTHETIC_ROUTE=      # route JSON; empty = built-in Opole loop
         BACKEND_POSITION_SYNTHETIC_DROPOUTS=60:90,200:230   # s since start without a fix
@@ -217,7 +223,23 @@ def _build_position():
         phone_uere_m=_num("BACKEND_POSITION_PHONE_UERE_M", 4.0, 0.5, 50.0),
         phone_linger_s=_num("BACKEND_POSITION_PHONE_LINGER_S", 120.0, 0.0, 3600.0),
         phone_poll_hz=_num("BACKEND_POSITION_PHONE_POLL_HZ", 4.0, 0.2, 10.0),
+        vehicle_api=_env_flag("BACKEND_POSITION_VEHICLE_API", "1"),
+        camera_mount=_camera_mount(env("BACKEND_POSITION_CAMERA_MOUNT"), log),
     )
+
+
+def _camera_mount(raw, log):
+    """BACKEND_POSITION_CAMERA_MOUNT "x,y,z" -> tuple, or None (unset / malformed)."""
+    if not (raw or "").strip():
+        return None
+    try:
+        x, y, z = (float(v) for v in raw.split(","))
+        if not (-2.0 <= x <= 6.0 and -1.5 <= y <= 1.5 and 0.0 <= z <= 3.0):
+            raise ValueError("out of range")
+        return (x, y, z)
+    except ValueError as exc:
+        log.error("Bad BACKEND_POSITION_CAMERA_MOUNT=%r (%s): not declared", raw, exc)
+        return None
 
 
 def _build_headunit():

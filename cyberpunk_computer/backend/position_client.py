@@ -9,6 +9,11 @@ is imported from roadsense. Changes against the reference client:
   and counts the message as dropped. The reference client counts it as sent
   and leaves half a JSON line in the stream, which corrupts the next message;
   mapd sees the connection end instead and drops the partial line.
+* the hello carries ``provides`` (what this feeder will send) and the reply's
+  ``accepts`` is forgotten on every reconnect, so the feeder decides per
+  connection whether the roadsense at the other end takes the vehicle input
+  API 1.1 messages (``controls``, ``body``, ``vehicle``, ``objects``;
+  roadsense docs/VEHICLE_API.md, 2026-11-17) or only v1.
 * ``connected`` property and ``errors_total`` counter for the status mirror.
 * the retry period after a failed connect is ``retry_s`` (default 2 s here).
 * mapd's ``hello`` reply is kept (``server``, ``accepts``: None until it has
@@ -33,9 +38,10 @@ API = 1
 
 
 class PositionFeed:
-    def __init__(self, rundir="/run/roadsense", name="feeder", retry_s=2.0):
+    def __init__(self, rundir="/run/roadsense", name="feeder", retry_s=2.0, provides=None):
         self.path = os.path.join(rundir, "position.sock")
         self.name, self.retry_s = name, retry_s
+        self.provides = provides         # what this feeder will send, declared in the hello (vehicle input API 1.1)
         self.sock = None
         self._next_try = 0.0
         self.sent = self.dropped = 0
@@ -58,11 +64,15 @@ class PositionFeed:
         try:
             s.connect(self.path)
             s.setblocking(False)
-            s.send((json.dumps({"type": "hello", "api": API, "name": self.name}) + "\n").encode())
+            hello = {"type": "hello", "api": API, "name": self.name}
+            if self.provides:
+                hello["provides"] = self.provides
+            s.send((json.dumps(hello) + "\n").encode())
         except OSError:
             s.close()
             return False
         self.sock = s
+        self.server = self.accepts = None    # of this connection: unknown until its hello reply is read
         self.connects += 1
         return True
 
