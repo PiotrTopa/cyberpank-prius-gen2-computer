@@ -12,6 +12,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 B="$HERE/build"
 JAR="${ANDROID_JAR:-/usr/lib/android-sdk/platforms/android-27/android.jar}"
 [ -f "$JAR" ] || { echo "android.jar not found at $JAR (set ANDROID_JAR)" >&2; exit 1; }
+# Debian/Ubuntu ship dx only under build-tools (dalvik-exchange package)
+for d in /usr/lib/android-sdk/build-tools/*/; do [ -x "$d/dx" ] && PATH="$PATH:$d"; done
 for t in javac aapt dx apksigner keytool; do command -v $t >/dev/null || { echo "missing $t" >&2; exit 1; }; done
 rm -rf "$B/classes" "$B"/*.apk; mkdir -p "$B/classes"
 aapt package -f -M "$HERE/AndroidManifest.xml" -I "$JAR" -F "$B/unsigned.apk"
