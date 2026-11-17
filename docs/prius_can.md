@@ -91,6 +91,23 @@ All gateway copies 0x5xx have byte 0 = header and bytes 1… = the BEAN data
 ([`BEAN_SIGNALS.md`](BEAN_SIGNALS.md) §5): 0x520/521/526/527/529/52C/540/591/5B2/5C8/5CC/5D4/5EC/5F8
 (CAN → BEAN) and 0x53F/553/554/56D/57F/5A4/5B6/5ED (BEAN → CAN).
 
+Body copies checked per action on 2026-11-17 (trip log 13:20–13:30, IG/READY parked; C):
+
+* 0x5B6 = `FE:B6`: C = door switches, `80` driver, `40` front passenger, `04` either rear door or the
+  back door (one bit); B = lock state. **Decoded** (`BODY_DOORS`): `vehicle.driver_door_open`,
+  `passenger_door_open`, `rear_door_open`, `doors_locked` while BEAN is stale (BEAN `FE:B6` wins:
+  it also runs with the car off, and the back door needs the BEAN opener pulse). The gateway sends
+  an immediate copy (header `E4`) and the periodic one (`64`), but at 2 of 6 door openings the
+  immediate copy was missing and the change arrived up to 1 s late.
+* 0x57F = `FE:7F`: B `28` during a headlamp flash with the lamps off (3/3; header `E8` = immediate
+  copy).
+* 0x529 D `08` and 0x230 D bit 2: held brake 13:24:21.4–24:45.9 (0x230 G changes with it only
+  because G is the checksum).
+* **Not on broadcast CAN:** turn signals left/right, wipers and washer, seat belt, the high-beam
+  switch with the lamps off, the climate hard keys and steering-pad keys (seen only through 0x5ED and
+  the A/C's own BEAN frames). No unexplained id changed in those windows (0x03E, 0x3C9, 0x484 vary
+  with the powertrain all the time; 0x020, 0x262, 0x423, 0x4C1–0x4D1 were constant).
+
 Partly read (2026-11-16 data crunch, P): 0x3CF A ?, D 0, E varies (B, C in §2). 0x4C1…0x4D1, 0x020,
 0x423 constant. (0x484 B, 0x230, 0x348: now in §2 and decoded.)
 

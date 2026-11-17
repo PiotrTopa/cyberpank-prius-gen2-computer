@@ -21,6 +21,10 @@ state (docs/BEAN_SIGNALS.md §4, survey 2026-11-14):
 * engine-running evidence (accepted rpm, 98:27, 62:20 presence) goes to the
   :class:`~cyberpunk_computer.comm.engine_gate.EngineRunningGate`, and the
   62:20 per-injection word to the ingress fuel-flow computation;
+* doors (FE:B6) go through the arbiter (``doors``; CAN 0x5B6 is the
+  fallback) into ``vehicle.*_door_open``; the back door is told apart from
+  the rear side doors by the opener pulse (FE:83 b3 0x04) just before the
+  shared switch bit rises (:data:`BACK_DOOR_OPENER_WINDOW_S`);
 * 62:C8 b1 0x10 (cruise main switch) goes to the
   :class:`~cyberpunk_computer.io.cruise_fusion.CruiseFusion`; the raw value
   is still recorded on every change (:class:`CruiseRawLog`).
@@ -102,6 +106,11 @@ METER_CONSUMPTION_STALE_S = 3.0
 #: 52:6D period is 1 s; after this long the cabin temperature is unknown.
 CABIN_TEMP_STALE_S = 10.0
 
+#: The back-door opener pulse (FE:83 b3 0x04) led the shared rear/back
+#: switch bit (FE:B6 b1 0x04) by 0.19-0.20 s (2026-11-13, 2026-11-17); a
+#: rise this long after a pulse is the back door.
+BACK_DOOR_OPENER_WINDOW_S = 1.0
+
 #: Arbitrated BEAN values older than this (frame ``ts`` vs now) are not
 #: dispatched: a better-than-nothing source must also be current.
 MAX_FRAME_AGE_S = 2.0
@@ -156,6 +165,9 @@ class BeanIngest:
         self._display_speed_seen: Optional[float] = None
         self._meter_consumption_seen: Optional[float] = None
         self._cabin_temp_seen: Optional[float] = None
+        self._opener_t: Optional[float] = None     # last back-door opener pulse
+        self._rear_bit: Optional[bool] = None      # FE:B6 b1 0x04, last frame
+        self._back_door: Optional[bool] = None
         self.frames = 0
 
     def _changed(self, group: str, name: str, value: Any) -> bool:
@@ -202,6 +214,25 @@ class BeanIngest:
                 self._meter_consumption_seen = now
             if "cabin_temp_c" in v:
                 self._cabin_temp_seen = now
+            if v.get("back_door_opener"):
+                self._opener_t = now
+                if self._rear_bit:             # shared bit already set (a rear door)
+                    self._back_door = True
+            if "rear_door_open" in v:
+                rear = v["rear_door_open"]
+                if not rear:
+                    self._back_door = False
+                elif not self._rear_bit:       # rising edge: back door only after the opener
+                    self._back_door = (self._opener_t is not None
+                                       and 0.0 <= now - self._opener_t <= BACK_DOOR_OPENER_WINDOW_S)
+                self._rear_bit = rear
+                if current and self.sources.offer("doors", SRC, now):
+                    for field in ("doors_locked", "driver_door_open", "passenger_door_open",
+                                  "rear_door_open"):
+                        if self._changed("vehicle", field, v[field]):
+                            vehicle[field] = v[field]
+                    if self._changed("vehicle", "back_door_open", self._back_door):
+                        vehicle["back_door_open"] = self._back_door
             gate = self.engine_gate
             if gate is not None and mes.upper() == "27" and "ice_stopped" in v:
                 gate.observe_bean_9827(int(data[:2], 16), now)

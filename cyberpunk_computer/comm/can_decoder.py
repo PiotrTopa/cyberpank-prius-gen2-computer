@@ -85,6 +85,7 @@ class CANMessageType(Enum):
     POWERTRAIN_FLAGS = auto()   # Accelerator pressed (0x03A)
     VEHICLE_SPEED_KMH = auto()  # True speed, integer km/h (0x3CA)
     COOLANT_ALT = auto()        # Coolant, second source (0x484)
+    BODY_DOORS = auto()         # Door lock + door switches (0x5B6 = BEAN FE:B6)
     # Solicited response types (OBD-II style)
     SOLICITED_RESPONSE = auto()        # Generic solicited response
     SOLICITED_ENGINE = auto()          # Response from Engine ECU (0x7E8)
@@ -144,6 +145,7 @@ KNOWN_CAN_IDS = {
     0x529: "SOC_BARS_EVENT",
     0x57F: "LAMPS_DOOR",
     0x5A4: "FUEL_TANK",
+    0x5B6: "BODY_DOORS",               # gateway copy of BEAN FE:B6
     0x5C8: "CRUISE_MAIN",              # gateway copy of BEAN 62:C8
     0x5CC: "BEAN_98CC",
     # Solicited replies
@@ -637,6 +639,19 @@ class CANDecoder:
             msg.values["door_open"] = bool(data[3] & 0x80)
             msg.values["headlight_state"] = headlight_state(light_byte)
         
+        # 0x5B6: door lock + door switches, the gateway's CAN copy of BEAN
+        # FE:B6 (IG only): data[0] = header (0x64; 0xE4 = immediate copy),
+        # data[1] = FE:B6 b0 (lock state, 0x00 = all locked), data[2] = FE:B6
+        # b1: 0x80 driver, 0x40 front passenger, 0x04 a rear door or the
+        # back door (one shared bit). Each door checked 2026-11-17 (C).
+        elif can_id == 0x5B6 and len(data) >= 3:
+            msg.msg_type = CANMessageType.BODY_DOORS
+            msg.values["lock_state_raw"] = data[1]
+            msg.values["doors_locked"] = data[1] == 0x00
+            msg.values["driver_door_open"] = bool(data[2] & 0x80)
+            msg.values["passenger_door_open"] = bool(data[2] & 0x40)
+            msg.values["rear_door_open"] = bool(data[2] & 0x04)
+
         # 0x529: SOC Bars & Event Messages (1000ms period, immediate on event)
         # Byte A (data[0]) bit 7: event flag
         # Byte B (data[1]) bits 2,4,6: general problem (red triangle)

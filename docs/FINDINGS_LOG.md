@@ -3,6 +3,22 @@
 One line per finding about the car, its buses and our hardware, newest first, with a link to where it
 is documented. Times CET. Add a line whenever a doc gains a confirmed fact or loses a wrong one.
 
+## 2026-11-17 (body signals)
+
+* Owner's body-signal list against BEAN and CAN ([BEAN_SIGNALS.md](BEAN_SIGNALS.md) §4.1, §4.2, §6,
+  §10; recording `docs/data/bean/2026-11-17_body_signals.ndjson.gz`):
+  * turn signals, hazards (car off), wipers/washer and seat belt are on neither BEAN nor broadcast
+    CAN; `vehicle.turn_signal` stays None until a lamp source exists (`io/turn_signal.py`);
+  * headlamp flash with the lamps off = `FE:7F` b0 `28` (both lamp bits); the high-beam switch alone
+    sets nothing then;
+  * each door: driver `FE:B6` b1 `80`, passenger `40`, both rear doors and the back door share `04`;
+    the back door is the one preceded by the opener pulse `FE:83` b3 `04` (decoded,
+    `vehicle.back_door_open`, P); CAN 0x5B6 decoded as the door fallback
+    ([prius_can.md](prius_can.md) §3);
+  * rear defogger `FE:FC` b0 `08`, front defrost `FE:FC` b0 `10` + `52:ED` b1 `20` now C; the
+    steering-pad temperature keys only step `52:FD` (0.5 °C per 1.3–1.6 s held), no `FE:FB`;
+  * brake hold: `FE:29` b2 `08` = 0x529 D `08` = 0x230 D bit 2 again.
+
 ## 2026-11-17
 
 * Backend decodes the 17 Nov findings: yaw rate (`dynamics.yaw_rate_dps`, standstill offsets learnt),

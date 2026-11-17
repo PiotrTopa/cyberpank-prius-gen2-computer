@@ -1640,6 +1640,11 @@ PASSIVE_SIGNAL_FIELDS = {
         # broadcast CAN (io.dynamics_ingest)
         "accelerator_pressed", "moving", "ice_power_request_kw", "distance_total_km",
         "distance_source", "odometer_km",
+        # doors (BEAN FE:B6 / CAN 0x5B6; back door: FE:83 opener pulse)
+        "doors_locked", "driver_door_open", "passenger_door_open", "rear_door_open",
+        "back_door_open",
+        # turn signals (io.turn_signal; no bus source on this car)
+        "turn_signal", "turn_lamp_left", "turn_lamp_right", "turn_signal_source",
     }),
     "climate": frozenset({
         "compressor_target_rpm", "compressor_rpm", "compressor_running", "ac_switch_on",

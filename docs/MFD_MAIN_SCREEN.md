@@ -606,7 +606,7 @@ Wanted by the design, not available from the car or roadsense today, and therefo
 | values on height / weight / width limit signs | roadsense sign reading |
 | end of a tunnel ahead, wet road | roadsense env (8.2) |
 | rear-left / rear-right / back door separately, bonnet | body switches the BEAN frame does not separate; a satellite input or a further BEAN decode |
-| turn signals, hazard lamps, reversing lamp, rear fog | not decoded on CAN/BEAN yet |
+| turn signals, hazard lamps, reversing lamp, rear fog | turn signals and hazards are on neither CAN nor BEAN (checked 2026-11-17, [BEAN_SIGNALS.md](BEAN_SIGNALS.md) §6): `vehicle.turn_signal` needs a lamp source; reversing lamp, rear fog not decoded yet |
 | adaptive-cruise gap and target | the car has plain cruise (the gap bars are reserved in the slot) |
 | blind-spot markers | side radar or a rear/side camera |
 | traffic behind | a rear camera in roadsense |

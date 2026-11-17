@@ -312,6 +312,8 @@ class SlotSuspender:
 #   hv_current    CAN 0x03B A,B     8 ms     0.1 A
 #                 OBD 21C3 AE/21CE  2 s      2 A / 0.01 A at the poll only
 #   coolant       (+ CAN 0x484 B, 1.1 s, 0.626 B - 0.6 °C, P)
+#   doors         BEAN FE:B6        1 s+chg  first; also with the car off
+#                 CAN 0x5B6         1 s+chg  = FE:B6 (IG only; 0-1 s late)
 #   brake_switch  CAN 0x230 D 04    28 ms    99 % at a FE:29 edge (C)
 #                 BEAN FE:29 b2 08  1 s
 
@@ -350,6 +352,10 @@ DEFAULT_POLICIES: Tuple[SignalPolicy, ...] = (
     SignalPolicy("outside_temp", (Source("avc", 15.0), Source("bean", 3.0))),
     SignalPolicy("gear", (Source("can", 2.0), Source("bean", 3.0))),
     SignalPolicy("lights", (Source("can", 3.0), Source("bean", 3.0))),
+    # Doors: BEAN FE:B6 first (also with the car off, and the back-door
+    # opener pulse rides the same bus); CAN 0x5B6 is its gateway copy, IG
+    # only, sometimes 1 s late (the immediate copy is skipped).
+    SignalPolicy("doors", (Source("bean", 3.0), Source("can", 3.0))),
     SignalPolicy("soc_bars", (Source("avc", 15.0), Source("can", 3.0), Source("bean", 3.0))),
     SignalPolicy("climate", (Source("avc", 15.0), Source("bean", 12.0))),
     # Engine running (comm.engine_gate): rpm first; CAN 0x038 b1 alone is

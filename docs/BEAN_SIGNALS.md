@@ -205,8 +205,8 @@ IDs with several fields follow in §4.1–§4.5. Counts and periods are from the
 | `52:A4` | meter | 2 | 1 | 3.2 s | IG | 0x5A4 | fuel gauge level (`00` in the first frame) | C |
 | `52:CA` | A/C amp | 2 | 2 | 5 s | IG | — | constant `00 71` (configuration?) | ? |
 | `52:D0` | meter | 1/9 | 5 | 1 s | IG | — | constant zeros | ? |
-| `52:ED` | A/C amp | 2/10 | 5 | 1 s | IG | 0x5ED | compressor request to the HV ECU (§4.2) | C/P |
-| `52:FD` | A/C amp | 2/10 | 2 | 5 s | IG | — | b0 target temperature, +1 per 0.5 °C, `05` = 18.0 °C; b1 `38` unused second zone | C |
+| `52:ED` | A/C amp | 2/10 | 5 | 1 s | IG | 0x5ED | compressor request to the HV ECU; b1 `20` front-defroster mode (§4.2) | C/P |
+| `52:FD` | A/C amp | 2/10 | 2 | 5 s + event | IG | — | b0 target temperature, +1 per 0.5 °C, `05` = 18.0 °C (steering-pad keys step it, §4.2); b1 `38` unused second zone | C |
 | `62:20` | gateway | 14 | 2 | 0.92 s, ICE running only | IG | 0x520 | ECM fuel quantity PER INJECTION for the trip computer, 16-bit; flow = K × word × rpm (§4.3) | C |
 | `62:21` | gateway | 6 | 1 | 0.3 s | IG | 0x521 | constant `00`; warning demands to the meter? | G |
 | `62:6E` | ? | 2/10 | 2 | 1 s | OFF | — | key-not-in-vehicle warning: b0 `80` warning active, b1 `80` the ~1.2 s beep | C |
@@ -225,11 +225,11 @@ IDs with several fields follow in §4.1–§4.5. Counts and periods are from the
 | `FE:53` | ? | 1 | 6 | 1 s | OFF | 0x553 | constant `49 00 00 00 00 00`; vehicle specification bitmap | G |
 | `FE:54` | ? | 1 | 6 | 1 s | OFF | 0x554 | constant `57 42 4C 41 45 4E`; specification/destination bitmap | G |
 | `FE:62` | power source `E9` | 2/10 | 2 | 1 s | OFF | — | power state (§4.5) | P |
-| `FE:7F` | body | 2/10 | 6 | 1 s | OFF | 0x57F | lamps and door-open indicator (§4.1) | C |
-| `FE:83` | body | 2/10 | 4 | 1 s | OFF | — | b0 `20` ACC, `40` IG; b3 `08` dome lamp, `04` luggage lamp (§4.1) | C |
+| `FE:7F` | body | 2/10 | 6 | 1 s | OFF | 0x57F | lamps (incl. high beam / flash) and door-open indicator (§4.1); no turn-signal bit | C |
+| `FE:83` | body | 2/10 | 4 | 1 s | OFF | — | b0 `20` ACC, `40` IG; b3 `08` dome lamp, `04` back-door opener pulse (§4.1) | C |
 | `FE:91` | gateway | 6/14 | 3 | 0.3 s | IG | 0x591 | `A0 1F 06` before READY, `00 00 00` from READY on | G |
 | `FE:AB` | each node | 0 (52: 4) | 2 / 11 | 1 s per node | OFF | — | network status (§3) | C |
-| `FE:B6` | body | 2/10 | 2 | 1 s | OFF | 0x5B6 | lock state and door switches (§4.1) | C |
+| `FE:B6` | body | 2/10 | 2 | 1 s | OFF | 0x5B6 | lock state and door switches: driver, front passenger, one bit for both rear doors and the back door (§4.1) | C |
 | `FE:C2` | each node | 8 (52: 12) | 2 | at wake | OFF | — | wake announcement (§3) | C |
 | `FE:CD` | A/C amp | 2 | 1 | 1 s | IG | — | outside temperature °C = x − 48 | C (offset and slope, 4–10 °C) |
 | `FE:D4` | gateway | 6 | 1 | 1 s | IG | 0x5D4 | constant `00`; warning flags (RX300: starter/charge/oil) | G |
@@ -237,7 +237,7 @@ IDs with several fields follow in §4.1–§4.5. Counts and periods are from the
 | `FE:DB` | ? | 2 | 1 | 1 s | OFF | — | constant `00` | ? |
 | `FE:E1` | body | 2/10 | 3 | 1 s | OFF | — | lock/unlock **event report** (§4.1) | C |
 | `FE:FB` | gateway | 14 | 6 | event | IG | — | climate button frame, one bit per press (§4.2) | C |
-| `FE:FC` | A/C amp | 2/10 | 6 | 5 s + event | IG | — | climate status (§4.2) | C / P |
+| `FE:FC` | A/C amp | 2/10 | 6 | 5 s + event | IG | — | climate status incl. front defroster / rear defogger keys (§4.2) | C |
 | `B5:D9`, `C1:E2` | smart / transponder | 10 | 3 | 0.5 s in the key window | OFF | — | key authentication exchange (§8) | P |
 
 The 14 IDs present with the car off: `40:59`, `52:3F`, `62:6E`, `FE:53`, `FE:54`, `FE:62`, `FE:7F`,
@@ -255,7 +255,16 @@ window). Every changing bit in them is explained. Constant in every state: `40:5
 | b0 | `40`, `80` | other doors unlocked, two groups (unlock `01 → C1` in 17–25 ms; lock `C0 → 00`, or `C0 → 40 → 00`); which doors: open gap |
 | b1 | `80` | driver door open |
 | b1 | `40` | front passenger door open |
-| b1 | `04` | a rear door or the back door open (one bit for all three) |
+| b1 | `04` | a rear door or the back door open: ONE bit for all three (2026-11-17: driver-side rear 13:28:25.3–26.6, back door 13:28:40.3–45.3, passenger-side rear 13:29:00.2–03.4 all set only `04`) |
+
+Each door separately (2026-11-17, owner's list, IG on): driver `80`, front passenger `40` (13:29:20.6–23.3);
+rear doors and back door share `04`. The **back door** is told apart only by the opener pulse
+`FE:83` b3 `04` (below), which leads the `04` rise by 0.19–0.20 s (2/2: 2026-11-13 16:36:01.05 →
+01.25, 2026-11-17 13:28:40.16 → 40.35); a rear side door sets `04` without it (2026-11-13 16:35:40,
+16:36:31; 2026-11-17 13:28:25, 13:29:00). Left vs right rear door: not distinguishable on BEAN (nor on
+CAN 0x5B6, which is the same byte). The backend: `vehicle.driver_door_open`, `passenger_door_open`,
+`rear_door_open` (the shared bit), `back_door_open` (P: shared bit rose within 1 s of the opener pulse;
+stays True until the shared bit clears, so a rear door opened while the back door is open is not seen).
 
 `FE:B6` b0 is the body ECU's lock state, not a switch read: it follows `FE:E1` within 8–9 ms, faster
 than a lock motor moves.
@@ -278,16 +287,25 @@ than a lock motor moves.
 | b0 | `10` | tail/parking lamps | C (switch sequence) |
 | b0 | `20` | low beam | C |
 | b0 | `01` | front fog lamp | C (one occurrence) |
-| b0 | `08` | high beam | C (2026-11-16 17:44:36–41, 17:44:45–50, 17:46:23–29, about 5 s each, moving with low beam on; CAN 0x57F b1 `30 → 38` in the same three episodes) |
+| b0 | `08` | high beam lit | C (2026-11-16 17:44:36–41, 17:44:45–50, 17:46:23–29, about 5 s each, moving with low beam on; CAN 0x57F b1 `30 → 38` in the same three episodes) |
+| b0 | `28` together | headlamp **flash** with the lamps off: `20` and `08` set for the pull, 0.9–1.3 s, then `00` | C (2026-11-17: 13:19:30.4–31.7 with the car off, the frame that woke the bus; 13:22:01.0–01.9, :03.6–04.8, :06.6–07.6 with IG, owner "flash 3× 1 s"; CAN 0x57F `28` in the same episodes) |
 | b1 | `08` | follows the tail lamps (illumination) | C |
 | b1 | `10` | always set except in the first frame of a door-open wake | ? |
 | b2 | `80` | any door open (meter indicator) | C |
+
+Flash vs high beam: no separate bit. With the lamps off a flash is `00 → 28 → 00` (both bits for
+about a second) and the high-beam switch position sets nothing (13:22:25–35: no change; the lamps
+are off, so nothing is lit). With the low beam on, a flash and the high-beam position should both be
+`20 → 28` (not yet captured; tell them apart only by duration). No turn-signal or hazard bit exists
+in `FE:7F` or anywhere on BEAN (§6).
 
 `FE:83` (4 bytes): b0 `20` = ACC, `40` = IG (C: `00 → 20 → 60` within 34 ms at power-on, the IG
 nodes appear 0.3–0.6 s after `40`; `60 → 40 → 00` at power-off; same order on the JP car); `02` = key
 in slot on the JP car, never set on this car. b3 `08` = interior (dome) lamp on, set at unlock or door
 open, cleared 15.2 s after the driver door closes or at lock (C); b3 `04` = luggage lamp / back door
-open (one occurrence). The powerbox ACC input follows these moments 0.6–0.9 s later (debounce) and
+open (one occurrence, read then as the luggage lamp). Corrected 2026-11-17: b3 `04` is a 0.8–1.2 s
+**pulse at the back-door opener**, 0.2 s before `FE:B6` b1 `04` rises (2/2), not held while the
+back door is open; `FE:83` b3 `08` (dome) follows every door. The powerbox ACC input follows these moments 0.6–0.9 s later (debounce) and
 cannot separate ACC from IG.
 
 `FE:D8` b1 `01` = driver-door key window: set when the driver door opens, cleared 29.9–30.0 s after it
@@ -313,8 +331,14 @@ remote).
 
 Not yet seen: temperature down, fan 5, AUTO off. For "temperature 18.0" and "AUTO off" the AVC
 remote sent no command at all, so these say nothing about BEAN. The hard climate keys and the
-steering pad are wired to the A/C amp and produce no `FE:FB` (a 20.0 → 18.0 °C pad change and a
-front-defrost press showed none).
+steering pad are wired to the A/C amp and produce no `FE:FB` (C: a 20.0 → 18.0 °C pad change and a
+front-defrost press on 2026-11-13; on 2026-11-17 four pad steps up, four down, rear defogger and
+front defrost on/off, none of them a `FE:FB` frame).
+
+Steering-pad temperature keys (2026-11-17, C): only `52:FD` b0 changes, one 0.5 °C step per 1.3–1.6 s
+while the key is held (auto-repeat): up 13:25:46.2 / 47.5 / 48.8 / 50.2 = `05 → 09` (18.0 → 20.0 °C),
+down 13:26:10.2 / 11.8 / 13.6 / 15.2 = `09 → 05`; in AUTO the A/C amp then changes fan and vent in
+`FE:FC` (b5, b1) 0.2–0.3 s later.
 
 `FE:FC` (6 bytes, A/C amp) status:
 
@@ -322,8 +346,8 @@ front-defrost press showed none).
 |---|---|---|---|
 | b0 | `80` | AUTO | C |
 | b0 | `40` | fresh air (clear = recirculation) | C |
-| b0 | `10` | front defroster (forces A/C on, fresh air, fan 5, AUTO off) | P (one occurrence) |
-| b0 | `08` | rear defogger | P |
+| b0 | `10` | front defroster (forces A/C on, fresh air, AUTO off, vent bits clear) | C (2026-11-13 21:48:55–21:54:39; 2026-11-17 13:26:55.1–27:00.2, `C2 80 … 20 → 52 00 … 40 → C2 80 … 20`) |
+| b0 | `08` | rear defogger | C (2026-11-17 13:26:40.1–44.9, `C2 → CA`, owner 26:40/26:45; nothing else changed: no separate mirror-heater bit) |
 | b0 | `02` | A/C on | C |
 | b0 | `01` | face | C |
 | b1 | `80` / `40` / `20` | face+foot / foot / windscreen+foot | C |
@@ -354,7 +378,7 @@ front-defrost press showed none).
 | b0 | `02` | target ≠ 0 | C |
 | b0 | `01` | only with a 3000 rpm start-up request | G |
 | b1 | `80` (b2 = complement) | A/C requests ICE run for cabin heat: clears 1.2–1.5 s before 5 of 6 standstill ICE stops, sets 0.5–1.3 s before 4 restarts, at coolant 53–59 °C | P |
-| b1 | `20` | front-defroster mode (exactly the `FE:FC` DEF interval, once) | P |
+| b1 | `20` | front-defroster mode (exactly the `FE:FC` DEF interval: 2026-11-13, and 2026-11-17 13:26:55.3–27:00.3) | C |
 
 `98:EC` (gateway → A/C amp, CAN 0x5EC): b0–b1 actual compressor rpm (C, tracks the `52:ED` target);
 b2 ≈ rpm/170 and b3 peaks at compressor start, both non-zero only while running: power/current (G);
@@ -372,7 +396,9 @@ or the project's own sensor.
 
 ### 4.3 Powertrain data relayed by the gateway
 
-* `FE:29` (copy of CAN 0x529), b2: `08` brake pedal (C: 74 of 79 edges against 0x030 b4, +2 ms);
+* `FE:29` (copy of CAN 0x529), b2: `08` brake pedal (C: 74 of 79 edges against 0x030 b4, +2 ms; held
+  brake 2026-11-17 13:24:21.4–24:45.2, owner 24:20–24:45, with CAN 0x230 D bit 2 21.6–45.9 and 0x529 D
+  `08` 21.4–45.1);
   bits 0–2 MFD SOC bars (3/4/5 seen, with hysteresis against 0x3CB SOC: 3 bars at 50–54 %, 4 at
   54–57.5 %, 5 at 55–58 %); `80` HV active/READY (set in the start sequence `0B → 2B → 8B → CB → 8B`,
   cleared 0.2 s after the power-off press). Bytes 0, 1, 3, 4 = warning bits per 0x529 (red triangle,
@@ -489,8 +515,12 @@ Checked against logged actions; nothing changed except signals explained by othe
 
 | Function | Evidence |
 |---|---|
-| Wipers (single, low, high, off) | no frame changed (only the climate script and one SOC-bar step in the window) |
-| Seat belt (unbuckle/buckle) | nothing within ±5 s except a fan step and an ICE stop |
+| **Turn signals left/right** (IG on) | 2026-11-17 13:20:20–20:35 (left, right, off; lamps blinking): no BEAN bit changed, no broadcast CAN bit either (incl. the ids logged once a second). Stalk and flasher are wired to the lamps and the meter. The backend keeps `vehicle.turn_signal` None until a lamp source exists (`io/turn_signal.py`) |
+| **Hazards** (car off) | 2026-11-17 13:19:00–19:05: the bus stayed asleep (no frame 13:14:3x–13:19:30). Hazards with IG on: not yet tried |
+| Turn stalk with the car off | 13:19:20/25: nothing (bus asleep; the lamps do not work without IG) |
+| Wipers (single, low, high, off) | no frame changed (only the climate script and one SOC-bar step in the window); again 2026-11-17 13:23:00–23:12 (washer + wipe, intermittent/low, off): nothing on BEAN or CAN |
+| Seat belt (unbuckle/buckle) | nothing within ±5 s except a fan step and an ICE stop; again 2026-11-17 13:23:45/55 (driver buckle in/out): nothing on BEAN or CAN |
+| High-beam switch position with the headlamps off | 2026-11-17 13:22:25–35: nothing (no lamp lit); flash: §4.1 |
 | Rear fog lamp | only one fog bit (`FE:7F` b0 `01`) exists for two fog steps |
 | Light-reminder chime | no chime frame; low beam drops at power-off, tail bit stays until switched off |
 | Map lamps | the bus stayed asleep |
@@ -577,18 +607,19 @@ Ranked by what they settle. By owner priority **E5 (cruise control) comes first*
 | # | Experiment | Settles |
 |---|---|---|
 | E1 | DONE 2026-11-16 (§4.5). **IG-ON without READY.** Power without brake (ACC), wait 10 s; press again (IG, not READY), wait 20 s; brake + press (READY), wait 10 s; power off | `FE:83` `20` = ACC on this car; the READY bit among `FE:29` b2 `80`, `98:27` b0 `01`, `FE:91`, `98:B2`, `FE:AB[52]` b2 `80`; `FE:D8` b0; `FE:50` `04` |
-| E2 | **Hard climate keys, parked READY.** Front defrost on/off, rear defogger on/off, two steering-pad temperature/mode steps | `FE:FC` b0 `10`/`08`, `52:ED` b1 `20`, a possible mirror-heater bit, `52:6D` b1 flags |
+| E2 | DONE 2026-11-17 (§4.2). **Hard climate keys, parked READY.** Front defrost on/off, rear defogger on/off, two steering-pad temperature/mode steps | `FE:FC` b0 `10`/`08` and `52:ED` b1 `20` C; no mirror-heater bit; pad keys = `52:FD` steps only, no `FE:FB`. Left: pad MODE key, `52:6D` b1 flags |
 | E3 | **Cabin thermometer during a cold start**, parked READY after a night soak, a reference thermometer, one reading per minute for 10 min | `52:6D` b0 offset only (scale P, 2026-11-16); whether `98:EC` b4 is cabin-related |
 | E4 | **Trip meter.** Note Trip A/B and average consumption at start and end of a drive; reset Trip A with IG on | which trip `52:76` is; whether `52:A2` resets with it |
 | E5 | **Cruise control** — PARTLY DONE 2026-11-16/17 (§1: main switch, engaged, set speed, `21D3` layout incl. the E switch bits, tap step 1 mph, 0x5C8 `A4` = immediate-copy header). Left: timed holds, CANCEL bit, brake vs stalk cancel, stalk wiring ([`CRUISE_CONTROL.md`](CRUISE_CONTROL.md) §8) | hold threshold and rate, CANCEL, wiring |
 | E6 | **GPS speed at steady 50 and 80 km/h** | `FE:24` = displayed (over-reading) speed |
-| E7 | **Flash, rear fog**, 10 s gaps (high beam seen 2026-11-16: `FE:7F` b0 `08`) | flash = the same bit?; whether rear fog has any bit |
+| E7 | PARTLY DONE 2026-11-17 (§4.1): flash with the lamps off = `FE:7F` b0 `28` (both bits); the high-beam position with the lamps off sets nothing. Left: **flash and high beam with the low beam on, rear fog**, 10 s gaps | flash vs high beam with low on; whether rear fog has any bit |
 | E8 | `98:CC`, `40:59`, `52:CA`, `52:D0`, `FE:DB`: no cheap experiment. A K-line data list of the A/C amp (room, evaporator, inverter temperatures) next to a capture | `98:CC`, `98:EC` b4 |
 | E9 | **K-line tester on DLC3** (needs K-line hardware): body active tests Hazard on/off, Security Indic, Trunk/Bdor Open, Door Lock (all doors closed); A/C Defogger Rly-R, Blower | BEAN diagnostic frames gateway → `40`/`98`, diagnosis-mode entry, body node address |
 | E10 | **Key reminder:** power OFF/ACC, key in the slot, driver door open | other meter-buzzer requests besides `62:6E` |
 | E11 | **Shift through B** (READY, brake held): P → R → N → D → B → P | `FE:40` / CAN 0x120 B value |
-| E12 | **Remote vs smart per door:** handle touch at each front door, back-door opener, mechanical key | `FE:B6` b0 `40`/`80` door groups; whether anything directed to `40` appears (expected none) |
+| E12 | PARTLY DONE 2026-11-17 (§4.1): door-open switches per door (driver `80`, passenger `40`, both rear doors and the back door share `04`; back door = `FE:83` b3 `04` opener pulse first). Left: **remote vs smart per door:** handle touch at each front door, mechanical key | `FE:B6` b0 `40`/`80` lock groups; whether anything directed to `40` appears (expected none) |
 | E13 | **Long locked idle**, 30 min, key away from the car | confirms no periodic wake (11.3 min so far) |
+| E14 | **Hazards with IG on**, 10 s, then left/right while moving slowly | confirms no bus carries the flasher with IG (only IG-off hazards and parked left/right were tried); a turn-signal source must then be hard-wired (two lamp lines into a powerbox input through opto-couplers / dividers, or a satellite) or come from vision |
 
 Other open items:
 
@@ -632,6 +663,8 @@ removed. All frames have valid CRCs. Times are CET.
 | `2026-11-13_drive_ig_on.ndjson.gz` | 21:47:47–22:07:26 | 59,444 / 43 | IG-ON, READY, drive | power-on, scripted AVC climate run (21 marks, 21:58:00–21:59:25), lamps, wipers, seat belt, reversing, key-out warning, power-off, lock on leaving |
 | `2026-11-16_cruise_drive.ndjson.gz` | 21:14:24–21:28:48 | 40,990 / 42 | IG-ON, READY, drive | cruise control session (§1), 16 `mark` records with the owner's timeline (main, SET, holds, cancels, refused SET); rebuilt from the phone trip log (powerbox device 203 batches), not from the BEAN capture file, which lost frames (79c4bb8); 254 CRC/length-bad frames and 14 frames to `B5`/`C1` removed |
 
+| `2026-11-17_body_signals.ndjson.gz` | 13:14:21–13:29:57 (bus asleep 13:14:3x–13:19:30) | 30,281 / 43 | car off, then IG/READY parked from 13:20:01 | owner's body-signal list as 29 `mark` records (phone clock, ±1–2 s): hazards and turn stalk with the car off, flash, turn signals, high-beam switch, washer/wipers, seat belt, brake hold, steering-pad temperature, rear defogger, front defrost, each door (timeline below); powerbox fw 2.4.2, complete; 65 frames to `B5`/`C1` and 1 empty frame removed |
+
 Not in the repository (phone `logs/bean/`): `bean_20261117-101230_drive.ndjson`, 2026-11-17
 10:12:30–10:39, 83,269 frames, complete (powerbox 2.4.2; the last line is cut off), with the cruise
 sessions of [`CRUISE_CONTROL.md`](CRUISE_CONTROL.md) §10.
@@ -651,6 +684,30 @@ session30 timeline (from the bus, owner's action list):
 | 16:35:27.1 | 39.5 s | driver door 35:27.3–35:31.0; rear/back door 35:40.2–35:52.0; back door + luggage lamp from 36:01.0 |
 | 16:36:16.1 / 16:36:31.1 / 16:36:41.3 | 4.6 s each | back door closed / a rear door open / closed |
 | 16:36:56.5 | 9.5 s | handle-touch lock (`E1 20`, `B6 C0 → 40 → 00`) |
+
+Body-signal session 2026-11-17 (bus times; owner's list in the `mark` records). The matching trip log
+(CAN from the panda, every changed frame; ids unknown to the decoder once a second) is on the phone
+(`logs/trips/trip_20261117_132002_308.ndjson`), not in the repository.
+
+| Bus time | Owner | What the bus shows |
+|---|---|---|
+| — | 19:00–19:05 hazards, 19:20/25 turn stalk (car off) | bus asleep, nothing |
+| 13:19:30.4–31.7 | 19:30 "high beam" (car off) | `FE:C2` wake, `FE:7F` `28` = a flash (§4.1) |
+| 13:20:01.2 | 20:00 car on | `FE:62` press, `FE:83` `20 → 60`, READY 13:20:03–04 |
+| — | 20:20 left, 20:25 right, 20:35 off | nothing on BEAN or CAN |
+| 13:22:01.0, :03.6, :06.6 (~1 s each) | 22:00 flash 3× | `FE:7F` b0 `28` |
+| — | 22:25–22:35 high-beam switch (lamps off) | nothing |
+| — | 23:00–23:12 washer, wipers, off; 23:45/55 seat belt | nothing |
+| 13:24:21.4–24:45.2 | 24:20–24:45 brake | `FE:29` b2 `08` (CAN 0x230 D 04, 0x529 D 08) |
+| 13:25:46.2–50.2 / 13:26:10.2–15.2 | 25:45–50 up / 26:10–15 down | `52:FD` `05 → 09` / `09 → 05` |
+| 13:26:40.1–44.9 | 26:40/26:45 rear defogger | `FE:FC` b0 `08` |
+| 13:26:55.1–27:00.2 | 26:50/26:55 front defrost (bus 5 s after the owner's times) | `FE:FC` b0 `10`, `52:ED` b1 `20` |
+| 13:28:19.3–22.7 | (not in the list: owner gets out) | `FE:B6` b1 `80` driver door; `62:6E` key-out warning from 13:28:23.1, one beep ~0.5 s after each door closes |
+| 13:28:25.3–26.6 | 28:25 driver-side rear door | b1 `04` |
+| 13:28:40.2 / 40.3–45.3 | 28:40 back door 5 s | `FE:83` b3 `04` pulse 40.16–41.00, then b1 `04` |
+| 13:29:00.2–03.4 | 29:00 passenger-side rear door | b1 `04` |
+| 13:29:20.6–23.3 | 29:20 passenger front door | b1 `40` |
+| 13:29:31.5, 13:29:34.7 | (owner gets in, powers off) | b1 `80`; power off |
 
 Drive capture notes:
 * The owner's clock agrees with the bus within 1–2 s (bus later): headlamp steps 22:00:11.9, :21.2,

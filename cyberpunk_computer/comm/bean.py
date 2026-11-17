@@ -253,17 +253,23 @@ def decode_known(mes: str, data_hex: str, dst: Optional[str] = None) -> Dict[str
     selects the directed frames; ``dst`` None/"" accepts any DST).
 
     CONFIRMED on the owner's NHW20 (docs/BEAN_SIGNALS.md §4):
-      FE:B6  door lock state (b0) + door-open courtesy switches (b1)
+      FE:B6  door lock state (b0) + door-open courtesy switches (b1: 80
+             driver, 40 front passenger, 04 one shared bit for both rear
+             doors and the back door; 2026-11-17: each door separately)
       FE:E1  lock/unlock EVENT (b2), by source: 04/08 remote fob, 10/20 smart
-      FE:7F  lamps (b0: 10 tail, 20 low beam, 01 front fog), b1 08
-             illumination, b2 80 a door open
-      FE:83  ACC (b0 20) / IG (b0 40); dome lamp (b3 08)
+      FE:7F  lamps (b0: 10 tail, 20 low beam, 08 high beam, 01 front fog),
+             b1 08 illumination, b2 80 a door open. A headlamp FLASH with
+             the lamps off is 20 + 08 together for the pull (2026-11-17,
+             4x); the high-beam switch position with the lamps off sets
+             nothing. Turn signals / hazards are NOT on BEAN.
+      FE:83  ACC (b0 20) / IG (b0 40); dome lamp (b3 08); b3 04 = back-door
+             opener pulse (0.8-1.2 s, 0.2 s before FE:B6 b1 04; 2/2)
       FE:D8  driver-door smart-key check window (b1 bit0, ~30 s)
       ..:3F  odometer, 24-bit km (52:3F on this car)
       FE:29  b2: 08 brake pedal, bits 0-2 MFD SOC bars
       98:27  b0 08 = ICE stopped while READY
       52:ED  compressor target rpm (b3-4), b0 40 compressor running, b0 20
-             A/C switch
+             A/C switch, b1 20 front-defroster mode (2/2)
       98:EC  actual compressor rpm (b0-1)
       52:76  trip distance, 0.1 km (TRUE distance, not the odometer's)
       52:90  instantaneous consumption 0.1 L/100 km over TRUE speed
@@ -277,7 +283,10 @@ def decode_known(mes: str, data_hex: str, dst: Optional[str] = None) -> Dict[str
       FE:26  engine rpm = word / 5.12
       FE:2C  coolant x/2 °C, clamped at 16 °C (raw 0x20 = "<= 16 °C")
       FE:CD  outside temperature x - 48 (offset confirmed, slope untested)
-      FE:FB  climate button frame; FE:FC climate status; 52:FD target temp
+      FE:FB  climate button frame (AVC remote only; the hard keys and the
+             steering pad send none); FE:FC climate status (b0 10 front
+             defroster, 08 rear defogger: 2/2 each); 52:FD target temp (the
+             steering pad steps it 0.5 °C at a time, 2026-11-17)
       62:6E  key-not-in-vehicle warning (b0 80) / beep (b1 80)
       FE:40  shift (80 P, 40 R, 10 D, 00 in transit)
 
@@ -319,6 +328,7 @@ def decode_known(mes: str, data_hex: str, dst: Optional[str] = None) -> Dict[str
         out["compressor_running"] = bool(d0 & 0x40)            # [C]
         out["ac_switch_on"] = bool(d0 & 0x20)                  # [C]
         out["prov_ac_engine_heat_request"] = bool(d1 & 0x80)   # [P]
+        out["front_defrost_mode"] = bool(d1 & 0x20)            # [C] = FE:FC b0 10
         return out
     if mes == "EC" and is_dst("98") and len(data) >= 6:      # gateway -> A/C amp
         out["compressor_rpm"] = _w(data, 0)                    # [C]
@@ -393,7 +403,7 @@ def decode_known(mes: str, data_hex: str, dst: Optional[str] = None) -> Dict[str
         out["lamp_tail"] = bool(d0 & 0x10)
         out["lamp_head"] = bool(d0 & 0x20)          # low beam
         out["lamp_fog_front"] = bool(d0 & 0x01)
-        out["lamp_high_beam"] = bool(d0 & 0x08)     # [C] seen 2026-11-16 17:44-17:46
+        out["lamp_high_beam"] = bool(d0 & 0x08)     # [C] 2026-11-16 (3x), flash 2026-11-17 (4x, with 20)
         if d1 is not None:
             out["illumination"] = bool(d1 & 0x08)
         if d2 is not None:
@@ -401,7 +411,11 @@ def decode_known(mes: str, data_hex: str, dst: Optional[str] = None) -> Dict[str
     elif mes == "83":                       # [C] ACC/IG (b0), dome/luggage lamp (b3)
         if d3 is not None:
             out["dome_lamp"] = bool(d3 & 0x08)
+            # b3 04: a 0.8-1.2 s pulse 0.2 s before the back door's switch
+            # (FE:B6 b1 04) rises, seen only for the back door (2/2): the
+            # back-door opener. ``luggage_lamp`` kept for existing readers.
             out["luggage_lamp"] = bool(d3 & 0x04)
+            out["back_door_opener"] = bool(d3 & 0x04)
         out["key_inserted"] = bool(d0 & 0x02)       # never set on this smart-start car
         out["acc_on"] = bool(d0 & 0x20)
         out["ig_on"] = bool(d0 & 0x40)

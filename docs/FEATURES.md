@@ -116,7 +116,7 @@ accelerates.
 |---|---|---|---|---|
 | 1 | GNSS position source | map limit for ISA, curve notice, eco hints with the map, tunnel by map, limit preview, wrong-way, geofences, finder, logbook, tow alert, POI | phone GNSS on postmarketOS (lane `feat/phone-gnss`), USB u-blox on the hub, or the head-unit agent posting `/api/v1/position/gnss` (ADB tooling and the app-less `hu-gnss-bridge` ready since 2026-11-17, untested on the unit: [HEADUNIT_INTEGRATION.md](HEADUNIT_INTEGRATION.md) §7) | S–M |
 | 2 | Sound output | every alert type's sound id | head-unit agent (Android sound with ducking) or a piezo on a satellite / spare powerbox output, behind `SoundSink` | S–M |
-| 3 | Turn-signal state | lane departure (enable), lane-change awareness, indicator-left-on reminder | opto-isolated input on the indicator lamp lines into a satellite / powerbox; or a CAN/BEAN decode | S |
+| 3 | Turn-signal state | lane departure (enable), lane-change awareness, indicator-left-on reminder, roadsense junction intent | opto-isolated input on the indicator lamp lines into a satellite / powerbox (no CAN/BEAN decode exists: checked 2026-11-17); the backend side is ready: `io/turn_signal.py` turns lamp levels into `vehicle.turn_signal` | S |
 | 4 | Push channel | parked-car guardian delivery, DTC / maintenance push | notifier on the phone over LTE to a self-hosted topic, behind `NotificationSink` | S |
 | 5 | Validated traffic-light ego state | green-light reminder (enable), red-light highlight | review `green_light` shadow log; roadsense L7 on own recordings | S–M |
 | 6 | Object tracks in roadsense (adjacent / oncoming, lead class, pedestrians) | better distance warning, cut-in handling, truck-ahead recirc | roadsense `objects[]` (MFD_MAIN_SCREEN 8.2) | M–L |

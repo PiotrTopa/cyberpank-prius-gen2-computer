@@ -98,6 +98,18 @@ def test_doors_and_lamps_come_from_bean():
     assert inp.tail is True and inp.head is False and inp.any_door_open
 
 
+def test_rear_group_unless_the_back_door_explains_it():
+    # vehicle.back_door_open (opener pulse, 2026-11-17) is known: an open back
+    # door explains the shared rear bit, otherwise the side doors are marked
+    st = AppState()
+    st = replace(st, vehicle=replace(st.vehicle, rear_door_open=True, back_door_open=False))
+    inp = read_inputs(st)
+    assert inp.doors[4] is False and inp.rear_group is True
+    st = replace(st, vehicle=replace(st.vehicle, back_door_open=True))
+    inp = read_inputs(st)
+    assert inp.doors[4] is True and inp.rear_group is False
+
+
 def test_display_speed_for_the_readout_real_speed_for_motion():
     st = AppState()
     st = replace(st, vehicle=replace(st.vehicle, speed_kmh=50.0, real_speed_kmh=50.0,

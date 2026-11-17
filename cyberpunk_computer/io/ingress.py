@@ -996,6 +996,14 @@ class IngressController:
                 actions.append(SetPassiveSignalsAction(
                     vehicle={"brake_switch": msg.values["brake_flag"]}))
 
+        # 0x5B6: doors (= BEAN FE:B6; BEAN wins while fresh). The back door
+        # cannot be told apart here (no opener pulse on CAN): left as is.
+        elif msg.msg_type == CANMessageType.BODY_DOORS:
+            if self._sources.offer("doors", "can"):
+                actions.append(SetPassiveSignalsAction(vehicle={
+                    k: msg.values[k] for k in ("doors_locked", "driver_door_open",
+                                               "passenger_door_open", "rear_door_open")}))
+
         # 0x348 / 0x3C8: ICE rpm (secondary sources behind BEAN FE:26)
         elif msg.msg_type == CANMessageType.ICE_SPEED:
             rpm = msg.values.get("ice_rpm")

@@ -210,6 +210,30 @@ class VehicleState:
     # Key-not-in-vehicle warning to the meter (BEAN 62:6E, CONFIRMED)
     key_out_warning: Optional[bool] = None    # b0 0x80
     key_out_beep: Optional[bool] = None       # b1 0x80 (the ~1.2 s beep)
+
+    # Doors (BEAN FE:B6, CAN 0x5B6 = its gateway copy while BEAN is stale;
+    # docs/BEAN_SIGNALS.md §4.1, each door checked 2026-11-17). None = unknown.
+    # rear_door_open is ONE switch bit for rear-left, rear-right AND the back
+    # door. back_door_open (P, io.bean_ingest): the shared bit rose within
+    # 1 s of the back-door opener pulse (FE:83 b3 0x04) and has not cleared
+    # since; False = the shared bit is clear or rose without the opener (a
+    # rear side door). With a rear door and the back door open together it
+    # stays True until the shared bit clears.
+    doors_locked: Optional[bool] = None       # FE:B6 b0 == 0
+    driver_door_open: Optional[bool] = None   # FE:B6 b1 0x80
+    passenger_door_open: Optional[bool] = None  # FE:B6 b1 0x40
+    rear_door_open: Optional[bool] = None     # FE:B6 b1 0x04 (either rear door or the back door)
+    back_door_open: Optional[bool] = None     # P: opener pulse + shared bit
+
+    # Turn signals (io.turn_signal). NOT on BEAN or broadcast CAN on this car
+    # (2026-11-17): stays None until a lamp source (hard-wired tap, satellite,
+    # vision) reports. turn_signal = steady driver intent "left" / "right" /
+    # "hazard" / None (off or unknown; turn_signal_source None = unknown);
+    # turn_lamp_left/right = the raw lamp level (blinks).
+    turn_signal: Optional[str] = None
+    turn_lamp_left: Optional[bool] = None
+    turn_lamp_right: Optional[bool] = None
+    turn_signal_source: Optional[str] = None
     
     # Temperatures
     ice_coolant_temp: Optional[float] = None  # Engine coolant temp (C)
@@ -390,7 +414,7 @@ class DynamicsState:
     headlight_state: str = "OFF"   # "OFF", "PARK", "LOW", "HIGH"
     parking_lights: bool = False
     low_beam: bool = False
-    high_beam: bool = False        # bit 0x08 (never seen set on this car yet)
+    high_beam: bool = False        # bit 0x08 high beam lit (also during a flash, with low_beam)
     fog_front: bool = False        # front fog lamp (FE:7F b0 0x01)
     # A door is open (CAN 0x57F data[3] 0x80 = BEAN FE:7F b2 0x80). This was
     # mis-named ``drl_active`` until 2026-11-14.

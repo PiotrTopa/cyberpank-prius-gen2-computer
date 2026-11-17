@@ -155,7 +155,7 @@ null (21C3 not in it).
 | `range_low` | `maintenance.py` | alert, notice | range < 60 km | `vehicle.fuel_level` (0x5A4, only once a real value arrived); own L/100 km over the last 300 km, else meter 52:A2 | petrol only (LPG not visible); once per drive |
 | `new_dtc` | `maintenance.py` | alert, notice | a stored DTC not known before | `diagnostics.stored_dtcs`, `diagnostics.ecus[*].dtcs` (existing scans only) | first observation = baseline; shown at < 10 km/h; known after 30 s at a standstill |
 | `left_unlocked`, `door_open_parked`, `lamps_left_on`, `low_12v`, `intrusion` | `guardian.py` | event | 5 min unlocked / 2 min door open / 1 min lamps / < 12.2 V for 10 min from 30 min / door opened while locked with no unlock in 60 s | BEAN FE:B6, FE:7F, FE:E1; INA219 | car off; once per parking; no polling |
-| `lane_departure` | `lane.py` | alert, warning | wheel < 0.15 m from an ego line, approaching ≥ 0.25 m/s | scene `lanes[1]`, `lanes[2]`; `turn_signal` (unknown) | ≥ 60 km/h, steering ≤ 30°; **off, cannot be on** until the turn signal is available |
+| `lane_departure` | `lane.py` | alert, warning | wheel < 0.15 m from an ego line, approaching ≥ 0.25 m/s | scene `lanes[1]`, `lanes[2]`; `turn_signal` (unknown until a lamp source feeds `vehicle.turn_signal`; not on CAN/BEAN) | ≥ 60 km/h, steering ≤ 30°; **off, cannot be on** until the turn signal is available |
 
 ### Not validated without real data
 

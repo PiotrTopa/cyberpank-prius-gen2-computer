@@ -346,8 +346,17 @@ def read_inputs(state: Any, feed: Optional[SceneFeed] = None, map_limit: bool = 
         door(("hatch_open", "back_door_open", "tailgate_open")),
     )
     rear_group = None
-    if doors[2] is None and doors[3] is None and doors[4] is None:
-        rear_group = _opt_bool(_bean(decoded, "rear_door_open"))
+    if doors[2] is None and doors[3] is None:
+        rear = _first(srcs, ("rear_door_open",))
+        if rear is None:
+            rear = _bean(decoded, "rear_door_open")
+        rear = _opt_bool(rear)
+        if doors[4] is None:
+            rear_group = rear
+        elif rear is not None:
+            # the back door is known (vehicle.back_door_open): an open back
+            # door explains the shared bit, so the side doors are not marked
+            rear_group = False if doors[4] else rear
     door_any = _bean(decoded, "any_door_open")
     if door_any is None:
         door_any = _bean(decoded, "door_open")

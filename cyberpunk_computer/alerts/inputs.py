@@ -129,7 +129,9 @@ class AlertInputs:
     lat_accel_ms2: Optional[float] = None  # CAN 0x023, + = left (P)
     lon_accel_ms2: Optional[float] = None  # CAN 0x023, + = speeding up (P)
     accelerator_pressed: Optional[bool] = None  # CAN 0x03A E bit 4 (P)
-    turn_signal: str = "unknown"           # not decoded on any bus
+    # off | left | right | hazard from vehicle.turn_signal (io.turn_signal);
+    # "unknown" while no lamp source reports (no bus carries it on this car)
+    turn_signal: str = "unknown"
     # ── climate ──
     outside_c: Optional[float] = None
     climate_live: bool = False             # a fresh AVC/BEAN climate status exists
@@ -378,6 +380,8 @@ def build_inputs(state: Any, scene: Optional[Mapping], scene_age: Optional[float
         lat_accel_ms2=_num(_get(dyn, "lateral_accel_ms2")),
         lon_accel_ms2=_num(_get(dyn, "longitudinal_accel_ms2")),
         accelerator_pressed=_get(v, "accelerator_pressed"),
+        turn_signal=("unknown" if _get(v, "turn_signal_source") is None
+                     else (_get(v, "turn_signal") or "off")),
         outside_c=_num(_get(cl, "outside_temp")), climate_live=climate_live, climate=climate,
         climate_buttons_ts=bean_ts(decoded, "climate_buttons"),
         doors_locked=bean_value(decoded, "doors_locked"),
