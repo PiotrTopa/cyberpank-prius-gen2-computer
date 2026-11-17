@@ -53,6 +53,10 @@ class MainScreen(Screen):
     page 2 is the dynamics page.
     """
     
+    # Backend link: state arrives at ~1 Hz plus an idle heartbeat, so 4 s of
+    # silence is three missed frames (docs/MFD_MAIN_SCREEN.md section 2).
+    LINK_LOST_S = 4.0
+
     # Layout constants
     SIDE_PANEL_WIDTH = 120
     FRAME_HEIGHT = 80
@@ -538,6 +542,11 @@ class MainScreen(Screen):
         self._scene_page = None
         self._scene_state = None
         self._frames = 0
+        # Backend link (remote frontend only): NO LINK after LINK_LOST_S
+        # without an envelope, instead of a frozen live-looking picture.
+        self._gateway_connected = False
+        self._link_lost = False
+        self._no_link_surf = None
 
     @property
     def scene_page(self):
@@ -678,7 +687,9 @@ class MainScreen(Screen):
         self._batt_bars_icon.set_bars(state.avc.battery_bars)
 
         # Connection
-        self._connection_indicator.set_connected(state.connection.connected)
+        self._gateway_connected = bool(state.connection.connected)
+        self._connection_indicator.set_connected(
+            self._gateway_connected and not self._link_lost)
 
         # Scene and status strip (door/lamp/road inputs, power history)
         self._scene_state = state
@@ -697,9 +708,33 @@ class MainScreen(Screen):
         self._dirty = True
         self._chrome_valid = False
     
+    def _backend_link_age(self):
+        """Seconds since the last backend envelope, or None without a remote
+        backend (local twin, tests)."""
+        twin = getattr(self.app, "_virtual_twin", None) if self.app else None
+        fn = getattr(twin, "link_age_s", None)
+        if not callable(fn):
+            return None
+        try:
+            age = fn()
+        except Exception:
+            return None
+        return age if isinstance(age, (int, float)) else None
+
+    def _check_backend_link(self) -> None:
+        age = self._backend_link_age()
+        lost = age is not None and age > self.LINK_LOST_S
+        if lost == self._link_lost:
+            return
+        self._link_lost = lost
+        self._connection_indicator.set_connected(self._gateway_connected and not lost)
+        self._chrome_valid = False     # one redraw on each edge
+        self._dirty = True
+
     def update(self, dt: float) -> None:
         """Update screen and check for focus timeout."""
         super().update(dt)
+        self._check_backend_link()
         if self._frames >= 1:              # the first frame goes out without it
             self.scene_page.update(dt)
 
@@ -855,6 +890,22 @@ class MainScreen(Screen):
         # Touch adjust hints on the frame being edited (pointer-entered only)
         if self._edit_by_pointer and (self._editing_volume or self._editing_target_temp):
             self._render_touch_adjust_hints(surface)
+
+        if self._link_lost:
+            self._render_no_link(surface, center_x, center_width)
+
+    def _render_no_link(self, surface: pygame.Surface, center_x: int, center_width: int) -> None:
+        """``NO LINK`` (Terminus 14, amber, 1-bit) left of the link LED while no
+        backend envelope arrives: the picture behind it is the last one."""
+        txt = self._no_link_surf
+        if txt is None:
+            txt = self._no_link_surf = get_mono_font(14).render("NO LINK", False, COLORS["amber"])
+        led = self._connection_indicator.rect
+        x = led.x - 4 - txt.get_width()
+        y = led.y + (led.height - txt.get_height()) // 2
+        pygame.draw.rect(surface, COLORS["bg_dark"],
+                         (x - 2, y - 1, txt.get_width() + 4, txt.get_height() + 2))
+        surface.blit(txt, (x, y))
     
     def _render_bottom_bar(
         self, surface: pygame.Surface, center_x: int, center_width: int

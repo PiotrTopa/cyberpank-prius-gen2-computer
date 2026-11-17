@@ -41,6 +41,14 @@ Power policy (state machine, driven from the backend loop at a slow cadence):
   times, because the SSH call is fire-and-forget.
 * While ON the manager keeps enforcing host-side IP config (gadget
   re-enumerations wipe it) and tracks reachability via ping.
+* Frontend watchdog (last resort, incident 2026-11-17): while ON, reachable
+  and not dark, the board must hold an ESTABLISHED TCP connection to the
+  backend's ZMQ PUB port (read from /proc/net/tcp, no sudo). If it has none
+  for ``frontend_restart_s`` the manager runs ``systemctl try-restart
+  mfd.service`` on the Pi over SSH (try-restart: a unit someone stopped stays
+  stopped), at most once per ``frontend_restart_min_interval_s``. The
+  frontend heals its own link first (frontend/client.py); this covers a
+  frontend that cannot.
 
 All external effects go through an injectable ``runner`` so the whole state
 machine is unit-testable without hardware.
@@ -123,6 +131,14 @@ class MfdPowerConfig:
     # across backend restarts (tmpfs: gone with a phone reboot by design).
     hold_s: float = 1800.0
     hold_file: str = "/run/prius/mfd_hold.json"
+    # Frontend watchdog: the Pi must hold an ESTABLISHED connection to this
+    # local port (backend ZMQ PUB). Missing for frontend_restart_s while ON,
+    # reachable and not dark -> restart_frontend_cmd over SSH, rate-limited.
+    # 0 disables. 180 s leaves room for the slow UI start after a boot.
+    frontend_port: int = 8081
+    frontend_restart_s: float = 180.0
+    frontend_restart_min_interval_s: float = 600.0
+    restart_frontend_cmd: str = "sudo systemctl try-restart mfd.service; true"
 
 
 BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
@@ -349,6 +365,7 @@ class MfdPowerManager:
         clock: Callable[[], float] = time.monotonic,
         controller: Optional[object] = None,
         iface_configured: Optional[Callable[[str, str], bool]] = None,
+        frontend_connected: Optional[Callable[[], Optional[bool]]] = None,
     ) -> None:
         self.config = config
         self._publish = publish
@@ -356,6 +373,7 @@ class MfdPowerManager:
         self._spawn = spawner or self._default_spawner
         self._iface_exists = iface_exists or self._default_iface_exists
         self._iface_configured = iface_configured or self._default_iface_configured
+        self._frontend_connected = frontend_connected or self._default_frontend_connected
         self._clock = clock
         # Port power controller (backend.port_power.RelayPortPower on the car:
         # the Pi's VBUS goes through powerbox relay ch3, with data-off
@@ -383,6 +401,11 @@ class MfdPowerManager:
         self._dark: bool = False
         self._standby_left: int = 0
         self._last_restore: float = 0.0   # monotonic, last restore sent in ON
+        # Frontend watchdog: since when the Pi holds no PUB connection while
+        # it should (monotonic), and when the frontend was last restarted.
+        self._frontend_missing_since: Optional[float] = None
+        self._last_frontend_restart: Optional[float] = None
+        self._frontend_restarts: int = 0
 
     # ── external effects (injectable) ────────────────────────────────────
 
@@ -399,6 +422,80 @@ class MfdPowerManager:
     @staticmethod
     def _default_iface_exists(iface: str) -> bool:
         return os.path.isdir(f"/sys/class/net/{iface}")
+
+    def _default_frontend_connected(self) -> Optional[bool]:
+        """Does the board hold an ESTABLISHED TCP connection to our local
+        ``frontend_port``? Read from /proc/net/tcp{,6} (no privilege). None
+        when the tables cannot be read (the watchdog then does nothing)."""
+        import socket
+        cfg = self.config
+        try:
+            ip_hex = socket.inet_aton(cfg.board_ip)[::-1].hex().upper()
+        except OSError:
+            return None
+        port_hex = "%04X" % cfg.frontend_port
+        read_any = False
+        for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+            try:
+                with open(path) as fh:
+                    lines = fh.readlines()[1:]
+            except OSError:
+                continue
+            read_any = True
+            for line in lines:
+                f = line.split()
+                if len(f) < 4 or f[3] != "01":          # 01 = ESTABLISHED
+                    continue
+                local, remote = f[1], f[2]
+                if not local.endswith(":" + port_hex):
+                    continue
+                raddr = remote.split(":", 1)[0].upper()
+                # IPv4, or IPv4-mapped IPv6 (::ffff:a.b.c.d)
+                if raddr == ip_hex or raddr == "0000000000000000FFFF0000" + ip_hex:
+                    return True
+        return False if read_any else None
+
+    def _frontend_watchdog(self, now: float, reachable: bool) -> None:
+        """Last resort: restart mfd.service when the board is up and awake
+        but its frontend holds no connection to the backend."""
+        cfg = self.config
+        if cfg.frontend_restart_s <= 0:
+            return
+        eligible = (self._state == STATE_ON and reachable and not self._dark)
+        connected = None
+        if eligible:
+            try:
+                connected = self._frontend_connected()
+            except Exception:
+                connected = None
+        if not eligible or connected is not False:
+            if self._frontend_missing_since is not None and connected:
+                logger.info("MFD frontend connected to the backend again")
+            self._frontend_missing_since = None
+            return
+        if self._frontend_missing_since is None:
+            self._frontend_missing_since = now
+            return
+        missing = now - self._frontend_missing_since
+        if missing < cfg.frontend_restart_s:
+            return
+        if (self._last_frontend_restart is not None and
+                now - self._last_frontend_restart < cfg.frontend_restart_min_interval_s):
+            return
+        self._last_frontend_restart = now
+        self._frontend_restarts += 1
+        logger.warning("MFD frontend: board reachable but no connection to port %d for "
+                       "%.0fs — restarting mfd.service over SSH (#%d)",
+                       cfg.frontend_port, missing, self._frontend_restarts)
+        cmd = ["sudo", "ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+               "-o", "ConnectTimeout=5", f"{cfg.ssh_user}@{cfg.board_ip}",
+               cfg.restart_frontend_cmd]
+        try:
+            self._spawn(cmd)
+        except Exception:
+            logger.exception("MFD frontend restart command failed")
+        # give the restarted UI the full window again
+        self._frontend_missing_since = now
 
     def _set_port_power(self, on: bool) -> None:
         if self._controller is not None:
@@ -600,6 +697,7 @@ class MfdPowerManager:
             "power_cycles": self._power_cycles,
             "last_boot_s": self._last_boot_s,
             "dark": self._dark,
+            "frontend_restarts": self._frontend_restarts,
         }
 
     def _emit(self) -> None:
@@ -776,4 +874,5 @@ class MfdPowerManager:
             self._reachable = None
             self._enter(STATE_OFF)
 
+        self._frontend_watchdog(now, bool(self._reachable))
         self._emit()

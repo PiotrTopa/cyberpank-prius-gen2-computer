@@ -306,3 +306,8 @@ class RemoteTwin:
     def connected(self) -> bool:
         return self._client.connected
 
+    def link_age_s(self):
+        """Seconds since the last backend envelope (since start before the
+        first one); the UI shows ``NO LINK`` when it grows (main_screen)."""
+        return self._client.link_age_s()
+

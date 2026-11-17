@@ -13,6 +13,12 @@ ZmqServer — ZeroMQ transport for the headless backend.
   thread via StoreBridge; execution is asynchronous) or
   ``{"status":"error","reason":...}``.
 
+Liveness (incident 2026-11-17, see frontend/client.py): both sockets run
+ZMTP heartbeats + TCP keepalive so connections of a vanished frontend are
+dropped, and the PUB socket sends a tiny ``{"type":"hb","ts":..}`` envelope
+whenever nothing was published for ``heartbeat_interval`` seconds, so the
+frontend's envelope watchdog never fires on a healthy but idle backend.
+
 Threading: ``enqueue_state`` / ``enqueue_event`` are thread-safe and
 non-blocking (engine thread calls them); all socket IO happens on the private
 server thread. State and events use SEPARATE queues so a burst of state
@@ -31,6 +37,7 @@ from typing import Optional
 import zmq
 
 from ..api.bridge import StoreBridge
+from ..zmq_liveness import apply_liveness_options
 
 logger = logging.getLogger(__name__)
 
@@ -43,12 +50,14 @@ class ZmqServer:
         pub_port: int = 8081,
         rep_port: int = 8082,
         state_min_interval: float = 1.0,
+        heartbeat_interval: float = 1.0,
     ):
         self._bridge = bridge
         self.host = host
         self.pub_port = pub_port
         self.rep_port = rep_port
         self.state_min_interval = state_min_interval
+        self.heartbeat_interval = heartbeat_interval
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._state_box: "queue.Queue[dict]" = queue.Queue(maxsize=1)
@@ -60,7 +69,7 @@ class ZmqServer:
         # Telemetry for logs/debugging.
         self.stats = {"state_pub": 0, "event_pub": 0, "commands": 0,
                       "command_errors": 0, "events_dropped": 0,
-                      "latest_pub": 0, "latest_replaced": 0}
+                      "latest_pub": 0, "latest_replaced": 0, "hb_pub": 0}
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -131,13 +140,17 @@ class ZmqServer:
         ctx = zmq.Context.instance()
         pub_sock = ctx.socket(zmq.PUB)
         pub_sock.setsockopt(zmq.SNDHWM, 16)
+        apply_liveness_options(pub_sock)
         pub_sock.bind(f"tcp://{self.host}:{self.pub_port}")
 
         rep_sock = ctx.socket(zmq.REP)
+        apply_liveness_options(rep_sock)
         rep_sock.bind(f"tcp://{self.host}:{self.rep_port}")
 
         poller = zmq.Poller()
         poller.register(rep_sock, zmq.POLLIN)
+        last_pub = time.monotonic()
+        sent_mark = -1
 
         while not self._stop.is_set():
             socks = dict(poller.poll(timeout=50))  # ms
@@ -169,6 +182,17 @@ class ZmqServer:
                 self.stats["state_pub"] += 1
             except queue.Empty:
                 pass
+            # idle heartbeat: only when nothing at all went out for a while
+            now = time.monotonic()
+            sent = (self.stats["state_pub"] + self.stats["event_pub"]
+                    + self.stats["latest_pub"])
+            if sent != sent_mark:
+                sent_mark = sent
+                last_pub = now
+            elif self.heartbeat_interval > 0 and now - last_pub >= self.heartbeat_interval:
+                pub_sock.send_string('{"type":"hb","ts":%.3f}' % time.time())
+                self.stats["hb_pub"] += 1
+                last_pub = now
 
         pub_sock.close(linger=0)
         rep_sock.close(linger=0)

@@ -48,6 +48,8 @@ def _build_mfd():
         BACKEND_MFD_BEAN_WAKE=entry       # early start from the BEAN bus:
                                           # entry (unlocked / door open) | any | off
         BACKEND_MFD_DARK_GRACE=1          # dark standby on the Pi during the grace
+        BACKEND_MFD_FRONTEND_RESTART_S=180  # restart mfd.service when the awake board
+                                          # holds no ZMQ connection this long (0 = off)
     """
     enabled = os.environ.get("BACKEND_MFD_ENABLED", "0").strip().lower() in (
         "1", "true", "yes", "on",
@@ -68,6 +70,7 @@ def _build_mfd():
         boot_timeout_s=float(env("BACKEND_MFD_BOOT_TIMEOUT_S", "180")),
         shutdown_wait_s=float(env("BACKEND_MFD_SHUTDOWN_WAIT_S", "45")),
         bean_wake=env("BACKEND_MFD_BEAN_WAKE", "entry").strip().lower(),
+        frontend_restart_s=float(env("BACKEND_MFD_FRONTEND_RESTART_S", "180")),
     )
 
 
@@ -368,7 +371,10 @@ def _build_fan_policy(args: argparse.Namespace):
         vals = ((n, getattr(args, "fan_%s_%s" % (prefix, k))) for n, k in zip(names, keys))
         return {n: v for n, v in vals if v is not None}
 
-    top = {k: v for k, v in (("safety_ctrl_c", args.fan_safety_temp), ("tau_s", args.fan_tau))
+    top = {k: v for k, v in (("safety_ctrl_c", args.fan_safety_temp), ("tau_s", args.fan_tau),
+                             ("hot_on_c", getattr(args, "fan_hot_on", None)),
+                             ("hot_full_c", getattr(args, "fan_hot_full", None)),
+                             ("hot_release_c", getattr(args, "fan_hot_release", None)))
            if v is not None}
     return replace(cfg, full=replace(cfg.full, **pick("full")), low=replace(cfg.low, **pick("low")), **top)
 
@@ -693,6 +699,12 @@ def main() -> None:
                      help="filtered control °C that forces 100 %%")
     fan.add_argument("--fan-tau", type=float, default=None,
                      help="low-pass time constant of the control temperature in s")
+    fan.add_argument("--fan-hot-on", type=float, default=None,
+                     help="hottest-core °C (5 s low-pass) where the hot-core ramp starts")
+    fan.add_argument("--fan-hot-full", type=float, default=None,
+                     help="hottest-core °C where the hot-core ramp reaches 100 %%")
+    fan.add_argument("--fan-hot-release", type=float, default=None,
+                     help="hottest-core °C below which the hot-core term releases")
 
     parser.add_argument("-v", "--verbose", action="store_true", help="verbose logging")
     args = parser.parse_args()

@@ -34,6 +34,15 @@ y 240 └──────────┴──────────┴─�
 The side panels (AUDIO, AMBIENT, ENGINE, CLIMATE, LIGHTS, BATTERY) and page 2 are unchanged; the
 strip is shown on every page. The link LED stays in the top-right corner of the scene.
 
+Backend link: when no envelope (state, event or the backend's idle heartbeat) has arrived for
+more than 4 s (`MainScreen.LINK_LOST_S`; state comes at about 1 Hz), `NO LINK` appears in
+Terminus 14 amber left of the link LED and the LED turns red, on every page; the picture behind
+it is the last one received. It clears with the next envelope. Before 2026-11-17 the LED showed
+only the gateway state from the last snapshot, so a dead link left a live-looking picture. The
+client heals the link itself (ZMTP heartbeats, then a socket rebuild after 10 s of silence,
+`frontend/client.py`); the backend restarts `mfd.service` as a last resort when the awake board
+holds no ZMQ connection for 180 s (`backend/mfd_power.py`, `BACKEND_MFD_FRONTEND_RESTART_S`).
+
 The look is "quiet road": the road and the lead vehicle dominate, the scenery is a faint band over
 the horizon, and secondary information appears when it matters. How much is shown is set in one
 place, `ui/scene/tuning.py` (section 12).
