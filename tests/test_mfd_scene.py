@@ -1238,3 +1238,74 @@ def test_roadside_trees_keep_their_place_while_they_approach(monkeypatch):
         assert len(set(v)) == 1, v[:5]
     # and the trees do differ from one another
     assert len({v[0] for v in followed}) > 3
+
+
+# ── junction view and the lane assignment of the traffic light ───────────────
+
+_JV = {"k": "j", "m": 180, "c": 0.9, "ctl": "s", "to": "Ozimska",
+       "arms": [[-90, "xe", 0, 0], [0, "xep", 1, 0], [90, "e", 2, 0]]}
+_JV_RING = {"k": "r", "m": 140, "c": 0.9, "ctl": "g", "to": "DW414",
+            "arms": [[95, "xe", 1, 1], [3, "xep", 0, 2], [-88, "xe", 2, 3], [180, "ea", 0, 0]],
+            "ring": {"r": 16, "n": 3, "p": 2}}
+
+
+def test_junction_view_is_parsed():
+    from cyberpunk_computer.ui.scene.mapinfo import parse_map
+    jv = parse_map({"map": _map_full(jv=_JV)}).junction
+    assert jv.kind == "j" and jv.m == 180 and jv.control == "s" and jv.to == "Ozimska"
+    assert [a.angle for a in jv.arms] == [-90, 0, 90]
+    assert jv.arms[1].path and jv.arms[1].rank == 1 and not jv.arms[2].exit and jv.arms[2].entry
+    rg = parse_map({"map": _map_full(jv=dict(_JV_RING, ring={"r": 16, "n": 3, "p": 2, "on": True, "car": 70}))}).junction
+    assert rg.kind == "r" and rg.ring_exits == 3 and rg.ring_path == 2 and rg.on_ring and rg.car_angle == 70
+    assert rg.arms[3].approach and rg.arms[1].exit_no == 2
+    for bad in ({"k": "z", "m": 1, "c": 1, "arms": [[0, "x"]]}, {"k": "j", "m": 1, "c": 1, "arms": []}, "x", None):
+        assert parse_map({"map": _map_full(jv=bad)}).junction is None
+
+
+def test_junction_view_is_off_by_default_and_gated_by_distance_confidence_and_position():
+    assert map_director(_map_full(jv=_JV))[0].map.junction is None                 # tuning map_junction is off
+    d, _ = map_director(_map_full(jv=_JV), map_junction=True)
+    jv = d.map.junction
+    assert jv is not None and 130 < jv.m < 145                                     # 180 m, 3 s at 50 km/h driven
+    assert map_director(_map_full(jv=dict(_JV, m=600)), map_junction=True)[0].map.junction is None
+    assert map_director(_map_full(jv=dict(_JV, m=600)), map_junction=True, map_junction_m=700)[0].map.junction is not None
+    assert map_director(_map_full(jv=dict(_JV, c=0.3)), map_junction=True)[0].map.junction is None
+    assert map_director(_map_full(jv=_JV, pos={"src": "dead_reckoning", "hacc": 45.0}),
+                        map_junction=True)[0].map.junction is None
+    # on the ring the picture stays although the path confidence is gone
+    on = dict(_JV_RING, m=0, c=0.2, ring={"r": 16, "n": 3, "p": 3, "on": True, "car": 70})
+    assert map_director(_map_full(jv=on), map_junction=True)[0].map.junction.on_ring
+    # the map drops out: it goes with the other map elements
+    d, inp = map_director(_map_full(jv=_JV), seconds=1.5, map_junction=True)
+    live_step(d, inp._replace(map=None), 3.5)
+    assert d.map.junction is None
+
+
+def test_junction_view_draws_in_its_panel_only():
+    from cyberpunk_computer.ui.scene import maplayer
+    base = mdrawn(map_inputs(_map_full()), map_junction=True)[1].surface.copy()
+    for jv in (_JV, _JV_RING, dict(_JV_RING, m=0, ring={"r": 16, "n": 3, "p": 3, "on": True, "car": 70})):
+        surf = mdrawn(map_inputs(_map_full(jv=jv)), map_junction=True)[1].surface
+        x0, y0, w, h = maplayer.JV_X, maplayer.JV_Y, maplayer.JV_W + 40, maplayer.JV_H + 16
+        changed = [(x, y) for x in range(surf.get_width()) for y in range(surf.get_height())
+                   if surf.get_at((x, y)) != base.get_at((x, y))]
+        assert changed, jv
+        assert all(x0 <= x < x0 + w and y0 <= y < y0 + h for x, y in changed), jv
+        # the way on is drawn in the brightest lane colour
+        hot = pygame.Color(*mdrawn(map_inputs(_map_full()))[1].pal["lane_ego"])
+        assert any(surf.get_at(p) == hot for p in changed)
+    # flag off: the same picture as without a view
+    assert mdrawn(map_inputs(_map_full(jv=_JV)))[0] == mdrawn(map_inputs(_map_full()))[0]
+
+
+def test_light_uncertainty_and_other_group_are_shown():
+    from cyberpunk_computer.ui.scene.inputs import _traffic_light
+    lt = _traffic_light({"state": "green", "d": 34, "y": 0.4, "q": True, "alt": {"s": "red", "side": "l"}})
+    assert lt.uncertain and lt.alt_state == "red" and lt.alt_side == "l" and lt.lat_m == -0.4
+    plain = _traffic_light({"state": "green", "d": 34, "y": 0.4})
+    assert not plain.uncertain and plain.alt_state == "" and plain.alt_side == ""
+    a = mdrawn(drive_inputs(light=plain))[0]
+    assert mdrawn(drive_inputs(light=lt))[0] != a
+    # both extras switched off: the plain signal
+    assert mdrawn(drive_inputs(light=lt), light_uncertain=False, light_alt=False)[0] == a
+    assert mdrawn(drive_inputs(light=lt._replace(uncertain=False)), light_alt=False)[0] == a

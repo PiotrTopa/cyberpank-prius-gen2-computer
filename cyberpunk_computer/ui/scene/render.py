@@ -1050,6 +1050,17 @@ class SceneRenderer:
             else:
                 pygame.draw.circle(s, _k(cols[i], 0.22), c, r, 1)
 
+    def _draw_signal_small(self, s: pygame.Surface, x: int, y: int, state: str) -> None:
+        """A 7 x 15 signal head with 1 px lamps (top-left at x, y): the state of
+        the signal group that is NOT the car's (docs/MFD_MAIN_SCREEN.md 6.6)."""
+        pygame.draw.rect(s, (0, 0, 0), (x, y, 7, 15))
+        pygame.draw.rect(s, _k(self.pal["dim"], 0.7), (x, y, 7, 15), 1)
+        on = self.LIGHT_COLORS.get(state, ())
+        cols = self._lamp_colors()
+        for i in range(3):
+            if i in on:
+                pygame.draw.rect(s, _k(cols[i], 0.75), (x + 2, y + 2 + 4 * i, 3, 3))
+
     def _draw_light_world(self, s: pygame.Surface, cam: Camera, lt, d: SceneDirector, v: float) -> None:
         y = lt.lat_m if lt.lat_m is not None else -4.5
         g = self._place(cam, max(6.0, min(100.0, lt.dist_m)), y, v)
@@ -1227,8 +1238,22 @@ class SceneRenderer:
                              self.limit_style(inp.limit_source, inp.limit_conf))
             x_right -= 32
         if inp.light is not None and inp.light.state in self.LIGHT_COLORS:
-            self._draw_signal(s, x_right - 12, 3, 3, inp.light, d.clock)
+            lt = inp.light
+            alt = tune.light_alt and lt.alt_state in self.LIGHT_COLORS and lt.alt_side in ("l", "r")
+            if alt and lt.alt_side == "r":
+                # the other signal group (another lane's light) stands on its side, small and dim
+                self._draw_signal_small(s, x_right - 7, 9, lt.alt_state)
+                x_right -= 9
+            self._draw_signal(s, x_right - 12, 3, 3, lt, d.clock)
             x_right -= 16
+            if alt and lt.alt_side == "l":
+                self._draw_signal_small(s, x_right - 5, 9, lt.alt_state)
+                x_right -= 9
+            if tune.light_uncertain and lt.uncertain:
+                q = self.text("?", 14, pal["warn"])
+                pygame.draw.rect(s, (0, 0, 0), (x_right - q.get_width() - 1, 8, q.get_width() + 2, 14))
+                s.blit(q, (x_right - q.get_width(), 8))
+                x_right -= q.get_width() + 3
             if inp.light.dist_m is not None:
                 t = self.text("%d" % int(inp.light.dist_m + 0.5), 14, pal["text"])
                 pygame.draw.rect(s, (0, 0, 0), (x_right - t.get_width() - 1, 8, t.get_width() + 2, 14))
@@ -1242,6 +1267,7 @@ class SceneRenderer:
             xl, xr = maplayer.next_limit_top(self, s, d, self.TOP_ROW_Y, 4, x_right - 2)
             self._draw_sign_row(s, d, self.TOP_ROW_Y, xr, xl)
         maplayer.mark(self, s, d)
+        maplayer.junction(self, s, d)
         self._draw_lane_indicator(s, d)
         # bottom-left: lamps (tuning.lamp_chips), above them the perception status
         x = 4

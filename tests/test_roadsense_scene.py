@@ -705,3 +705,61 @@ def test_builder_prefers_the_tracked_lanes_and_falls_back():
     b.feed(rl[3], 1.2)
     s = b.build(1.2)
     assert "lanes_src" not in s and any(x is not None for x in s["lanes"])
+
+
+def test_light_lane_assignment_fields():
+    """roadsense >= 2026-11-17: two signal groups, the ego light chosen by lane."""
+    ego = {"track_id": 1, "state": "green", "dist_m": 31.0, "lateral_m": -0.7, "relevance": 0.6, "agree": 1,
+           "held": False, "amb": False,
+           "assign": {"conflict": True, "confidence": 0.88, "basis": "lanes", "slot": -0.2,
+                      "alt": {"track_id": 3, "state": "red", "side": "left", "slot": -1.6}}}
+    out = lights_to_scene({"type": "lights", "ego": ego})
+    assert out["state"] == "green" and out["c"] == 0.88 and out["alt"] == {"s": "red", "side": "l"}
+    assert "q" not in out and "held" not in out
+    amb = lights_to_scene({"type": "lights", "ego": dict(ego, amb=True, held=True)})
+    assert amb["q"] is True and amb["held"] is True
+    # no conflict: no alt, the confidence still rides along
+    one = lights_to_scene({"type": "lights", "ego": dict(ego, assign={"conflict": False, "confidence": 1.0, "alt": None})})
+    assert "alt" not in one and one["c"] == 1.0
+
+
+def _map_msg(jv):
+    return {"type": "map", "available": True, "state": "good", "input": {"gnss": {"source": "headunit", "fix": "3d"}},
+            "ahead": {"junction_view": jv}}
+
+
+def test_junction_view_goes_out_compact_and_only_with_a_usable_map():
+    from cyberpunk_computer.backend.roadsense_scene import map_junction_to_scene
+    arm = lambda ang, **kw: dict({"angle_deg": ang, "class": "secondary", "name": None, "ref": None,   # noqa: E731
+                                  "exit": True, "entry": True, "path": False, "minor": False}, **kw)
+    jv = {"kind": "junction", "dist_m": 171.4, "confidence": 0.58, "control": "signals",
+          "approach": {"lanes": 2, "lanes_source": "tagged"},
+          "arms": [arm(-91.0, name="1 Maja", path=True), arm(7.0, **{"class": "tertiary"}),
+                   arm(90.0, exit=False, **{"class": "service"}, minor=True)], "ring": None}
+    out = map_junction_to_scene(_map_msg(jv))
+    assert out == {"k": "j", "m": 171, "c": 0.58, "ctl": "s", "ln": 2, "to": "1 Maja",
+                   "arms": [[-91, "xep", 0, 0], [7, "xe", 1, 0], [90, "em", 3, 0]]}
+    rb = {"kind": "roundabout", "dist_m": 52.0, "confidence": 1.0, "control": "give_way",
+          "approach": {"lanes": 1, "lanes_source": "assumed"},
+          "arms": [arm(124.0, exit_no=1), arm(-87.0, path=True, ref="DW414", exit_no=2),
+                   arm(180.0, exit=False, approach=True)],
+          "ring": {"radius_m": 8.2, "exits": 2, "path_exit_no": 2, "on_ring": False, "car_angle_deg": None}}
+    out = map_junction_to_scene(_map_msg(rb))
+    assert out["k"] == "r" and out["ctl"] == "g" and "ln" not in out and out["to"] == "DW414"
+    assert out["arms"] == [[124, "xe", 0, 1], [-87, "xep", 0, 2], [180, "ea", 0, 0]]
+    assert out["ring"] == {"r": 8, "n": 2, "p": 2}
+    on = dict(rb, ring=dict(rb["ring"], on_ring=True, car_angle_deg=70.0))
+    assert map_junction_to_scene(_map_msg(on))["ring"] == {"r": 8, "n": 2, "p": 2, "car": 70, "on": True}
+    for bad in (None, {}, {"kind": "junction", "dist_m": 10, "confidence": 0.9, "arms": []}):
+        assert map_junction_to_scene(_map_msg(bad)) is None
+    assert map_junction_to_scene({"type": "map", "ahead": None}) is None
+    # in the builder: rides inside "map" while the fused map layer is in use, never without it
+    road = next(ln for ln in load_lines() if peek_type(ln) == "road")
+    for ok in (True, False):
+        b = SceneBuilder(SceneFeedConfig())
+        b.feed(json.dumps({"type": "fused", "map": {"available": ok, "state": "good" if ok else "no_source"}}), 0.0)
+        b.feed(json.dumps(_map_msg(jv)), 0.0)
+        b.feed(road, 0.0)
+        scene = b.build(0.0)
+        assert ("jv" in scene["map"]) is ok
+        assert "map_jv" not in scene

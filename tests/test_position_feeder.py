@@ -659,3 +659,41 @@ def test_service_wiring_and_gating():
     svc.roadsense_power = None                 # no roadsense manager (dev): always on
     svc._position_feeder_tick()
     assert svc.position_feeder.active
+
+
+def _gyro_frame(ab: int, cd: int) -> bytes:
+    a, c = ab + 0x200, cd + 0x200
+    return bytes([a >> 8, a & 0xFF, c >> 8, c & 0xFF, 0, 0, 0, 0])
+
+
+def test_gyro_yaw_rate_opt_in_and_standstill_zero():
+    from cyberpunk_computer.backend.position_feeder import decode_yaw_counts, GYRO_RAD_PER_COUNT
+    assert decode_yaw_counts(_gyro_frame(-2, -7)) == (-2, -7)
+    assert decode_yaw_counts(_gyro_frame(450, 0)) is None             # not a plausible yaw rate
+    cfg = PositionFeederConfig(enabled=True, yaw_inputs=("wheels", "gyro"))
+    tap = _tap_with()
+    # turning left at 40 counts above the standstill offsets of both channels
+    tap.on_frame(0x022, _gyro_frame(-2 + 40, -7 + 40), 0, 0.0, 100.0)
+    m = tap.sample(100.02, cfg)
+    assert m["yaw_rate_rps"] == pytest.approx(40 * GYRO_RAD_PER_COUNT, abs=1e-4)
+    assert "wheel_speeds_mps" in m                                    # both ride along; mapd takes the gyro
+    assert "yaw_rate_rps" not in _tap_with().sample(100.0, cfg)       # no 0x022 frame: field left out
+    assert "yaw_rate_rps" not in tap.sample(100.02, PositionFeederConfig(enabled=True))   # default: not sent
+    # standing: the offsets follow the reading, the yaw rate goes to zero
+    tap = CanMotionTap()
+    t = 200.0
+    for _ in range(200):
+        tap.speed = (0.0, t)
+        tap.front = (0.0, 0.0, t)
+        tap.rear = (0.0, 0.0, t)
+        tap.on_frame(0x022, _gyro_frame(1, -4), 0, 0.0, t)            # the offsets drifted by +3
+        m = tap.sample(t, cfg)
+        t += 0.1
+    assert abs(m["yaw_rate_rps"]) < 0.5 * GYRO_RAD_PER_COUNT
+    assert tap.gyro_offsets[0] == pytest.approx(1.0, abs=0.1) and tap.gyro_offsets[1] == pytest.approx(-4.0, abs=0.1)
+    # moving again: the learned offsets stay
+    tap.speed = (30.0, t)
+    tap.front = (30.0, 30.0, t)
+    tap.rear = (30.0, 30.0, t)
+    tap.on_frame(0x022, _gyro_frame(1 - 20, -4 - 20), 0, 0.0, t)
+    assert tap.sample(t, cfg)["yaw_rate_rps"] == pytest.approx(-20 * GYRO_RAD_PER_COUNT, abs=3e-4)

@@ -476,3 +476,56 @@ class TestServicePowerProfileHold:
         assert h.m.is_active()
         assert svc._roadsense_holds_low() is True
         assert svc._low_mode_deferred is True
+
+
+class TestEarlyCamera:
+    """Door unlocked before ACC: the camera hub is powered early, without the stack."""
+
+    def test_early_demand_powers_the_camera_then_the_stack_starts_without_settle(self):
+        h = Harness()
+        h.tick(False)
+        assert h.state == "off" and h.camera.read() is False
+        h.m.set_early_camera(True)
+        h.tick(False, dt=0.5)                       # reacts on the next loop pass
+        assert h.state == "preview" and h.camera.read() is True
+        assert h.verbs() == []                      # no unit is started for it
+        h.tick(True)                                # the key: straight to the start, hub already up
+        assert h.state == "starting" and h.verbs() == ["start"]
+        h.api = {"fps": {}}
+        h.tick(True)
+        assert h.state == "running"
+
+    def test_early_demand_without_a_key_ends_after_the_limit(self):
+        h = Harness(early_camera_s=20.0)
+        h.tick(False)
+        h.m.set_early_camera(True)
+        h.tick(False, dt=0.5)
+        assert h.camera.read() is True
+        for _ in range(3):
+            h.m.set_early_camera(True)              # the demand is a level: repeated every pass
+            h.tick(False)
+        assert h.state == "preview"
+        h.m.set_early_camera(True)
+        h.tick(False, dt=10.0)                      # 25.5 s after the demand
+        assert h.state == "off" and h.camera.read() is False
+        h.m.set_early_camera(True)                  # the same demand does not bring it back
+        h.tick(False)
+        assert h.state == "off"
+        h.m.set_early_camera(False)
+        h.m.set_early_camera(True)                  # a new one does
+        h.tick(False, dt=0.5)
+        assert h.state == "preview"
+
+    def test_early_demand_dropped_or_disabled(self):
+        h = Harness()
+        h.tick(False)
+        h.m.set_early_camera(True)
+        h.tick(False, dt=0.5)
+        h.m.set_early_camera(False)
+        h.tick(False)
+        assert h.state == "off" and h.camera.read() is False
+        h = Harness(early_camera_s=0.0)
+        h.tick(False)
+        h.m.set_early_camera(True)
+        h.tick(False)
+        assert h.state == "off" and h.camera.read() is False

@@ -1685,6 +1685,9 @@ class BackendService:
             early = trig.update(getattr(state, "bean", None), own_tx,
                                 time.monotonic(), time.time())
             why = trig.reason
+            if self.roadsense_power is not None:
+                # the same entry signal powers the camera early (not the operator hold below)
+                self.roadsense_power.set_early_camera(bool(early) and not acc)
             if self._mfd_hold.check(state.powerbox):
                 early, why = True, "operator hold"
             self.mfd_power.tick(acc, early=early, why=why)

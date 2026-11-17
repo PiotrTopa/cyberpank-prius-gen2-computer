@@ -53,6 +53,61 @@ class NextLimit(NamedTuple):
     src: str = ""                    # maxspeed (tagged) | implicit (statutory)
 
 
+class Arm(NamedTuple):
+    angle: float                     # degrees from straight on, RIGHT positive, 180 = behind
+    exit: bool = True                # can be driven into
+    entry: bool = True               # traffic comes out of it
+    path: bool = False               # the most likely way on
+    minor: bool = False
+    approach: bool = False           # roundabout: the arm the car comes from
+    rank: int = 2                    # 0 main road .. 3 service
+    exit_no: int = 0                 # roundabout exits in driving order
+
+
+class JunctionView(NamedTuple):
+    """The junction ahead on the most likely path (wire: map.jv)."""
+    kind: str                        # j | r
+    m: float                         # distance to it
+    conf: float                      # path confidence up to it
+    arms: Tuple[Arm, ...] = ()
+    control: str = ""                # s signals | g give way | t stop
+    lanes: int = 0                   # tagged lanes of the approach (own direction), 0 = unknown
+    to: str = ""                     # number or name of the road the way on takes
+    ring_exits: int = 0
+    ring_path: int = 0               # exit number of the way on (0 = unknown)
+    on_ring: bool = False
+    car_angle: Optional[float] = None
+
+
+def _junction(raw: Any) -> Optional[JunctionView]:
+    if not isinstance(raw, Mapping) or raw.get("k") not in ("j", "r"):
+        return None
+    m, c = _f(raw.get("m")), _f(raw.get("c"))
+    if m is None or c is None or m < 0:
+        return None
+    arms = []
+    for a in raw.get("arms") or ():
+        if not isinstance(a, (list, tuple)) or len(a) < 2:
+            continue
+        ang = _f(a[0])
+        fl = a[1] if isinstance(a[1], str) else ""
+        if ang is None:
+            continue
+        rank = _f(a[2]) if len(a) > 2 else None
+        no = _f(a[3]) if len(a) > 3 else None
+        arms.append(Arm(ang, "x" in fl, "e" in fl, "p" in fl, "m" in fl, "a" in fl,
+                        2 if rank is None else int(rank), 0 if no is None else int(no)))
+    if not arms:
+        return None
+    rg = raw.get("ring") if isinstance(raw.get("ring"), Mapping) else {}
+    ln = _f(raw.get("ln"))
+    ctl = raw.get("ctl")
+    return JunctionView(raw["k"], m, c, tuple(arms), ctl if ctl in ("s", "g", "t") else "",
+                        0 if ln is None else int(ln), str(raw.get("to") or ""),
+                        int(_f(rg.get("n")) or 0), int(_f(rg.get("p")) or 0), rg.get("on") is True,
+                        _f(rg.get("car")))
+
+
 class MapInfo(NamedTuple):
     """The usable map block, normalised. Lateral values LEFT positive."""
     state: str = "good"              # good | dead_reckoning
@@ -70,6 +125,7 @@ class MapInfo(NamedTuple):
     junctions: Tuple[Tuple[float, float, str], ...] = ()   # (m, confidence, code j|r|x|d|n), nearest first
     shape_ds: float = 0.0            # metres of path between two shape points
     shape: Tuple[Tuple[float, float], ...] = ()            # (x forward, y left) from the matched position
+    junction: Optional[JunctionView] = None                # the junction view (map.jv)
 
 
 class Far(NamedTuple):
@@ -154,7 +210,7 @@ def _parse(mp: Mapping) -> MapInfo:
         road_cls=str(road.get("cls") or ""),
         lanes=lanes, lanes_conf=_f(ln.get("c")) or 0.0, onc_left=onc if isinstance(onc, bool) else None,
         tunnel_in=tunnel_in, tunnel_exit_m=exit_m if tunnel_in else None,
-        next_limit=nl, junctions=tuple(jn), shape_ds=ds, shape=shape)
+        next_limit=nl, junctions=tuple(jn), shape_ds=ds, shape=shape, junction=_junction(mp.get("jv")))
 
 
 _last: List[Any] = [None, None]
@@ -289,6 +345,8 @@ class MapDirector:
         self.max_hacc_m = float(g("map_max_hacc_m", 20.0))
         self.far_disagree_m = float(g("map_far_disagree_m", 8.0))
         self.far_max_m = float(g("map_far_max_m", 600))
+        self.on_junction = bool(g("map_junction", False))
+        self.junction_m = float(g("map_junction_m", 250))
         # ── shown (read by maplayer.py) ──
         self.mark = ""
         self.next_limit: Optional[NextLimit] = None      # m = the advanced distance
@@ -299,8 +357,11 @@ class MapDirector:
         self.lanes: Optional[LaneBoxes] = None
         self.onc_left = False
         self.label: Optional[RoadLabel] = None
+        self.junction: Optional[JunctionView] = None     # m = the advanced distance
         self.sig: tuple = ()
         # ── internal ──
+        self._jv = _Distance()
+        self._jv_on = False
         self._mi: Optional[MapInfo] = None
         self._age = 99.0
         self._lost_for = 0.0
@@ -332,6 +393,9 @@ class MapDirector:
         self.lanes = None
         self.onc_left = False
         self.label = None
+        self.junction = None
+        self._jv.m = None
+        self._jv_on = False
         self._mi = None
         self._nl.m = self._tn.m = None
         self._nl_kmh = None
@@ -424,6 +488,23 @@ class MapDirector:
             t_m = None
         self.tunnel_exit_m = self._tn.step(t_m, fresh, moved, can_adv)
 
+        # ── junction view ──
+        # shown from junction_m on (hysteresis 1.2 x), a roundabout until the car has left
+        # its ring; needs a path that is still likely up to the junction and a good position
+        jv = mi.junction if (self.on_junction and accurate) else None
+        if jv is not None and jv.conf < self.min_conf and not jv.on_ring:
+            jv = None
+        jm = self._jv.step(jv.m if jv is not None else None, fresh, moved, can_adv)
+        if jv is None or jm is None:
+            self._jv_on = False
+            self.junction = None
+        else:
+            if jv.on_ring or jm <= self.junction_m:
+                self._jv_on = True
+            elif jm > self.junction_m * 1.2:
+                self._jv_on = False
+            self.junction = jv._replace(m=jm) if self._jv_on else None
+
         # ── far road ──
         if self.on_far and accurate and can_adv:
             if fresh:
@@ -503,4 +584,7 @@ class MapDirector:
         self.sig = (self.mark, None if nl is None else (nl.kmh, int(nl.m / 10.0), nl.src),
                     None if self.tunnel_exit_m is None else int(self.tunnel_exit_m / 10.0),
                     int(self.far_alpha * 4), self.far is not None and int(self.adv),
-                    self.lanes, self.onc_left, self.label)
+                    self.lanes, self.onc_left, self.label,
+                    None if self.junction is None else (self.junction.kind, int(self.junction.m / 5.0),
+                                                        self.junction.arms, self.junction.car_angle,
+                                                        self.junction.ring_path))

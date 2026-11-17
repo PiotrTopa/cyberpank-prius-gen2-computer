@@ -58,6 +58,11 @@ runs **only while ACC is on** and is stopped cleanly when the key goes away:
   (both use ``O_EXCL``). PREVIEW counts as "off" for :meth:`is_off` (no unit
   runs: the low CPU profile is allowed) but :meth:`holds_camera` is True, so
   a manual ``set_relay`` on ch4 is still refused.
+* **Early camera power** (:meth:`RoadsenseManager.set_early_camera`): the
+  early start demand that boots the MFD before ACC (BEAN: doors unlocked)
+  also enters PREVIEW, for at most ``early_camera_s``, so the dashcam's own
+  power-up sequence (it leaves the USB bus once, for 4 s or for 2 min) runs
+  before the drive instead of during its first minutes.
 
 The POCO ``low`` power profile (Gold cluster offline) must not be applied while
 modeld is pinned to cpu4-7, so the backend defers the key-off ``low`` switch
@@ -130,6 +135,8 @@ class RoadsenseConfig:
     api_timeout_s: float = 2.0
     camera_relay: bool = True        # power the camera hub (relay ch4) with the stack
     camera_settle_s: float = 8.0     # hub + dashcam enumerate ~6 s after power
+    early_camera_s: float = 180.0    # early demand (door unlocked): camera hub on for at most this
+                                     # long before ACC, without the stack (0 = never)
     grace_s: float = 30.0            # key-off grace before the stop
     start_timeout_s: float = 120.0   # API must answer within this after the start
     stop_timeout_s: float = 60.0     # units must be inactive within this after the stop
@@ -232,6 +239,8 @@ class RoadsenseManager:
         # camera device (backend.camera_preview closes its O_EXCL reader).
         self.preview_release = preview_release
         self._preview_hold = False
+        self._early_until: Optional[float] = None   # early camera power (set_early_camera) ends then
+        self._early_seen = False
         self._publish = publish
         self._run = runner or self._default_runner
         self._camera = camera
@@ -428,6 +437,33 @@ class RoadsenseManager:
         self._last_tick = 0.0  # react on the next loop iteration
         return True
 
+    # ── early camera power ───────────────────────────────────────────────
+
+    def set_early_camera(self, on: bool) -> None:
+        """Early start demand (the same BEAN "doors unlocked" signal that boots
+        the MFD before ACC): power the camera hub now, without the stack, for
+        at most ``early_camera_s``.
+
+        Why: the dashcam (USB 1902:3241) drops off the bus once, 23-39 s after
+        it gets power, and comes back 4-5 s later, or 122 s later on the first
+        drive after a long stand (journals of 2026-11-16 / 17: both such drives
+        lost the road picture from 0:45 to 2:55 after ACC on). Nothing on the
+        phone can shorten that; powering the camera when the door is unlocked
+        moves the whole sequence ahead of the drive by the time between the
+        door and the key. It is the PREVIEW state (hub on, no units), so the
+        stack starts without the settle wait when ACC comes."""
+        on = bool(on) and self.config.early_camera_s > 0 and self.config.camera_relay
+        if on and not self._early_seen:
+            self._early_until = self._clock() + self.config.early_camera_s
+            logger.info("roadsense: early camera power (at most %.0f s)", self.config.early_camera_s)
+            self._last_tick = 0.0
+        elif not on and self._early_seen:
+            self._early_until = None
+        self._early_seen = on
+
+    def _early_camera(self) -> bool:
+        return self._early_until is not None and self._clock() < self._early_until
+
     def shutdown_preview(self) -> None:
         """Backend shutdown: drop the hold and, if only the preview powers the
         camera hub, cut it now (the stack itself is left alone, as on every
@@ -595,7 +631,7 @@ class RoadsenseManager:
             self._units = None
             if desired:
                 self._begin_start()
-            elif self._preview_hold:
+            elif self._preview_hold or self._early_camera():
                 self._enter_preview()
 
         elif self._state == STATE_PREVIEW:
@@ -607,7 +643,7 @@ class RoadsenseManager:
                 self._set_camera(True)
                 self._start_target()
                 self._enter(STATE_STARTING, cfg.start_timeout_s)
-            elif not self._preview_hold:
+            elif not self._preview_hold and not self._early_camera():
                 self._set_camera(False)
                 self._enter(STATE_OFF)
 

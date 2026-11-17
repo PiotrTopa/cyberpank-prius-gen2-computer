@@ -74,6 +74,9 @@ class TrafficLight(NamedTuple):
     dist_m: Optional[float] = None
     lat_m: Optional[float] = None    # LEFT positive
     flashing: bool = False
+    uncertain: bool = False          # roadsense: the choice between two signal groups is ambiguous
+    alt_state: str = ""              # the other signal group's state while two groups disagree
+    alt_side: str = ""               # ... and where it is: "l" | "r"
 
 
 class RoadScene(NamedTuple):
@@ -303,7 +306,13 @@ def _traffic_light(raw: Any) -> Optional[TrafficLight]:
         return None
     d = _num(raw.get("dist_m", raw.get("d")))
     y = _num(raw.get("lateral_m", raw.get("y")))
-    return TrafficLight(st, d, None if y is None else -y, bool(raw.get("flashing")))
+    alt = raw.get("alt")
+    alt_s, alt_side = "", ""
+    if isinstance(alt, Mapping) and isinstance(alt.get("s"), str):
+        alt_s = alt["s"]
+        alt_side = alt.get("side") if alt.get("side") in ("l", "r") else ""
+    return TrafficLight(st, d, None if y is None else -y, bool(raw.get("flashing")),
+                        raw.get("q") is True, alt_s, alt_side)
 
 
 _GEAR = {"PARK": "P", "REVERSE": "R", "NEUTRAL": "N", "DRIVE": "D", "B": "B"}

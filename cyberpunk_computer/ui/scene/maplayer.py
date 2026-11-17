@@ -12,6 +12,7 @@ director holds nothing and every function returns without drawing.
     lane_boxes      lane boxes from the map's lane count
     corner          bottom-left: tunnel exit distance, road number plate
     mark            the map pin under the link LED
+    junction        the junction / roundabout ahead as a schematic, left edge
     portal          the tunnel's end within 100 m
 
 1-bit like the rest of the scene: no anti-aliasing, cached sprites and text.
@@ -372,3 +373,157 @@ def portal(r: Any, s: pygame.Surface, d: Any, end: float) -> None:
            (cx + half - sh, fy - tall), (cx + half, fy - tall + sh), (cx + half, fy)]
     pygame.draw.polygon(s, PORTAL_FILL, pts)
     pygame.draw.lines(s, r.pal["text"], False, pts)
+
+
+# ── junction view ────────────────────────────────────────────────────────────
+
+JV_X, JV_Y, JV_W, JV_H = 3, 62, 58, 58      # the panel (scene pixels); the distance stands under it
+JV_ARM = 23                                 # arm length from the centre (px)
+JV_RING = 10                                # roundabout ring radius (px)
+
+
+_PLAIN = str.maketrans("ąćęłńóśźżĄĆĘŁŃÓŚŹŻ", "acelnoszzACELNOSZZ")
+
+
+def _dir(angle: float) -> Tuple[float, float]:
+    """Screen direction of an arm angle (0 = up = straight on, positive = right)."""
+    a = math.radians(angle)
+    return math.sin(a), -math.cos(a)
+
+
+def _thick(s: pygame.Surface, col: RGB, a: Tuple[float, float], b: Tuple[float, float], w: int) -> None:
+    """A line of width w without anti-aliasing (w parallel 1 px lines)."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    n = math.hypot(dx, dy) or 1.0
+    px, py = -dy / n, dx / n
+    for k in range(w):
+        o = k - (w - 1) / 2.0
+        pygame.draw.line(s, col, (int(round(a[0] + px * o)), int(round(a[1] + py * o))),
+                         (int(round(b[0] + px * o)), int(round(b[1] + py * o))))
+
+
+def _dashed(s: pygame.Surface, col: RGB, a: Tuple[float, float], b: Tuple[float, float]) -> None:
+    n = int(math.hypot(b[0] - a[0], b[1] - a[1]))
+    for i in range(0, n, 4):
+        t0, t1 = i / n, min(1.0, (i + 2) / n)
+        pygame.draw.line(s, col, (int(a[0] + (b[0] - a[0]) * t0), int(a[1] + (b[1] - a[1]) * t0)),
+                         (int(a[0] + (b[0] - a[0]) * t1), int(a[1] + (b[1] - a[1]) * t1)))
+
+
+def _arrow(s: pygame.Surface, col: RGB, tip: Tuple[float, float], d: Tuple[float, float], size: int = 4) -> None:
+    px, py = -d[1], d[0]
+    bx, by = tip[0] - d[0] * size, tip[1] - d[1] * size
+    pygame.draw.polygon(s, col, [(int(round(tip[0])), int(round(tip[1]))),
+                                 (int(round(bx + px * size * 0.8)), int(round(by + py * size * 0.8))),
+                                 (int(round(bx - px * size * 0.8)), int(round(by - py * size * 0.8)))])
+
+
+def _arm_width(a: Any) -> int:
+    return 3 if a.rank == 0 else 2 if a.rank == 1 else 1
+
+
+def _control_icon(r: Any, s: pygame.Surface, x: int, y: int, ctl: str) -> None:
+    pal = r.pal
+    if ctl == "s":                          # a three-lamp head
+        pygame.draw.rect(s, (0, 0, 0), (x + 1, y, 7, 15))
+        pygame.draw.rect(s, pal["label"], (x + 1, y, 7, 15), 1)
+        for i, c in enumerate((pal["red"], pal["warn"], pal["green"])):
+            pygame.draw.rect(s, c, (x + 3, y + 2 + 4 * i, 3, 3))
+    elif ctl == "g":                        # give way: a triangle standing on its tip
+        pygame.draw.polygon(s, pal["warn"], [(x, y), (x + 8, y), (x + 4, y + 7)], 1)
+    elif ctl == "t":                        # stop: a filled octagon
+        pygame.draw.polygon(s, pal["red"], [(x + 2, y), (x + 6, y), (x + 8, y + 2), (x + 8, y + 6),
+                                            (x + 6, y + 8), (x + 2, y + 8), (x, y + 6), (x, y + 2)])
+
+
+def junction(r: Any, s: pygame.Surface, d: Any) -> None:
+    """The junction or roundabout ahead on the most likely path, as a schematic
+    seen from above with the car coming from below: every arm in its direction
+    (wide = a main road, dashed = cannot be driven into), the most likely way
+    on bright with an arrow head, what controls it in the corner, the distance
+    under it. A roundabout: the ring, the way round it to the exit of the most
+    likely path, that exit's number in the middle, the car as a dot once it is
+    on the ring. Nothing without ``d.map.junction``."""
+    jv = d.map.junction
+    if jv is None:
+        return
+    if not getattr(r.tune, "map_junction_way", True):
+        jv = jv._replace(arms=tuple(a._replace(path=False) for a in jv.arms), ring_path=0, to="")
+    pal = r.pal
+    x0, y0 = JV_X, JV_Y
+    pygame.draw.rect(s, (0, 0, 0), (x0, y0, JV_W, JV_H + 16))
+    pygame.draw.rect(s, pal["lane_dim"], (x0, y0, JV_W, JV_H), 1)
+    cx, cy = x0 + JV_W // 2, y0 + JV_H // 2 + (3 if jv.kind == "j" else 0)
+    dim, mid, hot = pal["lane_dim"], _k(pal["lane_mid"], 0.62), pal["lane_ego"]
+    clip = s.get_clip()
+    s.set_clip((x0 + 1, y0 + 1, JV_W - 2, JV_H - 2))
+    if jv.kind == "j":
+        # arms first (dim), then the way in and the way on (bright) over them
+        for a in jv.arms:
+            if a.path:
+                continue
+            dx, dy = _dir(a.angle)
+            end = (cx + dx * JV_ARM, cy + dy * JV_ARM)
+            if not a.exit:
+                _dashed(s, dim, (cx, cy), end)
+            else:
+                _thick(s, dim if a.minor else mid, (cx, cy), end, _arm_width(a))
+        _thick(s, hot, (cx, cy + JV_ARM + 4), (cx, cy), 3)
+        for a in jv.arms:
+            if a.path:
+                dx, dy = _dir(a.angle)
+                end = (cx + dx * (JV_ARM - 3), cy + dy * (JV_ARM - 3))
+                _thick(s, hot, (cx, cy), end, 3)
+                _arrow(s, hot, (cx + dx * (JV_ARM + 2), cy + dy * (JV_ARM + 2)), (dx, dy), 5)
+    else:
+        rr = JV_RING
+        for a in jv.arms:
+            dx, dy = _dir(a.angle)
+            p0 = (cx + dx * rr, cy + dy * rr)
+            p1 = (cx + dx * (rr + 14), cy + dy * (rr + 14))
+            if a.path or (a.approach and not jv.on_ring):
+                continue
+            if not a.exit and not a.approach:
+                _dashed(s, dim, p0, p1)
+            else:
+                _thick(s, dim if a.minor else mid, p0, p1, min(2, _arm_width(a)))
+        pygame.draw.circle(s, mid, (cx, cy), rr, 1)
+        # the way: in from below, round the ring against the clock, out at the path's exit
+        start = 180.0 if jv.car_angle is None or not jv.on_ring else jv.car_angle
+        out_arm = next((a for a in jv.arms if a.path), None)
+        if not jv.on_ring:
+            _thick(s, hot, (cx, cy + rr + 16), (cx, cy + rr), 3)
+        if out_arm is not None:
+            sweep = (start - out_arm.angle) % 360.0 or 360.0
+            for k in range(0, int(sweep) + 1, 4):
+                dx, dy = _dir(start - k)
+                pygame.draw.rect(s, hot, (int(round(cx + dx * rr)) - 1, int(round(cy + dy * rr)) - 1, 2, 2))
+            dx, dy = _dir(out_arm.angle)
+            _thick(s, hot, (cx + dx * rr, cy + dy * rr), (cx + dx * (rr + 9), cy + dy * (rr + 9)), 3)
+            _arrow(s, hot, (cx + dx * (rr + 15), cy + dy * (rr + 15)), (dx, dy), 5)
+        if jv.on_ring and jv.car_angle is not None:
+            dx, dy = _dir(jv.car_angle)
+            pygame.draw.circle(s, pal["text"], (int(round(cx + dx * rr)), int(round(cy + dy * rr))), 2)
+        if jv.ring_path:
+            t = r.text("%d" % jv.ring_path, 14, pal["text"])
+            s.blit(t, (cx - t.get_width() // 2 + 1, cy - 7))
+    s.set_clip(clip)
+    if jv.control:
+        _control_icon(r, s, x0 + JV_W - 11, y0 + 3, jv.control)
+    # under the panel: the distance, and the road the way on takes
+    if not jv.on_ring:
+        num, unit = dist_text(jv.m)
+        t = r.text(num, 14, pal["text"])
+        u = r.text(unit, 8, pal["label"], mono=False)
+        s.blit(t, (x0 + 1, y0 + JV_H + 1))
+        s.blit(u, (x0 + 3 + t.get_width(), y0 + JV_H + 8))
+        tx = x0 + 3 + t.get_width() + u.get_width() + 4
+    else:
+        tx = x0 + 1
+    if jv.to and getattr(r.tune, "map_junction_name", True):
+        room = (JV_W + 40 - (tx - x0)) // 6
+        to = jv.to.translate(_PLAIN)       # the 8 px font has no Polish letters
+        name = to if len(to) <= room else to[:max(1, room - 1)].rstrip() + "."
+        n = r.text(name, 8, pal["label"], mono=False)
+        pygame.draw.rect(s, (0, 0, 0), (tx - 1, y0 + JV_H + 6, n.get_width() + 2, 10))
+        s.blit(n, (tx, y0 + JV_H + 7))

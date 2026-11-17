@@ -299,6 +299,21 @@ def lights_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     agree = _num(ego.get("agree"))
     if agree is not None:
         out["agree"] = int(agree)
+    # lane assignment (roadsense >= 2026-11-17): two signal groups in view
+    # (``alt`` = the other group's state and side) and how sure the choice is
+    if ego.get("amb") is True:
+        out["q"] = True
+    asg = ego.get("assign")
+    if isinstance(asg, dict):
+        c = _num(asg.get("confidence"))
+        if c is not None:
+            out["c"] = round(c, 2)
+        alt = asg.get("alt")
+        if asg.get("conflict") and isinstance(alt, dict) and isinstance(alt.get("state"), str):
+            side = alt.get("side")
+            out["alt"] = {"s": alt["state"], "side": side[:1] if isinstance(side, str) and side else ""}
+    if ego.get("held") is True:
+        out["held"] = True
     return out
 
 
@@ -555,6 +570,79 @@ def map_shape_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return {"ds": int(round(ds)), "x": xs, "y": ys}
 
 
+_ROAD_RANK = {"motorway": 0, "motorway_link": 0, "trunk": 0, "trunk_link": 0, "primary": 0, "primary_link": 0,
+              "secondary": 0, "secondary_link": 0, "tertiary": 1, "tertiary_link": 1, "unclassified": 1,
+              "residential": 2, "living_street": 2, "service": 3, "track": 3}
+_CONTROL = {"signals": "s", "give_way": "g", "stop": "t"}
+JV_MAX_ARMS = 8
+
+
+def map_junction_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """mapd ``map`` message -> scene ``map.jv``: the junction view (roadsense
+    ``ahead.junction_view``, the first major junction or roundabout on the most
+    likely path), compact:
+
+        {"k": "j" | "r", "m": metres to it, "c": path confidence up to it,
+         "ctl": "s" signals | "g" give way | "t" stop (left out: not known),
+         "ln": lanes of the approach in the car's direction (tagged only),
+         "to": name or number of the road the most likely path takes,
+         "arms": [[angle, flags, rank, exit_no], ...],
+         "ring": {"r": radius m, "n": exits, "p": exit number of the path,
+                  "on": the car is on the ring, "car": its angle on the ring}}
+
+    ``angle``: degrees from "straight on", positive = right, 180 = where the
+    car comes from (for a roundabout: where the arm meets the ring, seen from
+    its centre). ``flags``: letters x (can be driven into), e (traffic comes
+    out of it), p (the most likely path), m (minor: service road), a (the
+    approach arm of a roundabout). ``rank``: 0 main roads .. 3 service.
+    ``exit_no``: roundabout exits in driving order (0 = not an exit).
+    None without a view."""
+    ah = msg.get("ahead")
+    jv = ah.get("junction_view") if isinstance(ah, dict) else None
+    if not isinstance(jv, dict) or jv.get("kind") not in ("junction", "roundabout"):
+        return None
+    m, c = _num(jv.get("dist_m")), _num(jv.get("confidence"))
+    if m is None or c is None:
+        return None
+    out: Dict[str, Any] = {"k": "r" if jv["kind"] == "roundabout" else "j", "m": int(round(m)), "c": round(c, 2)}
+    ctl = _CONTROL.get(jv.get("control"))
+    if ctl:
+        out["ctl"] = ctl
+    ap = jv.get("approach")
+    if isinstance(ap, dict) and ap.get("lanes_source") in ("tagged", "tagged_total"):
+        n = _num(ap.get("lanes"))
+        if n is not None and n >= 1:
+            out["ln"] = int(n)
+    arms: List[List[Any]] = []
+    for a in jv.get("arms") or ():
+        if not isinstance(a, dict):
+            continue
+        ang = _num(a.get("angle_deg"))
+        if ang is None:
+            continue
+        flags = "".join(ch for ch, key in (("x", "exit"), ("e", "entry"), ("p", "path"), ("m", "minor"),
+                                           ("a", "approach")) if a.get(key))
+        no = a.get("exit_no")
+        arms.append([int(round(ang)), flags, _ROAD_RANK.get(a.get("class"), 2),
+                     int(no) if isinstance(no, int) and not isinstance(no, bool) else 0])
+        if a.get("path"):
+            to = a.get("ref") or a.get("name")
+            if isinstance(to, str) and to:
+                out["to"] = to[:24]
+        if len(arms) >= JV_MAX_ARMS:
+            break
+    if not arms:
+        return None
+    out["arms"] = arms
+    rg = jv.get("ring")
+    if isinstance(rg, dict):
+        out["ring"] = _drop_none({"r": _r(rg.get("radius_m")), "n": _r(rg.get("exits")),
+                                  "p": _r(rg.get("path_exit_no")), "car": _r(rg.get("car_angle_deg"))})
+        if rg.get("on_ring"):
+            out["ring"]["on"] = True
+    return out
+
+
 def map_input_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """mapd ``map`` message -> scene ``map.in``: what mapd hears from the
     position feeders (``gnss`` = the receiver's ``source`` tag, e.g.
@@ -676,6 +764,7 @@ class SceneBuilder:
             self.taint.update(msg)
             self._slow["map_in"] = (now, map_input_to_scene(msg))
             self._slow["map_shape"] = (now, map_shape_to_scene(msg))
+            self._slow["map_jv"] = (now, map_junction_to_scene(msg))
 
     def time_to_due(self, now: float) -> Optional[float]:
         """Seconds until a pending road frame may be published; None if none."""
@@ -724,7 +813,7 @@ class SceneBuilder:
         ages = {"light": self.cfg.lights_max_age_s, "limit": self.cfg.limit_max_age_s,
                 "env": self.cfg.env_max_age_s, "signs": self.cfg.rules_max_age_s,
                 "map": self.cfg.map_max_age_s, "map_in": self.cfg.map_max_age_s,
-                "map_shape": self.cfg.map_max_age_s}
+                "map_shape": self.cfg.map_max_age_s, "map_jv": self.cfg.map_max_age_s}
         for key, (t, val) in self._slow.items():
             if now - t <= ages[key]:
                 scene[key] = val
@@ -736,6 +825,10 @@ class SceneBuilder:
         shape = scene.pop("map_shape", None)
         if shape and isinstance(scene.get("map"), dict) and scene["map"].get("ok"):
             scene["map"] = dict(scene["map"], shape=shape)
+        # the junction view on the most likely path, under the same condition
+        jv = scene.pop("map_jv", None)
+        if jv and isinstance(scene.get("map"), dict) and scene["map"].get("ok"):
+            scene["map"] = dict(scene["map"], jv=jv)
         if self.taint.tainted and isinstance(scene.get("map"), dict):
             scene["map"] = dict(scene["map"], syn=True)
         return scene

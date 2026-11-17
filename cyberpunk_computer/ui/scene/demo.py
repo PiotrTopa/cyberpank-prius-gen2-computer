@@ -14,7 +14,8 @@ street lamps, red traffic light, stop, scene closes. ``state_at`` /
 ``env`` (place / light / weather labels), ``signs``, ``limit``, ``lamps``
 (tail / head / high / fog), ``cruise`` (VehicleState cruise fields), ``lanes``
 ("1", "2L", "2R", "3M": lane layout), ``tuning`` (overrides of ui/scene/tuning.py),
-``lead`` (False = none), ``objects`` (False = none), ``straight``.
+``lead`` (False = none), ``objects`` (False = none), ``straight``, ``light``
+(the scene's ``light`` block).
 
 Vehicle values go through the real state fields; the road arrives the way the
 backend is expected to send it: ``roadsense_scene`` events into a SceneFeed.
@@ -134,6 +135,11 @@ def scene_at(t: float, seq: int, mods: Optional[Dict[str, Any]] = None) -> Optio
     if 28.5 <= t < 40.0:
         out["light"] = {"state": "red" if t < 39.0 else "green",
                         "d": round(_ramp(t, 28.5, 36.0, 70.0, 12.0), 0), "y": 4.0}
+    if "light" in mods:
+        if mods["light"] is None:
+            out.pop("light", None)
+        else:
+            out["light"] = mods["light"]
     return out
 
 
@@ -305,13 +311,29 @@ def _map_drive(next_m: Optional[float] = 120.0, next_kmh: int = 90, bend: float 
              "pos": {"src": "gnss" if state == "good" else "dead_reckoning", "hacc": hacc},
              "in": {"gnss": "headunit", "fix": "3d", "motion": "vehicle", "tag": "prius-can"},
              "shape": {"ds": 40, "x": xs, "y": [0 if x < 200 else int(bend * (x - 200) ** 2 / 1600) for x in xs]}}
-        m.update(extra)
+        m.update({k: (v(t) if callable(v) else v) for k, v in extra.items()})
         return m
 
     return block
 
 
 _MAP_ROAD = dict(_OPEN_ROAD, limit=None, lamps=_NO_LAMPS, **_env("rural_road", "day"))
+_JV_ON = {"map_junction": True}
+
+
+def _jv(kind: str, m: float, arms: list, c: float = 0.9, ctl: str = "", to: str = "",
+        ring: Optional[Dict[str, Any]] = None):
+    """A ``map.jv`` block (the junction view) whose distance shrinks with the demo drive."""
+    def block(t: float) -> Dict[str, Any]:
+        out: Dict[str, Any] = {"k": kind, "m": max(0, int(m - (t - 19.5) * 14.4)), "c": c, "arms": arms}
+        if ctl:
+            out["ctl"] = ctl
+        if to:
+            out["to"] = to
+        if ring:
+            out["ring"] = ring
+        return out
+    return block
 
 
 # (file name, time, vision variant, stale from, caption, mods)
@@ -440,6 +462,46 @@ SHOTS = (
     ("map_road_label_name", 19.5, "live", None, "variant map_road_label=name: number and street name",
      dict(_MAP_ROAD, map=_map_drive(next_m=None, ref="414", cls="secondary", name="Bohaterów Powstań Śląskich"),
           tuning={"map_road_label": "name", "map_road_label_s": 99.0})),
+    # ── junction view (tuning map_junction) and the lane assignment of the traffic light ──
+    ("junction_crossroads_signals", 19.5, "live", None,
+     "junction view: crossroads with signals in 180 m, the way on straight, a main road crossing",
+     dict(_MAP_ROAD, map=_map_drive(next_m=None, jv=_jv("j", 180, [[-90, "xe", 0, 0], [0, "xep", 1, 0], [90, "xe", 0, 0]],
+                                                      ctl="s", to="Ozimska")), tuning=_JV_ON)),
+    ("junction_t_left", 19.5, "live", None, "junction view: T-junction in 90 m, give way, the way on to the left",
+     dict(_MAP_ROAD, map=_map_drive(next_m=None, jv=_jv("j", 90, [[-88, "xep", 0, 0], [92, "xe", 0, 0]], ctl="g",
+                                                      to="DK46")), tuning=_JV_ON)),
+    ("junction_five_arms", 19.5, "live", None,
+     "junction view: five arms, a one-way street that cannot be entered (dashed), a service road (thin, dim)",
+     dict(_MAP_ROAD, map=_map_drive(next_m=None, jv=_jv("j", 140, [[-120, "e", 2, 0], [-60, "xe", 2, 0], [8, "xep", 1, 0],
+                                                                 [75, "xem", 3, 0], [130, "xe", 1, 0]],
+                                                      ctl="t", to="1 Maja")), tuning=_JV_ON)),
+    ("junction_roundabout_2nd", 19.5, "live", None, "junction view: roundabout in 140 m, second exit (straight on)",
+     dict(_MAP_ROAD, map=_map_drive(next_m=None, end="roundabout",
+                                    jv=_jv("r", 140, [[95, "xe", 1, 1], [3, "xep", 0, 2], [-88, "xe", 2, 3], [180, "ea", 0, 0]],
+                                           ctl="g", to="DW414", ring={"r": 16, "n": 3, "p": 2})), tuning=_JV_ON)),
+    ("junction_roundabout_3rd", 19.5, "live", None, "junction view: roundabout in 60 m, third exit (to the left)",
+     dict(_MAP_ROAD, map=_map_drive(next_m=None, end="roundabout",
+                                    jv=_jv("r", 60, [[95, "xe", 1, 1], [3, "xe", 0, 2], [-88, "xep", 2, 3], [180, "ea", 0, 0]],
+                                           ctl="g", to="Plac Wolności", ring={"r": 16, "n": 3, "p": 3})), tuning=_JV_ON)),
+    ("junction_roundabout_on_ring", 19.5, "live", None,
+     "junction view: on the ring (the dot), the rest of the way to the third exit",
+     dict(_MAP_ROAD, map=_map_drive(next_m=None, end="roundabout",
+                                    jv=_jv("r", 0, [[95, "xe", 1, 1], [3, "xe", 0, 2], [-88, "xep", 2, 3], [180, "ea", 0, 0]],
+                                           to="Plac Wolności", ring={"r": 16, "n": 3, "p": 3, "on": True, "car": 70})),
+          tuning=_JV_ON)),
+    ("junction_low_confidence_hidden", 19.5, "live", None,
+     "junction view: the path to the junction is a coin toss (confidence 0.35): nothing is drawn",
+     dict(_MAP_ROAD, map=_map_drive(next_m=None, jv=_jv("j", 120, [[-90, "xe", 0, 0], [0, "xep", 1, 0]], c=0.35)),
+          tuning=_JV_ON)),
+    ("light_two_groups", 19.5, "live", None,
+     "traffic light: green for the car's lane, the left-turn group (red) small on its side",
+     {"light": {"state": "green", "d": 34, "y": 0.4, "c": 0.86, "alt": {"s": "red", "side": "l"}}}),
+    ("light_ambiguous", 19.5, "live", None,
+     "traffic light: two groups, the choice is ambiguous: ? beside the signal, the other group on the right",
+     {"light": {"state": "red", "d": 41, "y": -1.2, "c": 0.56, "q": True, "alt": {"s": "green", "side": "r"}}}),
+    ("light_other_lane_only", 19.5, "live", None,
+     "traffic light: the only light in view hangs over another lane: shown with ?",
+     {"light": {"state": "red", "d": 22, "y": -4.8, "c": 0.1, "q": True}}),
     ("map_synthetic_ignored", 19.5, "live", None, "synthetic position (map.syn): the vision-only picture",
      dict(_MAP_ROAD, map=_map_drive(syn=True))),
     ("map_none", 19.5, "live", None, "the same road without a map",
