@@ -206,6 +206,9 @@ def _translate(action: Action) -> Optional[Tuple[str, Dict]]:
         if action.op == "alert" and "alert_id" in p:
             p["id"] = p.pop("alert_id")
         return "headunit_" + action.op, p
+    if type(action).__name__ == "FuelLogCommandAction":
+        # fuelling log (fuel_log/commands.py): fuel_log_add / _undo / _edit_last
+        return "fuel_log_" + action.op, dict(action.params)
     if type(action).__name__ == "DtcCommandAction":
         return "dtc", {"op": action.op}
     return None
