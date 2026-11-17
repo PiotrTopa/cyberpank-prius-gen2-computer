@@ -7,23 +7,23 @@ meaningful data like battery state, power flow, engine status.
 Note: CAN IDs and data interpretation are based on community 
 research from EAA-PHEV wiki and may vary between vehicle years/regions.
 
-Key Prius Gen 2 CAN messages (from Battery ECU @ 100ms):
-- 0x03B: Battery current (12-bit signed @ 0.1A) and voltage (16-bit unsigned [V])
-- 0x3CB: SOC, CCL/CDL, temperatures
-- 0x3CD: Fault codes, pack voltage
-- 0x3C8: SOC alternative
-- 0x3C9: Cell voltage calibration data
+Broadcast ids decoded here (scales checked on this car, confidence in
+docs/prius_can.md §2: C confirmed, P probable, G third-party guess):
+- 0x022: yaw rate, two channels (C; scale P)      0x023: accelerations (P)
+- 0x025: steering angle (C)                       0x030: brake pedal (C)
+- 0x038: ICE status, B = ICE power request (P)    0x039: coolant (C)
+- 0x03A: E bit 4 accelerator pressed (P)          0x03B: HV current/voltage (C)
+- 0x0B1/0x0B3: wheel speeds (C)                   0x0B4: speed, E bit 0 moving
+- 0x120: gear, E bit 7 cruise engaged (C)         0x230: distance counter (P), brake
+- 0x244: pedal (G), E,F MG2 rpm (C)               0x348 / 0x3C8: ICE rpm (P)
+- 0x3CA: true speed km/h (C)                      0x3CB: SOC, limits, temps (C)
+- 0x3CD: pack voltage (P)                         0x3CF: outside/intake air (P)
+- 0x484: coolant (P)                              0x5xx: gateway copies of BEAN
+The last byte of every 0x022..0x3CF frame is a Toyota checksum, not data.
+Not decoded: 0x3C9, 0x4C1..0x4D1 (0x4CE is a constant index/config frame,
+not a temperature), 0x020, 0x03E, 0x262, 0x423, 0x602.
 
-Other important messages:
-- 0x038: ICE RPM and coolant temperature  
-- 0x039: ICE RPM alternative
-- 0x03A: Vehicle speed related
-- 0x120: Gear position
-- 0x348: follows ICE speed (not decoded)
-- 0x3CF: outside / intake air temperature
-
-Note: Inverter temperature requires SOLICITED PID 21C3 to ECU 0x7E2
-      (not available in unsolicited CAN messages)
+Solicited replies (0x7E8/0x7EA/0x7EB): docs/prius_can.md §5-7.
 """
 
 import logging
@@ -73,13 +73,18 @@ class CANMessageType(Enum):
     ENERGY_FLOW = auto()        # Energy flow arrows (0x3B6)
     FUEL_CONSUMPTION = auto()   # Fuel consumption (0x520)
     STEERING_ANGLE = auto()     # Steering angle (0x025)
-    ACCELERATION = auto()       # Lateral/longitudinal acceleration (0x022, 0x023)
+    ACCELERATION = auto()       # Longitudinal/lateral acceleration (0x023)
     WHEEL_SPEED = auto()        # Individual wheel speed (0x0B1, 0x0B3)
     HEADLIGHT_STATUS = auto()   # Headlight state (0x57F)
     SOC_BARS_EVENT = auto()     # MFD SOC bars & events (0x529)
-    YAW_RATE = auto()           # Yaw rate / vehicle dynamics (0x03A)
-    CRUISE_CONTROL = auto()     # Cruise control state (0x5C8)
+    YAW_RATE = auto()           # Yaw rate, two channels (0x022)
+    CRUISE_CONTROL = auto()     # Cruise control main switch (0x5C8)
     AIR_TEMPS = auto()          # Outside / intake air temperature (0x3CF)
+    DISTANCE = auto()           # Distance counter + brake flag (0x230)
+    ICE_SPEED = auto()          # ICE rpm, secondary sources (0x348, 0x3C8)
+    POWERTRAIN_FLAGS = auto()   # Accelerator pressed (0x03A)
+    VEHICLE_SPEED_KMH = auto()  # True speed, integer km/h (0x3CA)
+    COOLANT_ALT = auto()        # Coolant, second source (0x484)
     # Solicited response types (OBD-II style)
     SOLICITED_RESPONSE = auto()        # Generic solicited response
     SOLICITED_ENGINE = auto()          # Response from Engine ECU (0x7E8)
@@ -111,64 +116,89 @@ class CANMessage:
     sequence: int | None = None
 
 
-# Known Prius Gen 2 CAN IDs (11-bit standard frames)
-# Based on EAA-PHEV wiki documentation
+# Known Prius Gen 2 CAN IDs (11-bit standard frames): a label per id, for
+# tools and logs only. Meanings and confidence: docs/prius_can.md §2-3.
 KNOWN_CAN_IDS = {
-    # Battery ECU messages (from EAA-PHEV wiki)
-    0x03B: "HV_BATTERY_CURRENT_VOLTAGE",  # Current (12-bit signed 0.1A) + Voltage (16-bit V)
-    0x3CB: "HV_BATTERY_SOC_LIMITS",       # CDL, CCL, Delta SOC, SOC, temps
-    0x3CD: "HV_BATTERY_FAULT_VOLTAGE",    # Fault code + voltage
-    0x3C8: "HV_BATTERY_SOC_ALT",          # Alternative SOC data
-    0x3C9: "HV_BATTERY_CELL_DATA",        # Cell voltage calibration
-    
-    # Engine/ICE
-    0x038: "ENGINE_RPM_COOLANT",   # ICE RPM and coolant temperature
-    0x039: "ENGINE_RPM_ALT",       # Engine RPM alternative
-    0x030: "ENGINE_STATUS",        # ICE status flags
-    
-    # Speed and position
-    0x03A: "YAW_RATE",             # Yaw rate / vehicle dynamics
-    0x0B4: "VEHICLE_SPEED_ALT",    # Vehicle speed alternative
-    0x120: "GEAR_POSITION",        # PRND gear position
-    
-    # Vehicle dynamics
-    0x022: "LATERAL_ACCEL",        # Lateral + longitudinal acceleration
-    0x023: "LONGITUDINAL_ACCEL",   # Longitudinal acceleration (alt)
-    0x025: "STEERING_ANGLE",       # Steering wheel angle
-    0x0B1: "FRONT_WHEEL_SPEED",    # Front individual wheel speed
-    0x0B3: "REAR_WHEEL_SPEED",     # Rear individual wheel speed
-    
-    # Status & events
-    0x529: "SOC_BARS_EVENT",       # MFD SOC bars, EV mode, warnings
-    0x57F: "HEADLIGHT_STATUS",     # Headlight state
-    
-    # Energy Flow
-    0x3B6: "ENERGY_FLOW",          # Energy flow arrows
-    
-    # Fuel
-    0x520: "FUEL_INJECTOR",        # Fuel injector time
-    0x5A4: "FUEL_TANK",            # Fuel level
-
-    # Cruise Control
-    0x5C8: "CRUISE_CONTROL",        # Cruise control active flag
-
-    # Temperatures
-    0x348: "ICE_SPEED_RELATED",    # bytes B,C follow ICE speed (not decoded)
-    0x3CF: "AIR_TEMPS",            # B outside air degC, C intake air degC
-    # 0x540: NOT inverter temp - unknown status message (see decode section)
-    
-    # Other frequent messages
-    0x03E: "SYSTEM_STATUS_3E",     # Unknown status
-    0x0B3: "SYSTEM_STATUS_B3",     # Unknown status
-    
-    # Solicited OBD-II/CAN Responses (Protocol v2.8.0)
-    # These are responses to queries sent in Normal CAN mode
-    0x788: "OBD2_RESP_AIRBAG",     # Response from Airbag ECU (0x780)
-    0x7E8: "OBD2_RESP_ENGINE",     # Response from Engine ECU (0x7E0)
-    0x7E9: "OBD2_RESP_TRANS",      # Response from Transmission ECU
-    0x7EA: "OBD2_RESP_HYBRID",     # Response from Hybrid ECU (0x7E2)
-    0x7EB: "OBD2_RESP_HV_BATTERY", # Response from HV Battery ECU (0x7E3)
+    0x022: "YAW_RATE",                 # two channels, ~0.25 deg/s per count
+    0x023: "ACCELERATION",             # two channels at +-45 deg (long/lat)
+    0x025: "STEERING_ANGLE",
+    0x030: "BRAKE_PEDAL",
+    0x038: "ICE_STATUS",               # B = ICE power request
+    0x039: "ICE_COOLANT",
+    0x03A: "POWERTRAIN_FLAGS",         # E bit 4 accelerator pressed
+    0x03B: "HV_BATTERY_CURRENT_VOLTAGE",
+    0x0B1: "FRONT_WHEEL_SPEED",
+    0x0B3: "REAR_WHEEL_SPEED",
+    0x0B4: "VEHICLE_SPEED",            # + E bit 0 moving
+    0x120: "GEAR_CRUISE",              # gear, E bit 7 cruise engaged
+    0x230: "DISTANCE_COUNTER",         # A,B ~103 counts/m; D bit 2 brake
+    0x244: "PEDAL_MG2_RPM",            # G pedal, E,F MG2 rpm signed
+    0x348: "ICE_SPEED",                # C = rpm / 25 (NOT a pack temperature)
+    0x3C8: "ICE_SPEED_2",              # C = rpm / 32 (NOT an SOC)
+    0x3CA: "VEHICLE_SPEED_KMH",        # C true speed, km/h
+    0x3CB: "HV_BATTERY_SOC_LIMITS",
+    0x3CD: "HV_BATTERY_FAULT_VOLTAGE",
+    0x3CF: "AIR_TEMPS",
+    0x484: "ICE_COOLANT_2",
+    0x520: "FUEL_INJECTION",           # gateway copy -> BEAN 62:20
+    0x529: "SOC_BARS_EVENT",
+    0x57F: "LAMPS_DOOR",
+    0x5A4: "FUEL_TANK",
+    0x5C8: "CRUISE_MAIN",              # gateway copy of BEAN 62:C8
+    0x5CC: "BEAN_98CC",
+    # Solicited replies
+    0x788: "OBD2_RESP_AIRBAG",
+    0x7E8: "OBD2_RESP_ENGINE",
+    0x7E9: "OBD2_RESP_TRANS",
+    0x7EA: "OBD2_RESP_HYBRID",
+    0x7EB: "OBD2_RESP_HV_BATTERY",
 }
+
+# ── Calibrated broadcast scales (2026-11-17 drive, docs/prius_can.md §2) ──
+#: 0x022 yaw rate: rad/s per count (P: against the rear wheel-speed yaw with
+#: a 1.48 m track, slope 0.97-0.98, r 0.95); positive = turning left (C).
+YAW_RAD_S_PER_COUNT = 0.0044
+YAW_DEG_S_PER_COUNT = YAW_RAD_S_PER_COUNT * 57.29577951308232
+#: Standstill offsets of the two channels (counts) measured 2026-11-17; the
+#: ingress re-estimates them at every standstill.
+YAW_STANDSTILL_OFFSETS = (-2.0, -7.0)
+#: 0x023 accelerations (P): longitudinal = k_lon x (P - Q), positive =
+#: speeding up; lateral = k_lat x (P + Q), positive = towards the left.
+ACCEL_LON_MS2_PER_COUNT = 0.020
+ACCEL_LAT_MS2_PER_COUNT = 0.025
+#: 0x230 distance counter, counts per metre of 0x0B4 distance (P).
+DISTANCE_COUNTS_PER_M = 102.8
+#: 0x038 B: ICE power request, kW per count (P, r 0.92 against 21C3 K,L).
+ICE_POWER_KW_PER_COUNT = 0.23
+#: ICE rpm per count: 0x348 C and 0x3C8 C (P, r 0.99 against BEAN FE:26).
+ICE_RPM_PER_COUNT_348 = 25
+ICE_RPM_PER_COUNT_3C8 = 32
+
+
+def _s16(hi: int, lo: int) -> int:
+    v = (hi << 8) | lo
+    return v - 0x10000 if v & 0x8000 else v
+
+
+def decode_yaw_counts(data) -> Optional[tuple]:
+    """0x022 bytes -> (channel 1, channel 2) raw counts ((256A+B) - 0x200,
+    (256C+D) - 0x200), before the standstill offset; None if short."""
+    if len(data) < 4:
+        return None
+    return ((data[0] << 8 | data[1]) - 0x200, (data[2] << 8 | data[3]) - 0x200)
+
+
+def decode_accel_counts(data) -> Optional[tuple]:
+    """0x023 bytes -> (P, Q) raw counts of the two +-45 deg channels."""
+    if len(data) < 4:
+        return None
+    return ((data[0] << 8 | data[1]) - 0x200, (data[2] << 8 | data[3]) - 0x200)
+
+
+def _is_single_frame(data) -> bool:
+    """ISO-TP single frame: PCI 0x01..0x07 and at least that many bytes
+    (the relayed frame is 8 bytes; PCI 1 = a mode byte only, e.g. 44)."""
+    return len(data) >= 3 and 1 <= data[0] <= 7 and len(data) >= 1 + data[0]
 
 
 class CANDecoder:
@@ -373,11 +403,13 @@ class CANDecoder:
 
 
 
-        # 0x244: Throttle Pedal Position
-        # Eq: G (Byte 6) | Range 0-200 (0xC8)
+        # 0x244: accelerator pedal G (third-party, 0..0xC8) and, in E,F, the
+        # MG2 speed in rpm, signed 16-bit, negative in reverse (Car
+        # 2026-11-17: slope 1.00, r 0.999 against 21C3 MG2 speed).
         elif can_id == 0x244 and len(data) >= 7:
             msg.msg_type = CANMessageType.PEDAL_POSITION
             msg.values["throttle"] = data[6]
+            msg.values["mg2_rpm"] = _s16(data[4], data[5])
             
         # 0x030: Brake Pedal Position
         # Eq: E (Byte 4) | Range 0-127
@@ -391,13 +423,40 @@ class CANDecoder:
             msg.msg_type = CANMessageType.FUEL_LEVEL
             msg.values["fuel_level"] = data[1]
 
-        # 0x3C8: Alternative SOC data (info only, NOT used for SOC updates)
-        # Observed: [00-10, 28-34, 00-60, 00, 00-FD]
-        # NOTE: byte 2 often = 0, which would incorrectly reset SOC
-        # We only use 0x3CB for reliable SOC data
-        elif can_id == 0x3C8 and len(data) >= 5:
-            msg.msg_type = CANMessageType.SYSTEM_STATUS  # Don't treat as HV_BATTERY
-            msg.values["soc_alt"] = data[2]  # Store for info only
+        # 0x3C8 (70 ms): C = ICE rpm / 32 (P, r 0.99 against BEAN FE:26,
+        # 2026-11-17). Not an SOC (the old "soc_alt" label). D unknown.
+        elif can_id == 0x3C8 and len(data) >= 4:
+            msg.msg_type = CANMessageType.ICE_SPEED
+            msg.values["ice_rpm"] = data[2] * ICE_RPM_PER_COUNT_3C8
+            msg.values["rpm_source"] = "can3c8"
+
+        # 0x348 (44 ms): C = ICE rpm / 25 (P, r 0.99 against FE:26); A bit 2
+        # and B bits 0/5/6 switch with the ICE running (P). NOT a pack
+        # temperature (the old "C - 40" label).
+        elif can_id == 0x348 and len(data) >= 3:
+            msg.msg_type = CANMessageType.ICE_SPEED
+            msg.values["ice_rpm"] = data[2] * ICE_RPM_PER_COUNT_348
+            msg.values["rpm_source"] = "can"
+
+        # 0x3CA (108 ms): C = true vehicle speed, km/h, integer (C: slope
+        # 1.01, r 0.994 against 0x0B4). Fallback speed source.
+        elif can_id == 0x3CA and len(data) >= 3:
+            msg.msg_type = CANMessageType.VEHICLE_SPEED_KMH
+            msg.values["speed_kph"] = float(data[2])
+
+        # 0x484 (1.1 s): B = coolant, 0.626 x B - 0.6 °C (P, r 0.9998
+        # against 0x039); a third coolant source. C follows engine load (G).
+        elif can_id == 0x484 and len(data) >= 2:
+            msg.msg_type = CANMessageType.COOLANT_ALT
+            msg.values["coolant_temp"] = round(0.626 * data[1] - 0.6, 1)
+
+        # 0x230 (28 ms): A,B = 16-bit distance counter, wraps, ~102.8 counts
+        # per metre (P; counts up in reverse too); D bit 2 = brake pressed
+        # (C: 85 edges, 99 % at a BEAN FE:29 brake edge). F unknown.
+        elif can_id == 0x230 and len(data) >= 4:
+            msg.msg_type = CANMessageType.DISTANCE
+            msg.values["distance_counter"] = (data[0] << 8) | data[1]
+            msg.values["brake_flag"] = bool(data[3] & 0x04)
         
         # 0x3CD: Fault Code and Voltage (100ms period)
         # Format: [FaultCode_Hi, FaultCode_Lo, Voltage_Hi, Voltage_Lo, Checksum]
@@ -408,9 +467,9 @@ class CANDecoder:
             fault_code = (data[0] << 8) | data[1]
             msg.values["fault_code"] = fault_code
             
-            # Bytes C,D = pack voltage in V (2026-11-16 data crunch: median
-            # difference against 0x03B 1 V, r 0.90 at 0.2 s alignment). Not
-            # used downstream: 0x03B is the voltage source (8 ms period).
+            # Bytes C,D = pack voltage in V (P, 2026-11-16 data crunch: median
+            # difference against 0x03B 1 V, r 0.90 at 0.2 s alignment). The
+            # fallback voltage source while 0x03B (8 ms) is stale.
             msg.values["pack_voltage_3cd"] = (data[2] << 8) | data[3]
 
         # 0x3CF (139 ms): byte B = outside air °C, byte C = intake air °C,
@@ -424,10 +483,6 @@ class CANDecoder:
             for key, b in (("ambient_temp", data[1]), ("intake_air_temp", data[2])):
                 msg.values[key] = b - 256 if b & 0x80 else b
                 msg.values[key + "_verified"] = 0 < b < 0x80
-
-        # 0x348 (44 ms): bytes B,C follow the ICE speed (about 23.4 x C rpm,
-        # r 0.89; 2026-11-16 data crunch). It is NOT a pack temperature (the
-        # earlier "C - 40" label); nothing is decoded from it.
 
         # ---------------------------------------------------
         # ENGINE & INVERTER
@@ -446,16 +501,15 @@ class CANDecoder:
         # Byte 2: Status/flag field (mostly 12 when running, 8 when off)
         # Byte 6: Changes with RPM - possibly checksum or low bits
         #
-        # Alternative unsolicited RPM sources identified but not yet implemented:
-        #   - CAN 0x348 byte2 * 25: r=0.986, MAE=53 RPM
-        #   - CAN 0x3C8 byte2 * 32: r=0.977, MAE=38 RPM
+        # Byte 1 (2026-11-17): ICE power request, ~0.23 kW per count (P, r 0.92
+        # against 21C3 K,L). Secondary rpm sources: 0x348 C, 0x3C8 C.
         elif can_id == 0x038 and len(data) >= 7:
             msg.msg_type = CANMessageType.ENGINE_STATUS
             
-            # Byte 1: ICE running indicator only (0 = off, >0 = running)
-            # RPM value is NOT extracted — use solicited OBD-II PID 010C
+            # Byte 1 > 0 only with the ICE turning (engine gate evidence)
             rpm_byte = data[1]
             msg.values["ice_running"] = rpm_byte > 0
+            msg.values["ice_power_request_kw"] = round(rpm_byte * ICE_POWER_KW_PER_COUNT, 2)
             
         # 0x039: Coolant Temperature (RPM from this message is NOT reliable)
         # Observed cold start: [254/255 → 1 → 2 → ... → 38 → 39 → ... → 90]
@@ -493,9 +547,10 @@ class CANDecoder:
         
         # 0x5C8: gateway CAN copy of BEAN 62:C8 ([BEAN header 0x24][62:C8
         # data], §5 of docs/BEAN_SIGNALS.md). Byte 2 bit 4 (0x10) = cruise
-        # MAIN SWITCH on (2026-11-16 cruise drive; NOT a cancel flag). The
-        # copy lags BEAN by ~3 s and missed a 1 s off/on; byte 0 bit 7
-        # (A4 vs 24) was set for ~1 s at a refused SET (meaning open).
+        # MAIN SWITCH on (C, 2026-11-16/17; NOT a cancel flag). It leads
+        # BEAN 62:C8 by 40-60 ms (2026-11-17). Byte 0 bit 7 (A4 instead of
+        # 24) is the gateway's immediate-copy header on the first frame
+        # after a change: not a signal, ignored.
         elif can_id == 0x5C8 and len(data) >= 3:
             msg.msg_type = CANMessageType.CRUISE_CONTROL
             msg.values["cruise_main_switch"] = bool(data[2] & 0x10)
@@ -512,21 +567,25 @@ class CANDecoder:
             msg.values["steering_angle_raw"] = raw
             msg.values["steering_angle"] = raw * STEERING_DEG_PER_COUNT
         
-        # 0x022: Lateral + Longitudinal Acceleration (13ms period)
-        # Docs: (256*A+B) - 0x0200 for each axis
+        # 0x022 (13 ms): YAW RATE, two redundant channels (C: yaw, not an
+        # acceleration; scale P), see decode_yaw_counts / YAW_*. The
+        # standstill offset is removed by the ingress (io.dynamics_ingest).
         elif can_id == 0x022 and len(data) >= 4:
-            msg.msg_type = CANMessageType.ACCELERATION
-            lat_raw = (data[0] << 8) | data[1]
-            lon_raw = (data[2] << 8) | data[3]
-            msg.values["lateral_accel_raw"] = lat_raw - 0x200
-            msg.values["longitudinal_accel_raw"] = lon_raw - 0x200
-            # TODO: Scale factor to m/s² needs real-world calibration
-        
-        # 0x023: Longitudinal Acceleration alternative (13ms period)
+            msg.msg_type = CANMessageType.YAW_RATE
+            y1, y2 = decode_yaw_counts(data)
+            msg.values["yaw_raw_1"] = y1
+            msg.values["yaw_raw_2"] = y2
+
+        # 0x023 (13 ms): acceleration sensor, two channels at +-45 deg (P):
+        # longitudinal = 0.020 (P - Q), lateral = 0.025 (P + Q) m/s²
+        # (positive = speeding up / towards the left); includes road grade.
         elif can_id == 0x023 and len(data) >= 4:
             msg.msg_type = CANMessageType.ACCELERATION
-            lon_raw = (data[0] << 8) | data[1]
-            msg.values["longitudinal_accel_alt_raw"] = lon_raw - 0x200
+            p, q = decode_accel_counts(data)
+            msg.values["accel_raw_p"] = p
+            msg.values["accel_raw_q"] = q
+            msg.values["longitudinal_accel_ms2"] = round(ACCEL_LON_MS2_PER_COUNT * (p - q), 3)
+            msg.values["lateral_accel_ms2"] = round(ACCEL_LAT_MS2_PER_COUNT * (p + q), 3)
         
         # 0x0B1: Front Wheel Speed (13ms period)
         # Bytes 0-1: front right wheel speed * 100 (km/h)
@@ -546,16 +605,13 @@ class CANDecoder:
             msg.values["left_speed_kph"] = ((data[2] << 8) | data[3]) * 0.01
             msg.values["wheel_position"] = "rear"
         
-        # 0x03A: Yaw Rate / Vehicle Dynamics (13ms period, highest-volume undecoded)
-        # b0:b1 as 9-bit signed shows small values -7 to +27
-        # Likely yaw rate or rotational velocity sensor
+        # 0x03A (8 ms): NOT a yaw rate (r 0.01 with the wheel-speed yaw). E
+        # bit 4 = accelerator pressed (P, 2026-11-17: 0x244 G > 0 in all
+        # 6,576 samples with it set). E bit 0 + F: a 9-bit voltage ~ pack
+        # voltage - 11.5 V (P, not used).
         elif can_id == 0x03A and len(data) >= 5:
-            msg.msg_type = CANMessageType.YAW_RATE
-            # 16-bit raw, offset by 0x200 (same pattern as 0x022)
-            yaw_raw = (data[0] << 8) | data[1]
-            msg.values["yaw_rate_raw"] = yaw_raw - 0x200
-            # b4: status flags (dominant values 0x24, 0x34)
-            msg.values["yaw_status"] = data[4]
+            msg.msg_type = CANMessageType.POWERTRAIN_FLAGS
+            msg.values["accelerator_pressed"] = bool(data[4] & 0x10)
         
         # ---------------------------------------------------
         # HEADLIGHTS & EVENTS
@@ -611,10 +667,9 @@ class CANDecoder:
             speed_raw = (data[5] << 8) | data[6]
             msg.values["speed_kph"] = speed_raw * 0.01
             
-            # Bytes 6-7 alternative
-            speed_raw_alt = (data[6] << 8) | data[7]
-            if speed_raw_alt > 0:
-                msg.values["speed_kph_alt"] = speed_raw_alt * 0.01
+            # E bit 0 = moving: set at 7-14 km/h, cleared at <= 2 km/h (P,
+            # 22 edges on 2026-11-17). H is the checksum.
+            msg.values["moving"] = bool(data[4] & 0x01)
         
         # 0x120: Gear Position
         # Observed: [00, 00, 00, 00, 10-90, 20-23, 00-04, 59-E0]
@@ -638,8 +693,10 @@ class CANDecoder:
             else:
                 msg.values["gear"] = "?"
             msg.values["gear_raw"] = gear_val
-            # Byte 4 bit 7 (and byte 7 bit 7): cruise engaged (2026-11-16,
-            # every engage/cancel; ~2 s behind 21D3 D bit 6).
+            # Byte E (4) bit 7: cruise engaged (C, every engage/cancel of
+            # 2026-11-16/17). It is the first source of the engaged state:
+            # 21D3 D bit 6 follows 0.04-1.1 s later (poll phase). Byte H is
+            # the Toyota checksum (its bit 7 only follows E), not a signal.
             msg.values["cruise_active"] = bool(data[4] & 0x80)
         
         # ---------------------------------------------------
@@ -694,12 +751,16 @@ class CANDecoder:
             mode = data[0]
             pid = data[1] if len(data) > 1 else 0
             payload = data[2:] if len(data) > 2 else []
-        elif len(data) >= 3:
+        elif _is_single_frame(data):
             # Single-frame format: [Length, Mode, PID, Data...]
             mode = data[1]
             pid = data[2]
-            payload = data[3:] if len(data) > 3 else []
+            payload = data[3:1 + data[0]] if data[0] >= 3 else []
         else:
+            # ISO-TP first / consecutive / flow-control frame (e.g. the
+            # panda's passive copy of a multi-frame reply): not a reply on
+            # its own. Reading it as [len, mode, pid] decoded consecutive
+            # frames whose bytes happened to be 61 C3 as a 21C3 reply.
             return
         
         msg.values["obd2_mode"] = mode
@@ -784,12 +845,16 @@ class CANDecoder:
             mode = data[0]
             pid = data[1] if len(data) > 1 else 0
             payload = data[2:] if len(data) > 2 else []
-        elif len(data) >= 3:
+        elif _is_single_frame(data):
             # Single-frame format: [Length, Mode, PID, Data...]
             mode = data[1]
             pid = data[2]
-            payload = data[3:] if len(data) > 3 else []
+            payload = data[3:1 + data[0]] if data[0] >= 3 else []
         else:
+            # ISO-TP first / consecutive / flow-control frame (e.g. the
+            # panda's passive copy of a multi-frame reply): not a reply on
+            # its own. Reading it as [len, mode, pid] decoded consecutive
+            # frames whose bytes happened to be 61 C3 as a 21C3 reply.
             return
         
         msg.values["obd2_mode"] = mode
@@ -1013,12 +1078,16 @@ class CANDecoder:
             mode = data[0]
             pid = data[1] if len(data) > 1 else 0
             payload = data[2:] if len(data) > 2 else []
-        elif len(data) >= 3:
+        elif _is_single_frame(data):
             # Single-frame format: [Length, Mode, PID, Data...]
             mode = data[1]
             pid = data[2]
-            payload = data[3:] if len(data) > 3 else []
+            payload = data[3:1 + data[0]] if data[0] >= 3 else []
         else:
+            # ISO-TP first / consecutive / flow-control frame (e.g. the
+            # panda's passive copy of a multi-frame reply): not a reply on
+            # its own. Reading it as [len, mode, pid] decoded consecutive
+            # frames whose bytes happened to be 61 C3 as a 21C3 reply.
             return
         
         msg.values["obd2_mode"] = mode

@@ -422,6 +422,9 @@ class SetCruiseControlAction(Action):
     cruise_main_switch: Optional[bool] = None
     cruise_drive_request: Optional[int] = None
     cruise_5c8_debug: Optional[str] = None
+    cruise_switch_set_coast: Optional[bool] = None
+    cruise_switch_res_acc: Optional[bool] = None
+    cruise_brake_inputs: Optional[int] = None
     clear: bool = False
 
     def __init__(
@@ -432,10 +435,16 @@ class SetCruiseControlAction(Action):
         cruise_main_switch: Optional[bool] = None,
         cruise_drive_request: Optional[int] = None,
         cruise_5c8_debug: Optional[str] = None,
+        cruise_switch_set_coast: Optional[bool] = None,
+        cruise_switch_res_acc: Optional[bool] = None,
+        cruise_brake_inputs: Optional[int] = None,
         clear: bool = False,
         source: ActionSource = ActionSource.INTERNAL,
     ):
         super().__init__(ActionType.SET_CRUISE_CONTROL, source)
+        self.cruise_switch_set_coast = cruise_switch_set_coast
+        self.cruise_switch_res_acc = cruise_switch_res_acc
+        self.cruise_brake_inputs = cruise_brake_inputs
         self.cruise_active = cruise_active
         self.cruise_set_speed = cruise_set_speed
         self.cruise_memory_speed = cruise_memory_speed
@@ -1628,12 +1637,20 @@ PASSIVE_SIGNAL_FIELDS = {
         "acc_on", "ig_on", "display_speed_kmh", "brake_switch", "ice_stopped",
         "meter_trip_km", "meter_consumption_l100km", "meter_consumption_stopped",
         "meter_avg_consumption_l100km", "key_out_warning", "key_out_beep", "cruise_raw_62c8", "cruise_raw_changes",
+        # broadcast CAN (io.dynamics_ingest)
+        "accelerator_pressed", "moving", "ice_power_request_kw", "distance_total_km",
+        "distance_source", "odometer_km",
     }),
     "climate": frozenset({
         "compressor_target_rpm", "compressor_rpm", "compressor_running", "ac_switch_on",
         "inside_temp",
     }),
-    "dynamics": frozenset({"soc_bars"}),
+    "dynamics": frozenset({
+        "soc_bars",
+        # broadcast CAN 0x022 / 0x023 (io.dynamics_ingest)
+        "yaw_rate_dps", "yaw_rate_raw", "yaw_rate_raw_2", "yaw_offsets",
+        "longitudinal_accel_ms2", "lateral_accel_ms2", "lateral_accel_raw", "longitudinal_accel_raw",
+    }),
     "provisional": frozenset({
         "ac_engine_heat_request", "cabin_temp_raw", "avg_consumption_l100km", "hv_ready",
         "p_locked", "out_of_p", "p_ecu_on", "power_off_handshake", "hv_bus_voltage_v",

@@ -195,6 +195,24 @@ cancel, no taps.
 `21D3` C during these sessions: 45–90 in steady cruise at 50–58 km/h, a jump of 10–30 counts within
 1–2 s after each +tap, a drop of 10–25 after each −tap, 0 at every cancel.
 
+### 5.1 What the backend shows (`io/cruise_fusion.py`, 2026-11-17)
+
+| State field | Source, in order | Rule |
+|---|---|---|
+| `cruise_main_switch` | CAN 0x5C8 C bit 4 → BEAN `62:C8` → `21D3` D bits 0–3 | the next source takes over after 3 s of silence; the 0x5C8 `A4` header is ignored |
+| `cruise_active` | CAN 0x120 E bit 7 → `21D3` D bit 6 | 0x120 arrives first (§4); `21D3` only while 0x120 is silent > 1 s |
+| `cruise_set_speed` | `21D3` B | shown only once a `21D3` reply that itself says engaged confirms it (the B of the poll before an engage is still the old memory); cleared at every cancel |
+| `cruise_memory_speed` | `21D3` B | at a 0x120 cancel: the speed at the cancel when it differs from the set speed by ≥ 2 km/h (P, §5), else B until the next poll; cleared at once when the true speed (0x0B4) falls below 33 km/h (C) and by the main switch (C) |
+| `cruise_switch_set_coast`, `cruise_switch_res_acc`, `cruise_brake_inputs` | `21D3` E | the last poll's sample (1 Hz, short taps are missed); E `02` at power-off and `01` while driving are not interpreted |
+| `cruise_drive_request` | `21D3` C | raw |
+
+All cruise fields go back to unknown 5 s after the last source went silent. `21D3` stays at 1 Hz
+(slot 6); no faster cruise poll.
+
+Replay of the 2026-11-17 drive through the ingress: engage on 0x120 0.1–1.0 s before the set speed
+appears, set speeds 50/54/55/57/58/57/55/54 and 50/53/51/50/48 at the logged taps, memory 54 kept at
+the 10:26:08 cancel and 49 at the 10:29:22 cancel, memory cleared at 10:23:14 and 10:26:13 as in §5.
+
 ---
 
 ## 6. What the CAN/BEAN data say an interposer would have to respect

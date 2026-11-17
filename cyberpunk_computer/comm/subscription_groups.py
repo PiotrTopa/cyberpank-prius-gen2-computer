@@ -9,7 +9,7 @@ Core drivetrain PIDs (RPM, hybrid, cruise) are always active.
 
 Intervals (2026-11-17): every request is a frame the gateway transmits onto
 the car's powertrain CAN, and an ISO-TP reply costs a second one (the flow
-control frame). A value that is broadcast is not polled (rpm: BEAN FE:26;
+control frame). A value that is broadcast is not polled (rpm: BEAN FE:26 or CAN 0x348/0x3C8;
 intake and ambient air: CAN 0x3CF; these slots are suspended while the
 broadcast is fresh, comm.source_priority), and a poll runs no faster than
 its consumer needs:

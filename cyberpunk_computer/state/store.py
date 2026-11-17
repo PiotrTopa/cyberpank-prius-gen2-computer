@@ -567,7 +567,8 @@ class Store:
             if action.clear:
                 updates.update(cruise_active=False, cruise_set_speed=None,
                                cruise_memory_speed=None, cruise_main_switch=None,
-                               cruise_drive_request=None)
+                               cruise_drive_request=None, cruise_switch_set_coast=None,
+                               cruise_switch_res_acc=None, cruise_brake_inputs=None)
             if action.cruise_main_switch is not None:
                 updates["cruise_main_switch"] = action.cruise_main_switch
                 if not action.cruise_main_switch:      # main off: nothing engaged or held
@@ -585,6 +586,10 @@ class Store:
                 updates["cruise_drive_request"] = action.cruise_drive_request
             if action.cruise_5c8_debug is not None:
                 updates["cruise_5c8_debug"] = action.cruise_5c8_debug
+            for f in ("cruise_switch_set_coast", "cruise_switch_res_acc", "cruise_brake_inputs"):
+                val = getattr(action, f, None)
+                if val is not None:
+                    updates[f] = val
             if updates:
                 self._state = replace(
                     self._state,

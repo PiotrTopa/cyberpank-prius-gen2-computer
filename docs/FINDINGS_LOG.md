@@ -5,6 +5,20 @@ is documented. Times CET. Add a line whenever a doc gains a confirmed fact or lo
 
 ## 2026-11-17
 
+* Backend decodes the 17 Nov findings: yaw rate (`dynamics.yaw_rate_dps`, standstill offsets learnt),
+  accelerations (m/s²), MG2 rpm from 0x244, 0x230 distance and our own odometer (`vehicle.odometer_km`,
+  for service intervals, the meter is frozen), 0x348/0x3C8 rpm, 0x3CA speed, 0x3CD voltage, 0x484
+  coolant, 0x03A accelerator, 0x038 ICE power request, 0x0B4 moving, 0x230 brake; cruise engaged and
+  main switch now first from 0x120 / 0x5C8, `21D3` E switches in the state; replay of the drive
+  through the ingress: yaw r 0.957, MG2 r 0.995, 0x348 rpm r 0.997, distance 0.6 % below integrated
+  0x0B4 ([prius_can.md](prius_can.md) §2, [CRUISE_CONTROL.md](CRUISE_CONTROL.md) §5.1).
+* 0x230 distance counter: 102.85 counts/m over 10.8 km, counts up in reverse too
+  ([prius_can.md](prius_can.md) §2).
+* The "trip log appended to a file of 16 Nov" after the 10:39 reboot was a new file named by a stale
+  wall clock: the phone booted with the clock at 16 Nov 11:50, the recorder opened
+  `trip_20261116_115052_965`, and NTP stepped the clock by +82,173 s 36 s later. The recorder now
+  closes and re-dates a trip at a clock step and never reuses an existing file name; readers skip
+  NUL-filled tails ([ARCHITECTURE.md](ARCHITECTURE.md) §3).
 * `21D3` E = the HV ECU's switch inputs: `10` SET/COAST, `08` RES/ACC, bits 0–2 brake pedal; the stalk
   is visible nowhere else ([CRUISE_CONTROL.md](CRUISE_CONTROL.md) §3.1).
 * Cruise resume memory = vehicle speed at the cancel (6/6), cleared below ~33–35 km/h and by the main

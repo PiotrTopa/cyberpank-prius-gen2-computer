@@ -185,10 +185,10 @@ request + 8).
 
 | Group | Slot | Item | ECU | Request | Interval ms | Timeout ms / ISO-TP | Why this rate |
 |---|---|---|---|---|---|---|---|
-| core | 0 | engine RPM | 0x7E0 | `01 0C` | 500 | 200 | suspended while BEAN `FE:26` is fresh |
+| core | 0 | engine RPM | 0x7E0 | `01 0C` | 500 | 200 | suspended while BEAN `FE:26` or CAN 0x348 / 0x3C8 is fresh |
 | core | 1 | engine load | 0x7E0 | `01 04` | 5000 | 200 | no broadcast source |
-| core | 2 | hybrid comprehensive | 0x7E2 | `21 C3` | 2000 | 500 / yes | inverter and motor temperatures, torques |
-| core | 6 | cruise control | 0x7E2 | `21 D3` | 1000 | 200 | cruise set speed exists nowhere else |
+| core | 2 | hybrid comprehensive | 0x7E2 | `21 C3` | 2000 | 500 / yes | inverter and motor temperatures, torques (its MG2 rpm, HV voltage and current are used only while CAN 0x244 / 0x03B are stale) |
+| core | 6 | cruise control | 0x7E2 | `21 D3` | 1000 | 200 | cruise set speed, resume memory and stalk switches exist nowhere else; engaged and main switch come first from CAN 0x120 / 0x5C8 |
 | battery_cells | 3 | block voltages | 0x7E3 | `21 CE` | 2000 | 500 / yes | block-resistance pairs must be ≤ 3.5 s apart ([BATTERY_HEALTH.md](BATTERY_HEALTH.md)) |
 | battery_cells | 4 | battery temps / fan / delta SOC | 0x7E3 | `21 CF` | 10000 | 500 / yes | slow values; 0x3CB carries two temperatures at 0.1 s |
 | battery_cells | 5 | block resistances | 0x7E3 | `21 D0` | 30000 | 500 / yes | ECU's own slow figures |
@@ -207,6 +207,28 @@ A slot that exists for one broadcast-covered value is unsubscribed after the bro
 for 10 s and re-subscribed when it goes stale (`comm/source_priority.py`, `SlotSuspender`).
 `BACKEND_OBD_PAD` (unset by default) sets the padding byte of the requests
 ([prius_can.md](prius_can.md) §9).
+
+Audit against the 2026-11-17 findings (gateway fw 3.2.11): request ids, response ids, ISO-TP flags
+(every multi-frame PID sets `isotp`; `21D3`, `01xx` are single frames) and rates match the table;
+no slot polls a value that is broadcast except as a fallback. Two backend fixes came out of it:
+single-frame replies are now checked for an ISO-TP single-frame PCI (the panda also delivers the
+first and consecutive frames of every multi-frame answer; a consecutive frame starting `21 61 C3`
+used to decode as a 21C3 reply), and the 21C3 MG2 rpm, HV voltage and current no longer overwrite
+the broadcast values every 2 s (source policies `mg2_rpm`, `hv_voltage`, `hv_current`).
+
+Source order of the broadcast signals with more than one source (`comm/source_priority.py`):
+speed 0x0B4 → 0x3CA → wheel mean (2.2 % low) → OBD; rpm `FE:26` → 0x348 → 0x3C8 → OBD 010C;
+coolant 0x039 → `FE:2C` → 0x484 → OBD; brake switch 0x230 D → `FE:29`; cruise main 0x5C8 → `62:C8`
+→ `21D3`; cruise engaged 0x120 → `21D3`. Yaw rate, accelerations, distance and our odometer:
+`io/dynamics_ingest.py` ([prius_can.md](prius_can.md) §2).
+
+Trip recording (`io/trip_recorder.py`, `io/comm_logger.py`): a trip file is always a new file (opened
+exclusively; a taken name gets a suffix) whose header carries the kernel boot id and the monotonic
+clock. The phone has no RTC: after a boot the wall clock can be a day old until NTP steps it. A step
+of more than 5 s while a trip is open closes it, rewrites its pre-step wall times by the step and
+renames it after its corrected start; the next traffic opens a correctly named file. A hard reset can
+leave a NUL-filled tail and no `end` record: the readers (replay, battery backfill, alert replay, BEAN
+tools) skip NUL bytes and lines that are not JSON.
 
 Responses are decoded by `comm/can_decoder.py` (21C3 → `mg1/mg2_inverter_temp`, `mg1/mg2_motor_temp`,
 `inverter_temp` = MG2; 21CE → `battery_soc_21ce`, `battery_current_21ce`, 14 `block_voltages` with
