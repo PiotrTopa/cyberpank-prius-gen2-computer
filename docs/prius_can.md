@@ -269,16 +269,25 @@ Poll table and rates: [ARCHITECTURE.md](ARCHITECTURE.md) §3. Nominal transmit r
 (3.0 requests + 1.3 flow controls) since 2026-11-17, 8.6 before (measured before: 6.5 requests/s
 including retries, about 8.7 frames/s).
 
-State of the transmit path on fw 3.2.9 (2026-11-13 and 2026-11-16, `can_diag`): 19–35 % of the
-transmit attempts are hit by an error, the TEC climbs to bus-off about every 15 s, while the receive
-error counter stays at 0 and the controller answers 0xFF on SPI once per frame it sends. Each failed
-attempt is an error frame on the powertrain CAN (about 2 per second before, about 1 per second at the
-new poll rate). The cause is the MCP2515 module while its transceiver drives the bus, not bit timing
-or the polls colliding with a second tester; the evidence, the firmware part (lost ISO-TP frames) and
-firmware 3.2.10 are in the gateway repository, `gateway-rp2350/README.md` section "CAN transmit
-path".
+Transmit errors, fw 3.0.0 to 3.2.10 (`can_diag` of 2026-11-13 and 2026-11-16 on 3.2.9): 19–35 % of
+the transmit attempts were hit by an error, the TEC climbed to bus-off about every 15 s, while the
+receive error counter stayed at 0 and the controller answered 0xFF on SPI once per frame it sent.
+Each failed attempt was an error frame on the powertrain CAN (about 2 per second).
 
-Open experiment (no flash needed): `BACKEND_OBD_PAD=0x55` in the backend environment pads the
-requests with `55` instead of `00` (fewer consecutive dominant bits per frame, ECUs ignore the
-padding). If the transmit errors come from the module's supply sagging under dominant-bit current,
-`tec_up` per request falls with it. Off by default; compare two drives.
+Cause, found 2026-11-17 on the car with the ignition off (gateway and panda alone on the bus): the
+gateway firmware polled the MCP2515 over SPI while the MCP2515 was transmitting. On this module (SPI
+through level shifters) the SPI port is dead from about 50 µs into a dominant-heavy frame until about
+350 µs after it, and one SPI transaction in that window destroys the frame. Not bit timing, not a
+second tester, and not a hardware fault that needs a repair: frames sent without SPI traffic go out
+clean (2000 of 2000). Gateway fw 3.2.11 waits for the end of its frame on the INT pin and runs the
+controller in one-shot mode (the engine repeats a request that lost arbitration). Bench result with
+the panda acknowledging and answering, 12 s per phase: 3.2.10 three bus-offs per phase, 3.2.11
+`tec_up` 0 over about 5000 requests including 576 multi-frame answers. Evidence and the test plan:
+gateway repository, `gateway-rp2350/README.md` section "CAN transmit path: root cause (2026-11-17)
+and firmware 3.2.11", logs in `captures/2026-11-17/`.
+
+What a drive on 3.2.11 must show in `can_diag`: `tec` 0–7, `eflg` 00, `busoff` 0, `tec_up` near 0,
+`isotp_err` near 0, `tx_retry` growing slowly (lost arbitration, harmless).
+
+`BACKEND_OBD_PAD=0x55` (requests padded with `55` instead of `00`) stays available and off. It was
+meant as a test of the supply-sag idea; with 3.2.11 it is not needed.
