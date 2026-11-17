@@ -6,13 +6,20 @@ the campaign showed, and how it shapes this controller:
 
 * The CPU zones under the production load peak at 95-97 °C at every fan speed,
   100 % included: they follow the instantaneous core power through a fixed
-  internal resistance the fan cannot change. Reacting to them runs the fan flat
-  out for nothing, so raw CPU temperature only drives the last-resort override.
+  internal resistance the fan cannot change. They do not drive the GPU-led
+  ramp; the hottest core drives the hot-core term below and the override.
 * The GPU zone follows the sink the fan does control, and it is the only zone
   that actually throttled (kernel passive trip at 85 °C, road rate 13.5 -> 11
   runs/s). It is the control variable, low-pass filtered.
 * Airflow has sharply diminishing returns: 40 -> 100 % buys 2.4 K for 2250 RPM.
   The ramp therefore settles at the lowest speed that keeps the GPU clear.
+* Hot-core term (2026-11-17, owner): on the road the hottest raw CPU core cycled
+  89-96 °C with the fan at 28-50 % (roadsense pauses itself above 92 °C) and the
+  phone later hard-reset. Staying below ~88 °C on the hottest core now ranks
+  above quietness: the hottest core, low-passed at 5 s, ramps the duty from the
+  normal target at 84 °C to 100 % at 90 °C, reached within seconds (fast slew),
+  and holds a floor until it falls below 80 °C. It may exceed the ``low``
+  ceiling. Cool cores leave the quiet GPU-led behaviour untouched.
 
 Two profiles, selected by the POCO power mode: ``full`` (ACC on, roadsense
 running) holds the GPU below its trip at the least noise; ``low`` (key off,
@@ -55,6 +62,17 @@ class FanPolicyConfig:
     safety_ctrl_c: float = 86.0
     safety_release_c: float = 82.0
     safety_raw_c: float = 98.0
+    # Hot-core term: the hottest raw CPU core (cpu_c is the max over all
+    # cpu*/cluster* zones), low-passed at hot_tau_s. Engages above hot_on_c,
+    # ramps the duty linearly from the normal target at hot_on_c to 100 % at
+    # hot_full_c, holds at least hot_floor_pct while engaged and releases below
+    # hot_release_c. Rises at hot_slew_up_pct_s (no deadband).
+    hot_on_c: float = 84.0
+    hot_full_c: float = 90.0
+    hot_release_c: float = 80.0
+    hot_floor_pct: float = 40.0
+    hot_tau_s: float = 5.0
+    hot_slew_up_pct_s: float = 30.0
     # Output shaping, so the fan is heard as a steady speed.
     slew_up_pct_s: float = 5.0
     slew_down_pct_s: float = 0.5
@@ -76,6 +94,7 @@ class FanDecision:
     reason: str
     poco_pct: float = 0.0
     box_pct: float = 0.0
+    hot_pct: float = 0.0
 
 
 class ChassisFanPolicy:
@@ -85,10 +104,13 @@ class ChassisFanPolicy:
         self.cfg = cfg or FanPolicyConfig()
         self._gpu_f: Optional[float] = None
         self._cpu_f: Optional[float] = None
+        self._hot_f: Optional[float] = None
         self._last_t: Optional[float] = None
         self.control_c: Optional[float] = None
         self.active = False
         self.safety = False
+        self.hot = False
+        self.hot_c: Optional[float] = None
         self.box_active = False
         self.duty_pct = 0.0
 
@@ -101,6 +123,12 @@ class ChassisFanPolicy:
             self._cpu_f = None
         else:
             self._cpu_f = cpu_c if self._cpu_f is None else self._cpu_f + alpha * (cpu_c - self._cpu_f)
+        if cpu_c is None:
+            self._hot_f = None
+        else:
+            a_hot = 1.0 - math.exp(-dt / max(cfg.hot_tau_s, 1e-3))
+            self._hot_f = cpu_c if self._hot_f is None else self._hot_f + a_hot * (cpu_c - self._hot_f)
+        self.hot_c = self._hot_f
         if gpu_c is None:
             self._gpu_f = None
         else:
@@ -125,6 +153,24 @@ class ChassisFanPolicy:
         t = (ctrl - prof.on_c) / max(prof.full_c - prof.on_c, 0.1)
         return prof.min_pct + max(0.0, min(1.0, t)) * (prof.max_pct - prof.min_pct)
 
+    def _hot_target(self, normal: float) -> float:
+        """Hot-core term (0 when not engaged): from the normal target at
+        hot_on_c to 100 % at hot_full_c, at least hot_floor_pct while engaged."""
+        cfg = self.cfg
+        hot = self._hot_f
+        if hot is None:
+            self.hot = False
+            return 0.0
+        if self.hot:
+            if hot < cfg.hot_release_c:
+                self.hot = False
+        elif hot > cfg.hot_on_c:
+            self.hot = True
+        if not self.hot:
+            return 0.0
+        t = max(0.0, min(1.0, (hot - cfg.hot_on_c) / max(cfg.hot_full_c - cfg.hot_on_c, 0.1)))
+        return max(cfg.hot_floor_pct, normal + t * (100.0 - normal))
+
     def _box_target(self, box_in_c: Optional[float], box_out_c: Optional[float]) -> float:
         cfg = self.cfg
         if box_in_c is None or box_out_c is None:
@@ -141,8 +187,9 @@ class ChassisFanPolicy:
         t = (d - cfg.box_stop_delta) / max(cfg.box_ramp_range, 0.1)
         return max(0.0, min(cfg.box_max_pct, t * cfg.box_max_pct))
 
-    def _shape(self, target: float, dt: float, prof_max: float) -> float:
-        """Slew + deadband. Stopping, starting and reaching the ceiling are exact."""
+    def _shape(self, target: float, dt: float, prof_max: float, fast_up: bool = False) -> float:
+        """Slew + deadband. Stopping, starting and reaching the ceiling are exact.
+        ``fast_up``: the hot-core term leads; rise at hot_slew_up_pct_s, no deadband."""
         cfg = self.cfg
         cur = self.duty_pct
         if target <= 0.0:
@@ -150,6 +197,8 @@ class ChassisFanPolicy:
         if cur <= 0.0:
             return target
         if target > cur:
+            if fast_up:
+                return min(target, cur + max(cfg.hot_slew_up_pct_s, cfg.slew_up_pct_s) * dt)
             if target - cur < cfg.deadband_pct and target < prof_max:
                 return cur
             return min(target, cur + cfg.slew_up_pct_s * dt)
@@ -199,18 +248,25 @@ class ChassisFanPolicy:
                 poco = self._poco_target(ctrl, ambient_c, prof)
                 if self.active:
                     reason = name
+        hot = 0.0 if self.safety else self._hot_target(poco)
+        if self.safety:
+            self.hot = False
         box = self._box_target(box_in_c, box_out_c)
-        target = max(poco, box)
-        if box > poco:
+        target = max(poco, box, hot)
+        if box > max(poco, hot):
             reason = "box"
+        elif hot > poco:
+            reason = "hot_core"
         if 0.0 < target < cfg.stall_pct:
             target = cfg.stall_pct
         if self.safety:
             self.duty_pct = 100.0
         else:
-            ceiling = max(prof.max_pct, cfg.box_max_pct if box > 0 else 0.0)
-            self.duty_pct = self._shape(target, dt, ceiling)
-        return FanDecision(self.duty_pct, ctrl, reason, poco, box)
+            # the hot-core term may exceed the profile ceiling (low: 40 %)
+            ceiling = max(prof.max_pct, cfg.box_max_pct if box > 0 else 0.0,
+                          hot)
+            self.duty_pct = self._shape(target, dt, ceiling, fast_up=hot > 0.0)
+        return FanDecision(self.duty_pct, ctrl, reason, poco, box, hot)
 
 
 # Lumped plant used by the closed-loop tests and docs/THERMAL_MODEL.md.

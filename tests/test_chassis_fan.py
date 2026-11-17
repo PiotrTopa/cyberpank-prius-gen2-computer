@@ -48,16 +48,79 @@ def test_gpu_leads_the_control_temperature():
                                       box_out_c=None, power_mode="full").control_c is None
 
 
-def test_cpu_spikes_alone_do_not_run_the_fan():
-    """The production load spikes the CPU to 96 °C at any fan speed: no reaction."""
+def test_brief_cpu_spikes_alone_do_not_run_the_fan():
+    """A single 2 s sample at 96 °C between cool readings stays under the
+    hot-core on-point after its 5 s low-pass: no reaction."""
     p = ChassisFanPolicy(CFG)
     t, duties = 0.0, []
     for i in range(600):
-        cpu = 96.0 if i % 20 >= 15 else 76.0
+        cpu = 96.0 if i % 20 == 19 else 76.0
         duties.append(p.step(t, cpu_c=cpu, gpu_c=70.0, ambient_c=25.0, box_in_c=None,
                              box_out_c=None, power_mode="full").duty_pct)
         t += 2.0
-    assert max(duties) == 0.0 and not p.safety
+    assert max(duties) == 0.0 and not p.safety and not p.hot
+
+
+# ── hot-core term (2026-11-17: hottest core 89-96 °C on the road at 28-50 %) ──
+
+def test_sustained_hot_core_runs_the_fan_to_full_within_seconds():
+    """The road case: GPU-led duty modest, hottest core cycling 89..96 °C."""
+    p = ChassisFanPolicy(CFG)
+    settle(p, cpu=80.0, gpu=80.0)          # GPU-led, below full
+    base = p.duty_pct
+    assert 0.0 < base < 60.0 and not p.hot
+    t, duties = 1e5, []
+    for i in range(30):                    # 1 s ticks, hottest core 96 °C
+        duties.append(p.step(t + i, cpu_c=96.0, gpu_c=80.0, ambient_c=25.0, box_in_c=None,
+                             box_out_c=None, power_mode="full"))
+    assert duties[-1].duty_pct == 100.0 and duties[-1].reason == "hot_core"
+    # 100 % within about 10 s of the core going hot (5 s filter + fast slew)
+    first_full = next(i for i, d in enumerate(duties) if d.duty_pct == 100.0)
+    assert first_full <= 10
+
+
+def test_hot_core_ramp_floor_and_hysteresis():
+    p = ChassisFanPolicy(CFG)
+    # cool GPU: normal target 0; hot core at the ramp middle
+    mid = (CFG.hot_on_c + CFG.hot_full_c) / 2
+    d = settle(p, cpu=mid, gpu=40.0)
+    assert p.hot and d.duty_pct == pytest.approx(50.0, abs=1.0)
+    assert d.control_c < CFG.full.on_c      # the GPU-led part did not engage
+    # just above on: the floor
+    d = settle(p, cpu=CFG.hot_on_c + 0.2, gpu=40.0, t0=1e5)
+    assert p.hot and d.duty_pct >= CFG.hot_floor_pct
+    # between release and on: held (hysteresis)
+    d = settle(p, cpu=(CFG.hot_on_c + CFG.hot_release_c) / 2, gpu=40.0, t0=2e5)
+    assert p.hot and d.duty_pct >= CFG.hot_floor_pct
+    # below release: back to the quiet GPU-led behaviour (fan off here)
+    d = settle(p, cpu=CFG.hot_release_c - 1.0, gpu=40.0, t0=3e5)
+    assert not p.hot and d.duty_pct == 0.0
+
+
+def test_hot_core_builds_on_the_normal_target():
+    p = ChassisFanPolicy(CFG)
+    gpu = (CFG.full.on_c + CFG.full.full_c) / 2
+    normal = settle(p, cpu=70.0, gpu=gpu).duty_pct
+    q = ChassisFanPolicy(CFG)
+    d = settle(q, cpu=CFG.hot_on_c + 0.25 * (CFG.hot_full_c - CFG.hot_on_c), gpu=gpu)
+    assert d.duty_pct == pytest.approx(normal + 0.25 * (100.0 - normal), abs=CFG.deadband_pct)
+
+
+def test_hot_core_exceeds_the_low_ceiling():
+    p = ChassisFanPolicy(CFG)
+    d = settle(p, cpu=CFG.hot_full_c + 1.0, gpu=60.0, mode="low")
+    assert d.duty_pct == 100.0 and d.reason == "hot_core" and not p.safety
+    d = settle(p, cpu=70.0, gpu=60.0, mode="low", t0=1e5)
+    assert not p.hot and d.duty_pct <= CFG.low.max_pct
+
+
+def test_hot_core_thresholds_are_config():
+    from dataclasses import replace
+    cfg = replace(CFG, hot_on_c=70.0, hot_full_c=75.0, hot_release_c=66.0)
+    p = ChassisFanPolicy(cfg)
+    assert settle(p, cpu=76.0, gpu=40.0).duty_pct == 100.0
+    p = ChassisFanPolicy(CFG)
+    assert settle(p, cpu=76.0, gpu=40.0).duty_pct == 0.0
 
 
 def test_filter_time_constant():

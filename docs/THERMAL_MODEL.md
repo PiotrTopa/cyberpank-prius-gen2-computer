@@ -194,11 +194,26 @@ Shared numbers:
 | override on | control ≥ 86 °C, or raw ≥ 98 °C | past the GPU trip; raw 98 °C is above anything seen with the fan running (peak 97.2 °C) |
 | override release | control < 82 °C | |
 | slew up / down | 5 / 0.5 %/s, 4 % deadband | steady sound instead of following the 1–2 K jitter |
+| hot-core term | hottest raw CPU core, low-passed at 5 s: engages above 84 °C, ramps the duty linearly from the normal target at 84 °C to 100 % at 90 °C, holds at least 40 % while engaged, releases below 80 °C; rises at 30 %/s without deadband; may exceed the `low` ceiling | road drive 2026-11-17 (below) |
 | box purge | unchanged | no sensor on the bench, so nothing to justify a change. Untested |
 
 There is no override at raw 80 °C: raw CPU reaches 95–97 °C at any fan speed, so such
-an override holds the fan at 100 % whenever roadsense runs, with no benefit. The
-`--fan-*` backend flags (`backend/__main__.py`) override single policy numbers.
+an override holds the fan at 100 % whenever roadsense runs. The `--fan-*` backend flags
+(`backend/__main__.py`) override single policy numbers (`--fan-hot-on`, `--fan-hot-full`,
+`--fan-hot-release` for the hot-core term).
+
+**Hot-core term (2026-11-17).** On a drive the hottest CPU core (the max over the
+`cpu*`/`cluster*` zones, which is what the service passes as `cpu_c`) cycled 89–96 °C
+while the fan sat at 28–50 %: the 15 K CPU offset leaves the GPU in charge, and the
+override starts only at a filtered 86 °C control temperature or a raw 98 °C.
+roadsense's envd pauses itself above 92 °C, and the phone later hard-reset (heat or
+supply, unproven). The owner ranks staying below about 88 °C on the hottest core above
+quietness, will improve the cooling, and expects more compute load. The term therefore
+reacts to the hottest core directly (`hot_*` fields in `FanPolicyConfig`). Under the
+bench production load (CPU peaks 95–97 °C at any fan speed, section 3.1) it will hold
+the fan near 100 % whenever roadsense runs; that is accepted. Whether full airflow in
+the installed box keeps the core under 88 °C is open (section 7). A single 2 s spike
+to 96 °C between 76 °C readings stays below the on-point after the filter.
 
 Expected fan-off limit under roadsense, extrapolated from about 10 K/W total: the fan
 stays off below an ambient of roughly 12 °C (78 °C on-point), so a cold car stays silent.
@@ -238,5 +253,7 @@ been judged by ear.
 * **True CPU clock** is unreadable, and CPU cooling devices did not act at 95 °C (section
   1). Road rate is the only throughput evidence, and CPU-only throughput was not tested.
 * **Passive steady state at production load** was not reached (abort at 98 °C).
+* **Hot-core term on the road.** Not yet measured in the car: whether 100 % keeps the
+  hottest core under 88 °C in the installed box, and how often the term engages.
 * **`low` worst case** uses a synthetic GPU load that the real key-off state does not
   have; real key-off load is expected near the 0.62 W idle.
