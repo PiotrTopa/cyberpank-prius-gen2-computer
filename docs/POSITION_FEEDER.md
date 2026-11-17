@@ -288,6 +288,13 @@ Deploy (none of this was done):
   left turn, or a GNSS course, settles it.
 * 0x0B1/0x0B3 read 2.2 % below 0x0B4; 0x0B1/0x0B3 bytes E,F and the 0x025 fraction nibble are not
   decoded.
+* Gyro yaw is the car's setting since 2026-11-17 (`BACKEND_POSITION_YAW=wheels,gyro` in
+  `/etc/prius/backend.env`), scale left at 0.0044 rad/s per count. Check on the owner's turns at full
+  left lock that day (16:01:23–16:02:17, 3–4 km/h): the gyro integrates to 552° in the steady part
+  and 640° over the whole manoeuvre; the owner did not drive exact full circles and judged the
+  reading sensible, so it is no absolute calibration. Speed / yaw rate there gives a 4.5 m radius.
+  Against the rear-wheel yaw at driving speeds the scale is 1.006 ± 0.009 (roadsense lane L18).
+  roadsense's own estimator refines it against GNSS course when the receiver allows.
 * The yaw-rate sensor (0x022) is decoded (the state shows it as `dynamics.yaw_rate_dps`; the feeder uses the same decode, scale and start offsets from `comm/can_decoder.py`, at the bus rate) but is opt-in as a position input (`gyro`): its scale is probable (slope 0.97-0.98 against the rear wheel-speed yaw), not calibrated on a full circle.
 * Replay mode (`--replay`) has no panda, so no motion; the feeder is a live-car feature.
 * Steering ratio / wheelbase in mapd are nominal (19.1 / 2.70 m); this car's effective ratio is
