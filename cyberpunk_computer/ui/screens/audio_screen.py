@@ -111,16 +111,22 @@ class AudioScreen(Screen):
     """
     Audio settings screen.
     
-    Shows a scrollable list of audio settings (volume 0-63, bass/mid/treble
-    -5..+5, balance/fader -7..+7). These are UI/state values only: the stock
-    head unit is removed and the aftermarket radio is not on the AVC-LAN
-    (AVC_MAP.md), so there is no bus path for audio (see io/egress.py).
+    Shows a list of audio settings (volume 0-63, mute, media keys,
+    bass/mid/treble -5..+5, balance/fader -7..+7). Volume, mute and the media
+    keys drive the Android head unit over the backend's adb link
+    (backend/headunit.py, HEADUNIT_INTEGRATION.md §8.3); the aftermarket radio
+    is not on the AVC-LAN (AVC_MAP.md, io/egress.py), so bass/mid/treble/
+    balance/fader stay UI/state values only.
     """
-    
-    # Layout constants
+
+    # Layout constants (8 rows fit 480x240 above the 22 px footer)
     HEADER_HEIGHT = 30
-    ITEM_HEIGHT = 28
-    ITEM_PADDING = 4
+    ITEM_HEIGHT = 20
+    ITEM_PADDING = 3
+
+    #: MEDIA row options -> backend headunit_media keys
+    MEDIA_OPTIONS = ["PLAY/PAUSE", "NEXT", "PREV"]
+    MEDIA_KEYS = ["play_pause", "next", "prev"]
     SIDE_MARGIN = 20
     
     def __init__(self, size: Tuple[int, int], app=None, initial_volume: int = 25):
@@ -130,6 +136,12 @@ class AudioScreen(Screen):
         self.items: List[MenuItem] = [
             # Volume: 0-63 (Toyota uses 6-bit volume), step 1
             MenuItem("VOLUME", initial_volume, 0, 63, 1),
+
+            # Head unit mute (absolute; the backend reads the unit back)
+            MenuItem("MUTE", 0, options=["OFF", "ON"]),
+
+            # Head unit media keys: turn picks, OK sends
+            MenuItem("MEDIA", 0, options=list(self.MEDIA_OPTIONS)),
             
             # Bass: -5 to +5
             MenuItem("BASS", 0, -5, 5, 1),
@@ -156,6 +168,34 @@ class AudioScreen(Screen):
         
         # Value-change callback (set by the main screen; dispatches actions)
         self._on_value_changed = None
+        # Store for the live head-unit status line (optional)
+        self._store = None
+
+    def attach_store(self, store) -> None:
+        """Follow the store: header shows the head unit's state, volume and
+        mute rows track the unit's real level while not being edited."""
+        self._store = store
+
+    def _hu_status(self) -> Optional[str]:
+        st = getattr(self._store, "state", None)
+        hu = getattr(st, "headunit", None)
+        if hu is None or not hu.enabled:
+            return None
+        if not hu.present:
+            return "NO HEAD UNIT"
+        if st.audio.muted:
+            return "HU MUTE"
+        return "HU %d" % st.audio.volume
+
+    def _sync_from_store(self) -> None:
+        st = getattr(self._store, "state", None)
+        if st is None:
+            return
+        editing = self.items[self._selected_index].label if self._editing else None
+        if editing != "VOLUME":
+            self.set_value_from_avc("VOLUME", st.audio.volume)
+        if editing != "MUTE":
+            self.set_value_from_avc("MUTE", 1 if st.audio.muted else 0)
     
     @property
     def volume(self) -> int:
@@ -175,7 +215,8 @@ class AudioScreen(Screen):
     def update(self, dt: float) -> None:
         """Check for inactivity timeout."""
         super().update(dt)
-        
+        self._sync_from_store()
+
         # Check inactivity
         if time.time() - self._last_activity > self._get_timeout():
             self._exit_screen()
@@ -242,17 +283,16 @@ class AudioScreen(Screen):
         
         if self._editing:
             # Editing mode: arrows adjust value
-            if event == IE.ROTATE_LEFT:
+            if event in (IE.ROTATE_LEFT, IE.ROTATE_RIGHT):
                 item = self.items[self._selected_index]
-                item.adjust(-1)
-                self._notify_value_changed(item.label, item.value)
-                return True
-            elif event == IE.ROTATE_RIGHT:
-                item = self.items[self._selected_index]
-                item.adjust(1)
-                self._notify_value_changed(item.label, item.value)
+                item.adjust(-1 if event == IE.ROTATE_LEFT else 1)
+                if item.label != "MEDIA":          # MEDIA: turn picks, OK sends
+                    self._notify_value_changed(item.label, item.value)
                 return True
             elif event == IE.PRESS_LIGHT:
+                item = self.items[self._selected_index]
+                if item.label == "MEDIA":
+                    self._notify_value_changed("MEDIA", self.MEDIA_KEYS[item.value])
                 # Exit editing mode
                 self._editing = False
                 return True
@@ -310,6 +350,15 @@ class AudioScreen(Screen):
         title_x = (self.width - title_surf.get_width()) // 2
         title_y = (self.HEADER_HEIGHT - title_surf.get_height()) // 2
         surface.blit(title_surf, (title_x, title_y))
+
+        # Head unit status (right): "HU 32" / "HU MUTE" / "NO HEAD UNIT"
+        hu = self._hu_status()
+        if hu:
+            hfont = get_mono_font(10)
+            color = COLORS["text_tertiary"] if hu.startswith("NO") else COLORS["text_value"]
+            hs = hfont.render(hu, False, color)
+            surface.blit(hs, (self.width - hs.get_width() - 8,
+                              (self.HEADER_HEIGHT - hs.get_height()) // 2))
         
         # Separator line
         pygame.draw.line(
@@ -406,7 +455,9 @@ class AudioScreen(Screen):
         pygame.draw.rect(surface, COLORS["bg_panel"], (0, bar_y, self.width, bar_h))
         pygame.draw.line(surface, COLORS["border_dim"], (0, bar_y), (self.width, bar_y))
 
-        if self._editing:
+        if self._editing and self.items[self._selected_index].label == "MEDIA":
+            hint = "[TURN] KEY   [OK] SEND   [BACK] EXIT"
+        elif self._editing:
             hint = "[TURN] ADJUST   [OK] DONE   [BACK] EXIT"
         else:
             hint = "[TURN] SELECT   [OK] EDIT   [BACK] EXIT"

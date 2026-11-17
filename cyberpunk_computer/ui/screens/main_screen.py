@@ -193,6 +193,7 @@ class MainScreen(Screen):
                 12
             ),
             value=self._volume,
+            max_val=63,           # AudioState / head unit master level 0..63
             segments=10,
             show_value=False  # numeric value already shown by the VOL label above
         )
@@ -608,7 +609,7 @@ class MainScreen(Screen):
         if time.time() - self._volume_touch_t > self.VOLUME_ECHO_HOLD_S:
             self._volume = state.audio.volume
             self._volume_bar.set_value(state.audio.volume)
-            self._volume_label.set_value(str(state.audio.volume))
+            self._volume_label.set_value(self._volume_text(state))
 
         # Climate
         from ...state.climate_model import format_temp  # 0.5 °C grid: "21.5" / "22"
@@ -1200,10 +1201,10 @@ class MainScreen(Screen):
         # Volume editing mode
         if self._editing_volume:
             if event == IE.ROTATE_LEFT:
-                self._adjust_volume(-5)
+                self._adjust_volume(-2)
                 return True
             elif event == IE.ROTATE_RIGHT:
-                self._adjust_volume(5)
+                self._adjust_volume(2)
                 return True
             elif event == IE.PRESS_LIGHT or event == IE.PRESS_STRONG:
                 self._exit_volume_edit()
@@ -1252,9 +1253,20 @@ class MainScreen(Screen):
         # Normal input handling
         return super().handle_input(event)
     
+    @staticmethod
+    def _volume_text(state) -> str:
+        """VOL value: the head unit's level, "MUTE", or "--" when the head
+        unit module is on but the unit is absent (ACC off, link down)."""
+        hu = getattr(state, "headunit", None)
+        if hu is not None and hu.enabled and not hu.present:
+            return "--"
+        if state.audio.muted:
+            return "MUTE"
+        return str(state.audio.volume)
+
     def _adjust_volume(self, delta: int) -> None:
-        """Adjust volume by delta amount."""
-        self._volume = max(0, min(100, self._volume + delta))
+        """Adjust volume by delta amount (0..63, head unit master level)."""
+        self._volume = max(0, min(63, self._volume + delta))
         self._volume_bar.set_value(self._volume)
         self._volume_label.set_value(str(self._volume))
         
@@ -1393,6 +1405,12 @@ class MainScreen(Screen):
                         store.dispatch(SetBalanceAction(value, source=ActionSource.UI))
                     elif label == "FADER":
                         store.dispatch(SetFaderAction(value, source=ActionSource.UI))
+                    elif label == "MUTE":
+                        store.dispatch(SetMuteAction(bool(value), source=ActionSource.UI))
+                    elif label == "MEDIA":
+                        from ...state.actions import HeadunitCommandAction
+                        store.dispatch(HeadunitCommandAction("media", {"key": value},
+                                                             source=ActionSource.UI))
                     
                 audio_screen.set_on_value_changed(on_audio_value_changed)
                 
@@ -1404,6 +1422,8 @@ class MainScreen(Screen):
                 audio_screen.set_value_from_avc("TREBLE", state.audio.treble)
                 audio_screen.set_value_from_avc("BALANCE", state.audio.balance)
                 audio_screen.set_value_from_avc("FADER", state.audio.fader)
+                audio_screen.set_value_from_avc("MUTE", 1 if state.audio.muted else 0)
+                audio_screen.attach_store(store)
             
             self.app.push_screen(audio_screen)
     

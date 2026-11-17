@@ -217,6 +217,45 @@ def _build_position():
     )
 
 
+def _build_headunit():
+    """Head unit audio control over adb (backend.headunit); off unless enabled::
+
+        BACKEND_HEADUNIT=1                  # 0 (default) = no worker, headunit.enabled false
+        BACKEND_HEADUNIT_ALERT_SOUNDS=1     # alert framework sounds through the unit (default 0)
+        BACKEND_HEADUNIT_SERIAL=MJU8DY59WS8LMB85   # preferred adb serial (else any device in state 'device')
+        BACKEND_HEADUNIT_ADB=127.0.0.1:5037 # the adb server (owned by prius-gnss-bridge.service)
+        BACKEND_HEADUNIT_POLL_S=2           # dumpsys audio cadence while present (absent: 5 s)
+        BACKEND_HEADUNIT_ALERT_GAP_S=3      # global min gap between alert sounds
+
+    Returns ``None`` when off.
+    """
+    if not _env_flag("BACKEND_HEADUNIT"):
+        return None
+    from .headunit import DEFAULT_SERIAL, HeadunitConfig
+    env = os.environ.get
+    log = logging.getLogger(__name__)
+    host, port = "127.0.0.1", 5037
+    raw = (env("BACKEND_HEADUNIT_ADB") or "").strip()
+    if raw:
+        try:
+            h, _, p = raw.rpartition(":")
+            host, port = (h or host), int(p)
+        except ValueError:
+            log.error("Bad BACKEND_HEADUNIT_ADB=%r: 127.0.0.1:5037 used", raw)
+    try:
+        poll = max(0.5, min(30.0, float(env("BACKEND_HEADUNIT_POLL_S") or 2)))
+        gap = max(1.0, min(60.0, float(env("BACKEND_HEADUNIT_ALERT_GAP_S") or 3)))
+    except ValueError:
+        log.error("Bad BACKEND_HEADUNIT_POLL_S / _ALERT_GAP_S: defaults used")
+        poll, gap = 2.0, 3.0
+    return HeadunitConfig(
+        enabled=True, host=host, port=port,
+        serial=(env("BACKEND_HEADUNIT_SERIAL") or DEFAULT_SERIAL).strip() or None,
+        poll_present_s=poll, alert_sounds=_env_flag("BACKEND_HEADUNIT_ALERT_SOUNDS"),
+        alert_min_gap_s=gap,
+    )
+
+
 def _env_flag(name: str, default: str = "0") -> bool:
     return (os.environ.get(name, default) or "").strip().lower() in ("1", "true", "yes", "on")
 
@@ -439,6 +478,7 @@ def _build_config(args: argparse.Namespace) -> BackendConfig:
         roadsense_config=roadsense_config,
         roadsense_scene_config=_build_roadsense_scene(),
         position_config=_build_position(),
+        headunit_config=_build_headunit(),
         acc_off_debounce_s=float(os.environ.get("BACKEND_ACC_OFF_DEBOUNCE_S", "3")),
         panda_enabled=(not args.no_panda) and _env_flag("BACKEND_PANDA_ENABLED", "1"),
         panda_bus=args.panda_bus if args.panda_bus is not None

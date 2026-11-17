@@ -849,6 +849,26 @@ class ProvisionalBeanSignals:
 
 
 @dataclass(frozen=True)
+class HeadunitState:
+    """Android head unit over the phone's adb link (backend.headunit,
+    docs/HEADUNIT_INTEGRATION.md §8.3). ``enabled`` False = the module is off
+    (BACKEND_HEADUNIT unset). ``volume`` is the unit's master level 0..63
+    (also mirrored into ``audio.volume`` / ``audio.muted`` while present).
+    ``agent``: the last alert intent sent {ts, id, tone, say, sent};
+    ``sound``: the alert framework's head-unit sound sink status."""
+    enabled: bool = False
+    present: bool = False
+    serial: str = ""
+    volume: Optional[int] = None
+    muted: Optional[bool] = None
+    last_seen: float = 0.0
+    agent: Mapping = field(default_factory=dict)
+    error: str = ""
+    counters: Mapping = field(default_factory=dict)
+    sound: Mapping = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class BeanState:
     """Toyota BEAN body bus as seen by the powerbox receiver (fw >= 2.3.0).
 
@@ -1008,6 +1028,7 @@ class AppState:
     vision: VisionState = field(default_factory=VisionState)
     roadsense: RoadsenseState = field(default_factory=RoadsenseState)
     bean: BeanState = field(default_factory=BeanState)
+    headunit: HeadunitState = field(default_factory=HeadunitState)
 
     # UI-only state (not from vehicle)
     screen_brightness: int = 100

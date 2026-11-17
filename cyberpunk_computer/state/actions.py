@@ -12,7 +12,7 @@ Action types:
 
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 
 class ActionType(Enum):
@@ -135,6 +135,8 @@ class ActionType(Enum):
     SET_BEAN_CAPTURE = auto()         # capture log status mirror
     SET_RELAY = auto()                # relay board load channel (PCF8574 ch 2-8)
     MFD_HOLD = auto()                 # operator hold: keep the MFD board on (bench/test)
+    HEADUNIT_COMMAND = auto()         # head unit audio command (backend.headunit)
+    SET_HEADUNIT_STATE = auto()       # head unit status mirror (volume, mute, presence)
     ROADSENSE_MODE = auto()           # roadsense stack operator mode (auto|on|off)
     ROADSENSE_RESTART = auto()        # restart roadsense.target
     INPUT_EVENT = auto()              # human-interface event (frontend/satellite HID)
@@ -2004,3 +2006,27 @@ class ClimateButtonAction(Action):
         super().__init__(ActionType.CLIMATE_BUTTON, source)
         self.button = button
         self.count = count
+
+
+class HeadunitCommandAction(Action):
+    """Audio command for the Android head unit (backend.headunit, over adb):
+    op ``volume`` {level | delta}, ``mute`` {on: true|false|"toggle"},
+    ``media`` {key: play_pause|next|prev}, ``alert`` {tone, say, lang, gain,
+    sound, id}, ``alert_stop``. Not reduced into state."""
+    OPS = ("volume", "mute", "media", "alert", "alert_stop")
+
+    def __init__(self, op: str, params: Optional[Dict[str, Any]] = None,
+                 source: ActionSource = ActionSource.UI):
+        super().__init__(ActionType.HEADUNIT_COMMAND, source)
+        if op not in self.OPS:
+            raise ValueError("head unit op must be one of %s" % (self.OPS,))
+        self.op = op
+        self.params = dict(params or {})
+
+
+class SetHeadunitStateAction(Action):
+    """Mirror of the head unit status into ``AppState.headunit`` (and its
+    volume / mute into ``audio`` while present)."""
+    def __init__(self, fields: Dict[str, Any], source: ActionSource = ActionSource.INTERNAL):
+        super().__init__(ActionType.SET_HEADUNIT_STATE, source)
+        self.fields = dict(fields)

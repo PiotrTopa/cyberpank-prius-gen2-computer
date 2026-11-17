@@ -27,6 +27,7 @@ The UI code is identical in the frontend and the standalone app; only the data s
 | panda reader | broadcast CAN frames → `IngressController.ingest_broadcast_can` → `Store.dispatch` (the store holds a re-entrant lock for this path); with the position feeder on, `CanMotionTap.on_frame` sees each frame first |
 | roadsense-scene | roadsense `/ws` reader → ZMQ event `roadsense_scene` (`backend/roadsense_scene.py`) |
 | position-feeder | only with `BACKEND_POSITION_FEEDER=1`: CAN motion + GNSS → roadsense mapd `position.sock` (`backend/position_feeder.py`, [POSITION_FEEDER.md](POSITION_FEEDER.md)) |
+| headunit-adb | only with `BACKEND_HEADUNIT=1`: head unit volume / mute / media keys / alert sounds over the phone's adb server (smart-socket client, never the `adb` binary; `backend/headunit.py`, [HEADUNIT_INTEGRATION.md](HEADUNIT_INTEGRATION.md) §8.3) |
 
 `api/bridge.py::StoreBridge` is the boundary: API/ZMQ commands are queued and dispatched on the
 engine thread; snapshots go out latest-only so a slow client never blocks the engine.

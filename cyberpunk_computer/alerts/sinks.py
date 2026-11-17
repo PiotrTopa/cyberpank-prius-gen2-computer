@@ -78,8 +78,8 @@ class NullSoundSink(SoundSink):
 
     def status(self) -> Dict[str, Any]:
         return {"sink": self.name, "available": False, "requests": self.count,
-                "note": "no audio output on this system yet (MFD Pi has none; head-unit agent "
-                        "not built; meter buzzer on the BEAN deny list)"}
+                "note": "no audio output configured (head unit: BACKEND_HEADUNIT=1 + "
+                        "BACKEND_HEADUNIT_ALERT_SOUNDS=1, backend/headunit.py)"}
 
 
 class NotificationSink:

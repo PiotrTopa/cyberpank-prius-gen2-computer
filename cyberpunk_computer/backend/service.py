@@ -268,6 +268,10 @@ class BackendConfig:
     # synthetic / none) -> roadsense mapd's position.sock. Off unless
     # BACKEND_POSITION_FEEDER=1. PositionFeederConfig; None -> off.
     position_config: Optional[object] = None
+    # Head unit audio control over adb (backend.headunit): volume / mute /
+    # media keys / alert sounds through the agent app. Off unless
+    # BACKEND_HEADUNIT=1. HeadunitConfig; None -> off.
+    headunit_config: Optional[object] = None
 
     # ── USB hub port power (backend.port_power) ──────────────────────────────
     # Topology of hub port power control: the powerbox's socket has native PPPS
@@ -462,6 +466,12 @@ class BackendService:
         self.camera_preview = None
         # Driver alerts + smart functions (cyberpunk_computer/alerts).
         self.alerts = None
+        # Head unit audio over adb (backend.headunit) + its alert sound sink.
+        self.headunit = None
+        self.headunit_sound = None
+        self._headunit_version = -1
+        self._headunit_sound_last: Optional[dict] = None
+        self._headunit_sound_t = 0.0
         # Key-off "low" CPU profile deferred until roadsense has stopped
         # (modeld is pinned to cpu4-7, which "low" takes offline).
         self._low_mode_deferred = False
@@ -701,6 +711,10 @@ class BackendService:
         # shadow mode; event "alert" for the MFD banner, /api/v1/alerts.
         self.alerts = self._wire_alerts(twin, bridge, db)
 
+        # Head unit audio over adb (off unless BACKEND_HEADUNIT=1); its sound
+        # sink replaces the alert framework's null sink when enabled.
+        self._wire_headunit(twin)
+
 
         # On-demand camera preview (lease + frames; powers the camera hub
         # through the roadsense manager's preview hold when the stack is down).
@@ -831,6 +845,81 @@ class BackendService:
                 self.alerts.tick()
             except Exception:
                 logger.exception("alert tick failed")
+
+    def _wire_headunit(self, twin: VirtualTwin) -> None:
+        """Head unit audio control (backend.headunit): adb worker thread,
+        ``headunit_*`` commands and set_volume / set_mute from the UI, state
+        section ``headunit``, optional alert sounds."""
+        hcfg = self.config.headunit_config
+        if hcfg is None or not getattr(hcfg, "enabled", False):
+            return
+        try:
+            from .headunit import HeadunitController, HeadunitSoundSink, PRESETS
+            from ..state.actions import ActionSource, SetHeadunitStateAction
+            ctl = HeadunitController(hcfg)
+            self.headunit = ctl
+
+            def _headunit_middleware(action, _store) -> None:
+                name = type(action).__name__
+                try:
+                    if name == "HeadunitCommandAction":
+                        p = action.params
+                        if action.op == "volume":
+                            if p.get("level") is not None:
+                                ctl.set_volume(int(p["level"]))
+                            else:
+                                ctl.step_volume(int(p.get("delta") or 0))
+                        elif action.op == "mute":
+                            ctl.set_mute(p.get("on"))
+                        elif action.op == "media":
+                            ctl.media(p["key"])
+                        elif action.op == "alert":
+                            ctl.alert(**p)
+                        elif action.op == "alert_stop":
+                            ctl.alert_stop()
+                    elif action.source == ActionSource.UI and name == "SetVolumeAction":
+                        ctl.set_volume(int(action.volume))
+                    elif action.source == ActionSource.UI and name == "SetMuteAction":
+                        ctl.set_mute(bool(action.muted))
+                except (ValueError, KeyError, TypeError) as exc:
+                    logger.warning("head unit command %s refused: %s", name, exc)
+
+            twin.store.add_middleware(_headunit_middleware)
+            twin.store.dispatch(SetHeadunitStateAction(ctl.status()))
+            if hcfg.alert_sounds and self.alerts is not None:
+                sink = HeadunitSoundSink(ctl, hcfg.alert_min_gap_s, hcfg.alert_per_id_gap_s)
+                self.alerts.sound = sink
+                self.alerts.manager.sound = sink
+                self.headunit_sound = sink
+            logger.info("head unit audio wired (adb %s:%d, serial %s, alert sounds %s, presets %s)",
+                        hcfg.host, hcfg.port, hcfg.serial or "any",
+                        "on" if self.headunit_sound is not None else "off", ",".join(PRESETS))
+        except Exception:
+            logger.exception("Head unit audio could not be wired; disabled")
+            self.headunit = None
+            self.headunit_sound = None
+
+    def _headunit_tick(self) -> None:
+        """Mirror the worker's status into ``headunit`` when it changed."""
+        if self.headunit is None or self.twin is None:
+            return
+        v = self.headunit.version
+        now = time.monotonic()
+        snd = None
+        if self.headunit_sound is not None and now - self._headunit_sound_t >= 1.0:
+            self._headunit_sound_t = now
+            snd = self.headunit_sound.status()
+            if snd == self._headunit_sound_last:
+                snd = None
+        if v == self._headunit_version and snd is None:
+            return
+        self._headunit_version = v
+        from ..state.actions import SetHeadunitStateAction
+        fields = self.headunit.status()
+        if snd is not None:
+            self._headunit_sound_last = snd
+            fields["sound"] = snd
+        self.twin.store.dispatch(SetHeadunitStateAction(fields))
 
     def _wire_position_feeder(self, twin: VirtualTwin):
         """Position feeder -> roadsense mapd (backend.position_feeder).
@@ -1615,6 +1704,8 @@ class BackendService:
             self.roadsense_scene.start()
         if self.position_feeder is not None:
             self.position_feeder.start()
+        if self.headunit is not None:
+            self.headunit.start()
         if self.dashcam is not None:
             try:
                 self.dashcam.start()
@@ -1661,6 +1752,7 @@ class BackendService:
                     self._panda_tick()
                     self._dashcam_tick()
                     self._alerts_tick()
+                    self._headunit_tick()
                     if self.diag is not None:
                         self.diag.tick()
                     if self.recorder is not None:
@@ -2434,6 +2526,11 @@ class BackendService:
                 self.position_feeder.stop()
             except Exception:
                 logger.exception("Error stopping the position feeder")
+        if self.headunit is not None:
+            try:
+                self.headunit.stop()
+            except Exception:
+                logger.exception("Error stopping the head unit worker")
         if self.alerts is not None:
             try:
                 self.alerts.stop()

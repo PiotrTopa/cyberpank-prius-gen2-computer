@@ -63,6 +63,7 @@ class StateSlice(Enum):
     VISION = auto()  # dashcam vision: auto-light recommendation (io/dashcam_ingest.py)
     ROADSENSE = auto()  # roadsense perception stack on this computer (backend.roadsense_power)
     BEAN = auto()  # BEAN body bus: message table, known values, capture status (device 203)
+    HEADUNIT = auto()  # Android head unit over adb: presence, volume, mute (backend.headunit)
     ALL = auto()
 
 
@@ -1234,6 +1235,24 @@ class Store:
             if new_bean != self._state.bean:
                 self._state = replace(self._state, bean=new_bean)
                 affected.add(StateSlice.BEAN)
+
+        elif action.type == ActionType.SET_HEADUNIT_STATE:
+            from .app_state import HeadunitState as _HU
+            known = {f for f in _HU.__dataclass_fields__}
+            fields = {k: v for k, v in action.fields.items() if k in known}
+            new_hu = replace(self._state.headunit, **fields)
+            if new_hu != self._state.headunit:
+                self._state = replace(self._state, headunit=new_hu)
+                affected.add(StateSlice.HEADUNIT)
+                if new_hu.present:
+                    audio = self._state.audio
+                    if new_hu.volume is not None:
+                        audio = audio.with_volume(int(new_hu.volume))
+                    if new_hu.muted is not None:
+                        audio = replace(audio, muted=bool(new_hu.muted))
+                    if audio != self._state.audio:
+                        self._state = replace(self._state, audio=audio)
+                        affected.add(StateSlice.AUDIO)
 
         elif action.type == ActionType.BEAN_MARK:
             self._state = replace(self._state, bean=replace(

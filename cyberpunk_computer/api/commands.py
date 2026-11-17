@@ -199,6 +199,72 @@ def _build_mfd_hold(params: Dict[str, Any]) -> Action:
     return MfdHoldAction(_as_bool(_require(params, "on"), "on"), source=ActionSource.UI)
 
 
+def _build_headunit_volume(params: Dict[str, Any]) -> Action:
+    from ..state.actions import HeadunitCommandAction
+    has_level = params.get("level") is not None
+    has_delta = params.get("delta") is not None
+    if has_level == has_delta:
+        raise CommandError("give exactly one of 'level' or 'delta'")
+    if has_level:
+        return HeadunitCommandAction("volume", {"level": _as_int(params["level"], "level", 0, 63)})
+    return HeadunitCommandAction("volume", {"delta": _as_int(params["delta"], "delta", -63, 63)})
+
+
+def _build_headunit_mute(params: Dict[str, Any]) -> Action:
+    from ..state.actions import HeadunitCommandAction
+    on = _require(params, "on")
+    if isinstance(on, str) and on.strip().lower() == "toggle":
+        return HeadunitCommandAction("mute", {"on": "toggle"})
+    return HeadunitCommandAction("mute", {"on": _as_bool(on, "on")})
+
+
+def _build_headunit_media(params: Dict[str, Any]) -> Action:
+    from ..backend.headunit import MEDIA_KEYS
+    from ..state.actions import HeadunitCommandAction
+    key = str(_require(params, "key")).strip().lower()
+    if key not in MEDIA_KEYS:
+        raise CommandError("'key' must be one of %s" % ", ".join(MEDIA_KEYS))
+    return HeadunitCommandAction("media", {"key": key})
+
+
+def _build_headunit_alert(params: Dict[str, Any]) -> Action:
+    from ..backend.headunit import PRESETS, alert_cmd
+    from ..state.actions import HeadunitCommandAction
+    allowed = {"tone", "say", "lang", "gain", "sound", "id"}
+    unknown = [k for k in params if k not in allowed]
+    if unknown:
+        raise CommandError("unknown parameter(s): %s" % ", ".join(unknown))
+    p: Dict[str, Any] = {}
+    sound = params.get("sound")
+    if sound is not None:
+        if sound not in PRESETS:
+            raise CommandError("'sound' must be one of %s" % ", ".join(PRESETS))
+        p["tone"] = PRESETS[sound]["tone"]
+        p["gain"] = PRESETS[sound].get("gain")
+    if params.get("tone") is not None:
+        p["tone"] = str(params["tone"])
+    for k in ("say", "lang"):
+        if params.get(k) is not None:
+            p[k] = str(params[k])
+    if params.get("gain") is not None:
+        try:
+            p["gain"] = float(params["gain"])
+        except (TypeError, ValueError):
+            raise CommandError("'gain' must be a number 0..1")
+    if params.get("id") is not None:
+        p["alert_id"] = str(params["id"])
+    try:
+        alert_cmd(**p)
+    except ValueError as exc:
+        raise CommandError(str(exc))
+    return HeadunitCommandAction("alert", p)
+
+
+def _build_headunit_alert_stop(params: Dict[str, Any]) -> Action:
+    from ..state.actions import HeadunitCommandAction
+    return HeadunitCommandAction("alert_stop", {})
+
+
 def _build_roadsense_restart(params: Dict[str, Any]) -> Action:
     from ..state.actions import RoadsenseRestartAction
     return RoadsenseRestartAction(source=ActionSource.UI)
@@ -427,12 +493,13 @@ def _build_satellite_revoke(params: Dict[str, Any]) -> Action:
 COMMANDS: Dict[str, Dict[str, Any]] = {
     "set_volume": {
         "builder": _build_set_volume,
-        "description": "Set audio volume.",
+        "description": "Set audio volume (head unit master level when BACKEND_HEADUNIT=1; "
+                       "otherwise UI state only).",
         "params": {"value": "int 0..63"},
     },
     "set_mute": {
         "builder": _build_set_mute,
-        "description": "Mute or unmute audio.",
+        "description": "Mute or unmute audio (head unit, absolute, when BACKEND_HEADUNIT=1).",
         "params": {"muted": "bool"},
     },
     "set_tone": {
@@ -635,6 +702,52 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
             "under-voltage or a powerbox shutdown. State in connection.mfd_state."
         ),
         "params": {"on": "bool"},
+    },
+    "headunit_volume": {
+        "builder": _build_headunit_volume,
+        "description": (
+            "Head unit master volume over adb (BACKEND_HEADUNIT=1): level = absolute "
+            "0..63, delta = step from the unit's current level. Coalesced (latest "
+            "wins); the level read back from the unit is in headunit.volume and "
+            "audio.volume. Dropped silently while the unit is absent."
+        ),
+        "params": {"level": "int 0..63", "delta": "int -63..63 (instead of level)"},
+    },
+    "headunit_mute": {
+        "builder": _build_headunit_mute,
+        "description": (
+            "Head unit mute: on=true/false is absolute (the unit's mute is a toggle: "
+            "the backend reads the state, toggles only if different and reads it "
+            "back), on='toggle' flips it. State in headunit.muted."
+        ),
+        "params": {"on": "bool | 'toggle'"},
+    },
+    "headunit_media": {
+        "builder": _build_headunit_media,
+        "description": (
+            "Media key on the head unit (vendor broadcasts; names not yet verified "
+            "on the unit, table backend/headunit.py MEDIA_KEYS)."
+        ),
+        "params": {"key": "play_pause | next | prev"},
+    },
+    "headunit_alert": {
+        "builder": _build_headunit_alert,
+        "description": (
+            "Play an alert through the agent app on the head unit "
+            "(pl.topa.priusagent AlertService; ducks the music). sound = a named "
+            "preset (info, chime, notice, warning, critical) or tone = "
+            "'hz:ms,hz:ms' (0 Hz = pause, <= 15 s); say = text for the unit's speech "
+            "engine (lang e.g. pl). gain is capped at 0.8; the level follows the "
+            "unit's master volume (silent when muted or at 0; never raised)."
+        ),
+        "params": {"sound": "preset name (optional)", "tone": "string (optional)",
+                   "say": "string <= 300 chars (optional)", "lang": "e.g. pl (optional)",
+                   "gain": "float 0..1 (optional, capped 0.8)", "id": "string (optional)"},
+    },
+    "headunit_alert_stop": {
+        "builder": _build_headunit_alert_stop,
+        "description": "Stop the alert sound in progress on the head unit and drop its queue.",
+        "params": {},
     },
     "roadsense_mode": {
         "builder": _build_roadsense_mode,

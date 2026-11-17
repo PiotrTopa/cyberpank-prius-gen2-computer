@@ -120,7 +120,9 @@ Dashboard: tab ALERTS.
 
 ### 1.7 Environment
 
-`BACKEND_ALERTS=0` disables it; `BACKEND_ALERTS_DIR` (default `alerts/` next to the metrics
+Sound: with `BACKEND_HEADUNIT=1` and `BACKEND_HEADUNIT_ALERT_SOUNDS=1` the sound sink is the head
+unit (`backend/headunit.py` `HeadunitSoundSink`, [HEADUNIT_INTEGRATION.md](HEADUNIT_INTEGRATION.md)
+§8.3); otherwise the null sink. `BACKEND_ALERTS=0` disables it; `BACKEND_ALERTS_DIR` (default `alerts/` next to the metrics
 database); `BACKEND_ALERTS_TUNING` (a JSON file); `BACKEND_ALERTS_HZ` (1..20, default 10).
 
 ### 1.8 Replay

@@ -201,15 +201,15 @@ def test_drag_volume_bar_sets_volume_and_throttles_dispatch():
         pc.move(x, y)
     pc.up(bar.right + 20, y)
     assert pc.last_gesture[0] == "drag"        # never a click
-    assert m._volume == 100
-    assert m._volume_bar.value == 100
-    assert m._volume_label.value == "100"
+    assert m._volume == 63                     # head unit / AudioState scale 0..63
+    assert m._volume_bar.value == 63
+    assert m._volume_label.value == "63"
     assert not m._editing_volume               # drag does not enter edit mode
     # Throttled: far fewer commands than moves, final value flushed by update()
     m._volume_sent_t = 0.0
     m.update(0.05)
     sent = [a.volume for a in Store.actions]
-    assert sent[-1] == 100
+    assert sent[-1] == 63
     assert len(sent) < 10
 
 
@@ -279,27 +279,27 @@ def test_audio_screen_rows_edit_and_back_chip():
     pc, clock = make(lambda: app.current_screen)
 
     row_y = lambda i: a.HEADER_HEIGHT + a.ITEM_PADDING + i * (a.ITEM_HEIGHT + a.ITEM_PADDING) + 10
-    # Tap BASS row: selects and enters edit
-    tap(pc, clock, 100, row_y(1))
-    assert a._selected_index == 1 and a._editing
-    # Tap the '>' end of the edited row: +1; value area left of it: -1
-    right = a.SIDE_MARGIN + a.width - a.SIDE_MARGIN * 2
-    tap(pc, clock, right - 10, row_y(1))
-    tap(pc, clock, right - 10, row_y(1))
-    tap(pc, clock, right - 80, row_y(1))
-    assert a.items[1].value == 1
-    assert changes == [("BASS", 1), ("BASS", 2), ("BASS", 1)]
-    # Horizontal drag on the edited row = rotate steps
-    pc.down(right - 100, row_y(1))
-    for dx in range(0, 70, 7):
-        pc.move(right - 100 + dx, row_y(1))
-    pc.up(right - 30, row_y(1))
-    assert a.items[1].value == 4    # 63 px of travel = 3 steps of 16 px
-    # Tap another row while editing: done + select + edit that row
+    # Tap BASS row (rows: VOLUME, MUTE, MEDIA, BASS, ...): selects and enters edit
     tap(pc, clock, 100, row_y(3))
     assert a._selected_index == 3 and a._editing
+    # Tap the '>' end of the edited row: +1; value area left of it: -1
+    right = a.SIDE_MARGIN + a.width - a.SIDE_MARGIN * 2
+    tap(pc, clock, right - 10, row_y(3))
+    tap(pc, clock, right - 10, row_y(3))
+    tap(pc, clock, right - 80, row_y(3))
+    assert a.items[3].value == 1
+    assert changes == [("BASS", 1), ("BASS", 2), ("BASS", 1)]
+    # Horizontal drag on the edited row = rotate steps
+    pc.down(right - 100, row_y(3))
+    for dx in range(0, 70, 7):
+        pc.move(right - 100 + dx, row_y(3))
+    pc.up(right - 30, row_y(3))
+    assert a.items[3].value == 4    # 63 px of travel = 3 steps of 16 px
+    # Tap another row while editing: done + select + edit that row
+    tap(pc, clock, 100, row_y(5))
+    assert a._selected_index == 5 and a._editing
     # Label area of the edited row = done
-    tap(pc, clock, 60, row_y(3))
+    tap(pc, clock, 60, row_y(5))
     assert not a._editing
     # BACK chip pops to the main screen
     tap(pc, clock, 20, 232)
@@ -646,3 +646,54 @@ def test_climate_screen_outside_temp_na_without_avc():
     assert item.display_value == "22°C"
     cs.update_temperatures(outside=None)
     assert item.display_value == "--"
+
+
+def test_audio_screen_headunit_rows():
+    """MUTE row toggles (absolute value out), MEDIA row: turn picks, OK sends
+    the key; the header follows the head unit state."""
+    from dataclasses import replace
+    from cyberpunk_computer.state.app_state import HeadunitState
+    from cyberpunk_computer.state.store import Store
+    from cyberpunk_computer.ui.screens import AudioScreen
+    root = main_screen()
+    app = FakeApp(root)
+    a = AudioScreen(SIZE, app, initial_volume=20)
+    out = []
+    a.set_on_value_changed(lambda label, v: out.append((label, v)))
+    store = Store()
+    a.attach_store(store)
+    app.push_screen(a)
+    assert a._hu_status() is None                    # module off: no status
+    store._state = replace(store._state, headunit=HeadunitState(enabled=True, present=False))
+    assert a._hu_status() == "NO HEAD UNIT"
+    store._state = replace(store._state, headunit=HeadunitState(enabled=True, present=True),
+                           audio=replace(store._state.audio, volume=32))
+    a._sync_from_store()
+    assert a._hu_status() == "HU 32" and a.items[0].value == 32
+    labels = [i.label for i in a.items]
+    a._selected_index = labels.index("MUTE")
+    a.handle_input(IE.PRESS_LIGHT)
+    a.handle_input(IE.ROTATE_RIGHT)
+    assert out[-1] == ("MUTE", 1)
+    a.handle_input(IE.PRESS_LIGHT)
+    a._selected_index = labels.index("MEDIA")
+    a.handle_input(IE.PRESS_LIGHT)
+    a.handle_input(IE.ROTATE_RIGHT)                  # -> NEXT, nothing sent yet
+    assert out[-1] == ("MUTE", 1)
+    a.handle_input(IE.PRESS_LIGHT)
+    assert out[-1] == ("MEDIA", "next") and not a._editing
+    # last row stays above the footer
+    assert a.HEADER_HEIGHT + a.ITEM_PADDING + len(a.items) * (a.ITEM_HEIGHT + a.ITEM_PADDING) <= 240 - 22 + a.ITEM_PADDING
+
+
+def test_main_screen_volume_text_headunit():
+    from dataclasses import replace
+    from cyberpunk_computer.state.app_state import AppState, HeadunitState
+    from cyberpunk_computer.ui.screens.main_screen import MainScreen
+    st = AppState()
+    assert MainScreen._volume_text(st) == str(st.audio.volume)
+    st = replace(st, headunit=HeadunitState(enabled=True, present=False))
+    assert MainScreen._volume_text(st) == "--"
+    st = replace(st, headunit=HeadunitState(enabled=True, present=True),
+                 audio=replace(st.audio, muted=True))
+    assert MainScreen._volume_text(st) == "MUTE"

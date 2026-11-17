@@ -200,6 +200,12 @@ def _translate(action: Action) -> Optional[Tuple[str, Dict]]:
         return "climate_button", {"button": action.button, "count": action.count}
     if isinstance(action, SetReadyModeAction):
         return "set_ready", {"on": action.ready}
+    if type(action).__name__ == "HeadunitCommandAction":
+        # head unit over the backend's adb link (backend/headunit.py)
+        p = dict(action.params)
+        if action.op == "alert" and "alert_id" in p:
+            p["id"] = p.pop("alert_id")
+        return "headunit_" + action.op, p
     if type(action).__name__ == "DtcCommandAction":
         return "dtc", {"op": action.op}
     return None
