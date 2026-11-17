@@ -131,7 +131,7 @@ class TestConfirmedDecodes:
 
     def test_provisional_are_prefixed(self):
         assert decode_known("6D", "37807F", "52") == {"prov_cabin_temp_raw": 0x37,
-                                                      "cabin_temp_c": 0.25 * 0x37 - 6.5}
+                                                      "cabin_temp_c": 0.25 * 0x37 - 8.0}
         assert decode_known("50", "0C", "FE") == {
             "prov_p_locked": False, "prov_out_of_p": True, "prov_p_ecu_on": True,
             "prov_power_off_handshake": False}
@@ -558,8 +558,8 @@ class TestCanGatewayCopies:
 
 def test_cabin_temperature_from_52_6d_and_its_expiry():
     store, ing, clk = make_ingress()
-    feed_bean(ing, [("52", "6D", "6C807F")])          # 0x6C = 108 -> 20.5 °C
-    assert store.state.climate.inside_temp == 20.5
+    feed_bean(ing, [("52", "6D", "6C807F")])          # 0x6C = 108 -> 19.0 °C
+    assert store.state.climate.inside_temp == 19.0
     clk.t += 11.0
     ing.update()
     assert store.state.climate.inside_temp is None

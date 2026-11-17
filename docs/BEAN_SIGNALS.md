@@ -197,7 +197,7 @@ IDs with several fields follow in §4.1–§4.5. Counts and periods are from the
 |---|---|---|---|---|---|---|---|---|
 | `40:59` | ? (to body) | 2/10 | 2 | 1 s | OFF | — | constant `00 C0` in every state (JP the same) | ? |
 | `52:3F` | meter | 1/9 | 4 | 10 s + wake | OFF | 0x53F | odometer, b0–b2 km (24-bit); b3 `80`. Frozen at `04 93 DF` = 299,999 km on this car (the NHW20 meter stops there; `52:76` kept counting): distance must come from 0x0B4 / `52:76` | C (owner read the meter) |
-| `52:6D` | A/C amp | 2/10 | 3 | 1 s | IG | 0x56D | b0 cabin (room) temperature, °C = 0.25·b0 − 6.5; b1 `20` blower running; b2 = `FF` − b1 (§4.2) | P |
+| `52:6D` | A/C amp | 2/10 | 3 | 1 s | IG | 0x56D | b0 cabin (room) temperature, °C = 0.25·b0 − 8.0; b1 `20` blower running; b2 = `FF` − b1 (§4.2) | P |
 | `52:76` | meter | 9 | 3 | on change + ~15 s | IG | — | trip distance, b1 0.1 km/count, TRUE distance (= integrated 0x0B4, not the speedometer's); not reset at IG; b2 `80` = km | C |
 | `52:90` | meter | 1/9 | 3 | 0.5 s | IG | — | instantaneous consumption b0–b1 0.1 L/100 km over TRUE speed (§4.6); `00 00` no fuel (ICE off / EV, or fuel cut); `FF FE` stopped with ICE on; b2 `40` unit | C |
 | `52:99` | A/C amp | 2 | 3 | 5 s | IG | — | constant `00 00 00` | ? |
@@ -359,9 +359,13 @@ down 13:26:10.2 / 11.8 / 13.6 / 15.2 = `09 → 05`; in AUTO the A/C amp then cha
 `52:6D` (A/C amp → gateway → CAN 0x56D):
 * b0 = cabin (room) temperature, raw (P): rises `35` → `65` during warm-up, drops 2–3 counts within
   about 10 s of each door opening (3/3), independent of outside, coolant and intake temperature.
-  °C = 0.25·b0 − 6.5: scale P (two soak points against the powerbox sensor plus the warm-up slope,
-  2026-11-16 data crunch), offset G (Toyota A/C data-list range −6.5…57.25 °C; the box suggests −8.5,
-  so it may read 1–2 °C high). At the end of each 15-min AUTO drive it read 17.0–20.0 °C at setpoints
+  °C = 0.25·b0 − 8.0: scale P (two soak points against the powerbox sensor plus the warm-up slope,
+  2026-11-16 data crunch). Offset: the Toyota A/C data-list offset −6.5 (range −6.5…57.25 °C) read
+  high: on the cold-soaked car (2026-11-17 10:08, outside 6 °C, powerbox BMP280 6.2 °C) it gave
+  7.25 °C (+1.1), and 1.3–3.6 °C above the BMP280 during the drives of that day (the BMP280 is
+  under the seat and lags the cabin air, the cabin sensor is probably near the headliner). The owner
+  set a constant −1.5 °C on 2026-11-17, so the offset is −8.0 (`CABIN_TEMP_OFFSET_C` in
+  `comm/bean.py`). The figures in this paragraph before that date used −6.5. At the end of each 15-min AUTO drive it read 17.0–20.0 °C at setpoints
   18/20. The backend feeds `climate.inside_temp` from it (None after 10 s without the frame).
 * b1 `20` = blower running (= `FE:FC` fan > 0, 3982/3992 s; P → C); b1 `80` clears in warm-up windows
   (?). b2 = `FF` − b1.

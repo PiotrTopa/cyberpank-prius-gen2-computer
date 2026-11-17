@@ -151,6 +151,9 @@ class BeanClock:
         return min(recv_ts, frame_s + off)
 
 
+# 52:6D b0 -> cabin °C = 0.25 * raw - this (see decode_known)
+CABIN_TEMP_OFFSET_C = 8.0
+
 def frame_from_wire(rec: list, line_t: Optional[int], recv_ts: float,
                     frame_s: Optional[float] = None,
                     clock: Optional[BeanClock] = None,
@@ -360,9 +363,11 @@ def decode_known(mes: str, data_hex: str, dst: Optional[str] = None) -> Dict[str
     if mes == "6D" and is_dst("52"):                          # [P] cabin temp
         out["prov_cabin_temp_raw"] = d0
         # 0.25 °C/count (P, two soak points + warm-up slope, 2026-11-16 data
-        # crunch); offset -6.5 (G: Toyota A/C data-list range -6.5..57.25 °C;
-        # may read 1-2 °C high). The only cabin temperature the car has.
-        out["cabin_temp_c"] = 0.25 * d0 - 6.5
+        # crunch). Offset -8.0: the Toyota data-list offset -6.5 read 1.1 °C
+        # above the powerbox BMP280 and the outside sensor on the cold-soaked
+        # car (2026-11-17 10:08) and 1.3-3.6 °C above the BMP280 (under the
+        # seat) while driving; the owner set a constant -1.5 °C.
+        out["cabin_temp_c"] = 0.25 * d0 - CABIN_TEMP_OFFSET_C
         return out
     if mes == "FD" and is_dst("52"):                          # [C] target temp
         out["climate_target_c"] = None if d0 == 0x39 else 15.5 + 0.5 * d0
