@@ -5,6 +5,8 @@ UI on the car's own MFD (480×240), and RP2040 boards that bridge the car buses.
 
 The system informs the driver and runs comfort functions. It does not steer, brake or accelerate.
 
+![The road scene on the Prius multi-display: lane lines, road edges, lead vehicle at 26 m with a 1.8 s gap](docs/images/mfd_curve_night.png)
+
 - **Road scene on the factory screen**: a chase view of the car with lane lines, road edges, the
   lead vehicle with distance and time gap, traffic lights, warning signs and the speed limit, from
   the [roadsense](https://github.com/PiotrTopa/roadsense) camera perception service on the same phone.
@@ -14,7 +16,9 @@ The system informs the driver and runs comfort functions. It does not steer, bra
   ice risk, service and new fault codes. Every alert type ships in shadow mode (logged only) until
   it is switched on ([docs/FEATURES.md](docs/FEATURES.md)).
 - **Car state from its own buses**: AVC-LAN (climate control, nav emulation), CAN (hybrid power,
-  SOC, cruise state), BEAN body bus (lamps, doors), Toyota diagnostics over OBD/UDS.
+  SOC, yaw and acceleration, factory cruise state and set speed), BEAN body bus (lamps, high beam,
+  doors, locks, cabin and outside temperature), Toyota diagnostics over OBD/UDS. Bus findings are
+  documented signal by signal ([docs/FINDINGS_LOG.md](docs/FINDINGS_LOG.md)).
 - **Web dashboard** for statistics away from the car: HV battery block health over months,
   12 V battery, rides, diagnostics.
 
