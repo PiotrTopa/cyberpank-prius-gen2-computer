@@ -105,6 +105,11 @@ class Tuning:
     map_road_label = "off"      # the road's number plate for a while after it changed:
                                 # off | ref | name (number and street name)
     map_road_label_s = 8.0      # ... this long
+    road_geo = True             # the road picture itself continues on the map: the lane beyond
+                                # the camera's reach, side roads, a roundabout as a ring (the
+                                # camera's lanes then end where roadsense says they do); needs
+                                # roadsense's fused road geometry and a usable map, else nothing
+    road_geo_way = True         # ... a side road chosen by the turn signal drawn as the way on
     map_junction = False        # the junction / roundabout ahead as a schematic at the left edge
                                 # (arms, the most likely way on, the exit number); off until
                                 # it has been seen on the road with a real position

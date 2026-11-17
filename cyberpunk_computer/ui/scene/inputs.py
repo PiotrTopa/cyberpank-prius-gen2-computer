@@ -27,7 +27,7 @@ import time
 from collections.abc import Mapping   # isinstance on typing.Mapping is several times slower
 from typing import Any, Callable, NamedTuple, Optional, Sequence, Tuple
 
-from .mapinfo import MapInfo, parse_map, usable_map
+from .mapinfo import Geo, MapInfo, parse_geo, parse_map, usable_map
 
 # Default sample distances (metres ahead of the camera) of lane/edge/path
 # polylines when the scene mapping carries no "x".
@@ -131,6 +131,7 @@ class SceneInputs(NamedTuple):
     env_place: Optional[str] = None
     env_weather: Optional[str] = None
     map: Optional[MapInfo] = None          # roadsense's map layer when usable (mapinfo.py)
+    geo: Optional[Geo] = None              # the fused road geometry beyond the camera (with a usable map only)
 
     @property
     def any_door_open(self) -> bool:
@@ -487,4 +488,5 @@ def read_perception(state: Any, feed: Optional[SceneFeed] = None, map_limit: boo
         env_place=env.get("place") if rs_ok else None,
         env_weather=env.get("weather") if rs_ok else None,
         map=parse_map(raw_scene) if (rs_ok and raw_scene) else None,
+        geo=parse_geo(raw_scene) if (rs_ok and raw_scene) else None,
     )

@@ -14,7 +14,8 @@ Layers, back to front (each one a function, so new elements slot in):
     tunnel / car-park frames                Scenery.draw_enclosure
     headlamp beams on the road              _draw_beams
     planned path, lane lines, road edges    _draw_path, _draw_road
-    road beyond camera range (map)          maplayer.far_road
+    road beyond the camera, side roads,     roadgeo.py (fused geometry), else
+      roundabout (map, fused by roadsense)    maplayer.far_road
     roadside scenery by place               _draw_roadside
     fog band                                Scenery.draw_fog
     world objects, lead vehicle             _draw_objects    (far -> near)
@@ -36,7 +37,7 @@ import pygame
 
 from ..colors import COLORS
 from ..fonts import get_mono_font, get_tiny_font
-from . import maplayer
+from . import maplayer, roadgeo
 from .car import CarRenderer, car_palette
 from .director import DOOR_STEPS, VIEW_STEPS, SceneDirector
 from .inputs import DOOR_KEYS, SceneInputs
@@ -220,6 +221,8 @@ class SceneRenderer:
         self._cen_xs: Sequence[float] = ()
         self._cen: List[float] = []
         self._cen_v = 0.0
+        self._x_end = 1e9              # the camera's lanes are drawn up to here (fused geometry: geo.v)
+        self._geo_p = None
         self._last_draw = -1.0
         # 0.8: on time when the UI loop runs at about the same rate
         self.min_redraw_s = 0.8 / max(0.1, tune.fps_scene)
@@ -426,8 +429,14 @@ class SceneRenderer:
         enclosed = fast and place in ENCLOSED
         road = road_k > 0.0 and d.vision in ("live", "stale")
         lines: list = []
+        self._x_end = 1e9
+        self._geo_p = None
         if road:
             self._set_centre(d, v)
+            # the fused road geometry (roadgeo.py): the camera's lanes end where it takes over
+            self._geo_p = roadgeo.prepare(self, d)
+            if self._geo_p is not None:
+                self._x_end = d.map.geo.v
             lines = self._lane_points(cam, d, v)
         else:
             self._cen = []
@@ -436,6 +445,7 @@ class SceneRenderer:
         if road:
             # lane fill under the floor lines: they double as speed stripes
             self._draw_lane_fill(s, lines, d, road_k)
+            roadgeo.fills(self, s, self._geo_p, d, road_k)
         self._draw_floor(s, cam, d, v)
         if enclosed:
             end = maplayer.tunnel_end(d) if place == "tunnel" else 100.0
@@ -448,6 +458,7 @@ class SceneRenderer:
             self._draw_road(s, cam, d, v, road_k, lines)
             if fast and not enclosed:
                 maplayer.far_road(self, s, d)
+                roadgeo.lines(self, s, self._geo_p, d, road_k)
         if fast and place and not enclosed and self.tune.roadside != "off":
             self._draw_roadside(s, d, place, inp.env_light)
         if fast and inp.env_weather == "fog" and self.tune.fog_band:
@@ -659,6 +670,9 @@ class SceneRenderer:
                 along = d.odo + off * 3.1
                 idx = int(along // pitch)
                 x = 100.0 - (along % pitch)
+                while x > self._x_end:
+                    x -= pitch
+                    idx -= 1
                 while x > 7.0:
                     for sgn in (1.0, -1.0):
                         h = (idx * 2654435761 + (1 if sgn > 0 else 2) * 40503 + int(off * 10) * 97) & 0xFFFF
@@ -676,6 +690,8 @@ class SceneRenderer:
             rail = place == "bridge"
             prev = {1.0: None, -1.0: None}
             x = 100.0 - (d.odo % pitch)
+            while x > self._x_end:
+                x -= pitch
             while x > 3.0:
                 for sgn in (1.0, -1.0):
                     g = self._place(None, x, side_y(x, sgn, 0.8), 1.0)
@@ -737,7 +753,16 @@ class SceneRenderer:
             cen = self._cen
             cx = self.w / 2.0
             pts.append((cx - rb[1] * (ys[0] + slope * back), rb[0]))
+            xe = self._x_end
             for i in range(n):
+                if xs[i] > xe:
+                    # the camera's part ends between two samples
+                    if i > 0 and xe > xs[i - 1] + 0.5:
+                        t = (xe - xs[i - 1]) / (xs[i] - xs[i - 1])
+                        g = self._place(None, xe, ys[i - 1] + (ys[i] - ys[i - 1]) * t, 1.0)
+                        if g is not None:
+                            pts.append((g[0], g[1]))
+                    break
                 sy, k, q = rows[i]
                 pts.append((cx - k * (ys[i] - cen[i] * q), sy))
             return pts
