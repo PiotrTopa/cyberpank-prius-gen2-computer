@@ -50,11 +50,25 @@ class Capture:
 
 
 def _open(path: str):
-    return gzip.open(path, "rt") if path.endswith(".gz") else open(path, "rt")
+    return (gzip.open(path, "rt", errors="replace") if path.endswith(".gz")
+            else open(path, "rt", errors="replace"))
+
+
+def _rows(path: str):
+    """Records of a capture; NUL-filled tails (hard reset) and torn or
+    garbage lines are skipped."""
+    for l in _open(path):
+        l = l.replace("\0", "").strip()
+        if not l.startswith("{"):
+            continue
+        try:
+            yield json.loads(l)
+        except ValueError:
+            continue
 
 
 def load_ndjson(path: str) -> Capture:
-    rows = [json.loads(l) for l in _open(path) if l.strip()]
+    rows = list(_rows(path))
     fr = [r for r in rows if r.get("type") == "frame"]
     off = min(r["ts"] - r["t_ms"] / 1000.0 for r in fr) if fr else 0.0
     frames = [Frame(off + r["t_ms"] / 1000.0, int(r["pri"]), r["dst"].upper(), r["mes"].upper(),

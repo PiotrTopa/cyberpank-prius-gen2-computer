@@ -44,8 +44,10 @@ def feed_trip_file(path: str, decoder: FrameDecoder, collector: Collector, state
             if not any(k in line for k in _KEEP):
                 continue
             try:
-                m = json.loads(line)
+                m = json.loads(line.replace("\0", ""))   # NUL tail of a hard reset
             except ValueError:
+                continue
+            if not isinstance(m, dict):
                 continue
             ts = m.get("ts")
             if isinstance(ts, (int, float)) and ts > 1e9:

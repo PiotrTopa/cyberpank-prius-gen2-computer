@@ -27,14 +27,17 @@ device-domain timestamps the replay loader expects.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from .comm_logger import CommLogger, LogConfig
+from .comm_logger import CommLogger, LogConfig, iter_ndjson
 from .ports import (
     DEVICE_AVC,
     DEVICE_CAN,
@@ -46,6 +49,69 @@ from .ports import (
 logger = logging.getLogger(__name__)
 
 _MB = 1024 * 1024
+
+#: A wall-clock step larger than this (wall - monotonic offset change) while
+#: a trip is open closes the trip and re-dates it. The phone has no RTC: it
+#: boots with an old time and NTP steps it later (2026-11-17 10:41: the
+#: first 36 s after a reboot were written as "2026-11-16 11:50" into
+#: trip_20261116_115052_965, which read like a stale file being reused).
+CLOCK_STEP_S = 5.0
+
+
+def redate_trip_file(path: Path, step_s: float, t_step_old: float) -> Optional[Path]:
+    """Rewrite ``path`` with its pre-step wall times moved by ``step_s``
+    and rename it after its corrected start time. A wall time counts as
+    pre-step when it is nearer the old clock at the step (``t_step_old``)
+    than the new one. Returns the new path (None on failure, the original
+    file is then left as it was)."""
+    half = abs(step_s) / 2.0
+
+    def fix(t):
+        if isinstance(t, (int, float)) and t > 1e9 and abs(t - t_step_old) < half:
+            return t + step_s
+        return t
+
+    try:
+        tmp = path.with_name(path.name + ".redate")
+        start = None
+        with open(path, "rb") as src, open(tmp, "w", encoding="utf-8") as dst:
+            for rec in iter_ndjson(src):
+                if rec.get("meta") == "comm_log":
+                    try:
+                        t0 = datetime.fromisoformat(rec.get("created", "")).timestamp()
+                        start = fix(t0)
+                        rec["created"] = datetime.fromtimestamp(start).isoformat()
+                    except (TypeError, ValueError):
+                        pass
+                    rec["clock_step_s"] = round(step_s, 3)
+                elif "ts" in rec:
+                    rec["ts"] = fix(rec["ts"])
+                    d = rec.get("d")
+                    if isinstance(d, dict) and isinstance(d.get("ts"), (int, float)) and d["ts"] > 1e12:
+                        d["ts"] = int(round(fix(d["ts"] / 1000.0) * 1000))
+                dst.write(json.dumps(rec, separators=(",", ":")) + "\n")
+        name = path.name
+        if start is not None:
+            stamp = datetime.fromtimestamp(start).strftime("%Y%m%d_%H%M%S_%f")[:-3]
+            part = "_p" + name.rsplit("_p", 1)[1].split(".")[0] if "_p" in name else ""
+            name = "trip_%s%s.ndjson" % (stamp, part)
+        new = path.with_name(name)
+        n = 1
+        while new.exists() and new != path:
+            new = path.with_name(name.replace(".ndjson", "_%d.ndjson" % n))
+            n += 1
+        os.replace(tmp, new)
+        if new != path:
+            path.unlink(missing_ok=True)
+        logger.info("Trip recorder: re-dated %s -> %s (clock step %+.0f s)", path.name, new.name, step_s)
+        return new
+    except OSError:
+        logger.exception("Trip recorder: re-dating %s failed", path)
+        try:
+            path.with_name(path.name + ".redate").unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
 
 
 @dataclass
@@ -112,6 +178,9 @@ class TripRecorder:
         self._ignition: Optional[bool] = None
         self.discarded = 0           # short trips dropped (whole run)
         self._discarded_quiet = 0    # dropped since the last INFO line
+        # wall - monotonic when the current file was opened (clock steps)
+        self._clock_offset: Optional[float] = None
+        self.clock_steps = 0
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -182,13 +251,16 @@ class TripRecorder:
 
     # ── periodic + event-driven segmentation ─────────────────────────────────
 
-    def tick(self, now: Optional[float] = None) -> None:
-        """Close the current trip after an idle gap (call from the run loop)."""
+    def tick(self, now: Optional[float] = None, wall: Optional[float] = None) -> None:
+        """Close the current trip after an idle gap or a wall-clock step
+        (call from the run loop)."""
         if not self._started or self._current is None:
             return
-        if self.config.segmentation != "trip":
+        mono = time.monotonic()
+        self._check_clock(mono, wall if wall is not None else time.time())
+        if self._current is None or self.config.segmentation != "trip":
             return
-        now = now if now is not None else time.monotonic()
+        now = now if now is not None else mono
         if (now - self._last_activity) >= self.config.idle_timeout_s:
             self._close(reason="idle")
 
@@ -209,6 +281,28 @@ class TripRecorder:
             self._close(reason="ignition-off")
 
     # ── internals ─────────────────────────────────────────────────────────────
+
+    def _check_clock(self, mono: float, wall: float) -> None:
+        """Wall clock stepped since the file was opened (NTP after a boot
+        with a stale time): close the file, re-date it in the background,
+        and let the next traffic open a correctly named one."""
+        if self._clock_offset is None:
+            return
+        step = (wall - mono) - self._clock_offset
+        if abs(step) < CLOCK_STEP_S:
+            return
+        self.clock_steps += 1
+        t_step_old = mono + self._clock_offset
+        cur = self._current
+        path = cur.filepath if cur is not None else None
+        logger.warning("Trip recorder: wall clock stepped %+.0f s; closing %s",
+                       step, path.name if path else "-")
+        self._close(reason="clock-step", keep=True)
+        if path is not None and path.exists():
+            threading.Thread(target=redate_trip_file, args=(path, step, t_step_old),
+                             daemon=True, name="trip-redate").start()
+        if self.config.segmentation in ("session", "continuous") or self._ignition:
+            self._open(reason="clock-step")
 
     def _should_log(self, device_id: int) -> bool:
         cfg = self.config
@@ -253,6 +347,7 @@ class TripRecorder:
             return
         self._trip_start = time.monotonic()
         self._last_activity = self._trip_start
+        self._clock_offset = time.time() - self._trip_start
         if self._discarded_quiet:
             logger.info("Trip recorder: opened %s (%s; %d short trip(s) discarded before)",
                         path, reason, self._discarded_quiet)
@@ -260,17 +355,18 @@ class TripRecorder:
         else:
             logger.info("Trip recorder: opened %s (%s)", path, reason)
 
-    def _close(self, reason: str) -> None:
+    def _close(self, reason: str, keep: bool = False) -> None:
         if self._current is None:
             return
         logger_obj = self._current
         self._current = None
+        self._clock_offset = None
         path = logger_obj.filepath
         duration = max(0.0, time.monotonic() - self._trip_start)
         logger_obj.stop()
 
         # Drop trips that are too short to be useful (power blips, brief acc).
-        if duration < self.config.min_trip_seconds and self._part_index == 0:
+        if not keep and duration < self.config.min_trip_seconds and self._part_index == 0:
             try:
                 path.unlink(missing_ok=True)
                 self.discarded += 1
