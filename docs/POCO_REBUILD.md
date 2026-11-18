@@ -109,16 +109,39 @@ unit (Nice 19, idle I/O, CPUs 0-3, MemoryMax 1G); the rootfs is archived by
 `POCO/backup/rootfs-tar.py` (Python tarfile: busybox tar cannot store xattrs and no package may be
 installed); pulled with `rsync --partial` over the AP.
 
-**State at 2026-11-18 22:30 CET: INCOMPLETE.** The phone-side job finished the meta dump, every
-partition dump (modem EFS re-read stable: modemst1, modemst2, fsg, fsc, persist), the `/boot`
-image, the SQLite copies and the exclusion list, and was writing `rootfs.tar.zst` (4.2 GB at
-22:05 CET, still growing) when the laptop lost the phone (USB Wi-Fi card hang, laptop restart
-22:28 CET). On the laptop only `parts/sda18-cust.img.zst` (625 MB, complete) arrived; the rest
-must be verified on the phone and pulled with the runbook in [§2.1](#21-runbook-finish-the-backup).
-Sizes measured so far on the phone (zstd -3): partitions ≈ 2.8 GB in total (system 1.52 GB,
-cust 0.63 GB, vendor 0.39 GB, modem 76 MB, boot 34 MB, the rest small), `/boot` 200 MB,
-rootfs > 4.2 GB (expected ≈ 5 GB). Total ≈ 8 GB → laptop keeps ≈ 10 GB free. AP link 1.32 MB/s
-measured (625 MB in 7 min 32 s) → ≈ 1 h 45 min for the whole set.
+**State: complete and verified (2026-11-19 00:30 CET).** Runbook §2.1 was run on 2026-11-19
+00:00-00:30 CET; the phone had not rebooted since 2026-11-18 21:12 CET. Afterwards the phone lock
+`/run/phone-lane.lock` was handed to lane L24 (`L24`) and the netwatch runtime drop-in left in place. Archive run on the phone 2026-11-18
+21:49-22:12 CET (rootfs tar 21:57-22:07 CET); pulled 22:43-00:20 CET in one rsync pass
+(no link drop, ≈ 1.4 MB/s); the phone-side copy `/home/user/l25/img/` is kept for now (owner decides).
+
+| Item | Size | sha256 (of the file as stored) |
+|---|---|---|
+| whole set `img/` (128 files) | 9.11 GB (8.48 GiB) | see `SHA256SUMS` below |
+| `rootfs.tar.zst` (90 331 entries, 11.04 GB raw, 14 xattr records, 0 vanished, 0 changed while read) | 6.02 GB | `6e7ad2a5d87f4548ce88ecca0c380b7c68a5ca4dfa7823803e8e6d6d65923ec0` |
+| `pmos-boot.img.zst` (/boot ext2, 480 MiB raw) | 200 MB | `249efa5da0bb2f40107788c848a5c302f45112935597018897b73ab16e1946ac` |
+| `parts/` 86 partition images (all but userdata; 18.1 GB raw incl. /boot) | 2.6 GiB | per file in `SHA256SUMS`, raw images in `parts/SHA256SUMS.raw` |
+| ↳ `sdf6-modemst1` / `sdf7-modemst2` | 8 MiB raw each | `6bb94012…ea706661` / `117998ff…98dda95f`: full values in `SHA256SUMS` |
+| ↳ `sda14-persist`, `sde36-fsg`, `sdf1-fsc`, `sde45-boot` | 64 / 8 / 0.25 / 64 MiB raw | `86e746e4…`, `927e5551…`, `71a8ed4e…`, `48b23167…` |
+| `sqlite/` metrics.db, battery.db, fuel_log.db (online copies) | 190 MB | in `SHA256SUMS` |
+| `meta/` GPT dumps, blkid, tune2fs, cmdline, apk world/installed, deviceinfo, rides file list | small | in `SHA256SUMS` |
+
+`SHA256SUMS` (sha256 `6bd172e40db3d519ae020775bbd402e65a0ee31d93ff954b0639a45aa4ddac2a`) lists every file.
+Modem EFS partitions were re-read after the dump: modemst1, modemst2, fsg, fsc, persist all
+**stable** (`parts/stability.txt`).
+
+Verification:
+
+| Check | Phone | Laptop |
+|---|---|---|
+| `sha256sum -c SHA256SUMS` | 127/127 OK | 127/127 OK |
+| `zstd -t` (86 files, 18 122 993 664 bytes raw) | OK | OK |
+| full `tar -tv` of the archive | — | OK: 90 331 entries, exit 0, no warnings (apart from GNU tar's `hdrcharset` notice) |
+| raw partition hashes vs `SHA256SUMS.raw`, `/boot` raw hash | (dump-time) | OK: 84/84 partition images match their raw dump-time hashes; `/boot` raw hash OK |
+| subset build test (`build-userdata-image.sh … 14 ./etc ./usr/local ./root`, in tmpfs) | — | OK: GPT label-id `210CA09F-…`, PARTUUIDs `c11fa8a5-…`/`899bc788-…`, fs UUIDs `b56c1f02-…`/`398a493f-…` equal to `meta/`; e2fsck clean; owners/modes kept (`/etc/shadow` 640 0:42, `car.key` 0600 0:0); image deleted |
+| excluded files vs laptop copies | — | `ljkr.nv12`, `ljkr.nv12.xz`, `poland-20261114.rsmap`: sha256 equal |
+
+Laptop free space after the pull: 8.5 GB (8128 MiB); other jobs were writing to the disk at the same time.
 
 | Exclusion (re-creatable bulk) | Size | Other copy |
 |---|---|---|
@@ -214,12 +237,11 @@ names both UUIDs, so the existing boot.img boots the restored image unchanged.
 xattrs; harmless, the xattrs are restored. The ext2 `/boot` image is restored raw, so its
 `lost+found` and DTB backups come back too.)
 
-**Build test: not run yet** (needs the complete backup). Runbook step R6 runs
-`build-userdata-image.sh` with only `./etc ./usr/local ./root` extracted into a 14 GB sparse file and
-checks `blkid` (UUIDs `b56c1f02-…`, `398a493f-…`) and `sfdisk -d` (label-id, PARTUUIDs) against
-`meta/`, then deletes it. The full-size build stays a procedure until ≥ 12 GB can be spared
-(node2 needs the owner's OK).
-
+**Build test: done 2026-11-19** with a subset (`./etc ./usr/local ./root`) in a 14 GB sparse file
+on tmpfs: see the verification table above. The full-size build stays a procedure until ≥ 12 GB
+of disk can be spared. A full-size build (16 GB image) was started 2026-11-19 00:27 CET on the
+owner's scratch disk `/mnt/win/linux-scratch/l25/` (unit `l25-build`, log `build.log` there);
+result to be checked, then the image deleted.
 
 ---
 
