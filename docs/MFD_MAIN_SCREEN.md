@@ -56,7 +56,7 @@ Scene HUD while driving (all on the scene surface):
 | bottom-right | lane boxes: one per lane seen, the own lane lit (only when a neighbouring lane is seen; section 6.4) |
 | bottom-left | chip `HIGH` while the high beam is on (all lamps with `lamp_chips = all`), above it the perception status (nothing when live) |
 | from the map (section 6.5; only with a usable map) | top-left, before the warnings: the next speed limit as a dashed ring with its distance; under the link LED a 5 x 7 pin (amber on dead reckoning); beyond the camera's 100 m the road up to the horizon; bottom-right the lane boxes from the map's lane count; bottom-left the tunnel exit distance |
-| on the road | lead vehicle with target brackets and its distance; under it the time gap when shorter than 2.5 s and the closing/opening speed in km/h with an arrow from 5 km/h |
+| on the road | lead vehicle with target brackets and its distance (whole metres with a 0.3 m hysteresis: the number changes when the value is 0.8 m from it); under it the time gap when shorter than 2.5 s and the closing/opening speed in km/h with an arrow from 5 km/h |
 
 Rules and warnings stay for 4 s after the feed stops carrying them (`sign_hold_s`; the feed drops
 its `signs` key 3 s after roadsense's last `rules` message), never while roadsense is off.
@@ -221,7 +221,7 @@ offset: lane points need no projection (`SceneRenderer._row`, `_xs_table`).
 | cruise gap setting | `vehicle.cruise_gap` / `.acc_gap` if a state ever has one (none today) |
 | HV power, SOC | `energy.battery_power_kw`, `energy.battery_soc`, bars from `avc.battery_bars` else `dynamics.soc_bars` |
 | roadsense running | `roadsense.state == "running"` and `roadsense.api_ok` not False |
-| speed limit, ego traffic light, place / light / weather | the scene mapping, else `roadsense.health["speed_limit" / "lights" / "env"]` (refreshed every 5 s) |
+| speed limit, ego traffic light, place / light / weather | the scene mapping (the ego light from its display block `vw` when roadsense sends it, section 7.4), else `roadsense.health["speed_limit" / "lights" / "env"]` (refreshed every 5 s). The health mirror's light is used only while no scene arrives at all: while the feed is live a scene without a light means no light (before 2026-11-18 the mirror's up to 5 s old light was drawn then, 14 % of the frames with a light on the 2026-11-17 drive) |
 | lanes, edges, planned path, lead vehicle, rules in effect, warnings ahead | the scene mapping only (section 7), from the backend feed `backend/roadsense_scene.py` |
 | objects | the scene mapping only; roadsense provides none yet (section 8.2) |
 
@@ -473,7 +473,8 @@ The state publish is limited to 1 Hz, too slow for a road. The frontend therefor
 from a backend **event** `roadsense_scene` on the existing ZMQ event channel (the one that carries
 `touch`), 5..10 Hz, latest wins (`inputs.SceneFeed`, registered in `core/app.py`). The same mapping
 is also accepted as a state field `roadsense.scene` or as `roadsense.health["scene"]`; the geometry
-is low-passed (0.3 s) in the director, so 1 Hz still moves smoothly. Staleness is judged by `seq`
+is low-passed (0.3 s) in the director, so 1 Hz still moves smoothly (with roadsense's display channel the
+director plays the samples by their frame time instead, section 7.4). Staleness is judged by `seq`
 not changing, on the frontend clock.
 
 ```
@@ -651,6 +652,47 @@ Driver intent. `CanMotionTap.set_turn_signal("left" | "right" | "both" | "off")`
 `turn_signal` into the motion messages for mapd, which relays it; roadsense then selects the side road or
 exit on that side (`geo.br[].w`, `geo.way`). Nothing calls it yet: the turn-signal lamps are on BEAN and not
 decoded. The place that decodes them calls it once a second or on change; no other code has to change.
+
+### 7.4 Display channel key `vw` (roadsense 2.0 topic `view`, lane L19, 2026-11-18)
+
+roadsense separates what it measured (`road`, `lanes`, `lead`, `lights`, ...: no display latency, held values
+marked) from a display channel `view` for consumers that draw (roadsense docs/ARCHITECTURE.md, "api-derived topic
+view"). The backend subscribes to `view` too; while it is fresh (0.5 s):
+
+* the scene is built **per `view` message**, the last message roadsense sends for a frame (road, lead, lanes,
+  roadgeom, view). Built per `road` message, the scene carried the lead and lanes of the previous frame in
+  4.5 % of the scenes on the 2026-11-17 drive; now 0.03 %. The 15 kB `road` message is no longer decoded;
+* the top-level keys stay the measurement (`lead` from the tracker, `lanes` / `edges` from `lanes`, `light` from
+  `lights.ego`): the alert functions read those;
+* a block `vw` carries what the screen draws:
+
+```
+"vw": {"t": 149350123,                        # frame time of the view message, ms (roadsense's monotonic clock)
+       "lanes": [L, L, L, L], "edges": [L, L],  # L = {"y": [...] at the scene x, "prob": 0.3..1, "f": fade 0..1 (only < 1)} or null
+       "path": {"y": [...]},
+       "lead": {"id": "lead:12", "d": 34.2, "y": 0.3, "v": -1.2, "f": 0.6} | null,   # v: relative speed, m/s
+       "light": {"id": "light:7", "state": "red", "d": 41.0, "y": 2.5,               # car frame, y right
+                 "vx": -12.0, "vy": 0.0, "f": 1.0, "flashing": true, "q": true, "held": true,
+                 "alt": {"s": "green", "side": "l"}} | null}
+```
+
+The screen (`inputs.parse_scene`, `director._update_road_view`, `director._update_light`):
+
+* draws lanes, edges, path, the lead and the ego light from `vw`; a fading line is dimmed by its `f`;
+* places each sample on its own clock by `t`: the offset between the two clocks is the smallest (arrival -
+  frame time) over the last 3 s (the link only adds delay), so the WebSocket, the 10 Hz publish cap, the ZMQ
+  poll (50 ms) and the link's jitter do not move the picture; the lead and the light are carried by their
+  velocity from the sample's frame time to the frame being drawn (at most 0.35 s) and only the corrections are
+  eased (0.08 s); lines are eased over 0.1 s (before: a 0.3 s low-pass of everything);
+* the light is drawn where `vw.light` puts it in the car frame (before: `lights.ego.lateral_m`, the offset from
+  the planned path, placed as if from the camera axis);
+* while the car stands in traffic (road view open) the road picture is redrawn whenever what it shows moved by
+  about a pixel (`director.road_sig`, at most `fps_scene`); before L19 the road was redrawn only while moving,
+  so the lead, lanes and light froze until the car started (on the 2026-11-17 drive: up to 227 s without a
+  redraw behind a standing car).
+
+Without `view` (an older roadsense) everything is as before (sections 7.1-7.3). Measured with
+`tools/scene_feed_replay.py` on the recorded drives (docs: roadsense docs/lanes/L19-view-channel.md).
 
 ## 8. Requests
 

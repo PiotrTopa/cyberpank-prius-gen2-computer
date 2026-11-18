@@ -57,7 +57,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 logger = logging.getLogger(__name__)
 
 EVENT_NAME = "roadsense_scene"
-TOPICS = ("road", "lights", "speed_limit", "env", "rules", "fused", "map", "lead", "lanes", "roadgeom")
+TOPICS = ("road", "lights", "speed_limit", "env", "rules", "fused", "map", "lead", "lanes", "roadgeom", "view")
 
 # Caps of the sign lists (payload and screen room: the MFD shows this many).
 MAX_SIGNS_ON = 6
@@ -85,6 +85,8 @@ class SceneFeedConfig:
     lead_max_age_s: float = 0.5        # lead (tracker): one per road frame, 10-14/s; older -> road.leads[0]
     lanes_max_age_s: float = 0.5       # lanes (road-geometry tracker): one per road frame; older -> road.lane_lines
     geo_max_age_s: float = 0.5         # roadgeom (fused road geometry): one per road frame; older -> no "geo"
+    view_max_age_s: float = 0.5        # view (roadsense 2.0 display channel): one per road frame; while fresh the
+                                       # scene is built per view message (no road decode) and carries "vw"
     lane_min_prob: float = 0.2         # below this a lane line goes out as null (UI draws >= 0.3)
     lead_min_prob: float = 0.3         # below this the lead goes out as null (UI draws >= 0.5)
     connect_timeout_s: float = 3.0
@@ -834,6 +836,94 @@ def peek_type(line: str) -> Optional[str]:
     return head[i + 1:j] if j > i else None
 
 
+def _line_to_scene(xs: Any, ln: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    ys = ln.get("y")
+    if not isinstance(ys, list):
+        return None
+    pts = [(x, y) for x, y in zip(xs, ys) if _num(y) is not None]
+    if len(pts) < 2:
+        return None
+    out = resample([p[0] for p in pts], [p[1] for p in pts])
+    if out is None:
+        return None
+    res: Dict[str, Any] = {"y": out}
+    p = _num(ln.get("conf"))
+    if p is not None:
+        res["prob"] = round(min(1.0, max(TRACKED_MIN_PROB, p)), 2)
+    a = _num(ln.get("alpha"))
+    if a is not None and a < 1.0:
+        res["f"] = round(a, 2)
+    return res
+
+
+def view_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """roadsense ``view`` topic (2.0 display channel) -> scene ``vw``: what the screen draws.
+
+    t      the frame time of the view message in ms (roadsense CLOCK_MONOTONIC): the screen spaces the samples
+           by it, so the transport's jitter (WebSocket, publish cap, ZMQ poll, Wi-Fi) does not move the picture
+    lanes  4 x {"y", "f"} (lane:0..3, f = fade 0..1, only while < 1) or null; edges 2 x the same; path {"y"}
+    lead   {"id", "d", "y", "v" (relative speed m/s, the screen extrapolates with it), "f"} or null
+    light  the ego light: {"id", "state", "d", "y" (car frame, y right), "vx", "vy", "f", "flashing", "q",
+           "held", "alt"} or null
+    """
+    xs = msg.get("x")
+    if not isinstance(xs, list):
+        return None
+    ts = msg.get("ts_mono_ns")
+    out: Dict[str, Any] = {"t": int(ts // 1_000_000) if isinstance(ts, int) else None,
+                           "lanes": [None] * 4, "edges": [None] * 2}
+    for ln in msg.get("lines") or ():
+        if not isinstance(ln, dict) or not isinstance(ln.get("id"), str):
+            continue
+        kind, _, idx = ln["id"].partition(":")
+        i = int(idx) if idx.isdigit() else -1
+        key = {"lane": "lanes", "edge": "edges"}.get(kind)
+        if key is None or not 0 <= i < len(out[key]):
+            continue
+        out[key][i] = _line_to_scene(xs, ln)
+    pth = msg.get("path")
+    if isinstance(pth, dict):
+        p = _line_to_scene(xs, pth)
+        if p is not None:
+            out["path"] = {"y": p["y"]}
+    out["lead"] = None
+    out["light"] = None
+    for o in msg.get("objects") or ():
+        if not isinstance(o, dict):
+            continue
+        x, y = _num(o.get("x")), _num(o.get("y"))
+        if x is None or y is None:
+            continue
+        f = _num(o.get("alpha"))
+        if o.get("role") == "lead" and out["lead"] is None:
+            ld: Dict[str, Any] = {"id": o.get("id"), "d": round(x, 2), "y": round(y, 2),
+                                  "v": round(_num(o.get("vx")) or 0.0, 2)}
+            if f is not None and f < 1.0:
+                ld["f"] = round(f, 2)
+            out["lead"] = ld
+        elif o.get("role") == "ego" and o.get("kind") == "traffic_light" and out["light"] is None:
+            at = o.get("attrs") if isinstance(o.get("attrs"), dict) else {}
+            st = at.get("ego_state") or at.get("state")
+            if not isinstance(st, str) or not st:
+                continue
+            lt: Dict[str, Any] = {"id": o.get("id"), "state": st, "d": round(x, 1), "y": round(y, 2),
+                                  "vx": round(_num(o.get("vx")) or 0.0, 2), "vy": round(_num(o.get("vy")) or 0.0, 2)}
+            if f is not None and f < 1.0:
+                lt["f"] = round(f, 2)
+            if at.get("ego_flashing"):
+                lt["flashing"] = True
+            if at.get("amb"):
+                lt["q"] = True
+            if at.get("held"):
+                lt["held"] = True
+            alt = at.get("alt")
+            if isinstance(alt, dict) and isinstance(alt.get("state"), str):
+                side = alt.get("side")
+                lt["alt"] = {"s": alt["state"], "side": side[:1] if isinstance(side, str) and side else ""}
+            out["light"] = lt
+    return out
+
+
 class SceneBuilder:
     """Collects roadsense messages, builds a scene mapping when one is due.
 
@@ -855,6 +945,8 @@ class SceneBuilder:
         self._lead: Optional[Tuple[float, Optional[Dict[str, Any]], bool]] = None
         self._lanes: Optional[Tuple[float, Optional[Dict[str, Any]]]] = None
         self._geo: Optional[Tuple[float, Optional[Dict[str, Any]]]] = None
+        self._view: Optional[Tuple[float, Dict[str, Any]]] = None
+        self._view_new = False
         self.decode_errors = 0
 
     def feed(self, line: str, now: float) -> None:
@@ -888,15 +980,23 @@ class SceneBuilder:
             self._lanes = (now, lanes_to_scene(msg))
         elif mtype == "roadgeom":
             self._geo = (now, roadgeom_to_scene(msg))
+        elif mtype == "view":
+            # the last message of a road frame (roadsense sends road, lead, lanes, roadgeom, view): a scene
+            # built now has the lead, lanes and geometry of the same frame
+            self._view, self._view_new = (now, msg), True
         elif mtype == "map":
             self.taint.update(msg)
             self._slow["map_in"] = (now, map_input_to_scene(msg))
             self._slow["map_shape"] = (now, map_shape_to_scene(msg))
             self._slow["map_jv"] = (now, map_junction_to_scene(msg))
 
+    def view_mode(self, now: float) -> bool:
+        """roadsense sends the display channel: scenes are built per view message."""
+        return self._view is not None and now - self._view[0] <= self.cfg.view_max_age_s
+
     def time_to_due(self, now: float) -> Optional[float]:
         """Seconds until a pending road frame may be published; None if none."""
-        if not self._road_new:
+        if not (self._view_new if self.view_mode(now) else self._road_new):
             return None
         return max(0.0, self._last_pub + 1.0 / max(0.1, self.cfg.max_hz) - now)
 
@@ -906,17 +1006,31 @@ class SceneBuilder:
         wait = self.time_to_due(now)
         if wait is None or wait > 0.0:
             return None
-        self._road_new = False
-        if now - self._road_t > self.cfg.road_max_age_s or self._road_raw is None:
-            return None
-        try:
-            road = json.loads(self._road_raw)
-        except ValueError:
-            self.decode_errors += 1
-            return None
-        if not isinstance(road, dict):
-            return None
-        scene = road_to_scene(road, self.cfg)
+        vw = None
+        if self.view_mode(now):
+            # roadsense 2.0: the frame's view message is complete; the 15 kB road message is not decoded
+            self._view_new = self._road_new = False
+            view = self._view[1]  # type: ignore[index]
+            vw = view_to_scene(view)
+            if vw is None:
+                return None
+            seq = view.get("seq")
+            scene = {"seq": int(seq) if _num(seq) is not None else 0,
+                     "lanes": [None] * 4, "edges": [None] * 2, "lead": None}
+            if vw.get("path"):
+                scene["path"] = vw["path"]
+        else:
+            self._road_new = False
+            if now - self._road_t > self.cfg.road_max_age_s or self._road_raw is None:
+                return None
+            try:
+                road = json.loads(self._road_raw)
+            except ValueError:
+                self.decode_errors += 1
+                return None
+            if not isinstance(road, dict):
+                return None
+            scene = road_to_scene(road, self.cfg)
         if scene["seq"] and scene["seq"] == self._last_seq:
             return None
         self._last_seq = scene["seq"]
@@ -965,6 +1079,8 @@ class SceneBuilder:
         if (self._geo is not None and self._geo[1] is not None and now - self._geo[0] <= self.cfg.geo_max_age_s
                 and isinstance(scene.get("map"), dict) and scene["map"].get("ok") and not self.taint.tainted):
             scene["geo"] = self._geo[1]
+        if vw is not None:
+            scene["vw"] = vw
         return scene
 
 

@@ -1441,3 +1441,88 @@ def test_geo_redraws_when_it_changes_and_costs_nothing_without_it():
     live_step(d0, drive_inputs(), 1.0)
     r.render(d0, drive_inputs(), 10.0)
     assert r._geo_p is None and r._x_end == 1e9
+
+
+# ── roadsense 2.0 display channel ("vw", lane L19) ─────────────────────────────
+
+def vw_scene(seq, t_ms, lead=None, light=None, lanes_f=1.0):
+    ln = {"y": [-1.75] * 11, "prob": 0.9}
+    if lanes_f < 1.0:
+        ln["f"] = lanes_f
+    return {"seq": seq, "lanes": [None, None, None, None], "edges": [None, None], "lead": None,
+            "vw": {"t": t_ms, "lanes": [None, ln, {"y": [1.75] * 11, "prob": 0.9}, None], "edges": [None, None],
+                   "lead": lead, "light": light}}
+
+
+def test_standing_behind_a_live_lead_redraws_the_road():
+    """Owner 2026-11-18: the lead froze until the car started. With the car standing (no motion, view open)
+    the scene is redrawn when the drawn lead moves; before L19 the road picture was not redrawn at all."""
+    from cyberpunk_computer.ui.scene.render import SceneRenderer
+    r = SceneRenderer((238, 216))
+    d = SceneDirector()
+    drive = SceneInputs(speed_kmh=30, real_speed_kmh=30, gear="D", ready=True, rs_state="running", rs_ok=True,
+                        road=parse_scene(vw_scene(1, 1000, lead={"id": "lead:1", "d": 3.0, "y": 0.0, "v": 0.0})))
+    step(d, drive, 2.0)                                   # the view opens
+    stand = drive._replace(speed_kmh=0.0, real_speed_kmh=0.0)
+    step(d, stand, 1.0)
+    t, n0 = 50.0, None
+    for k in range(40):                                   # 4 s standing, the lead's value creeps by 0.6 m
+        road = parse_scene(vw_scene(10 + k, 2000 + 100 * k,
+                                    lead={"id": "lead:1", "d": 3.0 + 0.015 * k, "y": 0.0, "v": 0.0}))
+        inp = stand._replace(road=road)
+        for _ in range(2):
+            d.update(inp, 0.05)
+            t += 0.05
+            r.render(d, inp, t)
+        if n0 is None:
+            n0 = r.redraws
+    assert not d.moving and d.view_step == VIEW_STEPS
+    assert r.redraws - n0 >= 10                           # the picture follows the lead
+    assert abs(d.lead.dist_m - (3.0 + 0.015 * 39)) < 0.1
+
+
+def test_lead_readout_has_a_hysteresis():
+    d = SceneDirector()
+    base = SceneInputs(speed_kmh=30, real_speed_kmh=30, gear="D", rs_state="running", rs_ok=True)
+    shown = []
+    for k in range(60):                                   # a live value wobbling around 4.5 m
+        dist = 4.5 + 0.12 * (1 if k % 2 else -1)
+        d.update(base._replace(road=parse_scene(vw_scene(k + 1, 1000 + 80 * k,
+                                                         lead={"id": "lead:1", "d": dist, "y": 0, "v": 0}))), 0.08)
+        shown.append(d.lead_shown_m)
+    assert len(set(shown[5:])) == 1
+
+
+def test_light_moves_smoothly_between_samples_with_a_jittery_link():
+    """vw samples arrive 3-12 per second, each 0.1-0.16 s old; the light (approached at 10 m/s) is placed by the
+    sample's frame time and carried by its velocity in between: no step, although samples are 1-3 m apart."""
+    import random
+    from cyberpunk_computer.ui.scene.inputs import _traffic_light
+    rnd = random.Random(2)
+    d = SceneDirector()
+    base = SceneInputs(speed_kmh=36, real_speed_kmh=36, gear="D", rs_state="running", rs_ok=True)
+    clock, steps, prev, inp, next_arrival, seq = 0.0, [], None, None, 0.0, 0
+    while clock < 4.0:
+        clock += 0.05
+        if clock >= next_arrival:
+            seq += 1
+            t_src = clock - 0.1 - rnd.uniform(0.0, 0.06)
+            light = {"id": "light:7", "state": "red", "d": 60.0 - 10.0 * t_src, "y": 2.0, "vx": -10.0, "vy": 0.0}
+            inp = base._replace(road=parse_scene(vw_scene(seq, t_src * 1000.0, light=light)),
+                                light=_traffic_light(light))
+            next_arrival = clock + rnd.uniform(0.08, 0.3)
+        d.update(inp, 0.05)
+        if prev is not None:
+            steps.append(abs(d.light_pos[0] - prev + 10.0 * 0.05))
+        prev = d.light_pos[0]
+    assert max(steps[10:]) < 0.5
+    assert abs(d.light_pos[0] - (60.0 - 10.0 * clock)) < 2.0   # where the light is now, not 0.15 s ago
+
+
+def test_no_stale_health_light_while_the_scene_feed_is_live():
+    st = running(AppState())
+    st = replace(st, roadsense=replace(st.roadsense, health={"lights": {"state": "red", "dist_m": 40.0}}))
+    feed = SceneFeed(clock=lambda: 10.0)
+    feed.push(SCENE_EVENT, scene(1))                      # a live scene without a light
+    assert read_inputs(st, feed).light is None
+    assert read_inputs(st, SceneFeed()).light is not None   # no feed at all: the mirror is all there is

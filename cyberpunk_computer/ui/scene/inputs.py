@@ -45,11 +45,14 @@ class Lead(NamedTuple):
     prob: float = 1.0
     kind: str = "car"
     accel: Optional[float] = None    # m/s2 (the model's estimate), negative = braking
+    alpha: float = 1.0               # display channel: fade in / out (roadsense view)
+    oid: str = ""                    # display channel: object id (a new id = another vehicle)
 
 
 class RoadLine(NamedTuple):
     ys: Tuple[float, ...]            # lateral offsets at RoadScene.xs, LEFT positive
     prob: float = 1.0
+    alpha: float = 1.0               # display channel: fade in / out
 
 
 class RoadObject(NamedTuple):
@@ -77,6 +80,12 @@ class TrafficLight(NamedTuple):
     uncertain: bool = False          # roadsense: the choice between two signal groups is ambiguous
     alt_state: str = ""              # the other signal group's state while two groups disagree
     alt_side: str = ""               # ... and where it is: "l" | "r"
+    # display channel (roadsense view): position in the car frame, velocity for extrapolation, fade
+    vx: Optional[float] = None       # m/s, forward
+    vy: Optional[float] = None       # m/s, LEFT positive
+    alpha: float = 1.0
+    oid: str = ""
+    car_frame: bool = False          # lat_m is from the camera axis (view), not the offset from the path
 
 
 class RoadScene(NamedTuple):
@@ -87,6 +96,7 @@ class RoadScene(NamedTuple):
     lead: Optional[Lead] = None
     objects: Tuple[RoadObject, ...] = ()
     path: Optional[RoadLine] = None                                    # the model's planned path
+    t: Optional[float] = None        # display channel: roadsense frame time, s (samples are spaced by it)
 
 
 class SceneInputs(NamedTuple):
@@ -216,12 +226,16 @@ def _line(raw: Any, n: int) -> Optional[RoadLine]:
     if raw is None:
         return None
     prob = 1.0
+    alpha = 1.0
     ys = raw
     if isinstance(raw, Mapping):
         ys = raw.get("y")
         p = _num(raw.get("prob"))
         if p is not None:
             prob = p
+        f = _num(raw.get("f"))
+        if f is not None:
+            alpha = max(0.0, min(1.0, f))
     if not isinstance(ys, (list, tuple)) or len(ys) < 2:
         return None
     vs = ys[:n]
@@ -229,14 +243,14 @@ def _line(raw: Any, n: int) -> Optional[RoadLine]:
     # through to the checked loop below)
     out = [-v for v in vs if type(v) is float and v == v]
     if len(out) == len(vs):
-        return RoadLine(tuple(out), prob)
+        return RoadLine(tuple(out), prob, alpha)
     out = []
     for v in vs:
         f = _num(v)
         if f is None:
             return None
         out.append(-f)
-    return RoadLine(tuple(out), prob)
+    return RoadLine(tuple(out), prob, alpha)
 
 
 def parse_scene(raw: Any) -> Optional[RoadScene]:
@@ -272,8 +286,31 @@ def parse_scene(raw: Any) -> Optional[RoadScene]:
             continue
         objs.append(RoadObject(str(o.get("kind") or ""), x, -y, str(o.get("state") or "")))
     seq = raw.get("seq")
+    path = _line(raw.get("path"), n)
+    t = None
+    vw = raw.get("vw")
+    if isinstance(vw, Mapping):
+        # roadsense 2.0 display channel: what is drawn comes from the view (contract section 7.4); the
+        # top-level keys stay the measurement for the alert functions
+        tv = _num(vw.get("t"))
+        t = None if tv is None else tv / 1000.0
+        lr_ = vw.get("lanes") or ()
+        er_ = vw.get("edges") or ()
+        lanes = tuple(_line(lr_[i], n) if i < len(lr_) else None for i in range(4))
+        edges = tuple(_line(er_[i], n) if i < len(er_) else None for i in range(2))
+        if vw.get("path") is not None:
+            path = _line(vw.get("path"), n)
+        accel = lead.accel if lead is not None else None
+        lead = None
+        lv = vw.get("lead")
+        if isinstance(lv, Mapping):
+            d = _num(lv.get("d"))
+            if d is not None and d > 0:
+                f = _num(lv.get("f"))
+                lead = Lead(d, -(_num(lv.get("y")) or 0.0), _num(lv.get("v")), 1.0, "car", accel,
+                            1.0 if f is None else max(0.0, min(1.0, f)), str(lv.get("id") or ""))
     return RoadScene(int(seq) if isinstance(seq, (int, float)) else 0,
-                     xs, lanes, edges, lead, tuple(objs), _line(raw.get("path"), n))
+                     xs, lanes, edges, lead, tuple(objs), path, t)
 
 
 def parse_signs(raw: Any) -> Tuple[Tuple[SignItem, ...], Tuple[SignItem, ...]]:
@@ -312,8 +349,11 @@ def _traffic_light(raw: Any) -> Optional[TrafficLight]:
     if isinstance(alt, Mapping) and isinstance(alt.get("s"), str):
         alt_s = alt["s"]
         alt_side = alt.get("side") if alt.get("side") in ("l", "r") else ""
+    vx, vy, f = _num(raw.get("vx")), _num(raw.get("vy")), _num(raw.get("f"))
     return TrafficLight(st, d, None if y is None else -y, bool(raw.get("flashing")),
-                        raw.get("q") is True, alt_s, alt_side)
+                        raw.get("q") is True, alt_s, alt_side,
+                        vx, None if vy is None else -vy, 1.0 if f is None else max(0.0, min(1.0, f)),
+                        str(raw.get("id") or ""), vx is not None)
 
 
 _GEAR = {"PARK": "P", "REVERSE": "R", "NEUTRAL": "N", "DRIVE": "D", "B": "B"}
@@ -474,8 +514,15 @@ def read_perception(state: Any, feed: Optional[SceneFeed] = None, map_limit: boo
             limit_src = str(limit.get("src", limit.get("source")) or "")
             limit_conf = _num(limit.get("conf", limit.get("confidence")))
     signs_on, signs_ahead = parse_signs(raw_scene.get("signs") if raw_scene else None)
-    light = _traffic_light(raw_scene.get("light") if raw_scene else None)
-    if light is None:
+    vw = raw_scene.get("vw") if raw_scene else None
+    if isinstance(vw, Mapping):
+        light = _traffic_light(vw.get("light"))      # display channel: smooth, in the car frame
+    else:
+        light = _traffic_light(raw_scene.get("light") if raw_scene else None)
+    if light is None and not raw_scene:
+        # the 5 s health mirror only when no scene feed is there at all: while the feed is live, "no light in
+        # the scene" means no light (before L19 the mirror's old light was drawn then: a stale ghost, 3 % of
+        # the 2026-11-17 drive)
         light = _traffic_light(health.get("lights"))
     env = raw_scene.get("env") if raw_scene else None
     if not isinstance(env, Mapping):
