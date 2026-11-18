@@ -414,7 +414,7 @@ Demo shots 70..79 (section 11).
 The main road drawing itself shows what the road ahead is: the lane beyond the camera's reach, side roads
 leaving it, a roundabout as a ring on the ground. Tuning `road_geo` (**on by default**; without a usable
 map it does nothing and the picture is the vision-only one). It needs roadsense's fused road geometry
-(topic `roadgeom`, roadsense docs/ARCHITECTURE.md; scene key `geo`, section 7.3), in which roadsense has
+(`view.road` of roadsense api 2, roadsense docs/ARCHITECTURE.md; scene key `geo`, section 7.3), in which roadsense has
 already fitted the map's geometry to the camera's lanes in the car's frame and withholds it when the two
 disagree. The screen draws what it gets; the gates of the map layer (section 6.5: match confidence over
 3 s, a real position, accuracy, a live road picture) apply on top. With `geo` the far road of section 6.5
@@ -510,7 +510,7 @@ Every key is optional; a missing key means "not known" and nothing is drawn for 
 
 ### 7.1 Backend feed (`cyberpunk_computer/backend/roadsense_scene.py`)
 
-The backend reads roadsense's WebSocket `ws://127.0.0.1:8090/ws?topics=road,lights,speed_limit,env,rules,fused,map,lead,lanes,roadgeom`
+The backend reads roadsense's WebSocket `ws://127.0.0.1:8090/ws?topics=road,lights,speed_limit,env,rules,fused,map,lead,lanes,view`
 (roadsense's own API on loopback, not the backend's `/api/v1/roadsense/ws` front) with a stdlib
 RFC 6455 client in its own thread and publishes `roadsense_scene` on the ZMQ PUB channel only (not
 on the dashboard websocket, whose latest-only queue would let scenes displace state snapshots),
@@ -605,7 +605,7 @@ elements of section 6.5.
         "pos": {"src": "gnss|dead_reckoning", "hacc": 2.1},
         "shape": {"ds": 40, "x": [0, 40, 79, 115], "y": [0, 1, 10, 27]},
         "lead": {"present": true, "d": 5.4, "y": 0.1, "v_rel": 0.0, "v": 0.0, "a": 0.0, "gap": 1.2, "ttc": 4.0,
-                 "standing": true, "departed": true, "mode": "hold", "id": 7},   # roadsense's tracked lead, when fused carries it
+                 "standing": true, "departed": true, "mode": "track", "id": 7},   # roadsense's tracked lead, when fused carries it
         "in": {"gnss": "headunit|synthetic", "fix": "3d|none|...", "fix_age": 0.4,
                "motion": "vehicle|vision|none", "tag": "prius-can|synthetic"},
         "syn": true}                   # only when set: mapd's position comes, or may still come, from a synthetic drive
@@ -634,10 +634,12 @@ Size (compact JSON): about 0.65 kB with the map available (test example `FUSED_M
 
 ### 7.3 Road geometry key `geo` (`roadsense_scene.roadgeom_to_scene`)
 
-roadsense's `roadgeom` topic (one message per road frame, 2 kB) is cut down to what the screen draws and
-rides on the scene event while it is younger than 0.5 s, the map layer is in use (`map.ok`), roadsense
-uses the map part (`roadgeom.map.used`) and the position is not synthetic. Metres, x ahead of the camera,
-**y right** (the frontend flips it), one decimal.
+The geometry of roadsense's `view.road` (api 2; until then the topic `roadgeom`) is cut down to what the
+screen draws and rides on the scene event of the same `view` message while the map layer is in use
+(`map.ok`), roadsense trusts the position (`view.road.position.trusted`) and uses the map part
+(`view.road.map.used`), and the position is not synthetic. Metres, x ahead of the camera, **y right** (the
+frontend flips it), one decimal. `"ap": true` is added when roadsense marks the position approximate (dead
+reckoning, a weak or held position): side roads and the ring are then drawn at 60 % brightness.
 
 ```
 "geo": {"v": 60.0,                  # the camera's lanes are drawn up to here
@@ -668,7 +670,7 @@ marked) from a display channel `view` for consumers that draw (roadsense docs/AR
 view"). The backend subscribes to `view` too; while it is fresh (0.5 s):
 
 * the scene is built **per `view` message**, the last message roadsense sends for a frame (road, lead, lanes,
-  roadgeom, view). Built per `road` message, the scene carried the lead and lanes of the previous frame in
+  view). Built per `road` message, the scene carried the lead and lanes of the previous frame in
   4.5 % of the scenes on the 2026-11-17 drive; now 0.03 %. The 15 kB `road` message is no longer decoded;
 * the top-level keys stay the measurement (`lead` from the tracker, `lanes` / `edges` from `lanes`, `light` from
   `lights.ego`): the alert functions read those;
@@ -691,7 +693,13 @@ The screen (`inputs.parse_scene`, `director._update_road_view`, `director._updat
   frame time) over the last 3 s (the link only adds delay), so the WebSocket, the 10 Hz publish cap, the ZMQ
   poll (50 ms) and the link's jitter do not move the picture; the lead and the light are carried by their
   velocity from the sample's frame time to the frame being drawn (at most 0.35 s) and only the corrections are
-  eased (0.08 s); lines are eased over 0.1 s (before: a 0.3 s low-pass of everything);
+  eased (0.08 s); lines move with their own rate (L22): each point's lateral rate is taken from the last two
+  samples and their frame times, the line is drawn 0.1 s behind "now" on roadsense's clock, and only the
+  correction at a new sample is eased. The samples reach the screen unevenly (13 frames a second at the source,
+  at most 10 passed on: frame times 75 or 150-225 ms apart), and easing towards the newest sample made a stair
+  of a line that sweeps in a turn: drawn steps over 0.3 m at 30 m on the 2026-11-17 day drive 15 (0.3 s
+  low-pass, before L19) -> 56 (0.1 s ease, L19) -> 6 (L22). A line that is still fading in is placed, not
+  moved; a line whose length changes keeps the motion of the part that stays;
 * the light is drawn where `vw.light` puts it in the car frame (before: `lights.ego.lateral_m`, the offset from
   the planned path, placed as if from the camera axis);
 * while the car stands in traffic (road view open) the road picture is redrawn whenever what it shows moved by
@@ -701,6 +709,44 @@ The screen (`inputs.parse_scene`, `director._update_road_view`, `director._updat
 
 Without `view` (an older roadsense) everything is as before (sections 7.1-7.3). Measured with
 `tools/scene_feed_replay.py` on the recorded drives (docs: roadsense docs/lanes/L19-view-channel.md).
+
+### 7.5 roadsense api 2: the whole road scene from `view` (lane L22, 2026-11-18)
+
+Since roadsense 2.0 the display channel carries the road as one picture, `view.road` (roadsense
+docs/ARCHITECTURE.md, "view.road: the road as one picture"), and the screen draws its whole road scene from
+that one message of one frame. The alert functions keep reading the measurement keys (`lead`, `lanes`,
+`light`, `limit`, `signs`, the facts of `map`).
+
+| drawn element | scene key | until L22 from | now from |
+|---|---|---|---|
+| lanes, edges, path, lead, ego light | `vw` | `view` (L19) | `view` (lines, objects) |
+| road beyond the camera, side roads, ring | `geo` | topic `roadgeom` | `view.road` (`centre`, `branches`, `ring`, `way`) |
+| junction / roundabout schematic | `map.jv` | topic `map` (`ahead.junction_view`) | `view.road.junction` (the same object, its distance carried to the frame, `approximate` -> `"ap": true`) |
+| lane boxes | `map.lanes` | topic `fused` (`lanes`) | `view.road.lanes`: `n`, `fwd`, `back`, `ego` (the lane roadsense lights, with its own hysteresis), `lk` (the likely lane when none is lit), `p`, `c`, `onc_left`, and near a junction with painted arrows `tl` / `tp` |
+| far road beyond 100 m when `geo` is absent | `map.shape` | topic `map` | unchanged (the only map element still drawn straight from a measurement topic; it has its own camera-agreement gate, section 6.5). To decide: drop it, now that `geo` covers the case |
+
+`map.lanes` near a junction with painted turn arrows (map pack format 2, OpenStreetMap `turn:lanes`):
+
+```
+"lanes": {"n": 4, "fwd": 3, "back": 1, "ego": 1, "c": 0.9, "p": [0.05, 0.9, 0.05],
+          "tl": ["l", "t", "tr"],     # per own lane, from the left: l left, t straight on, r right, u turn back, m merge; "" = no arrow
+          "tp": [0, 1, 1]}            # the lanes that lead where the most likely path goes
+```
+The arrows ride along from 120 m before their stretch (`TURN_ARROWS_AHEAD_M`) and only while they count the
+same lanes as the boxes. `maplayer.lane_boxes` draws them inside the 9 x 14 px boxes (7 x 11 px each: a stem
+with a head for straight on, a branch for a turn, a hooked arrow for a lane that only turns): black on the lit
+lane, in the ego-lane colour on the lanes of the most likely way, dim on the others. They show what is painted
+on the road; like the schematic's bright arm, the "likely way" is the map's guess, not a route.
+
+![Turn arrows in the lane boxes](images/mfd_l22_turn_arrows.png) ![Turn arrows, own lane unknown, junction approximate](images/mfd_l22_turn_arrows_likely_approx.png)
+
+What roadsense now decides and the screen no longer has to: whether the map layer may be drawn at all
+(`view.road.position.trusted`: match confidence over about 2 s with hysteresis 0.55 / 0.40, a 2.5 s hold over
+a drop-out), whether a junction is near enough for the position error, and when it is only approximate. The
+`MapDirector` gates of sections 6.5-6.7 stay as a second line (they also need the fused map layer, `map.ok`);
+`junction_approx` is set when either side says so. With a roadsense older than 2.0 (no `view`) the screen
+shows the camera's road, the fused facts and the lane boxes from `fused`, but no junction schematic and no
+`geo`: the car computer of this branch needs roadsense 2.0 for those.
 
 ## 8. Requests
 
@@ -953,7 +999,7 @@ python -m cyberpunk_computer.ui.scene.demo --live --scale 3                  # t
 python -m cyberpunk_computer.ui.scene.demo --bench                           # frame cost incl. the simulation
 ```
 
-`--shots` writes `NN_name.png` (native 480 x 240) and `NN_name@4x.png` for 83 cases (82: a junction on dead reckoning, drawn approximate; 83: three lanes from the map with the own lane unknown and the middle one likely (2026-11-18); 70..79: the junction view as a crossroads with signals, a T-junction, five arms, a roundabout before and on the ring, a low-confidence path that shows nothing; the traffic light with a second signal group, an ambiguous choice and a light over another lane; the two last map cases moved to 80..81): the states of
+`--shots` writes `NN_name.png` (native 480 x 240) and `NN_name@4x.png` for 85 cases (84: turn arrows in the lane boxes before a signalled junction, the car in the middle lane; 85: turn arrows with the own lane unknown and the junction marked approximate by roadsense (L22); 82: a junction on dead reckoning, drawn approximate; 83: three lanes from the map with the own lane unknown and the middle one likely (2026-11-18); 70..79: the junction view as a crossroads with signals, a T-junction, five arms, a roundabout before and on the ring, a low-confidence path that shows nothing; the traffic light with a second signal group, an ambiguous choice and a light over another lane; the two last map cases moved to 80..81): the states of
 section 4, the five lamp states on the road and three parked, 18 scenery variants covering every
 place, light and weather label, four lane layouts, the top line with the speed switched back on, a full sign row, the cruise slot states, the three speed-limit provenance styles, 17 map-layer cases (55..71: next limit in the top line, at the roadside and in the `beside` variant, far road with a roundabout and switched off, three lane layouts from the map, tunnel exit in metres, kilometres and with the mouth in view, dead reckoning, a poor position, the road-number variants, synthetic position = no map) and `signs_legend`
 with every pictogram. Shots 1..51 are byte-identical to the set before the map layer. `--copy-to` also writes the 4x images there as `<prefix>NN_name.png`
@@ -968,8 +1014,8 @@ street lamps of the demo are simulated data for the `lamp` object kind (section 
 ### 11.0 Where the map chain loses a junction (`tools/mfd_chain_replay.py`, 2026-11-18)
 
 A roadsense drive-recorder session (or a replay of its `map` messages, roadsense `tools/map_replay.py --out`)
-through roadsense's own fusion and road-geometry code, the backend's `SceneBuilder` and the frontend's
-`MapDirector`, scored against hand-labelled junctions (CSV `source,stamp,kind,note`, stamp = camera frame seq):
+through roadsense's own derived topics (roadsense `tools/replay_lib.py`, api 2: `fused`, `lanes`, `view` with
+`view.road`), the backend's `SceneBuilder` and the frontend's `MapDirector`, scored against hand-labelled junctions (CSV `source,stamp,kind,note`, stamp = camera frame seq):
 for the 12 s before each junction it says which stage still knew it (position, usable map, junction announced,
 scene event, MFD) and whether the schematic's distance matched the distance actually driven. Results on the
 drives of 17 Nov: roadsense docs/lanes/L20-ego-lane-junctions.md.
@@ -1008,7 +1054,7 @@ lost 600..690 s), `warsaw-city`, `krakow-city`. Sequences from them: filedrop ga
 
 A recording of roadsense's `tools/roadgeom_drive.py --network tour --out REC` (a made-up network: a bend,
 a crossroads with signals, a roundabout, a side road; a synthetic camera with limited reach) carries the
-camera side too (`road`, `lanes`, `roadgeom`): `render` replays it as it is, so the picture shows what
+camera side too (`road`, `lanes`, `view`): `render` replays it as it is, so the picture shows what
 roadsense's fusion gives, including the moments it withholds the map. `--synthetic` on such a recording is
 the "no GPS" picture. Sequences: filedrop gallery `set=l17road`.
 
@@ -1057,7 +1103,7 @@ ignored and logged.
 | `map_far_road` | true | the road beyond camera range |
 | `map_tunnel` | true | tunnel exit distance and the tunnel's mouth |
 | `map_lanes` | true | lane boxes and the oncoming tint from the map |
-| `road_geo` | true | the road picture continues on the map: lane beyond the camera, side roads, roundabout as a ring (section 6.7); nothing without roadsense's `roadgeom` and a usable map |
+| `road_geo` | true | the road picture continues on the map: lane beyond the camera, side roads, roundabout as a ring (section 6.7); nothing without roadsense's `view.road` and a usable map |
 | `road_geo_way` | true | ... a side road chosen by the turn signal drawn as the way on |
 | `map_junction` | true | the junction / roundabout ahead as a schematic at the left edge (section 6.6); false before 2026-11-18 |
 | `map_junction_hacc_share` | 0.4 | ... also while the position error is at most this share of its distance, drawn approximate (amber frame, `~` distance) |

@@ -239,27 +239,30 @@ def left_is_oncoming(r: Any, d: Any) -> bool:
 
 
 def _lane_arrow(s: pygame.Surface, col: RGB, x: int, y: int, codes: str) -> None:
-    """The painted arrows of one lane inside its box (7 x 11 px at x, y): a stem from the bottom, a head
-    pointing up for "t" (straight on), a branch with a head to the left / right for "l" / "r" ("u", turning
-    back, is drawn as left). Pixels only, no anti-aliasing."""
-    cx = x + 3
+    """The painted arrows of one lane inside its box (7 x 11 px at x, y), pixel by pixel: a stem from the
+    bottom with a head pointing up for "t" (straight on), a branch with a head to the left / right for "l" /
+    "r" ("u", turning back, is drawn as left; "m", a merge, has no picture)."""
     left, right, up = ("l" in codes or "u" in codes), "r" in codes, "t" in codes
     if not (left or right or up):
         return
-    top = y + 1 if up else y + 5
-    pygame.draw.line(s, col, (cx, y + 10), (cx, top))
-    if up:
-        pygame.draw.line(s, col, (cx - 1, y + 1), (cx + 1, y + 1))
-        pygame.draw.line(s, col, (cx - 2, y + 2), (cx + 2, y + 2))
-        s.set_at((cx, y), col)
-    by = y + 6 if up else y + 5                      # the branch leaves the stem here
-    for on, sg in ((left, -1), (right, 1)):
-        if not on:
-            continue
-        pygame.draw.line(s, col, (cx, by), (cx + 3 * sg, by))
-        pygame.draw.line(s, col, (cx + 2 * sg, by - 1), (cx + 2 * sg, by + 1))
-        if not up:
-            pygame.draw.line(s, col, (cx + sg, by - 2), (cx + sg, by + 2))
+    px = set()
+    if up or (left and right):
+        cx = 3
+        px |= {(cx, r) for r in range(1 if up else 5, 11)}
+        if up:
+            px |= {(3, 0), (2, 1), (4, 1), (1, 2), (2, 2), (4, 2), (5, 2)}
+        for on, sg in ((left, -1), (right, 1)):
+            if on:                                   # a branch up and out at 45 degrees, its head a corner at the tip
+                px |= {(cx + sg, 7), (cx + 2 * sg, 6), (cx + 3 * sg, 5),
+                       (cx + 2 * sg, 5), (cx + sg, 5), (cx + 3 * sg, 6), (cx + 3 * sg, 7)}
+    else:
+        sg = -1 if left else 1                       # a single turn: the stem on the far side, a full head
+        cx = 3 - sg
+        px |= {(cx, r) for r in range(4, 11)}
+        px |= {(cx + sg * k, 4) for k in range(1, 5)}
+        px |= {(cx + 3 * sg, 3), (cx + 3 * sg, 5), (cx + 2 * sg, 2), (cx + 2 * sg, 3), (cx + 2 * sg, 5), (cx + 2 * sg, 6)}
+    for dx, dy in px:
+        s.set_at((x + dx, y + dy), col)
 
 
 def lane_boxes(r: Any, s: pygame.Surface, d: Any) -> bool:
