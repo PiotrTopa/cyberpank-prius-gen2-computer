@@ -173,7 +173,7 @@ def main():
         if t >= next_health:                      # the backend's 5 s health mirror
             next_health += 5.0
             health = {"lights": cur_ego}
-        state = NS(vehicle=NS(real_speed_kmh=cur_speed * 3.6, display_speed_kmh=cur_speed * 3.6, gear="D",
+        state = NS(vehicle=NS(real_speed_kmh=cur_speed * 3.6, display_speed_kmh=cur_speed * 3.6, gear="DRIVE",
                               ready_mode=True, acc_on=True),
                    roadsense=NS(state="running", api_ok=True, health=health, scene=None))
         inp = read_inputs(state, feed, tune.map_limit)
