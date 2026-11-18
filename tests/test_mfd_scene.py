@@ -1541,9 +1541,9 @@ def test_ego_lane_probabilities_unknown_lane_shows_the_count_and_the_likely_lane
     the count with no lane lit, the most likely one outlined when it holds 0.45 or more."""
     unk = _map_full(lanes={"n": 3, "fwd": 3, "back": 0, "c": 0.0, "p": [0.1, 0.6, 0.3]})
     d = map_director(unk)[0]
-    assert d.map.lanes == (3, 0, -1, 1)
+    assert d.map.lanes[:4] == (3, 0, -1, 1)
     flat = _map_full(lanes={"n": 3, "fwd": 3, "back": 0, "c": 0.0, "p": [0.34, 0.33, 0.33]})
-    assert map_director(flat)[0].map.lanes == (3, 0, -1, -1)
+    assert map_director(flat)[0].map.lanes[:4] == (3, 0, -1, -1)
     known = _map_full(lanes={"n": 3, "fwd": 3, "back": 0, "ego": 1, "c": 0.8, "p": [0.05, 0.9, 0.05]})
     a = mdrawn(map_inputs(known), 3.0, map_far_road=False)[0]
     b = mdrawn(map_inputs(unk), 3.0, map_far_road=False)[0]
@@ -1561,3 +1561,67 @@ def test_scene_carries_the_ego_lane_probabilities():
     assert ln["p"] == [0.1, 0.62, 0.28] and "ego" not in ln
     fu["lanes"]["probs_from"] = "right"
     assert "p" not in fused_to_scene(fu)["lanes"]
+
+
+def test_turn_arrows_are_drawn_in_the_lane_boxes_near_a_junction():
+    """roadsense 2.0 (view.road.lanes.turn, from the map pack's turn lanes): per own lane the painted arrows; the
+    boxes then carry them (l left, t straight on, r right), the lanes of the most likely way brighter."""
+    from cyberpunk_computer.ui.scene.mapinfo import parse_map
+    plain = _map_full(lanes={"n": 3, "fwd": 3, "back": 0, "ego": 1, "c": 0.9, "p": [0.05, 0.9, 0.05]})
+    arrows = _map_full(lanes={"n": 3, "fwd": 3, "back": 0, "ego": 1, "c": 0.9, "p": [0.05, 0.9, 0.05],
+                              "tl": ["l", "t", "tr"], "tp": [0, 1, 1]})
+    mi = parse_map({"map": arrows})
+    assert mi.lanes_turn == ("l", "t", "tr") and mi.lanes_path == (False, True, True)
+    d = map_director(arrows)[0]
+    assert d.map.lanes.turn == ("l", "t", "tr") and d.map.lanes.path == (False, True, True)
+    a = mdrawn(map_inputs(plain), 3.0, map_far_road=False)[0]
+    b = mdrawn(map_inputs(arrows), 3.0, map_far_road=False)[0]
+    other = _map_full(lanes={"n": 3, "fwd": 3, "back": 0, "ego": 1, "c": 0.9, "p": [0.05, 0.9, 0.05],
+                             "tl": ["tr", "t", "l"], "tp": [0, 1, 1]})
+    c = mdrawn(map_inputs(other), 3.0, map_far_road=False)[0]
+    assert a != b != c
+    # arrows for another number of lanes than the boxes are ignored, never mis-assigned
+    bad = _map_full(lanes={"n": 3, "fwd": 3, "back": 0, "ego": 1, "c": 0.9, "tl": ["l", "t"]})
+    assert parse_map({"map": bad}).lanes_turn == ()
+    # roadsense's likely lane is used as sent
+    lk = _map_full(lanes={"n": 3, "fwd": 3, "back": 0, "c": 0.0, "lk": 2, "p": [0.3, 0.3, 0.4]})
+    assert map_director(lk)[0].map.lanes[:4] == (3, 0, -1, 2)
+
+
+def test_junction_marked_approximate_by_roadsense_is_drawn_approximate():
+    jv = {"k": "j", "m": 150, "c": 0.9, "arms": [[0, "xep", 0, 0], [90, "xe", 1, 0]]}
+    d = map_director(_map_full(jv=jv))[0]
+    assert d.map.junction is not None and not d.map.junction_approx
+    d = map_director(_map_full(jv=dict(jv, ap=True)))[0]
+    assert d.map.junction is not None and d.map.junction_approx
+
+
+def test_lines_sweep_evenly_although_samples_arrive_unevenly():
+    """roadsense makes 13 frames a second, the backend passes on at most 10: the samples' frame times are 75 or
+    225 ms apart while they arrive every 100 ms. A line sweeping at a constant rate (a turn) must move by about
+    the same amount on every drawn frame, not in a stair (56 steps over 0.3 m at 30 m in 29 min before L22)."""
+    d = SceneDirector()
+    base = SceneInputs(speed_kmh=40, real_speed_kmh=40, gear="D", rs_state="running", rs_ok=True)
+    rate = 4.0                                            # m/s to the left, at every point
+    t_src, clock, k, inp, steps, prev = 0.0, 0.0, 0, None, [], None
+    next_arrival = 0.0
+    while clock < 6.0:
+        clock += 0.05
+        if clock >= next_arrival:
+            k += 1
+            t_src += 0.075 if k % 2 else 0.225
+            sc = vw_scene(k, t_src * 1000.0)
+            for ln in sc["vw"]["lanes"]:
+                if ln:
+                    ln["y"] = [y - rate * t_src for y in ln["y"]]      # the wire is y right
+            inp = base._replace(road=parse_scene(sc))
+            next_arrival += 0.15
+        d.update(inp, 0.05)
+        if d.lanes[1] is not None:
+            if prev is not None:
+                steps.append(d.lanes[1][5] - prev)
+            prev = d.lanes[1][5]
+    steps = steps[20:]
+    mean = sum(steps) / len(steps)
+    assert abs(mean - rate * 0.05) < 0.02                 # it keeps up with the line
+    assert max(steps) < 1.5 * mean and min(steps) > 0.5 * mean

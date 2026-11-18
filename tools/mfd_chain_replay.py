@@ -3,8 +3,9 @@
 Development tool (nothing here runs on the car). A roadsense drive-recorder session goes through:
 
     mapd `map` (as recorded, or a replay of it: roadsense tools/map_replay.py --out)
-      -> roadsense api: fusion (`fused`), road-geometry tracker (`lanes`) and fusion (`roadgeom`)   [roadsense code]
-      -> backend SceneBuilder (scene event: map, map.jv, geo)                                       [this repo]
+      -> roadsense api: `fused`, `lanes`, the ego lane, and the display channel `view` with the road picture
+         `view.road` (roadsense tools/replay_lib.py: the api's derived topics in the api's order)   [roadsense code]
+      -> backend SceneBuilder (scene event: map, map.jv, map.lanes, geo, all from view.road)        [this repo]
       -> frontend MapDirector (the gates of docs/MFD_MAIN_SCREEN.md 6.5-6.7)                        [this repo]
 
 and at every labelled junction (a CSV `source,stamp,kind,note` with stamp = camera frame seq, kind
@@ -30,35 +31,10 @@ import csv
 import json
 import os
 import sys
-import zlib
 from types import SimpleNamespace
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
-
-
-def lines(path):
-    if os.path.isdir(path):
-        path = os.path.join(path, "messages.jsonl.gz")
-    with open(path, "rb") as f:
-        d, buf = (zlib.decompressobj(31), b"") if path.endswith(".gz") else (None, b"")
-        while True:
-            chunk = f.read(1 << 20)
-            if not chunk:
-                break
-            if d is not None:
-                try:
-                    chunk = d.decompress(chunk)
-                except zlib.error:
-                    break
-            buf += chunk
-            *full, buf = buf.split(b"\n")
-            for ln in full:
-                if ln.startswith(b"{"):
-                    try:
-                        yield json.loads(ln)
-                    except ValueError:
-                        continue
 
 
 def _load(name, rel):
@@ -81,10 +57,8 @@ def main(argv=None) -> int:
     ap.add_argument("--before-s", type=float, default=12.0)
     ap.add_argument("--quiet", action="store_true")
     a = ap.parse_args(argv)
-    sys.path.insert(0, os.path.join(a.roadsense, "api"))
-    from roadsense_api.fusion import Fusion
-    from roadsense_api.lanes import RoadGeometryTracker
-    from roadsense_api.roadgeom import RoadGeometryFusion
+    sys.path.insert(0, os.path.join(a.roadsense, "tools"))
+    from replay_lib import Pipeline, read_session       # roadsense's own offline pipeline (api 2)
     # loaded by file: the packages' __init__ pull in the whole backend / pygame, which this needs neither of
     rs = _load("roadsense_scene", "cyberpunk_computer/backend/roadsense_scene.py")
     SceneBuilder, SceneFeedConfig = rs.SceneBuilder, rs.SceneFeedConfig
@@ -96,72 +70,45 @@ def main(argv=None) -> int:
     for k, v in (json.loads(a.tuning) if a.tuning else {}).items():
         setattr(tun, k, v)
 
-    msgs = []
-    for m in lines(a.session):
-        t = m.get("type")
-        if t in ("road", "ego", "camera", "speed_limit", "env", "vehicle") or (t == "map" and not a.map):
-            msgs.append(m)
-    if a.map:
-        with open(a.map) as f:
-            for ln in f:
-                m = json.loads(ln)
-                msgs.append(m)
-    msgs.sort(key=lambda m: m.get("ts_mono_ns") or 0)
-    cam = [(m["ts_mono_ns"], m["seq"]) for m in msgs if m.get("type") == "camera"]
-
-    fusion, tracker, rgf = Fusion(), RoadGeometryTracker(), RoadGeometryFusion()
+    pipe = Pipeline()
     builder = SceneBuilder(SceneFeedConfig(max_hz=10.0))
     md = mapinfo.MapDirector(tun)
-    latest = {}
-    last_fused_t = -1.0
+    cam = []
     speed = 0.0
+    have_ego = False
     timeline = []            # (t, speed, flags)
     last_t = None
     cur = {"pos": False, "map": False, "jv": False}
-    for m in msgs:
+    arrows = lanes_lit = lanes_likely = 0
+    for m in read_session(a.session, a.map):
         t_ns = m.get("ts_mono_ns")
-        if not isinstance(t_ns, int):
+        typ = m.get("type")
+        if not isinstance(t_ns, int) or typ not in ("road", "ego", "camera", "speed_limit", "env", "vehicle", "map"):
             continue
         t = t_ns / 1e9
-        typ = m.get("type")
+        if typ == "camera":
+            cam.append((t_ns, m["seq"]))
+            continue
         if typ == "ego":
             speed = abs(m.get("speed_mps") or 0.0)
-            tracker.on_ego(m)
-            rgf.on_ego(m)
-            latest["ego"] = m
-            continue
-        if typ in ("speed_limit", "env"):
-            latest[typ] = m
-            continue
-        if typ == "map":
-            latest["map"] = m
-            tracker.on_map(m)
-            rgf.on_map(m)
-            builder.feed(json.dumps(m), t)
+            have_ego = True
+        elif typ == "map":
             cur["pos"] = m.get("state") in ("good", "dead_reckoning")
             ah = m.get("ahead") or {}
             jvw = ah.get("junction_view")
             near = [j for j in ah.get("junctions") or () if j.get("dist_m", 1e9) <= 300 and not j.get("minor")]
             cur["jv"] = bool(m.get("available") and (jvw or near))
-            if "ego" not in latest and isinstance(m.get("position"), dict):
+            if not have_ego and isinstance(m.get("position"), dict):
                 speed = abs(m["position"].get("speed_mps") or 0.0)
-            continue
+        outs = pipe.feed(m)
+        for o in outs:
+            ot = o.get("type")
+            if ot == "fused":
+                cur["map"] = bool(o["map"]["available"])
+            if ot in ("map", "fused", "lanes", "lead", "view", "road"):
+                builder.feed(json.dumps(o), t)
         if typ != "road":
             continue
-        latest["road"] = m
-        ln = tracker.on_road(m)
-        if ln is not None:
-            latest["lanes"] = ln
-            builder.feed(json.dumps(ln), t)
-            g = rgf.on_lanes(ln, m)
-            if g is not None:
-                builder.feed(json.dumps(g), t)
-        if t - last_fused_t >= 0.5:
-            last_fused_t = t
-            fu = fusion.update(latest, t_ns)
-            builder.feed(json.dumps(fu), t)
-            cur["map"] = bool(fu["map"]["available"])
-        builder.feed(json.dumps(m), t)
         sc = builder.build(t)
         if sc is None:
             continue
@@ -177,16 +124,24 @@ def main(argv=None) -> int:
         scene_has = bool(mp.get("jv")) or bool(g.get("br") or g.get("ring"))
         geo_shown = md.geo is not None and bool(md.geo.branches or md.geo.ring)
         mfd = md.junction is not None or geo_shown
+        if speed >= 3.0 and md.lanes is not None:
+            arrows += bool(md.lanes.turn)
+            lanes_lit += md.lanes.ego >= 0
+            lanes_likely += md.lanes.ego < 0 and md.lanes.likely >= 0
         timeline.append((t, speed, dict(cur, scene=scene_has, mfd=mfd, sch=md.junction is not None, geo=geo_shown,
+                                        approx=md.junction is not None and md.junction_approx,
+                                        boxes=md.lanes is not None,
                                         jm=None if md.junction is None else md.junction.m)))
 
     # time share while driving
     drv = [x for x in timeline if x[1] >= 3.0]
-    keys = ("pos", "map", "jv", "scene", "mfd", "sch", "geo", "right")
+    keys = ("pos", "map", "jv", "scene", "mfd", "sch", "approx", "geo", "boxes", "right")
     for x in timeline:
         x[2].setdefault("right", False)
     share = {k: round(100.0 * sum(x[2][k] for x in drv) / max(1, len(drv)), 1) for k in keys}
     print("driving scenes %d: share of the time  %s" % (len(drv), json.dumps(share)))
+    print("lane boxes while driving: own lane lit on %d scenes, likely lane only on %d, with turn arrows on %d" % (
+        lanes_lit, lanes_likely, arrows))
     if not a.labels:
         return 0
     tl_t = [x[0] for x in timeline]

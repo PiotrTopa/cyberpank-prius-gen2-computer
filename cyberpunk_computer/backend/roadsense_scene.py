@@ -8,7 +8,7 @@ docs/MFD_MAIN_SCREEN.md section 7; consumer: ``ui/scene/inputs.SceneFeed``).
 This module builds that mapping from what the roadsense stack already
 publishes and hands it to the ZMQ event channel:
 
-    roadsense api  ws://127.0.0.1:8090/ws?topics=road,lights,speed_limit,env,rules,fused,map,lead,lanes,roadgeom
+    roadsense api  ws://127.0.0.1:8090/ws?topics=road,lights,speed_limit,env,rules,fused,map,lead,lanes,view
          │  (road 10-14/s ~16 kB, lights ~3/s, speed_limit and rules >= 1/s, env ~1/s,
          │   fused ~2/s, map 2/s ~4 kB, lead 10-14/s ~0.7 kB)
          ▼
@@ -57,7 +57,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 logger = logging.getLogger(__name__)
 
 EVENT_NAME = "roadsense_scene"
-TOPICS = ("road", "lights", "speed_limit", "env", "rules", "fused", "map", "lead", "lanes", "roadgeom", "view")
+TOPICS = ("road", "lights", "speed_limit", "env", "rules", "fused", "map", "lead", "lanes", "view")
 
 # Caps of the sign lists (payload and screen room: the MFD shows this many).
 MAX_SIGNS_ON = 6
@@ -84,7 +84,6 @@ class SceneFeedConfig:
     map_max_age_s: float = 3.0         # fused / map: ~2/s (roadsense's own map staleness is 3 s)
     lead_max_age_s: float = 0.5        # lead (tracker): one per road frame, 10-14/s; older -> road.leads[0]
     lanes_max_age_s: float = 0.5       # lanes (road-geometry tracker): one per road frame; older -> road.lane_lines
-    geo_max_age_s: float = 0.5         # roadgeom (fused road geometry): one per road frame; older -> no "geo"
     view_max_age_s: float = 0.5        # view (roadsense 2.0 display channel): one per road frame; while fresh the
                                        # scene is built per view message (no road decode) and carries "vw"
     lane_min_prob: float = 0.2         # below this a lane line goes out as null (UI draws >= 0.3)
@@ -606,7 +605,14 @@ def map_junction_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     ``exit_no``: roundabout exits in driving order (0 = not an exit).
     None without a view."""
     ah = msg.get("ahead")
-    jv = ah.get("junction_view") if isinstance(ah, dict) else None
+    return junction_to_scene(ah.get("junction_view") if isinstance(ah, dict) else None)
+
+
+def junction_to_scene(jv: Any) -> Optional[Dict[str, Any]]:
+    """A junction view (roadsense ``view.road.junction``; the same object as mapd's
+    ``ahead.junction_view`` with the distance carried to the frame and the marks
+    ``approximate`` / ``why``) -> scene ``map.jv``. ``ap``: true when roadsense marks it
+    approximate (dead reckoning, a weak or held position)."""
     if not isinstance(jv, dict) or jv.get("kind") not in ("junction", "roundabout"):
         return None
     m, c = _num(jv.get("dist_m")), _num(jv.get("confidence"))
@@ -616,6 +622,8 @@ def map_junction_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     ctl = _CONTROL.get(jv.get("control"))
     if ctl:
         out["ctl"] = ctl
+    if jv.get("approximate"):
+        out["ap"] = True
     ap = jv.get("approach")
     if isinstance(ap, dict) and ap.get("lanes_source") in ("tagged", "tagged_total"):
         n = _num(ap.get("lanes"))
@@ -651,7 +659,7 @@ def map_junction_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return out
 
 
-# ── fused road geometry (roadsense topic "roadgeom") ─────────────────────────
+# ── fused road geometry (roadsense view.road) ────────────────────────────────
 
 GEO_MAX_M = 400.0          # the centre line is passed on this far
 GEO_MAX_POINTS = 28
@@ -695,9 +703,11 @@ def _thin(pts: List[Tuple[float, float, float]], tol_near: float = 0.25, tol_far
 
 
 def roadgeom_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """roadsense ``roadgeom`` -> the scene's ``geo`` block (docs/MFD_MAIN_SCREEN.md
-    7.3), or None when the map part is not in use (the camera's part alone is
-    what the scene's ``lanes`` already carry) or the position is synthetic."""
+    """roadsense's fused road geometry (``view.road``; api 1: the topic ``roadgeom``)
+    -> the scene's ``geo`` block (docs/MFD_MAIN_SCREEN.md 7.3), or None when the map
+    part is not in use (the camera's part alone is what the scene's ``lanes`` already
+    carry) or the position is synthetic. ``ap``: side roads and the ring rest on an
+    approximate position."""
     mp = msg.get("map")
     cen = msg.get("centre")
     if not isinstance(mp, dict) or mp.get("used") is not True or mp.get("synthetic") or not isinstance(cen, dict):
@@ -772,6 +782,42 @@ def roadgeom_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     way = msg.get("way")
     if isinstance(way, dict) and way.get("source") == "intent":
         out["way"] = "i"
+    pos = msg.get("position")
+    if isinstance(pos, dict) and pos.get("approximate") and (out.get("br") or out.get("ring")):
+        out["ap"] = True
+    return out
+
+
+TURN_ARROWS_AHEAD_M = 120.0    # painted turn arrows are shown in the lane boxes from this far before their stretch
+
+
+def road_lanes_to_scene(rd: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """``view.road.lanes`` -> scene ``map.lanes`` (the lane boxes): n / fwd / back counts, ``ego`` the lit lane
+    (from the left), ``lk`` the likely lane when none is lit, ``p`` the probability per own lane, ``c`` the
+    confidence of the lit lane, ``onc_left``; near a junction with painted arrows ``tl`` (per own lane a string
+    of l / t / r / u / m, "" = no arrow) and ``tp`` (1 per lane that leads where the most likely path goes)."""
+    ln = rd.get("lanes") if isinstance(rd, dict) else None
+    if not isinstance(ln, dict) or _num(ln.get("forward")) is None:
+        return None
+    fwd = int(ln["forward"])
+    out = _drop_none({"n": _r(ln.get("count")), "fwd": fwd, "back": _r(ln.get("backward")),
+                      "ego": _r(ln.get("ego_index")), "lk": _r(ln.get("likely_index")),
+                      "src": ln.get("count_source") or None, "c": _r(ln.get("confidence"), 2)})
+    if isinstance(ln.get("oncoming_left"), bool):
+        out["onc_left"] = ln["oncoming_left"]
+    pr = ln.get("probs")
+    if (ln.get("probs_from") == "left" and isinstance(pr, list) and len(pr) == fwd
+            and all(isinstance(v, (int, float)) for v in pr)):
+        out["p"] = [round(float(v), 2) for v in pr]
+    tn = ln.get("turn")
+    if isinstance(tn, dict) and isinstance(tn.get("arrows"), list) and len(tn["arrows"]) == fwd \
+            and all(isinstance(a, str) for a in tn["arrows"]):
+        d = _num(tn.get("dist_m"))
+        if tn.get("here") or (d is not None and d <= TURN_ARROWS_AHEAD_M):
+            out["tl"] = [a[:4] for a in tn["arrows"]]
+            path = tn.get("path")
+            if isinstance(path, list) and len(path) == fwd:
+                out["tp"] = [1 if v else 0 for v in path]
     return out
 
 
@@ -949,7 +995,6 @@ class SceneBuilder:
         self._slow: Dict[str, Tuple[float, Optional[Dict[str, Any]]]] = {}
         self._lead: Optional[Tuple[float, Optional[Dict[str, Any]], bool]] = None
         self._lanes: Optional[Tuple[float, Optional[Dict[str, Any]]]] = None
-        self._geo: Optional[Tuple[float, Optional[Dict[str, Any]]]] = None
         self._view: Optional[Tuple[float, Dict[str, Any]]] = None
         self._view_new = False
         self.decode_errors = 0
@@ -983,17 +1028,14 @@ class SceneBuilder:
             self._lead = (now, lead_to_scene(msg), msg.get("departed") is True)
         elif mtype == "lanes":
             self._lanes = (now, lanes_to_scene(msg))
-        elif mtype == "roadgeom":
-            self._geo = (now, roadgeom_to_scene(msg))
         elif mtype == "view":
-            # the last message of a road frame (roadsense sends road, lead, lanes, roadgeom, view): a scene
-            # built now has the lead, lanes and geometry of the same frame
+            # the last message of a road frame (roadsense sends road, lead, lanes, view): a scene built now
+            # has the lead, the lanes and the road picture (view.road) of the same frame
             self._view, self._view_new = (now, msg), True
         elif mtype == "map":
             self.taint.update(msg)
             self._slow["map_in"] = (now, map_input_to_scene(msg))
             self._slow["map_shape"] = (now, map_shape_to_scene(msg))
-            self._slow["map_jv"] = (now, map_junction_to_scene(msg))
 
     def view_mode(self, now: float) -> bool:
         """roadsense sends the display channel: scenes are built per view message."""
@@ -1060,7 +1102,7 @@ class SceneBuilder:
         ages = {"light": self.cfg.lights_max_age_s, "limit": self.cfg.limit_max_age_s,
                 "env": self.cfg.env_max_age_s, "signs": self.cfg.rules_max_age_s,
                 "map": self.cfg.map_max_age_s, "map_in": self.cfg.map_max_age_s,
-                "map_shape": self.cfg.map_max_age_s, "map_jv": self.cfg.map_max_age_s}
+                "map_shape": self.cfg.map_max_age_s}
         for key, (t, val) in self._slow.items():
             if now - t <= ages[key]:
                 scene[key] = val
@@ -1072,18 +1114,26 @@ class SceneBuilder:
         shape = scene.pop("map_shape", None)
         if shape and isinstance(scene.get("map"), dict) and scene["map"].get("ok"):
             scene["map"] = dict(scene["map"], shape=shape)
-        # the junction view on the most likely path, under the same condition
-        jv = scene.pop("map_jv", None)
-        if jv and isinstance(scene.get("map"), dict) and scene["map"].get("ok"):
-            scene["map"] = dict(scene["map"], jv=jv)
         if self.taint.tainted and isinstance(scene.get("map"), dict):
             scene["map"] = dict(scene["map"], syn=True)
-        # the fused road geometry (roadsense >= 2026-11-17): the road beyond the camera, side
-        # roads and a roundabout in the car's frame; only while the map layer is in use, the
-        # position is real and the topic is as fresh as the lanes it continues
-        if (self._geo is not None and self._geo[1] is not None and now - self._geo[0] <= self.cfg.geo_max_age_s
-                and isinstance(scene.get("map"), dict) and scene["map"].get("ok") and not self.taint.tainted):
-            scene["geo"] = self._geo[1]
+        # the road picture (roadsense 2.0: view.road): the road beyond the camera with side roads and a
+        # roundabout (geo), the junction ahead (map.jv) and the lane boxes (map.lanes) all come from the
+        # display channel, of the same frame as the lanes they continue; roadsense has decided there what a
+        # weak position still allows and marks it approximate. Drawn only while the fused map layer is in
+        # use as well (the screen's own gate) and the position is real.
+        rd = self._view[1].get("road") if vw is not None else None      # type: ignore[index]
+        if isinstance(rd, dict) and isinstance(scene.get("map"), dict):
+            mp = dict(scene["map"])
+            pos = rd.get("position") if isinstance(rd.get("position"), dict) else {}
+            if mp.get("ok") and pos.get("trusted") and not pos.get("synthetic") and not self.taint.tainted:
+                jv = junction_to_scene(rd.get("junction"))
+                if jv:
+                    mp["jv"] = jv
+                geo = roadgeom_to_scene(rd)
+                if geo:
+                    scene["geo"] = geo
+            mp["lanes"] = road_lanes_to_scene(rd) if pos.get("trusted") else None
+            scene["map"] = mp
         if vw is not None:
             scene["vw"] = vw
         return scene

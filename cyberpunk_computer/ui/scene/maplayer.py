@@ -238,6 +238,30 @@ def left_is_oncoming(r: Any, d: Any) -> bool:
     return d.map.onc_left and _lanes_ok(r, d) is not None
 
 
+def _lane_arrow(s: pygame.Surface, col: RGB, x: int, y: int, codes: str) -> None:
+    """The painted arrows of one lane inside its box (7 x 11 px at x, y): a stem from the bottom, a head
+    pointing up for "t" (straight on), a branch with a head to the left / right for "l" / "r" ("u", turning
+    back, is drawn as left). Pixels only, no anti-aliasing."""
+    cx = x + 3
+    left, right, up = ("l" in codes or "u" in codes), "r" in codes, "t" in codes
+    if not (left or right or up):
+        return
+    top = y + 1 if up else y + 5
+    pygame.draw.line(s, col, (cx, y + 10), (cx, top))
+    if up:
+        pygame.draw.line(s, col, (cx - 1, y + 1), (cx + 1, y + 1))
+        pygame.draw.line(s, col, (cx - 2, y + 2), (cx + 2, y + 2))
+        s.set_at((cx, y), col)
+    by = y + 6 if up else y + 5                      # the branch leaves the stem here
+    for on, sg in ((left, -1), (right, 1)):
+        if not on:
+            continue
+        pygame.draw.line(s, col, (cx, by), (cx + 3 * sg, by))
+        pygame.draw.line(s, col, (cx + 2 * sg, by - 1), (cx + 2 * sg, by + 1))
+        if not up:
+            pygame.draw.line(s, col, (cx + sg, by - 2), (cx + sg, by + 2))
+
+
 def lane_boxes(r: Any, s: pygame.Surface, d: Any) -> bool:
     """Lane boxes from the map: one per lane of the own direction (the own
     one lit) when it has two or more, oncoming lanes (at most two) as dim
@@ -266,6 +290,9 @@ def lane_boxes(r: Any, s: pygame.Surface, d: Any) -> bool:
         x += bw + gap
     if back:
         x += sep
+    turn = getattr(lb, "turn", ()) if len(getattr(lb, "turn", ())) == lb.fwd else ()
+    tpath = getattr(lb, "path", ()) if len(getattr(lb, "path", ())) == lb.fwd else ()
+    x_first = x
     for i in range(fwd):
         if i == ego:
             pygame.draw.rect(s, pal["lane_ego"], (x, y, bw, bh))
@@ -278,6 +305,11 @@ def lane_boxes(r: Any, s: pygame.Surface, d: Any) -> bool:
             pygame.draw.rect(s, (0, 0, 0), (x, y, bw, bh))
             pygame.draw.rect(s, pal["lane_mid"], (x, y, bw, bh), 1)
         x += bw + gap
+    # painted turn arrows near a junction (roadsense view.road, from the map's turn lanes): black on the lit
+    # lane, bright on the lanes that lead where the most likely path goes, dim on the others
+    for i in range(fwd if turn else 0):
+        col = (0, 0, 0) if i == ego else pal["lane_ego"] if (tpath and tpath[i]) else pal["lane_mid"]
+        _lane_arrow(s, col, x_first + i * (bw + gap) + 1, y + 1, turn[i])
     return True
 
 

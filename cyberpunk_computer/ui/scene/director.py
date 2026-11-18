@@ -41,7 +41,10 @@ LEAD_FADE_S = 0.4
 # roadsense 2.0 display channel ("vw", contract 7.4): the samples are already display-filtered and carry their
 # frame time and velocities; the director places them on its own clock and extrapolates to the frame drawn
 VIEW_EASE_S = 0.08         # residual corrections between two samples are eased over this (motion is not)
-VIEW_LINE_EASE_S = 0.10    # lines: short ease between samples
+VIEW_LINE_DELAY_S = 0.10   # lines are drawn this far behind "now" on roadsense's clock (less extrapolation)
+VIEW_LINE_BACK_S = 0.10    # ... and never further back than this from the newest sample
+VIEW_LINE_RATE_MAX = 15.0  # m/s: a larger lateral rate of a line point is a relabelled line, not motion
+VIEW_LINE_SNAP_ALPHA = 0.3 # a line that is still fading in is placed, not moved
 VIEW_MAX_EXTRAP_S = 0.35   # a sample is carried forward by its velocity at most this long
 VIEW_OFFSET_WINDOW_S = 3.0 # clock offset = the smallest (arrival - frame time) seen over this window
 READOUT_HYST_M = 0.3       # a whole-metre read-out changes when the value is 0.5 + this from it
@@ -87,6 +90,7 @@ class SceneDirector:
         self.road_sig: tuple = ()                 # what the road picture shows, quantised
         self.road_dirty = False                   # it changed since the renderer last drew it
         self._offs: List[Tuple[float, float]] = []   # (arrival on our clock, arrival - frame time)
+        self._line_s: dict = {}                      # line -> (newest sample, its frame time, rate per point)
         self._light_id = ""
         self._view_age = 0.0
         self.animating = True
@@ -312,26 +316,52 @@ class SceneDirector:
 
     def _update_road_view(self, road: RoadScene, fresh: bool, dt: float) -> None:
         age = self._sample_age(road.t, fresh)
-        a = 1.0 - math.exp(-dt / VIEW_LINE_EASE_S) if dt > 0 else 1.0
         self.xs = road.xs
+        # Lines move with their own rate between two samples. The samples reach the screen unevenly (roadsense
+        # makes 13 a second, the backend passes on at most 10: their frame times are 75 or 150-225 ms apart),
+        # so a line that sweeps across the picture in a turn made a stair when it was eased towards the newest
+        # sample (56 drawn steps over 0.3 m at 30 m in 29 min of the 2026-11-17 drive). Each point's rate is
+        # taken from the last two samples and their frame times, the line is drawn where that puts it
+        # VIEW_LINE_DELAY_S behind "now", and only the correction at a new sample is eased.
+        a = 1.0 - math.exp(-dt / VIEW_EASE_S) if dt > 0 else 1.0
+        off = max(-VIEW_LINE_BACK_S, min(VIEW_MAX_EXTRAP_S, age - VIEW_LINE_DELAY_S))
 
-        def ease_line(cur, ln):
+        def ease_line(key, cur, ln):
             if ln is None:
+                self._line_s.pop(key, None)
                 return None
-            if cur is None or len(cur) != len(ln.ys):
-                return list(ln.ys)
-            for k, y in enumerate(ln.ys):
-                cur[k] += (y - cur[k]) * a
+            st = self._line_s.get(key)
+            if fresh or st is None:
+                rate = None
+                if st is not None and road.t is not None and st[1] is not None and 0.03 < road.t - st[1] < 0.4 \
+                        and ln.alpha >= VIEW_LINE_SNAP_ALPHA:
+                    k = 1.0 / (road.t - st[1])
+                    rate = [max(-VIEW_LINE_RATE_MAX, min(VIEW_LINE_RATE_MAX, (y - p) * k))
+                            for y, p in zip(ln.ys, st[0])]
+                    rate += [0.0] * (len(ln.ys) - len(rate))
+                st = self._line_s[key] = (ln.ys, road.t, rate)
+            ys, _, rate = st
+            if cur is None or ln.alpha < VIEW_LINE_SNAP_ALPHA:
+                return list(ys)                          # new, or still fading in: where it is, no glide
+            n = min(len(cur), len(ys))
+            for k in range(n):
+                target = ys[k] + (rate[k] * off if rate is not None else 0.0)
+                cur[k] += (rate[k] * dt if rate is not None else 0.0)          # motion: as measured
+                cur[k] += (target - cur[k]) * a                                  # correction: eased
+            if len(cur) != len(ys):
+                # the line reaches further or less far than before (its length follows the tracker's
+                # certainty): the part that stays keeps its motion, it does not jump to the new sample
+                cur = cur[:n] + list(ys[n:])
             return cur
         for i in range(4):
             ln = road.lanes[i]
-            self.lanes[i] = ease_line(self.lanes[i], ln)
+            self.lanes[i] = ease_line(i, self.lanes[i], ln)
             self.lane_prob[i] = ln.prob if ln is not None else 0.0
             self.line_alpha[i] = ln.alpha if ln is not None else 0.0
         for i in range(2):
-            self.edges[i] = ease_line(self.edges[i], road.edges[i])
+            self.edges[i] = ease_line(4 + i, self.edges[i], road.edges[i])
             self.line_alpha[4 + i] = road.edges[i].alpha if road.edges[i] is not None else 0.0
-        self.path = ease_line(self.path, road.path)
+        self.path = ease_line(6, self.path, road.path)
 
         lead = road.lead if self.vision == "live" else None
         if lead is not None:

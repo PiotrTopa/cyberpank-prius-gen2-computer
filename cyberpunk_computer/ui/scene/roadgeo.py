@@ -45,6 +45,9 @@ ISLAND = (0, 0, 0)
 ISLAND_MARK = (40, 70, 50)
 
 
+APPROX_DIM = 0.6            # side roads / ring of an approximate position are drawn at this brightness
+
+
 def _k(c: RGB, k: float) -> RGB:
     return (int(c[0] * k), int(c[1] * k), int(c[2] * k))
 
@@ -284,7 +287,10 @@ def fills(r: Any, s: pygame.Surface, p: Optional[Prepared], d: Any, k: float) ->
         return
     polygon = pygame.draw.polygon
     pal = r.pal
-    arm = _k(ARM_FILL, k)
+    # side roads and a ring on an approximate position (dead reckoning, a weak receiver; roadsense marks it):
+    # dimmer, they are "about there"
+    ka = k * (APPROX_DIM if getattr(d.map.geo, "approx", False) else 1.0)
+    arm = _k(ARM_FILL, ka)
     way_on = r.tune.road_geo_way
     for b, (left, right) in p.arms:
         if b.exit or b.ring:
@@ -305,8 +311,9 @@ def lines(r: Any, s: pygame.Surface, p: Optional[Prepared], d: Any, k: float) ->
         return
     pal = r.pal
     draw_lines = pygame.draw.lines
-    edge = _k(pal["edge"], 0.85 * k)
-    edge_dim = _k(pal["edge"], 0.45 * k)
+    ka = k * (APPROX_DIM if getattr(d.map.geo, "approx", False) else 1.0)
+    edge = _k(pal["edge"], 0.85 * ka)
+    edge_dim = _k(pal["edge"], 0.45 * ka)
     way_on = r.tune.road_geo_way
     for b, (left, right) in p.arms:
         if b.way and way_on:

@@ -77,6 +77,7 @@ class JunctionView(NamedTuple):
     ring_path: int = 0               # exit number of the way on (0 = unknown)
     on_ring: bool = False
     car_angle: Optional[float] = None
+    approx: bool = False             # roadsense marks it approximate (dead reckoning, a weak or held position)
 
 
 def _junction(raw: Any) -> Optional[JunctionView]:
@@ -105,7 +106,7 @@ def _junction(raw: Any) -> Optional[JunctionView]:
     return JunctionView(raw["k"], m, c, tuple(arms), ctl if ctl in ("s", "g", "t") else "",
                         0 if ln is None else int(ln), str(raw.get("to") or ""),
                         int(_f(rg.get("n")) or 0), int(_f(rg.get("p")) or 0), rg.get("on") is True,
-                        _f(rg.get("car")))
+                        _f(rg.get("car")), raw.get("ap") is True)
 
 
 class Branch(NamedTuple):
@@ -130,6 +131,7 @@ class Geo(NamedTuple):
     branches: Tuple[Branch, ...] = ()
     ring: Optional[Tuple[float, float, float, float, bool]] = None   # centre x, y, radius, road width, on the ring
     intent: bool = False                     # the way on was chosen by the turn signal
+    approx: bool = False                     # side roads / ring rest on an approximate position (drawn dimmer)
 
 
 _geo_last: List[Any] = [None, None]
@@ -161,7 +163,7 @@ def parse_geo(raw_scene: Any) -> Optional[Geo]:
             if isinstance(rg, (list, tuple)) and len(rg) >= 5:
                 ring = (float(rg[0]), -float(rg[1]), float(rg[2]), float(rg[3]), bool(rg[4]))
             out = Geo(v, w, path, float(g.get("s") or path[0][0]), str(g.get("end") or ""), tuple(brs), ring,
-                      g.get("way") == "i")
+                      g.get("way") == "i", g.get("ap") is True)
     except (KeyError, TypeError, ValueError, IndexError):
         out = None
     _geo_last[0], _geo_last[1] = g, out
@@ -179,6 +181,9 @@ class MapInfo(NamedTuple):
     lanes: Optional[Tuple[int, int, int]] = None      # (own direction, oncoming, ego index from the left)
     lanes_conf: float = 0.0
     lanes_p: Tuple[float, ...] = ()                   # probability of each own lane, from the left (roadsense >= L20)
+    lanes_likely: Optional[int] = None                # roadsense's likely lane when none is lit (view.road); None: not sent
+    lanes_turn: Tuple[str, ...] = ()                  # painted turn arrows per own lane (l t r u m), near a junction
+    lanes_path: Tuple[bool, ...] = ()                 # ... the lanes that lead where the most likely path goes
     onc_left: Optional[bool] = None  # the lane to the left carries oncoming traffic
     tunnel_in: bool = False          # in a tunnel by the map
     tunnel_exit_m: Optional[float] = None
@@ -199,6 +204,8 @@ class LaneBoxes(NamedTuple):
     back: int
     ego: int                                 # -1: unknown (the count is shown, no lane lit)
     likely: int = -1                         # with ego unknown: the most likely lane when it is >= 0.45
+    turn: Tuple[str, ...] = ()               # painted turn arrows per own lane (strings of l t r u m)
+    path: Tuple[bool, ...] = ()              # the lanes that lead where the most likely path goes
 
 
 class RoadLabel(NamedTuple):
@@ -245,6 +252,16 @@ def _parse(mp: Mapping) -> MapInfo:
     elif fwd is not None and back is not None and fwd >= 2 and lp:
         lanes = (int(fwd), int(back), -1)            # the count is known, the own lane is not (L20)
     onc = ln.get("onc_left")
+    lk = _f(ln.get("lk"))
+    likely = int(lk) if (lk is not None and fwd is not None and 0 <= lk < fwd) else None
+    turn: Tuple[str, ...] = ()
+    tpath: Tuple[bool, ...] = ()
+    tl = ln.get("tl")
+    if isinstance(tl, (list, tuple)) and fwd is not None and len(tl) == int(fwd) and all(isinstance(a, str) for a in tl):
+        turn = tuple("".join(ch for ch in a if ch in "ltrum") for a in tl)
+        tp = ln.get("tp")
+        if isinstance(tp, (list, tuple)) and len(tp) == len(turn):
+            tpath = tuple(bool(v) for v in tp)
     exit_m = _f(tn.get("exit_m"))
     src = tn.get("src")
     tunnel_in = bool(tn.get("in")) and isinstance(src, str) and "map" in src
@@ -279,6 +296,7 @@ def _parse(mp: Mapping) -> MapInfo:
         road_ref=str(road.get("ref") or ""), road_name=str(road.get("name") or ""),
         road_cls=str(road.get("cls") or ""),
         lanes=lanes, lanes_conf=_f(ln.get("c")) or 0.0, lanes_p=lp, onc_left=onc if isinstance(onc, bool) else None,
+        lanes_likely=likely, lanes_turn=turn, lanes_path=tpath,
         tunnel_in=tunnel_in, tunnel_exit_m=exit_m if tunnel_in else None,
         next_limit=nl, junctions=tuple(jn), shape_ds=ds, shape=shape, junction=_junction(mp.get("jv")))
 
@@ -578,7 +596,7 @@ class MapDirector:
         if jv is not None and jv.conf < self.min_conf and not jv.on_ring:
             jv = None
         jm = self._jv.step(jv.m if jv is not None else None, fresh, moved, can_adv)
-        self.junction_approx = bool(jv is not None and (mi.state == "dead_reckoning" or not accurate or (
+        self.junction_approx = bool(jv is not None and (jv.approx or mi.state == "dead_reckoning" or not accurate or (
             mi.hacc is not None and jm is not None and mi.hacc > 0.15 * max(jm, 1.0))))
         if jv is None or jm is None:
             self._jv_on = False
@@ -648,10 +666,12 @@ class MapDirector:
             self._lanes_on = False
         if self._lanes_on and mi.lanes is not None:
             likely = -1
-            if mi.lanes[2] < 0 and mi.lanes_p:
+            if mi.lanes[2] < 0 and mi.lanes_likely is not None:
+                likely = mi.lanes_likely               # roadsense's own choice (view.road)
+            elif mi.lanes[2] < 0 and mi.lanes_p:
                 k = max(range(len(mi.lanes_p)), key=lambda i: mi.lanes_p[i])
                 likely = k if mi.lanes_p[k] >= 0.45 else -1
-            self.lanes = LaneBoxes(*mi.lanes, likely)
+            self.lanes = LaneBoxes(*mi.lanes, likely, mi.lanes_turn, mi.lanes_path)
             self.onc_left = mi.onc_left is True
         else:
             self.lanes = None
