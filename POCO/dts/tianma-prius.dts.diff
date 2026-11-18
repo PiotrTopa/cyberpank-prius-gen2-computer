@@ -1,0 +1,46 @@
+--- pristine sdm845-xiaomi-beryllium-tianma.dtb (linux-postmarketos-qcom-sdm845-7.1_rc1-r4), dtc -I dtb -O dts -s
++++ patched (running since 2026-10-22), dtc -I dtb -O dts -s
+@@ -2918,15 +2918,15 @@
+ 				reg = <0x00 0xa98000 0x00 0x4000>;
+ 				status = "okay";
+ 
+-				touchscreen@1 {
+-					compatible = "novatek,nt36672a-ts";
++				touchscreen@38 {
++					compatible = "focaltech,ft8719";
+ 					interrupts-extended = <0x4f 0x1f 0x01>;
+ 					iovcc-supply = <0x72>;
+ 					panel = <0x71>;
+ 					pinctrl-0 = <0x74 0x75>;
+ 					pinctrl-1 = <0x76 0x77>;
+ 					pinctrl-names = "default", "sleep";
+-					reg = <0x01>;
++					reg = <0x38>;
+ 					reset-gpios = <0x4f 0x20 0x01>;
+ 					touchscreen-size-x = <0x438>;
+ 					touchscreen-size-y = <0x8c6>;
+@@ -5178,6 +5178,15 @@
+ 					phandle = <0xfd>;
+ 					reg = <0xc000>;
+ 				};
++
++				usb-vbus-regulator@1100 {
++					compatible = "qcom,pm8150b-vbus-reg";
++					reg = <0x1100>;
++					regulator-always-on;
++					regulator-boot-on;
++					regulator-max-microamp = <0x2dc6c0>;
++					regulator-min-microamp = <0x7a120>;
++				};
+ 			};
+ 
+ 			pmic@3 {
+@@ -5538,7 +5547,7 @@
+ 
+ 			usb@a600000 {
+ 				compatible = "snps,dwc3";
+-				dr_mode = "peripheral";
++				dr_mode = "host";
+ 				interrupts = <0x00 0x85 0x04>;
+ 				iommus = <0x32 0x740 0x00>;
+ 				phy-names = "usb2-phy", "usb3-phy";

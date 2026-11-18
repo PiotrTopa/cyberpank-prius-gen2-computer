@@ -77,6 +77,7 @@ log "installing rootfs overlay from $SRC"
     fi
     case "$rel" in
         usr/local/sbin/*)                         mode=755 ;;
+        etc/boot-deploy/hooks/*|etc/apk/commit_hooks.d/*) mode=755 ;;
         etc/NetworkManager/system-connections/*)  mode=600 ;;
         etc/prius/sim-pin)                        mode=600 ;;
         *)                                        mode=644 ;;
@@ -220,12 +221,12 @@ if command -v udevadm >/dev/null 2>&1; then
     log "reloaded udev rules"
 fi
 if [ "$CORE" = 1 ]; then
-    UNITS="prius-power.service prius-power.path prius-backend.service prius-bled.service prius-gnss-bridge.service"
+    UNITS="prius-power.service prius-power.path prius-backend.service prius-bled.service prius-gnss-bridge.service prius-dt-check.service"
     PATHS="prius-power.path"
 else
     UNITS="prius-power.service prius-power.path prius-wifi.service prius-wifi.path \
            prius-backend.service prius-bled.service prius-gnss-bridge.service backlight-off.service \
-           prius-clock-fallback.timer prius-sim-unlock.service prius-lifeline.service"
+           prius-clock-fallback.timer prius-sim-unlock.service prius-lifeline.service prius-dt-check.service"
     PATHS="prius-power.path prius-wifi.path prius-clock-fallback.timer"
 fi
 # netwatch is owned by prius-power (ACC off + grace); never enabled at boot.

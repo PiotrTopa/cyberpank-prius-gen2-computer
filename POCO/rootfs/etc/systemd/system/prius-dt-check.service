@@ -1,0 +1,13 @@
+[Unit]
+Description=Check the car computer's device-tree patch (USB host, VBUS) in the running DT, boot partition and /boot
+Documentation=file:///usr/local/sbin/prius-dt-check
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/prius-dt-check
+RemainAfterExit=yes
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

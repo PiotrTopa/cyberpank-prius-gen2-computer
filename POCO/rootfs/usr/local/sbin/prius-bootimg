@@ -1,0 +1,111 @@
+#!/bin/sh
+# prius-bootimg - build the POCO F1 boot.img exactly the way postmarketOS does
+# (boot-deploy: kernel + appended DTB + initramfs -> mkbootimg), but into a scratch
+# directory and WITHOUT flashing, then compare it with the boot partition.
+#
+#   prius-bootimg build OUTDIR [DTB] [INITRAMFS]
+#       DTB       default /boot/dtbs/qcom/sdm845-xiaomi-beryllium-tianma.dtb
+#       INITRAMFS default /boot/initramfs
+#       Uses the real /usr/share/boot-deploy functions; only find_dtb (-> DTB),
+#       the hooks and the flash step are overridden. Writes OUTDIR/boot.img.
+#   prius-bootimg compare IMG [PARTITION]
+#       PARTITION default: PARTLABEL=boot. Exit 0 if IMG equals the partition's
+#       first size(IMG) bytes and the rest of the partition is zero-filled.
+#   prius-bootimg hooktest   (PRIUS_PRISTINE_DTB=pristine.dtb)
+#       build through the REAL boot-deploy hooks from a pristine DTB copy and
+#       compare with the boot partition (proves the re-apply hook end to end).
+#   prius-bootimg dryrun
+#       build with the patched pristine DTB (prius-dtb-patch on the kernel
+#       package's DTB as shipped) and compare: the identity proof of
+#       docs/POCO_REBUILD.md. Flashes nothing.
+#
+# Flashing is never done here. To flash a verified image by hand:
+#   dd if=OUTDIR/boot.img of=$(findfs PARTLABEL=boot) bs=1M && sync
+set -eu
+
+BD_FUNCS=/usr/share/boot-deploy/boot-deploy-functions.sh
+DEF_DTB=/boot/dtbs/qcom/sdm845-xiaomi-beryllium-tianma.dtb
+
+die() { echo "prius-bootimg: ERROR: $*" >&2; exit 1; }
+
+build() { # $1 outdir $2 dtb $3 initramfs
+    out=$1; dtb=${2:-$DEF_DTB}; ird=${3:-/boot/initramfs}
+    [ -f "$dtb" ] || die "no DTB $dtb"; [ -f "$ird" ] || die "no initramfs $ird"
+    [ -f /boot/vmlinuz ] || die "no /boot/vmlinuz"
+    mkdir -p "$out"; out=$(cd "$out" && pwd)
+    wd=$(mktemp -d /tmp/prius-bootimg.XXXXXX)
+    cp "$ird" "$wd/initramfs"
+    cp /boot/vmlinuz "$out/vmlinuz"
+    cat > "$wd/functions.sh" <<EOF
+. $BD_FUNCS
+find_dtb() { echo "$(readlink -f "$dtb")"; }
+$( [ "${PRIUS_BOOTIMG_HOOKS:-0}" = 1 ] || echo 'execute_hooks() { log_arrow "prius-bootimg: hooks skipped"; }' )
+flash_updated_boot_parts() { log_arrow "prius-bootimg: NOT flashing (dry run)"; }
+flash_updated_depthcharge_kernel() { :; }
+EOF
+    BOOT_DEPLOY_FUNCTIONS="$wd/functions.sh" boot-deploy -i initramfs -d "$wd" -o "$out"
+    rm -rf "$wd"
+    [ -f "$out/boot.img" ] || die "boot-deploy produced no boot.img"
+    echo "prius-bootimg: $out/boot.img $(stat -c %s "$out/boot.img") bytes sha256 $(sha256sum "$out/boot.img" | cut -d' ' -f1)"
+}
+
+compare() { # $1 img $2 partition
+    img=$1; part=${2:-$(findfs PARTLABEL=boot)}
+    [ -r "$part" ] || die "cannot read $part (root needed)"
+    isz=$(stat -c %s "$img"); psz=$(blockdev --getsize64 "$part")
+    [ "$isz" -le "$psz" ] || die "image $isz bytes > partition $psz bytes"
+    if ! head -c "$isz" "$part" | cmp -s - "$img"; then
+        echo "DIFFERENT: $img vs first $isz bytes of $part"
+        head -c "$isz" "$part" | cmp - "$img" | head -3 || true
+        return 1
+    fi
+    rest=$((psz - isz))
+    nz=$(tail -c "$rest" "$part" | tr -d '\000' | head -c 1 | wc -c)
+    if [ "$nz" != 0 ]; then
+        # boot-deploy writes with plain dd and never clears the rest of the partition,
+        # so an older, larger image leaves stale bytes after the end; the bootloader
+        # reads only the sizes in the boot.img header.
+        echo "IDENTICAL: $img == $part (first $isz bytes; the ${rest}-byte tail holds stale data of an older image, not read at boot)"
+    else
+        echo "IDENTICAL: $img == $part (first $isz bytes; tail $rest bytes zero)"
+    fi
+}
+
+dryrun() {
+    d=$(mktemp -d /tmp/prius-dryrun.XXXXXX)
+    pkg_dtb=$d/pristine.dtb
+    # pristine DTB = the kernel package's file as shipped (apk keeps none; take it from
+    # the cached package if present, else from PRIUS_PRISTINE_DTB)
+    if [ -n "${PRIUS_PRISTINE_DTB:-}" ]; then cp "$PRIUS_PRISTINE_DTB" "$pkg_dtb"
+    else
+        apkf=$(ls /var/cache/apk/linux-postmarketos-qcom-sdm845-"$(apk info -e -v linux-postmarketos-qcom-sdm845 | sed 's/^linux-postmarketos-qcom-sdm845-//')".*.apk 2>/dev/null | head -1)
+        [ -n "$apkf" ] || die "no pristine DTB: set PRIUS_PRISTINE_DTB=path (laptop: tar -xzf the cached kernel .apk)"
+        tar -xzf "$apkf" -O boot/dtbs/qcom/sdm845-xiaomi-beryllium-tianma.dtb > "$pkg_dtb" 2>/dev/null
+    fi
+    prius-dtb-patch apply "$pkg_dtb" "$d/patched.dtb"
+    cmp "$d/patched.dtb" "$DEF_DTB" && echo "DTB: patched pristine == $DEF_DTB"
+    build "$d/out" "$d/patched.dtb" /boot/initramfs
+    compare "$d/out/boot.img"
+    echo "dry-run files left in $d"
+}
+
+hooktest() {
+    # the real boot-deploy hooks (/etc/boot-deploy/hooks) on a pristine DTB copy:
+    # proves that a kernel bump's pristine DTB still ends up patched in boot.img
+    d=$(mktemp -d /tmp/prius-hooktest.XXXXXX)
+    [ -n "${PRIUS_PRISTINE_DTB:-}" ] || die "set PRIUS_PRISTINE_DTB=path to the pristine DTB"
+    cp "$PRIUS_PRISTINE_DTB" "$d/sdm845-xiaomi-beryllium-tianma.dtb"
+    prius-dtb-patch check "$d/sdm845-xiaomi-beryllium-tianma.dtb" >/dev/null && die "input is not pristine"
+    export PRIUS_DTB="$d/sdm845-xiaomi-beryllium-tianma.dtb" PRIUS_BOOTIMG_HOOKS=1
+    build "$d/out" "$d/sdm845-xiaomi-beryllium-tianma.dtb" /boot/initramfs
+    compare "$d/out/boot.img"
+    echo "hook-test files left in $d"
+}
+
+case "${1:-}" in
+    hooktest) hooktest ;;
+    build) [ $# -ge 2 ] || die "usage: build OUTDIR [DTB] [INITRAMFS]"; build "$2" "${3:-}" "${4:-}" ;;
+    compare) [ $# -ge 2 ] || die "usage: compare IMG [PARTITION]"; compare "$2" "${3:-}" ;;
+    dryrun) dryrun ;;
+    *) echo "usage: prius-bootimg {build OUTDIR [DTB] [INITRAMFS]|compare IMG [PART]|dryrun}" >&2; exit 2 ;;
+esac

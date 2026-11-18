@@ -35,6 +35,9 @@ and installed with `sync.sh` / `provision.sh` ([PROVISIONING.md](PROVISIONING.md
 | `prius-clock-fallback` | — | HTTPS `Date` clock step while NTP is unsynchronized; touches `/run/prius-clock-synced` |
 | `prius-usb` | `host` \| `device` \| `status` `[--reboot]` | USB role via DTB `dr_mode` + `mkinitfs` |
 | `prius-vbus` | `apply` \| `revert` \| `status` `[--reboot]` | PMI8998 VBUS regulator node ([ARCHITECTURE.md](ARCHITECTURE.md)) |
+| `prius-dtb-patch` | `apply IN OUT` \| `check DTB` \| `check-live` \| `check-bootimg IMG` | the device-tree patch (USB host, VBUS, FT8719 touch) as one reproducible, fail-closed step ([docs/POCO_REBUILD.md](../docs/POCO_REBUILD.md) §1) |
+| `prius-bootimg` | `build OUTDIR [DTB] [INITRAMFS]` \| `compare IMG` \| `dryrun` \| `hooktest` | boot.img built by the real boot-deploy into a scratch dir, never flashed; compared with the boot partition |
+| `prius-dt-check` | `[status]` | DT patch present in the running DT, the boot partition and /boot? Flag `/run/prius-dt-check`; `prius-dt-check.service` at boot |
 | `prius-usb-power` | `status` \| `locate` \| `cycle` \| `off` \| `on` `[TARGET]` | hub port power via `uhubctl -f` ([POWER.md](POWER.md#usb-hub-and-port-power)) |
 | `prius-flash-powerbox` | `[FILE ...]` | powerbox firmware update over NDJSON via `pb_flash.py` (default main.py + boot.py + bean_rx.py + bean_tx.py); stops and restarts `prius-backend` ([powerbox/README.md](../powerbox/README.md#flashing-firmware)) |
 | `prius-deploy-mfd` | `[--dry-run]` | rsync the frontend to the MFD Pi over `usb0`, install the Pi's timesyncd config (time from the phone), restart `mfd.service` (as root) |
@@ -78,7 +81,8 @@ and installed with `sync.sh` / `provision.sh` ([PROVISIONING.md](PROVISIONING.md
 | `/etc/NetworkManager/conf.d/99-unmanage-usb0.conf` | `usb0` unmanaged |
 | NM conns `prius-wan`, `wg-homelab`, `prius-ap`, `prius-home-wifi`, `prius-dev-wifi` | rendered from `*.nmconnection.tmpl` ([NETWORKING.md](NETWORKING.md)) |
 | `/etc/wireguard/wg-homelab.conf` | WireGuard config (address from `WG_ADDRESS`) |
-| `/boot/dtbs/qcom/sdm845-xiaomi-beryllium-tianma.dtb` | patched: `usb@a600000` host role + `pmic@2/usb-vbus-regulator@1100` |
+| `/boot/dtbs/qcom/sdm845-xiaomi-beryllium-tianma.dtb` | patched: `usb@a600000` host role + `pmic@2/usb-vbus-regulator@1100` + touch FT8719; re-applied by `/etc/boot-deploy/hooks/50-prius-dtb` inside every `mkinitfs` |
+| `/etc/apk/commit_hooks.d/prius-dtb`, `/usr/local/share/prius/apk-pins.txt` | after each apk run: pinned boot/GPU stack unchanged? DT check ok? (warns only) |
 | `/root/boot-backup/usb-otg-*/`, `/root/boot-backup/vbus-*/` | pre-OTG / pre-VBUS `boot.img` + DTB |
 | `/etc/mkinitfs/files-extra/adreno-fw` | bundles `a630_sqe.fw`, `a630_gmu.bin`, `…/beryllium/a630_zap.mbn` into the initramfs |
 | `/lib/firmware/qcom/a630_sqe.fw`, `a630_gmu.bin` | Adreno microcode (apk `firmware-qcom-adreno-a630-sqe`, `firmware-qcom-adreno-a630`) |

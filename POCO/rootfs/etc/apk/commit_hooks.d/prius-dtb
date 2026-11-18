@@ -1,0 +1,25 @@
+#!/bin/sh
+# apk commit hook: after every apk transaction, check that the pinned boot/GPU stack
+# did not move and that the device-tree patch is still in the boot partition.
+# Prints a loud warning into the apk output and the journal; it does not undo anything.
+# Pin list: /usr/local/share/prius/apk-pins.txt (name=version per line).
+# Repo: POCO/rootfs/etc/apk/commit_hooks.d/prius-dtb.
+[ "${1:-}" = post-commit ] || exit 0
+PINS=/usr/local/share/prius/apk-pins.txt
+bad=""
+if [ -f "$PINS" ]; then
+    inst=$(apk info -v 2>/dev/null)
+    while IFS= read -r line; do
+        case "$line" in ''|'#'*) continue ;; esac
+        n=${line%%=*}; v=${line#*=}
+        echo "$inst" | grep -qx "$n-$v" || bad="$bad $n"
+    done < "$PINS"
+fi
+if [ -n "$bad" ]; then
+    echo "!!! prius: PINNED PACKAGES MOVED:$bad (see /etc/apk/world, docs/POCO_REBUILD.md)" >&2
+    logger -t prius-apk-hook -p user.crit "pinned packages moved:$bad"
+fi
+/usr/local/sbin/prius-dt-check >/dev/null 2>&1 || {
+    echo "!!! prius: device-tree patch check FAILED after this apk run: DO NOT REBOOT. $(head -1 /run/prius-dt-check 2>/dev/null)" >&2
+}
+exit 0

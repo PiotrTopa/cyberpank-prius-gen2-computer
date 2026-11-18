@@ -1,0 +1,35 @@
+#!/bin/sh
+# prius-dt-check - is the car computer's device-tree patch in place?
+#
+# Checks three places: the RUNNING device tree (this boot), the boot partition
+# (what the NEXT boot gets) and the on-disk DTB boot-deploy builds from. Writes the
+# result to /run/prius-dt-check (first word "ok" or "FAIL"), logs to the journal
+# (crit on failure) and exits 1 on any failure so the unit shows as failed.
+#   prius-dt-check          run all checks (prius-dt-check.service at boot, apk hook)
+#   prius-dt-check status   print the last result
+# Repo: POCO/rootfs/usr/local/sbin/prius-dt-check; patch: POCO/dts/prius-dtb-patch.
+set -u
+FLAG=/run/prius-dt-check
+P=/usr/local/sbin/prius-dtb-patch
+DTB=/boot/dtbs/qcom/sdm845-xiaomi-beryllium-tianma.dtb
+
+[ "${1:-}" = status ] && { cat "$FLAG" 2>/dev/null || echo "no result yet"; exit 0; }
+
+fail=""
+out_live=$($P check-live 2>&1) || fail="$fail running-dt"
+part=$(findfs PARTLABEL=boot 2>/dev/null)
+out_part=$($P check-bootimg "$part" 2>&1) || fail="$fail boot-partition"
+out_disk=$($P check "$DTB" 2>&1) || fail="$fail disk-dtb"
+
+ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+if [ -z "$fail" ]; then
+    echo "ok $ts running-dt boot-partition disk-dtb" > "$FLAG.tmp" && mv "$FLAG.tmp" "$FLAG"
+    logger -t prius-dt-check -p user.info "device-tree patch ok (running, boot partition, disk)"
+    exit 0
+fi
+{ echo "FAIL $ts:$fail"; echo "$out_live"; echo "$out_part"; echo "$out_disk"; } > "$FLAG.tmp" && mv "$FLAG.tmp" "$FLAG"
+msg="DEVICE-TREE PATCH MISSING in:$fail. USB host/VBUS lost or will be lost at next boot. Fix: sudo prius-dtb-patch apply $DTB $DTB && sudo mkinitfs, then prius-dt-check (docs/POCO_REBUILD.md)"
+logger -t prius-dt-check -p user.crit "$msg"
+echo "$msg" >&2
+printf '%s\n%s\n%s\n' "$out_live" "$out_part" "$out_disk" >&2
+exit 1

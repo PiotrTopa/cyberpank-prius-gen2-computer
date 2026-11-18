@@ -8,6 +8,13 @@ The package index used is the one already in `/var/cache/apk`, fetched 2026-11-1
 
 Phase 2 (section 6) runs only after the owner approves it.
 
+**Update 2026-11-18 (lane L25, owner decision: the OS stays pinned, no general upgrade):** M1 and M2
+are done (world pins on the kernel/device/firmware/mesa/libcamera/boot stack, the DTB patch as a
+script with a boot-deploy re-apply hook and a boot check) and a full restorable backup exists on the
+laptop. Restore and rebuild plan, gaps and the prepared (not applied) M3-M6 commands:
+[POCO_REBUILD.md](POCO_REBUILD.md). Step 0 below is wrong on this phone: a runtime mask does not
+override the unit in `/etc/systemd/system`; use the drop-in in POCO_REBUILD.md §5.
+
 ---
 
 ## 0. Summary
@@ -17,7 +24,7 @@ Phase 2 (section 6) runs only after the owner approves it.
 | Upgrade state | Never fully upgraded since the install on 2026-10-21. A few packages were upgraded as side effects of `apk add` (mesa 26.2.5→26.2.6 on 11-04, openssh p1→p2 on 11-13): a **partial upgrade on edge**. 395 packages are behind the 11-17 index. | high |
 | Kernel | `linux-postmarketos-qcom-sdm845` **7.1_rc1-r4** (built 2026-07-14), stock pmOS package from `mirror.postmarketos.org/postmarketos/main`. Variant **tianma** (`device-xiaomi-beryllium-kernel-tianma` 23-r0). It is **not** in the upgradable list: the 11-17 index has no newer kernel. Not held. | info |
 | Owner patches | No local package and no pmbootstrap build. The patches live as **in-place edits of the package-owned DTB** `/boot/dtbs/qcom/sdm845-xiaomi-beryllium-tianma.dtb` (`apk audit`: `U`): `dr_mode=host`, `usb-vbus-regulator@1100` and the FT8719 touch node. Any reinstall or upgrade of the kernel package silently reverts them. `deviceinfo_flash_kernel_on_update=true` then flashes the pristine DTB to the boot partition, so the next boot comes up in device mode with no VBUS: hub, powerbox, gateway and MFD are all gone. | high |
-| Holds | None. `/etc/apk/world` has no `=` pins and no local repository. | high |
+| Holds | None at audit time. **Since 2026-11-18 (L25): 27 world pins** (POCO_REBUILD.md §1). | high |
 | Risky upgrades pending | mesa 26.2.6 → **26.3.0** (turnip/ncnn), libcamera 0.7.2 → 0.8.0, linux-firmware-qcom/ath10k 20260916 → 20261019 (WCN3990 Wi-Fi = the AP lifeline), soc-qcom 14 → 16 and tqftpserv 1.2 → 1.3 (modem/remoteproc plumbing), postmarketos-base 78 → 79 / base-ui 62 → 65, systemd 262 → 262.2, python3 3.14.8 → 3.14.10, musl r5 → r6, openssl/libssl/libcrypto 3.5.9-r0 → r1, NetworkManager r1 → r2, nftables r0 → r1. | high |
 | Security | sshd listens on all interfaces. **Password login is enabled, and the password is a 6-digit PIN.** LTE (`qmapmux*`/`wwan*`) is dropped by nftables before the port-22 accept, so ssh is reachable over Wi-Fi AP, WireGuard and USB. Root login: key only (no keys for root). sudo-rs: `%wheel ALL=(ALL) ALL` with a password. AP: WPA2-PSK, 24 characters, 3 character classes, PMF at the default. openssh 10.6p2 and openssl 3.5.9 are current in the 11-17 index (only a `-r1` openssl rebuild is pending). | medium |
 | Health | One failed unit (`usb-signaller`: expected in host mode, harmless). Journal 996 MB with no configured limit. ext4 is clean, with 396 GB lifetime writes. UFS life-time estimate A/B = 0x01 (0-10 % used), EOL info 0x01 (normal). zram 8.1 GB zstd, swappiness 180. Boot takes 79 s, 48.5 s of it in `prius-backend`. Watchdog 30 s is active. | ok |
@@ -397,8 +404,8 @@ The kernel stays pinned until M1 is done; a kernel bump is its own window with `
 
 | # | Item | Change | Risk |
 |---|---|---|---|
-| M1 | Make the DTB patches survive kernel updates | Either an apk hook or a `/etc/mkinitfs/hooks`-style re-apply (run `poco-usb host` / `poco-vbus apply` logic idempotently before boot.img generation), or a pmaports **local device-package fork** with the patched DTS (proper way, needs pmbootstrap build + local repo key on the phone). Until then: keep the kernel pinned in world | medium (wrong hook = boot without host mode; test with a RAM boot first) |
-| M2 | Pin the kernel/device packages in world now | `apk add linux-postmarketos-qcom-sdm845=7.1_rc1-r4 device-xiaomi-beryllium-kernel-tianma=23-r0 device-xiaomi-beryllium=23-r0` | low (blocks unwanted bumps; must be lifted on purpose) |
+| M1 | **Done 2026-11-18 (L25, POCO_REBUILD.md §1).** Make the DTB patches survive kernel updates | Either an apk hook or a `/etc/mkinitfs/hooks`-style re-apply (run `poco-usb host` / `poco-vbus apply` logic idempotently before boot.img generation), or a pmaports **local device-package fork** with the patched DTS (proper way, needs pmbootstrap build + local repo key on the phone). Until then: keep the kernel pinned in world | medium (wrong hook = boot without host mode; test with a RAM boot first) |
+| M2 | **Done 2026-11-18 (L25).** Pin the kernel/device packages in world now | `apk add linux-postmarketos-qcom-sdm845=7.1_rc1-r4 device-xiaomi-beryllium-kernel-tianma=23-r0 device-xiaomi-beryllium=23-r0` | low (blocks unwanted bumps; must be lifted on purpose) |
 | M3 | Journal limits | `/etc/systemd/journald.conf.d/10-prius.conf`: `SystemMaxUse=300M`, `MaxRetentionSec=1month`, `RateLimitBurst` default. Frees ~700 MB, cuts UFS writes | low |
 | M4 | Bench reboot loop | Reset `/run/prius-netwatch.fail` when `prius-netwatch-arm` arms the timer (repo `POCO/rootfs` script). Optionally a bench flag that keeps netwatch off without LTE antenna | low |
 | M5 | ssh hardening | `PasswordAuthentication no`, `KbdInteractiveAuthentication no` in a drop-in `/etc/ssh/sshd_config.d/60-prius.conf` (keys `piotr@ai` already in place; the PIN stays the sudo password). Keep a second session open while reloading sshd; armed rollback as for nft on 11-15. Optionally also add a second key (nokia1/P52) as a spare | low with the armed rollback; locking out = fastboot path |

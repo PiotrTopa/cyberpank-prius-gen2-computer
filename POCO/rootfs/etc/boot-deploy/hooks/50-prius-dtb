@@ -1,0 +1,37 @@
+#!/bin/sh
+# boot-deploy hook (postmarketOS): runs inside every `mkinitfs` -> boot-deploy, after
+# deviceinfo is read and BEFORE the DTB is appended to the kernel and boot.img is built
+# and flashed. It re-applies the car computer's device-tree patch (USB host, VBUS,
+# touch; POCO/dts/prius-dtb-patch) to the DTB boot-deploy is about to use, so a kernel
+# package bump that installs a pristine DTB cannot flash a boot image without USB host.
+#
+# Fail closed: if the patch cannot be applied, this exits 1, boot-deploy (set -e)
+# aborts BEFORE flashing, and the boot partition keeps the previous (patched) image.
+# The apk trigger then reports an error; `prius-dt-check` and the apk commit hook
+# flag it. Repo: POCO/rootfs/etc/boot-deploy/hooks/50-prius-dtb.
+set -u
+. /usr/share/misc/source_deviceinfo
+want="qcom/sdm845-xiaomi-beryllium-tianma"
+DTB=${PRIUS_DTB:-/boot/dtbs/$deviceinfo_dtb.dtb}
+say() { echo "==> prius-dtb hook: $1" >&2; logger -t prius-dtb-hook -p "${2:-user.notice}" "$1" 2>/dev/null || true; }
+
+if [ "$deviceinfo_dtb" != "$want" ]; then
+    say "deviceinfo_dtb is '$deviceinfo_dtb', expected '$want': refusing (boot.img NOT flashed)" user.crit
+    exit 1
+fi
+if [ ! -f "$DTB" ]; then
+    say "DTB $DTB missing (boot.img NOT flashed)" user.crit
+    exit 1
+fi
+if /usr/local/sbin/prius-dtb-patch check "$DTB" >/dev/null 2>&1; then
+    say "DTB already patched (USB host, VBUS, touch)"
+    exit 0
+fi
+bk=/root/boot-backup/pristine-$(date +%Y%m%d-%H%M%S)
+mkdir -p "$bk" && cp -a "$DTB" "$bk/" && cp -a /boot/boot.img "$bk/boot.img.before" 2>/dev/null
+if /usr/local/sbin/prius-dtb-patch apply "$DTB" "$DTB" >&2; then
+    say "re-applied the DTB patch to $DTB (pristine copy in $bk)" user.warning
+    exit 0
+fi
+say "FAILED to patch $DTB: boot.img NOT built/flashed; boot partition keeps the old image" user.crit
+exit 1
