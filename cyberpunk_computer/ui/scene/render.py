@@ -248,6 +248,7 @@ class SceneRenderer:
         if sig != self._sig or (d.animating and now - self._last_draw >= self.min_redraw_s):
             self._sig = sig
             self._last_draw = now
+            d.road_dirty = False          # the road picture as it is now is on the surface
             self._draw(d, inp)
             self.redraws += 1
         return self.surface
@@ -847,7 +848,7 @@ class SceneRenderer:
                 continue
             pts = self._line_points(cam, xs, ed, v)
             if len(pts) >= 2:
-                pygame.draw.lines(s, _k(pal["edge"], k * (0.5 if stale else 1.0)), False, pts)
+                pygame.draw.lines(s, _k(pal["edge"], k * d.line_alpha[4 + i] * (0.5 if stale else 1.0)), False, pts)
         for i in (0, 3, 1, 2):
             pts = lines[i]
             if len(pts) < 2:
@@ -859,7 +860,7 @@ class SceneRenderer:
             else:
                 seen = (nl if i == 0 else nr)
                 col = pal["lane_mid"] if (seen or d.lane_prob[i] >= 0.6) else pal["lane_dim"]
-            pygame.draw.lines(s, _k(col, k), False, pts, 2 if (i in (1, 2) and not stale) else 1)
+            pygame.draw.lines(s, _k(col, k * d.line_alpha[i]), False, pts, 2 if (i in (1, 2) and not stale) else 1)
 
     @staticmethod
     def _interp(xs: Sequence[float], ys: Optional[Sequence[float]], x: float) -> float:
@@ -880,8 +881,8 @@ class SceneRenderer:
         for o in d.objects:
             items.append((o.x, lambda o=o: self._draw_object(s, cam, o, v, k)))
         lt = inp.light
-        if lt is not None and lt.dist_m is not None and d.vision == "live":
-            items.append((lt.dist_m, lambda: self._draw_light_world(s, cam, lt, d, v)))
+        if lt is not None and d.light_pos is not None and d.vision == "live":
+            items.append((d.light_pos[0], lambda: self._draw_light_world(s, cam, lt, d, v)))
         if d.lead is not None and d.lead_alpha > 0.0:
             items.append((d.lead.dist_m, lambda: self._draw_lead(s, cam, d, inp, v, k)))
         maplayer.world_items(self, s, d, items)
@@ -989,7 +990,8 @@ class SceneRenderer:
                 line(s, col, (px, py), (px + dx * t, py))
                 line(s, col, (px, py), (px, py + dy * t))
         # distance read-out beside the vehicle (left of it when it sits right)
-        num = self.text("%d" % int(lead.dist_m + 0.5), 16, self.pal["text"])
+        shown = d.lead_shown_m if d.lead_shown_m is not None else int(lead.dist_m + 0.5)
+        num = self.text("%d" % shown, 16, self.pal["text"])
         unit = self.text("m", 8, col, mono=False)
         tw = num.get_width() + 2 + unit.get_width()
         right_side = cx <= self.w * 0.60
@@ -1087,8 +1089,8 @@ class SceneRenderer:
                 pygame.draw.rect(s, _k(cols[i], 0.75), (x + 2, y + 2 + 4 * i, 3, 3))
 
     def _draw_light_world(self, s: pygame.Surface, cam: Camera, lt, d: SceneDirector, v: float) -> None:
-        y = lt.lat_m if lt.lat_m is not None else -4.5
-        g = self._place(cam, max(6.0, min(100.0, lt.dist_m)), y, v)
+        dist, y = d.light_pos       # the director's drawn position (smooth with roadsense's view channel)
+        g = self._place(cam, max(6.0, min(100.0, dist)), y, v)
         if g is None:
             return
         cx, by, ppm = g
@@ -1279,8 +1281,8 @@ class SceneRenderer:
                 pygame.draw.rect(s, (0, 0, 0), (x_right - q.get_width() - 1, 8, q.get_width() + 2, 14))
                 s.blit(q, (x_right - q.get_width(), 8))
                 x_right -= q.get_width() + 3
-            if inp.light.dist_m is not None:
-                t = self.text("%d" % int(inp.light.dist_m + 0.5), 14, pal["text"])
+            if d.light_shown_m is not None:
+                t = self.text("%d" % d.light_shown_m, 14, pal["text"])
                 pygame.draw.rect(s, (0, 0, 0), (x_right - t.get_width() - 1, 8, t.get_width() + 2, 14))
                 s.blit(t, (x_right - t.get_width(), 8))
                 x_right -= t.get_width() + 4

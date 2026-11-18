@@ -36,8 +36,15 @@ DOOR_SECONDS = 0.55        # door swing time
 DOOR_STEPS = 6             # quantisation of door angles (cache keys)
 STALE_S = 2.5              # road data older than this is "stale"
 LOST_S = 7.0               # ... and older than this is dropped
-SMOOTH_TAU_S = 0.30        # low-pass on lane/lead geometry
+SMOOTH_TAU_S = 0.30        # low-pass on lane/lead geometry (older roadsense without the view channel)
 LEAD_FADE_S = 0.4
+# roadsense 2.0 display channel ("vw", contract 7.4): the samples are already display-filtered and carry their
+# frame time and velocities; the director places them on its own clock and extrapolates to the frame drawn
+VIEW_EASE_S = 0.08         # residual corrections between two samples are eased over this (motion is not)
+VIEW_LINE_EASE_S = 0.10    # lines: short ease between samples
+VIEW_MAX_EXTRAP_S = 0.35   # a sample is carried forward by its velocity at most this long
+VIEW_OFFSET_WINDOW_S = 3.0 # clock offset = the smallest (arrival - frame time) seen over this window
+READOUT_HYST_M = 0.3       # a whole-metre read-out changes when the value is 0.5 + this from it
 REAR_GROUP_AJAR = 0.34     # opening shown for the shared rear/back door bit
 
 
@@ -72,6 +79,16 @@ class SceneDirector:
         self.lead: Optional[Lead] = None      # smoothed
         self.lead_alpha = 0.0                 # 0..1 appear/disappear
         self.objects: tuple = ()
+        self.lead_shown_m: Optional[int] = None   # the lead's whole-metre read-out (with hysteresis)
+        self.light_pos: Optional[Tuple[float, float]] = None   # drawn (distance, lateral LEFT+) of the ego light
+        self.light_alpha = 0.0
+        self.light_shown_m: Optional[int] = None
+        self.line_alpha: List[float] = [1.0] * 6   # lane lines 0..3, edges 0..1 (display channel fades)
+        self.road_sig: tuple = ()                 # what the road picture shows, quantised
+        self.road_dirty = False                   # it changed since the renderer last drew it
+        self._offs: List[Tuple[float, float]] = []   # (arrival on our clock, arrival - frame time)
+        self._light_id = ""
+        self._view_age = 0.0
         self.animating = True
         self.clock = 0.0
         self._stopped_for = 99.0
@@ -136,10 +153,18 @@ class SceneDirector:
         self._update_signs(inp, dt)
         self.map.update(inp, self, dt)
 
+        sig = self.road_sig
+        self._update_light(inp, dt)
+        self.road_sig = self._road_signature()
+        if self.road_sig != sig:
+            self.road_dirty = True
         self.animating = (
             self.view_raw != target or moving_doors or self.moving
             or (self.lead_alpha not in (0.0, 1.0))
             or was != (self.view_step, self.door_step, self.vision)
+            # standing in traffic: the road picture is still live (lead, lanes, light), so it is redrawn
+            # whenever what it shows moved (before L19 it froze until the car moved)
+            or (self.view_step == VIEW_STEPS and self.road_dirty)
         )
 
     # -- signs ----------------------------------------------------------------
@@ -205,6 +230,10 @@ class SceneDirector:
         if road is None:
             return
 
+        if road.t is not None:
+            self._update_road_view(road, fresh, dt)
+            return
+        self.line_alpha = [1.0] * 6
         a = 1.0 - math.exp(-dt / SMOOTH_TAU_S) if dt > 0 else 1.0
         self.xs = road.xs
         for i in range(4):
@@ -260,6 +289,116 @@ class SceneDirector:
             if self.lead_alpha == 0.0:
                 self.lead = None
         self.objects = road.objects if self.vision == "live" else ()
+        self._readout()
+
+    # -- display channel (roadsense view) -------------------------------------------
+
+    def _sample_age(self, t_src: Optional[float], fresh: bool) -> float:
+        """Seconds between the frame time of the newest sample and the frame being drawn, on our clock: the
+        offset between the two clocks is the smallest (arrival - frame time) of the last seconds (transport
+        delays only add), so jitter of the link does not move the picture."""
+        if t_src is None:
+            return 0.0
+        if fresh:
+            self._offs.append((self.clock, self.clock - t_src))
+            while self._offs and self._offs[0][0] < self.clock - VIEW_OFFSET_WINDOW_S:
+                self._offs.pop(0)
+            if len(self._offs) > 64:
+                self._offs.pop(0)
+        if not self._offs:
+            return 0.0
+        off = min(o for _, o in self._offs)
+        return max(0.0, min(VIEW_MAX_EXTRAP_S, self.clock - (t_src + off)))
+
+    def _update_road_view(self, road: RoadScene, fresh: bool, dt: float) -> None:
+        age = self._sample_age(road.t, fresh)
+        a = 1.0 - math.exp(-dt / VIEW_LINE_EASE_S) if dt > 0 else 1.0
+        self.xs = road.xs
+
+        def ease_line(cur, ln):
+            if ln is None:
+                return None
+            if cur is None or len(cur) != len(ln.ys):
+                return list(ln.ys)
+            for k, y in enumerate(ln.ys):
+                cur[k] += (y - cur[k]) * a
+            return cur
+        for i in range(4):
+            ln = road.lanes[i]
+            self.lanes[i] = ease_line(self.lanes[i], ln)
+            self.lane_prob[i] = ln.prob if ln is not None else 0.0
+            self.line_alpha[i] = ln.alpha if ln is not None else 0.0
+        for i in range(2):
+            self.edges[i] = ease_line(self.edges[i], road.edges[i])
+            self.line_alpha[4 + i] = road.edges[i].alpha if road.edges[i] is not None else 0.0
+        self.path = ease_line(self.path, road.path)
+
+        lead = road.lead if self.vision == "live" else None
+        if lead is not None:
+            v = lead.v_rel or 0.0
+            target = lead.dist_m + v * age
+            cur = self.lead
+            if cur is None or (lead.oid and cur.oid != lead.oid):
+                d, lat = target, lead.lat_m
+            else:
+                k = 1.0 - math.exp(-dt / VIEW_EASE_S) if dt > 0 else 1.0
+                d = cur.dist_m + v * dt                      # motion: exact
+                d += (target - d) * k                        # corrections: eased
+                lat = cur.lat_m + (lead.lat_m - cur.lat_m) * k
+            self.lead = lead._replace(dist_m=d, lat_m=lat)
+            self.lead_alpha = lead.alpha
+        else:
+            self.lead_alpha = max(0.0, self.lead_alpha - dt / LEAD_FADE_S)
+            if self.lead_alpha == 0.0:
+                self.lead = None
+        self.objects = road.objects if self.vision == "live" else ()
+        self._view_age = age
+        self._readout()
+
+    def _update_light(self, inp: SceneInputs, dt: float) -> None:
+        """The drawn position of the ego light. From the display channel: carried by its velocity between two
+        samples, corrections eased; otherwise (older roadsense) the light's own values."""
+        lt = inp.light
+        if lt is None or lt.dist_m is None:
+            self.light_pos, self.light_alpha, self._light_id, self.light_shown_m = None, 0.0, "", None
+            return
+        lat = lt.lat_m if lt.lat_m is not None else -4.5
+        if not lt.car_frame:
+            self.light_pos, self.light_alpha = (lt.dist_m, lat), 1.0
+        else:
+            age = self._view_age
+            vx, vy = lt.vx or 0.0, lt.vy or 0.0
+            tx, ty = lt.dist_m + vx * age, lat + vy * age
+            if self.light_pos is None or lt.oid != self._light_id:
+                self.light_pos = (tx, ty)
+            else:
+                k = 1.0 - math.exp(-dt / VIEW_EASE_S) if dt > 0 else 1.0
+                x, y = self.light_pos[0] + vx * dt, self.light_pos[1] + vy * dt
+                self.light_pos = (x + (tx - x) * k, y + (ty - y) * k)
+            self.light_alpha = lt.alpha
+        self._light_id = lt.oid
+        self.light_shown_m = self._hyst(self.light_shown_m, self.light_pos[0])
+
+    @staticmethod
+    def _hyst(shown: Optional[int], value: float) -> int:
+        if shown is None or abs(value - shown) > 0.5 + READOUT_HYST_M:
+            return int(value + 0.5)
+        return shown
+
+    def _readout(self) -> None:
+        self.lead_shown_m = None if self.lead is None else self._hyst(self.lead_shown_m, self.lead.dist_m)
+
+    def _road_signature(self) -> tuple:
+        """What the road picture shows, quantised to about a pixel: a change redraws the scene."""
+        def q(v, step):
+            return None if v is None else int(round(v / step))
+        lines = tuple(None if ln is None else (q(ln[2], 0.05), q(ln[min(6, len(ln) - 1)], 0.2))
+                      for ln in self.lanes + self.edges)
+        ld = None if self.lead is None else (q(self.lead.dist_m, 0.05), q(self.lead.lat_m, 0.05),
+                                             q(self.lead_alpha, 0.1), self.lead_shown_m)
+        lt = None if self.light_pos is None else (q(self.light_pos[0], 0.25), q(self.light_pos[1], 0.1),
+                                                 q(self.light_alpha, 0.1))
+        return (lines, ld, lt, tuple(q(a, 0.1) for a in self.line_alpha))
 
     # -- derived ------------------------------------------------------------------
 
