@@ -305,8 +305,10 @@ def _map_drive(next_m: Optional[float] = 120.0, next_kmh: int = 90, bend: float 
             tun = {"in": True, "exit_m": max(0, int(tunnel_m - gone)), "src": "map+vision"}
         m = {"ok": True, "state": state, "conf": 0.93, "limit": {"kmh": 50, "src": "map", "conf": 0.8},
              "road": {"cls": cls, "ref": ref, "name": name},
-             "lanes": {"n": lanes[0] + lanes[1], "fwd": lanes[0], "back": lanes[1], "ego": lanes[2],
-                       "onc_left": lanes[1] > 0 and lanes[2] == 0, "c": 0.8},
+             "lanes": ({"n": lanes[0] + lanes[1], "fwd": lanes[0], "back": lanes[1], "ego": lanes[2],
+                        "onc_left": lanes[1] > 0 and lanes[2] == 0, "c": 0.8} if lanes[2] >= 0 else
+                       {"n": lanes[0] + lanes[1], "fwd": lanes[0], "back": lanes[1], "c": 0.0,
+                        "p": list(lanes[3])}),        # L20: the ego lane unknown, probabilities per lane
              "tunnel": tun, "ahead": ahead,
              "pos": {"src": "gnss" if state == "good" else "dead_reckoning", "hacc": hacc},
              "in": {"gnss": "headunit", "fix": "3d", "motion": "vehicle", "tag": "prius-can"},
@@ -506,6 +508,15 @@ SHOTS = (
      dict(_MAP_ROAD, map=_map_drive(syn=True))),
     ("map_none", 19.5, "live", None, "the same road without a map",
      dict(_MAP_ROAD)),
+    # ── lane L20: approximate position, the ego lane from roadsense's filter ──
+    ("junction_approx_dead_reckoning", 19.5, "live", None,
+     "junction view on dead reckoning (35 m error, 180 m to go): amber frame, ~ distance",
+     dict(_MAP_ROAD, map=_map_drive(next_m=None, state="dead_reckoning", hacc=35.0,
+                                    jv=_jv("j", 180, [[-90, "xe", 0, 0], [0, "xep", 1, 0], [90, "xe", 0, 0]],
+                                           ctl="s", to="Ozimska")))),
+    ("map_lanes_three_likely", 19.5, "live", None,
+     "map: three lanes, roadsense cannot name the car's lane; the middle one is likely (outlined, 0.6)",
+     dict(_MAP_ROAD, lanes="1", map=_map_drive(next_m=None, lanes=(3, 0, -1, (0.15, 0.6, 0.25)), bend=0.0))),
 )
 
 

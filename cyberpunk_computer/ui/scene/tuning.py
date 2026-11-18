@@ -110,9 +110,10 @@ class Tuning:
                                 # camera's lanes then end where roadsense says they do); needs
                                 # roadsense's fused road geometry and a usable map, else nothing
     road_geo_way = True         # ... a side road chosen by the turn signal drawn as the way on
-    map_junction = False        # the junction / roundabout ahead as a schematic at the left edge
-                                # (arms, the most likely way on, the exit number); off until
-                                # it has been seen on the road with a real position
+    map_junction = True         # the junction / roundabout ahead as a schematic at the left edge
+                                # (arms, the most likely way on, the exit number). On since
+                                # 2026-11-18 (lane L20: off by default, no junction had ever
+                                # reached the glass on the recorded drives)
     map_junction_m = 250        # ... from this distance (m); a roundabout stays while on its ring
     map_junction_way = True     # ... the most likely way on bright with an arrow head (it is the
                                 # map's guess, not a route); False = all arms alike, no exit number
@@ -120,14 +121,20 @@ class Tuning:
     map_ahead_s = 12.0          # the next limit appears this many seconds of driving ahead,
     map_ahead_min_m = 150       # ... but not later than this (m)
     map_ahead_max_m = 400       # ... and not earlier than this (m)
-    map_min_match = 0.7         # map elements need this match confidence, averaged over ~3 s
-                                # (roadsense uses the map from 0.5; they go below 0.55)
+    map_min_match = 0.55        # map elements need this match confidence, averaged over ~3 s
+                                # (roadsense uses the map from 0.5; they go 0.15 below). Was 0.7:
+                                # on the recorded drives the average stayed under it half the time.
+                                # roadsense >= L20 reports the confidence of the road, not of the
+                                # edge, so it no longer dips at every side road
     map_hold_s = 2.5            # ... and stay this long when the map drops out (a message or two
                                 # at side roads), distances advanced by the distance driven
     map_min_conf = 0.5          # a fact about the road ahead / the lanes is shown from this
                                 # confidence (path confidence up to it x its own)
     map_path_min_conf = 0.6     # the far road ends at the first real junction below this
     map_max_hacc_m = 20.0       # distances are shown while the position is this accurate (m)
+    map_junction_hacc_share = 0.4   # the junction schematic also while the position error is at
+                                # most this share of its distance (drawn as approximate: amber
+                                # frame, "~" before the distance); dead reckoning is approximate too
     map_far_disagree_m = 8.0    # the far road hides when camera and map differ by more than
                                 # this in the road's lateral run over 100 m
     map_far_max_m = 600         # reach of the far road (m)

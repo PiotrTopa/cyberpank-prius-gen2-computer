@@ -178,6 +178,7 @@ class MapInfo(NamedTuple):
     road_cls: str = ""
     lanes: Optional[Tuple[int, int, int]] = None      # (own direction, oncoming, ego index from the left)
     lanes_conf: float = 0.0
+    lanes_p: Tuple[float, ...] = ()                   # probability of each own lane, from the left (roadsense >= L20)
     onc_left: Optional[bool] = None  # the lane to the left carries oncoming traffic
     tunnel_in: bool = False          # in a tunnel by the map
     tunnel_exit_m: Optional[float] = None
@@ -196,7 +197,8 @@ class Far(NamedTuple):
 class LaneBoxes(NamedTuple):
     fwd: int
     back: int
-    ego: int
+    ego: int                                 # -1: unknown (the count is shown, no lane lit)
+    likely: int = -1                         # with ego unknown: the most likely lane when it is >= 0.45
 
 
 class RoadLabel(NamedTuple):
@@ -232,8 +234,16 @@ def _parse(mp: Mapping) -> MapInfo:
     road, ln, tn, ah, pos = sub("road"), sub("lanes"), sub("tunnel"), sub("ahead"), sub("pos")
     lanes = None
     fwd, back, ego = _f(ln.get("fwd")), _f(ln.get("back")), _f(ln.get("ego"))
+    lp: Tuple[float, ...] = ()
+    pr = ln.get("p")
+    if isinstance(pr, (list, tuple)) and fwd is not None and len(pr) == int(fwd):
+        vals = [_f(v) for v in pr]
+        if all(v is not None for v in vals):
+            lp = tuple(vals)
     if fwd is not None and back is not None and ego is not None and 0 <= ego < fwd:
         lanes = (int(fwd), int(back), int(ego))
+    elif fwd is not None and back is not None and fwd >= 2 and lp:
+        lanes = (int(fwd), int(back), -1)            # the count is known, the own lane is not (L20)
     onc = ln.get("onc_left")
     exit_m = _f(tn.get("exit_m"))
     src = tn.get("src")
@@ -268,7 +278,7 @@ def _parse(mp: Mapping) -> MapInfo:
         state=str(mp.get("state") or ""), conf=_f(mp.get("conf")) or 0.0, hacc=_f(pos.get("hacc")),
         road_ref=str(road.get("ref") or ""), road_name=str(road.get("name") or ""),
         road_cls=str(road.get("cls") or ""),
-        lanes=lanes, lanes_conf=_f(ln.get("c")) or 0.0, onc_left=onc if isinstance(onc, bool) else None,
+        lanes=lanes, lanes_conf=_f(ln.get("c")) or 0.0, lanes_p=lp, onc_left=onc if isinstance(onc, bool) else None,
         tunnel_in=tunnel_in, tunnel_exit_m=exit_m if tunnel_in else None,
         next_limit=nl, junctions=tuple(jn), shape_ds=ds, shape=shape, junction=_junction(mp.get("jv")))
 
@@ -422,6 +432,8 @@ class MapDirector:
         self.onc_left = False
         self.label: Optional[RoadLabel] = None
         self.junction: Optional[JunctionView] = None     # m = the advanced distance
+        self.junction_approx = False                     # position too uncertain for an exact distance
+        self.jv_hacc_share = float(g("map_junction_hacc_share", 0.4))
         self.sig: tuple = ()
         # ── internal ──
         self._jv = _Distance()
@@ -458,6 +470,7 @@ class MapDirector:
         self.onc_left = False
         self.label = None
         self.junction = None
+        self.junction_approx = False
         self.geo = None
         self._jv.m = None
         self._jv_on = False
@@ -556,10 +569,17 @@ class MapDirector:
         # ── junction view ──
         # shown from junction_m on (hysteresis 1.2 x), a roundabout until the car has left
         # its ring; needs a path that is still likely up to the junction and a good position
-        jv = mi.junction if (self.on_junction and accurate) else None
+        # an uncertain position (dead reckoning, a weak receiver) does not hide it while the error is
+        # small against the distance: it is then drawn as approximate (L20)
+        jv = mi.junction if self.on_junction else None
+        if jv is not None and not accurate and not (mi.hacc is not None and (
+                jv.on_ring or mi.hacc <= self.jv_hacc_share * max(jv.m, 1.0))):
+            jv = None
         if jv is not None and jv.conf < self.min_conf and not jv.on_ring:
             jv = None
         jm = self._jv.step(jv.m if jv is not None else None, fresh, moved, can_adv)
+        self.junction_approx = bool(jv is not None and (mi.state == "dead_reckoning" or not accurate or (
+            mi.hacc is not None and jm is not None and mi.hacc > 0.15 * max(jm, 1.0))))
         if jv is None or jm is None:
             self._jv_on = False
             self.junction = None
@@ -617,7 +637,9 @@ class MapDirector:
                 self.far = far
 
         # ── lanes ──
-        if self.on_lanes and mi.lanes is not None:
+        if self.on_lanes and mi.lanes is not None and mi.lanes[2] < 0:
+            self._lanes_on = True                     # count only: shown while the map is trusted (above)
+        elif self.on_lanes and mi.lanes is not None:
             if mi.lanes_conf >= self.min_conf:
                 self._lanes_on = True
             elif mi.lanes_conf < self.min_conf - CONF_HYST:
@@ -625,7 +647,11 @@ class MapDirector:
         else:
             self._lanes_on = False
         if self._lanes_on and mi.lanes is not None:
-            self.lanes = LaneBoxes(*mi.lanes)
+            likely = -1
+            if mi.lanes[2] < 0 and mi.lanes_p:
+                k = max(range(len(mi.lanes_p)), key=lambda i: mi.lanes_p[i])
+                likely = k if mi.lanes_p[k] >= 0.45 else -1
+            self.lanes = LaneBoxes(*mi.lanes, likely)
             self.onc_left = mi.onc_left is True
         else:
             self.lanes = None
@@ -661,5 +687,5 @@ class MapDirector:
                     self.lanes, self.onc_left, self.label,
                     None if self.junction is None else (self.junction.kind, int(self.junction.m / 5.0),
                                                         self.junction.arms, self.junction.car_angle,
-                                                        self.junction.ring_path),
+                                                        self.junction.ring_path, self.junction_approx),
                     self._geo_n if self.geo is not None else 0)

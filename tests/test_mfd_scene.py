@@ -1089,16 +1089,17 @@ def test_map_elements_survive_a_short_dropout_and_go_after_the_hold():
 
 def test_low_match_confidence_hides_map_elements_with_hysteresis():
     from cyberpunk_computer.ui.scene.mapinfo import parse_map
-    assert map_director(_map_full(conf=0.55), seconds=5.0)[0].map.mark == ""
+    # thresholds since L20: trusted from a 3 s average of 0.55, lost under 0.40
+    assert map_director(_map_full(conf=0.45), seconds=5.0)[0].map.mark == ""
     d, inp = map_director(_map_full(conf=0.95))
-    # dips at side roads (one message in four at 0.5) do not hide it ...
+    # dips at side roads (one message in four at 0.3) do not hide it ...
     for i in range(12):
-        m = _map_full(conf=0.5 if i % 4 == 0 else 0.9, pos={"src": "gnss", "hacc": 3.0 + i * 0.01})
+        m = _map_full(conf=0.3 if i % 4 == 0 else 0.9, pos={"src": "gnss", "hacc": 3.0 + i * 0.01})
         live_step(d, inp._replace(map=parse_map({"map": m})), 0.5)
         assert d.map.mark == "good", i
     # ... a lasting low confidence does (after the hold)
-    for i in range(12):
-        m = _map_full(conf=0.5, pos={"src": "gnss", "hacc": 4.0 + i * 0.01})
+    for i in range(20):
+        m = _map_full(conf=0.35, pos={"src": "gnss", "hacc": 4.0 + i * 0.01})
         live_step(d, inp._replace(map=parse_map({"map": m})), 0.5)
     assert d.map.mark == "" and d.map.next_limit is None
 
@@ -1157,7 +1158,7 @@ def test_map_lanes_give_the_boxes_and_mark_the_oncoming_lane():
     three = _map_full(lanes={"n": 3, "fwd": 3, "back": 0, "ego": 2, "onc_left": False, "c": 0.8})
     inp = map_inputs(three)
     assert mdrawn(inp, 3.0)[0] != mdrawn(inp, 3.0, map_lanes=False)[0]      # boxes although no lane is seen
-    assert map_director(three)[0].map.lanes == (3, 0, 2)
+    assert map_director(three)[0].map.lanes[:3] == (3, 0, 2)
     low = _map_full(lanes={"n": 3, "fwd": 3, "back": 0, "ego": 2, "c": 0.3})
     assert map_director(low)[0].map.lanes is None
     unknown = _map_full(lanes={"n": 3, "fwd": 3, "back": 0, "c": 0.8})     # ego lane not known
@@ -1274,16 +1275,23 @@ def test_junction_view_is_parsed():
         assert parse_map({"map": _map_full(jv=bad)}).junction is None
 
 
-def test_junction_view_is_off_by_default_and_gated_by_distance_confidence_and_position():
-    assert map_director(_map_full(jv=_JV))[0].map.junction is None                 # tuning map_junction is off
+def test_junction_view_is_on_by_default_and_gated_by_distance_confidence_and_position():
+    # on by default since L20; the tuning still switches it off
+    assert map_director(_map_full(jv=_JV), map_junction=False)[0].map.junction is None
+    assert map_director(_map_full(jv=_JV))[0].map.junction is not None
     d, _ = map_director(_map_full(jv=_JV), map_junction=True)
     jv = d.map.junction
     assert jv is not None and 130 < jv.m < 145                                     # 180 m, 3 s at 50 km/h driven
     assert map_director(_map_full(jv=dict(_JV, m=600)), map_junction=True)[0].map.junction is None
     assert map_director(_map_full(jv=dict(_JV, m=600)), map_junction=True, map_junction_m=700)[0].map.junction is not None
     assert map_director(_map_full(jv=dict(_JV, c=0.3)), map_junction=True)[0].map.junction is None
-    assert map_director(_map_full(jv=_JV, pos={"src": "dead_reckoning", "hacc": 45.0}),
+    # a poor position: shown as approximate while the error is small against the distance, else hidden
+    d, _ = map_director(_map_full(jv=_JV, state="dead_reckoning", pos={"src": "dead_reckoning", "hacc": 45.0}))
+    assert d.map.junction is not None and d.map.junction_approx
+    assert map_director(_map_full(jv=_JV, pos={"src": "dead_reckoning", "hacc": 80.0}),
                         map_junction=True)[0].map.junction is None
+    d, _ = map_director(_map_full(jv=_JV, pos={"src": "gnss", "hacc": 4.0}))
+    assert not d.map.junction_approx
     # on the ring the picture stays although the path confidence is gone
     on = dict(_JV_RING, m=0, c=0.2, ring={"r": 16, "n": 3, "p": 3, "on": True, "car": 70})
     assert map_director(_map_full(jv=on), map_junction=True)[0].map.junction.on_ring
@@ -1307,7 +1315,7 @@ def test_junction_view_draws_in_its_panel_only():
         hot = pygame.Color(*mdrawn(map_inputs(_map_full()))[1].pal["lane_ego"])
         assert any(surf.get_at(p) == hot for p in changed)
     # flag off: the same picture as without a view
-    assert mdrawn(map_inputs(_map_full(jv=_JV)))[0] == mdrawn(map_inputs(_map_full()))[0]
+    assert mdrawn(map_inputs(_map_full(jv=_JV)), map_junction=False)[0] == mdrawn(map_inputs(_map_full()))[0]
 
 
 def test_light_uncertainty_and_other_group_are_shown():
@@ -1441,3 +1449,30 @@ def test_geo_redraws_when_it_changes_and_costs_nothing_without_it():
     live_step(d0, drive_inputs(), 1.0)
     r.render(d0, drive_inputs(), 10.0)
     assert r._geo_p is None and r._x_end == 1e9
+
+
+def test_ego_lane_probabilities_unknown_lane_shows_the_count_and_the_likely_lane():
+    """roadsense >= L20: an ego lane it cannot name comes with the probability per lane; the boxes then show
+    the count with no lane lit, the most likely one outlined when it holds 0.45 or more."""
+    unk = _map_full(lanes={"n": 3, "fwd": 3, "back": 0, "c": 0.0, "p": [0.1, 0.6, 0.3]})
+    d = map_director(unk)[0]
+    assert d.map.lanes == (3, 0, -1, 1)
+    flat = _map_full(lanes={"n": 3, "fwd": 3, "back": 0, "c": 0.0, "p": [0.34, 0.33, 0.33]})
+    assert map_director(flat)[0].map.lanes == (3, 0, -1, -1)
+    known = _map_full(lanes={"n": 3, "fwd": 3, "back": 0, "ego": 1, "c": 0.8, "p": [0.05, 0.9, 0.05]})
+    a = mdrawn(map_inputs(known), 3.0, map_far_road=False)[0]
+    b = mdrawn(map_inputs(unk), 3.0, map_far_road=False)[0]
+    c = mdrawn(map_inputs(flat), 3.0, map_far_road=False)[0]
+    assert a != b != c
+
+
+def test_scene_carries_the_ego_lane_probabilities():
+    from cyberpunk_computer.backend.roadsense_scene import fused_to_scene
+    fu = {"map": {"available": True, "state": "good", "match_confidence": 0.9},
+          "lanes": {"count": 3, "forward": 3, "backward": 0, "ego_index": None, "oncoming_left": False,
+                    "probs": [0.1, 0.62, 0.28], "probs_from": "left", "source": "map:tagged+vision",
+                    "confidence": 0.0}}
+    ln = fused_to_scene(fu)["lanes"]
+    assert ln["p"] == [0.1, 0.62, 0.28] and "ego" not in ln
+    fu["lanes"]["probs_from"] = "right"
+    assert "p" not in fused_to_scene(fu)["lanes"]

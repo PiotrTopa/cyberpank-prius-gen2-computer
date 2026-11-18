@@ -467,6 +467,11 @@ def fused_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                             "src": ln.get("source") or None, "c": _r(ln.get("confidence"), 2)})
         if isinstance(ln.get("oncoming_left"), bool):
             lanes["onc_left"] = ln["oncoming_left"]
+        # roadsense >= L20: the ego-lane filter's probability per own lane, from the left
+        pr = ln.get("probs")
+        if (ln.get("probs_from") == "left" and isinstance(pr, list) and pr and len(pr) == ln.get("forward")
+                and all(isinstance(v, (int, float)) for v in pr)):
+            lanes["p"] = [round(float(v), 2) for v in pr]
         out["lanes"] = lanes or None
     tn = msg.get("tunnel")
     if isinstance(tn, dict):
