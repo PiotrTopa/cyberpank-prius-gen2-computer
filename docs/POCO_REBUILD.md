@@ -98,11 +98,19 @@ Pins (`apk upgrade --simulate`, same 2026-11-17 index, no `apk update`):
 
 ## 2. Full backup image
 
-**Location (laptop only):** `/home/piotr/backups/poco/20261118/` (mode 700, owner piotr). It holds
+**Location (laptop only):** `/mnt/win/linux-home/backups__poco/20261118/` on the laptop's second
+disk; `/home/piotr/backups/poco` is a symlink to `/mnt/win/linux-home/backups__poco`, so the
+`/home/piotr/backups/poco/20261118/` paths in this document keep working (owner decision
+2026-11-19: the only copy on the laptop lives there). **That disk is NTFS** (ntfs-3g, mounted
+owner-only on Linux with `umask=077`, in fstab with `nofail`): Unix permissions are **not stored**
+and **Windows can read every file**, including the secrets below. Nothing in the restore relies on
+the file modes there: owners, modes and xattrs of the phone's files live inside the archives
+(`rootfs.tar.zst` pax headers, raw partition images), and the scripts are run with `sh …`. If the
+disk is not mounted (`nofail`), the symlink dangles: `sudo mount /mnt/win`. The backup holds
 WireGuard keys, the SIM PIN, the backend auth token, the car's satellite signing key, ssh host
 keys and the root ssh key: never copy it elsewhere, never attach it, never commit it. A phone-side
-copy of the same files stays in `/home/user/l25/img/` (on the phone's own disk; useful for a
-partial restore over ssh; delete it with the next cleanup).
+copy of the same files stays in `/home/user/l25/img/` (8.5 GB on the phone's own disk; the owner
+decides when to delete it).
 
 **How it was made:** `POCO/backup/phone-backup.sh` run as root on the phone in a `systemd-run`
 unit (Nice 19, idle I/O, CPUs 0-3, MemoryMax 1G); the rootfs is archived by
@@ -138,7 +146,7 @@ Verification:
 | `zstd -t` (86 files, 18 122 993 664 bytes raw) | OK | OK |
 | full `tar -tv` of the archive | — | OK: 90 331 entries, exit 0, no warnings (apart from GNU tar's `hdrcharset` notice) |
 | raw partition hashes vs `SHA256SUMS.raw`, `/boot` raw hash | (dump-time) | OK: 84/84 partition images match their raw dump-time hashes; `/boot` raw hash OK |
-| subset build test (`build-userdata-image.sh … 14 ./etc ./usr/local ./root`, in tmpfs) | — | OK: GPT label-id `210CA09F-…`, PARTUUIDs `c11fa8a5-…`/`899bc788-…`, fs UUIDs `b56c1f02-…`/`398a493f-…` equal to `meta/`; e2fsck clean; owners/modes kept (`/etc/shadow` 640 0:42, `car.key` 0600 0:0); image deleted |
+| build tests: subset (`… 14 ./etc ./usr/local ./root`, tmpfs) and full size (16 GB, see below) | — | OK: GPT label-id `210CA09F-…`, PARTUUIDs `c11fa8a5-…`/`899bc788-…`, fs UUIDs `b56c1f02-…`/`398a493f-…` equal to `meta/`; e2fsck clean; owners/modes kept (`/etc/shadow` 640 0:42, `car.key` 0600 0:0); image deleted |
 | excluded files vs laptop copies | — | `ljkr.nv12`, `ljkr.nv12.xz`, `poland-20261114.rsmap`: sha256 equal |
 
 Laptop free space after the pull: 8.5 GB (8128 MiB); other jobs were writing to the disk at the same time.
@@ -239,9 +247,11 @@ xattrs; harmless, the xattrs are restored. The ext2 `/boot` image is restored ra
 
 **Build test: done 2026-11-19** with a subset (`./etc ./usr/local ./root`) in a 14 GB sparse file
 on tmpfs: see the verification table above. The full-size build stays a procedure until ≥ 12 GB
-of disk can be spared. A full-size build (16 GB image) was started 2026-11-19 00:27 CET on the
-owner's scratch disk `/mnt/win/linux-scratch/l25/` (unit `l25-build`, log `build.log` there);
-result to be checked, then the image deleted.
+of disk can be spared. Full-size build: **done 2026-11-19 00:27-00:31 CET** on the owner's scratch disk
+(`/mnt/win/linux-scratch/l25/`, NTFS): `build-userdata-image.sh … userdata.img 16` exit 0; the whole
+archive extracted (ext4: 90 068 inodes, 11.6 GB used of 16 GB), `e2fsck -fn` clean, GPT label-id,
+PARTUUIDs and both fs UUIDs equal to `meta/`. Only the img2simg/fastboot step was not run (no phone
+in fastboot). The image was deleted afterwards.
 
 ---
 
