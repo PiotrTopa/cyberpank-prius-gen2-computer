@@ -86,6 +86,8 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
+from . import dvr_timesync
+
 logger = logging.getLogger(__name__)
 
 # ── phases ───────────────────────────────────────────────────────────────────
@@ -455,6 +457,28 @@ class BlockIO:
     def close(self, fd: int) -> None:
         os.close(fd)
 
+    def write_sector(self, path: str, lba: int, data: bytes) -> None:
+        """One O_DIRECT sector write through a second descriptor (the read fd
+        holds O_EXCL; a plain open next to it is allowed). Only used for the
+        camera's time sync (backend.dvr_timesync)."""
+        if len(data) != SECTOR:
+            raise OSError(errno.EINVAL, "one sector only")
+        buf = mmap.mmap(-1, 4096)
+        try:
+            buf[:SECTOR] = data
+            fd = os.open(path, os.O_WRONLY | os.O_DIRECT | os.O_SYNC | os.O_CLOEXEC)
+            try:
+                view = memoryview(buf)[:SECTOR]
+                try:
+                    if os.pwritev(fd, [view], lba * SECTOR) != SECTOR:
+                        raise OSError(errno.EIO, "short write")
+                finally:
+                    view.release()
+            finally:
+                os.close(fd)
+        finally:
+            buf.close()
+
 
 @dataclass
 class Frame:
@@ -507,6 +531,8 @@ class DvrReader:
         self.reopens = 0
         self.attempts = 0                 # open attempts since the last good open
         self._attempt_log_t = -1e9
+        self._time_synced = False         # per connection (backend.dvr_timesync)
+        self.time_syncs = 0
 
     # ── public ───────────────────────────────────────────────────────────
 
@@ -611,6 +637,7 @@ class DvrReader:
                         logger.info("camera preview: camera back on %s after %d attempt(s)",
                                     path, self.attempts)
                     self.attempts = 0
+                    self._time_synced = False
                     self._last_seq = None
                     self._last_new = self._clock()
                     self.reopens += 1
@@ -624,6 +651,24 @@ class DvrReader:
             logger.info("camera preview: open attempt %d: %s", self.attempts, why)
         self._set_phase(phase, why)
         return False
+
+    def _time_sync(self, info: bytes, info_lba: int) -> None:
+        """Send the vendor app's time sync once per connection: without it the
+        camera leaves the USB bus once, 28 s after power-up (backend.dvr_timesync)."""
+        write = getattr(self.io, "write_sector", None)
+        cmd_lba = dvr_timesync.CMD_LBA.get(info_lba)
+        if write is None or cmd_lba is None or self._path is None:
+            return
+        try:
+            fd = self._fd
+            if not dvr_timesync.hwc_covers(lambda lba, n: self.io.pread(fd, n, lba * SECTOR), cmd_lba):
+                logger.info("camera preview: time sync not sent (command file not found on the camera)")
+                return
+            write(self._path, cmd_lba, dvr_timesync.time_packet(info[0x34] == dvr_timesync.BOARD_V1))
+            self.time_syncs += 1
+            logger.info("camera preview: time sync sent to the camera")
+        except OSError as exc:
+            logger.info("camera preview: time sync failed (%s)", exc)
 
     def _io_failed(self, what: str, exc: OSError) -> None:
         logger.info("camera preview: %s failed (%s): reopening", what, exc)
@@ -648,6 +693,9 @@ class DvrReader:
             self._set_phase(PHASE_WAITING, "camera info sector empty (starting up)")
             self._stale_check(now, reopen=False)
             return 0.2
+        if not self._time_synced:
+            self._time_synced = True
+            self._time_sync(info, info_lba)
         if self._last_seq is not None and h.vseq == self._last_seq:
             if not h.playback and now - self._last_new > 0.4:
                 try:   # the app's dummy "kick" read for a stalled sequence
