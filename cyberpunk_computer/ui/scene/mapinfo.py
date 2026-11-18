@@ -181,6 +181,7 @@ class MapInfo(NamedTuple):
     lanes: Optional[Tuple[int, int, int]] = None      # (own direction, oncoming, ego index from the left)
     lanes_conf: float = 0.0
     lanes_p: Tuple[float, ...] = ()                   # probability of each own lane, from the left (roadsense >= L20)
+    rs_trust: bool = False                            # roadsense trusts the map layer (view.road.position.trusted)
     lanes_likely: Optional[int] = None                # roadsense's likely lane when none is lit (view.road); None: not sent
     lanes_turn: Tuple[str, ...] = ()                  # painted turn arrows per own lane (l t r u m), near a junction
     lanes_path: Tuple[bool, ...] = ()                 # ... the lanes that lead where the most likely path goes
@@ -296,7 +297,7 @@ def _parse(mp: Mapping) -> MapInfo:
         road_ref=str(road.get("ref") or ""), road_name=str(road.get("name") or ""),
         road_cls=str(road.get("cls") or ""),
         lanes=lanes, lanes_conf=_f(ln.get("c")) or 0.0, lanes_p=lp, onc_left=onc if isinstance(onc, bool) else None,
-        lanes_likely=likely, lanes_turn=turn, lanes_path=tpath,
+        rs_trust=mp.get("tr") is True, lanes_likely=likely, lanes_turn=turn, lanes_path=tpath,
         tunnel_in=tunnel_in, tunnel_exit_m=exit_m if tunnel_in else None,
         next_limit=nl, junctions=tuple(jn), shape_ds=ds, shape=shape, junction=_junction(mp.get("jv")))
 
@@ -513,7 +514,11 @@ class MapDirector:
             if mi is not self._seen:
                 self._seen = mi
                 self._conf_s = mi.conf if self._conf_s is None else self._conf_s + (mi.conf - self._conf_s) * 0.25
-            if self._conf_s >= self.min_match:
+            if mi.rs_trust:
+                # roadsense 2.0 judges the match itself (the same low-pass and hysteresis, in view.road) and
+                # has sent the map elements of this scene on that judgement: one gate, not two in a row
+                self._trusted = True
+            elif self._conf_s >= self.min_match:
                 self._trusted = True
             elif self._conf_s < self.min_match - CONF_HYST:
                 self._trusted = False

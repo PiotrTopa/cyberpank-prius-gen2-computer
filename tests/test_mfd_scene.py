@@ -1625,3 +1625,12 @@ def test_lines_sweep_evenly_although_samples_arrive_unevenly():
     mean = sum(steps) / len(steps)
     assert abs(mean - rate * 0.05) < 0.02                 # it keeps up with the line
     assert max(steps) < 1.5 * mean and min(steps) > 0.5 * mean
+
+
+def test_roadsense_trust_is_adopted_not_judged_twice():
+    """roadsense 2.0 decides in view.road whether the map layer may be drawn (match confidence over 2 s with
+    hysteresis) and marks the scene (map.tr). The screen's own 3 s gate then does not delay the same decision:
+    with a match confidence under its threshold the junction still shows; without the mark it does not."""
+    jv = {"k": "j", "m": 150, "c": 0.9, "arms": [[0, "xep", 0, 0], [90, "xe", 1, 0]]}
+    assert map_director(_map_full(jv=jv, conf=0.45, tr=True), seconds=1.0)[0].map.junction is not None
+    assert map_director(_map_full(jv=jv, conf=0.45), seconds=1.0)[0].map.junction is None

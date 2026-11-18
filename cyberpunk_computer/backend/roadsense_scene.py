@@ -1133,6 +1133,8 @@ class SceneBuilder:
                 if geo:
                     scene["geo"] = geo
             mp["lanes"] = road_lanes_to_scene(rd) if pos.get("trusted") else None
+            if pos.get("trusted") and mp.get("ok"):
+                mp["tr"] = True      # roadsense's own trust decision (smoothed, with hysteresis): the screen adopts it
             scene["map"] = mp
         if vw is not None:
             scene["vw"] = vw
