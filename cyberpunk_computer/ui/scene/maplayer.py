@@ -228,7 +228,7 @@ def _lanes_ok(r: Any, d: Any):
     if lb is None:
         return None
     nl, nr = r.lane_neighbours(d)
-    if (nl and lb.ego == 0 and lb.back == 0) or (nr and lb.ego >= lb.fwd - 1):
+    if lb.ego >= 0 and ((nl and lb.ego == 0 and lb.back == 0) or (nr and lb.ego >= lb.fwd - 1)):
         return None
     return lb, nl, nr
 
@@ -252,7 +252,8 @@ def lane_boxes(r: Any, s: pygame.Surface, d: Any) -> bool:
     if not r.tune.lane_indicator:
         return True
     fwd = min(lb.fwd, 5)
-    ego = min(lb.ego, fwd - 1)
+    ego = min(lb.ego, fwd - 1)                  # -1: the own lane is not known (L20): no lane lit
+    likely = min(getattr(lb, "likely", -1), fwd - 1)
     back = min(lb.back, 2 if fwd <= 4 else 1)
     bw, bh, gap, sep = 9, 14, 3, 3
     x = r.w - 5 - (fwd + back) * (bw + gap) + gap - (sep if back else 0)
@@ -268,6 +269,11 @@ def lane_boxes(r: Any, s: pygame.Surface, d: Any) -> bool:
     for i in range(fwd):
         if i == ego:
             pygame.draw.rect(s, pal["lane_ego"], (x, y, bw, bh))
+        elif ego < 0 and i == likely:
+            # probably this one: an outline in the own-lane colour, not filled
+            pygame.draw.rect(s, (0, 0, 0), (x, y, bw, bh))
+            pygame.draw.rect(s, pal["lane_ego"], (x, y, bw, bh), 1)
+            pygame.draw.rect(s, pal["lane_ego"], (x + 3, y + bh - 4, bw - 6, 2))
         else:
             pygame.draw.rect(s, (0, 0, 0), (x, y, bw, bh))
             pygame.draw.rect(s, pal["lane_mid"], (x, y, bw, bh), 1)
@@ -451,8 +457,10 @@ def junction(r: Any, s: pygame.Surface, d: Any) -> None:
         jv = jv._replace(arms=tuple(a._replace(path=False) for a in jv.arms), ring_path=0, to="")
     pal = r.pal
     x0, y0 = JV_X, JV_Y
+    approx = bool(getattr(d.map, "junction_approx", False))
     pygame.draw.rect(s, (0, 0, 0), (x0, y0, JV_W, JV_H + 16))
-    pygame.draw.rect(s, pal["lane_dim"], (x0, y0, JV_W, JV_H), 1)
+    # an approximate position (dead reckoning, a weak receiver): amber frame, "~" before the distance
+    pygame.draw.rect(s, pal["warn"] if approx else pal["lane_dim"], (x0, y0, JV_W, JV_H), 1)
     cx, cy = x0 + JV_W // 2, y0 + JV_H // 2 + (3 if jv.kind == "j" else 0)
     dim, mid, hot = pal["lane_dim"], _k(pal["lane_mid"], 0.62), pal["lane_ego"]
     clip = s.get_clip()
@@ -513,7 +521,7 @@ def junction(r: Any, s: pygame.Surface, d: Any) -> None:
     # under the panel: the distance, and the road the way on takes
     if not jv.on_ring:
         num, unit = dist_text(jv.m)
-        t = r.text(num, 14, pal["text"])
+        t = r.text(("~" if approx else "") + num, 14, pal["warn"] if approx else pal["text"])
         u = r.text(unit, 8, pal["label"], mono=False)
         s.blit(t, (x0 + 1, y0 + JV_H + 1))
         s.blit(u, (x0 + 3 + t.get_width(), y0 + JV_H + 8))
