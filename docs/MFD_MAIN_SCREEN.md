@@ -330,7 +330,7 @@ Gates that hold for every element:
 
 | Gate | Rule | Tunable |
 |---|---|---|
-| match confidence | average of `conf` over about 3 s (a quarter of each new message) must reach 0.7; elements go when it falls under 0.55. roadsense itself uses the map from 0.5 per message, and on a village street the per-message value dips to 0.4..0.6 at every side road (recorded drive: an unavailable message every 2..20 s) | `map_min_match` |
+| match confidence | average of `conf` over about 3 s (a quarter of each new message) must reach 0.55; elements go when it falls under 0.40 (0.7 / 0.55 before 2026-11-18: on the recorded drives the average stayed under 0.7 half the time; roadsense since its lane L20 reports the confidence of the road, which no longer dips at every side road). roadsense itself uses the map from 0.5 per message | `map_min_match` |
 | short dropout | when the block is missing or unusable the last one is kept for 2.5 s, its distances shrinking with the distance driven; then everything goes at once | `map_hold_s` |
 | stalled feed | a block that does not change for 3.5 s while the car drives is dropped and does not come back until it changes (standing still it may repeat) | fixed |
 | road picture | elements exist only while the road picture is live (section 4): a stale feed carries a stale map | fixed |
@@ -344,7 +344,10 @@ Elements:
 | map pin | `state` | 5 x 7 px outline pin under the link LED, dim cyan with a centre dot; amber without the dot on `dead_reckoning` | with any usable, trusted map | `map_mark` (on) |
 | next speed limit | `ahead.limit` (`m`, `kmh`, `src`, `c`), `limit` in effect | a dashed red ring (r 12; thin and dim for an implicit limit) with the value, and the distance in Terminus 14 rounded to 10 m, first in the top line before the warning signs. Within 100 m also a small ring on a post at the right road edge, at its distance | when the change is within `map_ahead_s` (12 s) of driving, at least 150 m, at most 400 m; reported for 1 s; confidence `c` (path up to it x the limit's own) at least 0.5; value different from the limit shown. Not when first seen closer than 20 m. Goes when the map no longer reports it (passed) or 25 % beyond the window | `map_next_limit` `ahead` / `beside` / `off`, `map_next_limit_road` (on), `map_ahead_s`, `map_ahead_min_m`, `map_ahead_max_m`, `map_min_conf` |
 | far road | `shape` (a point every 40 m to 600 m), `ahead.jn` | a ribbon from the far end of the camera's ego lane (100 m) to 3 rows under the horizon: rows logarithmic in the distance, columns in true perspective, width falling with 1 / distance, 80 % of the lane fill with dim edges. It ends where the most likely path stops being known: the first junction with a real side road whose path confidence is under 0.6, a roundabout (small ellipse), a dead end (bar), or 600 m. Not drawn inside a tunnel or car park | when at least 40 m beyond the camera remain and the camera's road centre agrees with the map's over the camera's range (lateral run within 8 m per 100 m + 1 m) for 1 s; fades in 0.5 s. Goes after 0.4 s of disagreement | `map_far_road` (on), `map_path_min_conf`, `map_far_disagree_m`, `map_far_max_m` |
-| lanes | `lanes` (`fwd`, `back`, `ego`, `onc_left`, `c`) | the lane boxes bottom-right from the map: one per lane of the own direction (at most 5) with the own one lit, oncoming lanes (at most 2) as violet boxes with a pointer towards the car, a 3 px gap between the directions. A neighbour lane the camera sees on the left is filled violet instead of blue when the map says it is oncoming | lanes confidence at least 0.5 (off under 0.35) and a known ego lane. With one lane per direction and no neighbour seen: no boxes, as before. When the camera sees a lane where the map has none (left of lane 0 on a one-way road, right of the rightmost lane) the map is ignored and the camera's boxes are drawn as before | `map_lanes` (on), `lane_indicator` |
+| lanes | `lanes` (`fwd`, `back`, `ego`, `onc_left`, `c`) | the lane boxes bottom-right from the map: one per lane of the own direction (at most 5) with the own one lit, oncoming lanes (at most 2) as violet boxes with a pointer towards the car, a 3 px gap between the directions. A neighbour lane the camera sees on the left is filled violet instead of blue when the map says it is oncoming | lanes confidence at least 0.5 (off under 0.35) and a known ego lane. Since 2026-11-18 (roadsense L20, an
+ego-lane filter with a probability per lane, scene `lanes.p`): an ego lane roadsense cannot name shows the
+count with no lane lit, the most likely lane outlined in the own-lane colour when it holds 0.45 or more
+(demo shot 83). With one lane per direction and no neighbour seen: no boxes, as before. When the camera sees a lane where the map has none (left of lane 0 on a one-way road, right of the rightmost lane) the map is ignored and the camera's boxes are drawn as before | `map_lanes` (on), `lane_indicator` |
 | tunnel exit | `tunnel` (`in`, `exit_m`, `src` containing `map`) | bottom-left, above the lamp chip / status: a portal pictogram and the distance in Terminus 14 (`640 m`, `1.8 km` from 1000 m). Within 100 m the tunnel frames end there and the mouth is drawn as a bright arch | only in a tunnel the map knows. On dead reckoning beyond 20 m position error the distance stays while the error is under 10 % of it (recorded 2.3 km tunnel: shown from 2.3 km down to about 350 m, then hidden) | `map_tunnel` (on) |
 | road number | `road` (`ref`, `cls`, `name`) | bottom-left: the first ref as a plate (white on red for motorway / trunk / primary, black on yellow for secondary, outline otherwise), with `name` also the street name (18 characters) | off by default. When on: 8 s after the ref (or name) changed and held for 2 s | `map_road_label` `off` / `ref` / `name`, `map_road_label_s` |
 
@@ -360,7 +363,7 @@ Deliberately not drawn:
 | road class, bridge, toll, one-way | no decision of the driver depends on them at a glance |
 | map state as text, match confidence, position source | a status display; the pin and its colour carry all of it. Numbers are on the dashboard's MAP tab |
 | distance to a tunnel entry | the tunnel is visible; only its end is not |
-| turn angle at the next junction, any arrow in the road picture | would read as a navigation instruction; there is no route. Since 2026-11-17 the junction itself can be shown as a schematic (section 6.6, off by default), where the most likely way on is marked and can be switched off (`map_junction_way`) |
+| turn angle at the next junction, any arrow in the road picture | would read as a navigation instruction; there is no route. Since 2026-11-17 the junction itself can be shown as a schematic (section 6.6, on by default since 2026-11-18), where the most likely way on is marked and can be switched off (`map_junction_way`) |
 | street name by default | 182 px for a long name in the quietest corner; the car's position is not something the driver needs told. Kept as a variant |
 | a second or third limit change | one is the next decision |
 
@@ -368,8 +371,9 @@ Cost: section 10.3. Demo shots 55..71 and the recorded drives: section 11.
 
 ### 6.6 Junction view and the car's own traffic light (2026-11-17)
 
-**Junction view** (`maplayer.junction`, tuning `map_junction`, **off by default**: it has only been
-seen on demo data and on synthetic drives; the car has no position source yet). From `map_junction_m`
+**Junction view** (`maplayer.junction`, tuning `map_junction`, **on by default since 2026-11-18**; roadsense
+lane L20: on the recorded drives of 17 Nov no junction ever reached the glass, the schematic being off was
+the largest single loss on the MFD side, docs/lanes/L20-ego-lane-junctions.md in roadsense). From `map_junction_m`
 (250 m) before the first major junction or roundabout on the most likely path, a 58 x 58 px panel at
 the left edge (x 3, y 62) shows it from above with the car coming from below:
 
@@ -386,7 +390,10 @@ the left edge (x 3, y 62) shows it from above with the car coming from below:
 Gates, all in `MapDirector`: the usable-map conditions of section 6.5 (match confidence, hold, a live
 road picture, no synthetic position), the path confidence up to the junction at least `map_min_conf`
 (a coin-toss path shows nothing; on the ring the picture stays), position accuracy within
-`map_max_hacc_m`. Junctions whose side branches are all service roads never get a view (roadsense
+`map_max_hacc_m`, or (since 2026-11-18) within `map_junction_hacc_share` (0.4) of the distance to the
+junction. A weak receiver or dead reckoning then does not hide the junction: it is drawn **approximate**,
+with an amber frame and `~` before the distance, whenever the position is dead-reckoned, outside
+`map_max_hacc_m`, or its error is more than 15 % of the distance (demo shot 82). Junctions whose side branches are all service roads never get a view (roadsense
 leaves them out). The distance counts down by odometry between map messages. Without a position
 source nothing is drawn and nothing else changes: the scene is the vision-only picture.
 
@@ -412,7 +419,7 @@ already fitted the map's geometry to the camera's lanes in the car's frame and w
 disagree. The screen draws what it gets; the gates of the map layer (section 6.5: match confidence over
 3 s, a real position, accuracy, a live road picture) apply on top. With `geo` the far road of section 6.5
 is replaced; `road_geo = false` gives that far road back. The L16 schematic (section 6.6) is independent
-and stays off by default.
+and is on by default since 2026-11-18.
 
 | Situation | Picture |
 |---|---|
@@ -584,7 +591,8 @@ elements of section 6.5.
                   "agree": "agree|conflict|vision_only|map_only|none", "rule": "built_up", "sign": "B-33", "var": true} | null,
         "road": {"cls": "primary", "name": "Ozimska", "ref": "DK46",
                  "oneway": true, "rbt": true, "link": true, "expr": true, "mroad": true, "dual": true, "bridge": true, "toll": true},
-        "lanes": {"n": 2, "fwd": 1, "back": 1, "ego": 0, "onc_left": true, "src": "map:tagged+vision", "c": 0.8},
+        "lanes": {"n": 2, "fwd": 1, "back": 1, "ego": 0, "onc_left": true, "src": "map:tagged+vision", "c": 0.8,
+                  "p": [0.92, 0.08]},   # roadsense >= L20: probability per own lane from the left (only with its map count)
         "tunnel": {"in": false, "exit_m": 640, "entry_m": 840, "len_m": 2310, "src": "map|vision|map+vision|none"},
         "built_up": {"v": true, "src": "sign|map_tagged|map_class|map_landuse+env|map_landuse|env|none"},
         "ahead": {"pc": 0.62,
@@ -903,7 +911,7 @@ python -m cyberpunk_computer.ui.scene.demo --live --scale 3                  # t
 python -m cyberpunk_computer.ui.scene.demo --bench                           # frame cost incl. the simulation
 ```
 
-`--shots` writes `NN_name.png` (native 480 x 240) and `NN_name@4x.png` for 81 cases (70..79: the junction view as a crossroads with signals, a T-junction, five arms, a roundabout before and on the ring, a low-confidence path that shows nothing; the traffic light with a second signal group, an ambiguous choice and a light over another lane; the two last map cases moved to 80..81): the states of
+`--shots` writes `NN_name.png` (native 480 x 240) and `NN_name@4x.png` for 83 cases (82: a junction on dead reckoning, drawn approximate; 83: three lanes from the map with the own lane unknown and the middle one likely (2026-11-18); 70..79: the junction view as a crossroads with signals, a T-junction, five arms, a roundabout before and on the ring, a low-confidence path that shows nothing; the traffic light with a second signal group, an ambiguous choice and a light over another lane; the two last map cases moved to 80..81): the states of
 section 4, the five lamp states on the road and three parked, 18 scenery variants covering every
 place, light and weather label, four lane layouts, the top line with the speed switched back on, a full sign row, the cruise slot states, the three speed-limit provenance styles, 17 map-layer cases (55..71: next limit in the top line, at the roadside and in the `beside` variant, far road with a roundabout and switched off, three lane layouts from the map, tunnel exit in metres, kilometres and with the mouth in view, dead reckoning, a poor position, the road-number variants, synthetic position = no map) and `signs_legend`
 with every pictogram. Shots 1..51 are byte-identical to the set before the map layer. `--copy-to` also writes the 4x images there as `<prefix>NN_name.png`
@@ -914,6 +922,26 @@ limit sign and rules, left curve at night with street lamps, red light with the 
 the scene closes. Vehicle values go through the real state fields; the road goes in as
 `roadsense_scene` events; `mods` override labels, signs, lamps and cruise for the variant shots. The
 street lamps of the demo are simulated data for the `lamp` object kind (section 9).
+
+### 11.0 Where the map chain loses a junction (`tools/mfd_chain_replay.py`, 2026-11-18)
+
+A roadsense drive-recorder session (or a replay of its `map` messages, roadsense `tools/map_replay.py --out`)
+through roadsense's own fusion and road-geometry code, the backend's `SceneBuilder` and the frontend's
+`MapDirector`, scored against hand-labelled junctions (CSV `source,stamp,kind,note`, stamp = camera frame seq):
+for the 12 s before each junction it says which stage still knew it (position, usable map, junction announced,
+scene event, MFD) and whether the schematic's distance matched the distance actually driven. Results on the
+drives of 17 Nov: roadsense docs/lanes/L20-ego-lane-junctions.md.
+
+```
+~/projects/roadsense/.venv-models/bin/python tools/mfd_chain_replay.py ~/roadsense-rec/SESSION \
+    --labels LABELS.junctions.csv [--map REPLAY.jsonl] [--roadsense ~/projects/roadsense] [--tuning '{"map_junction": false}']
+```
+
+![Junction ahead with signals](images/mfd_l20_junction.png) ![Roundabout, second exit](images/mfd_l20_roundabout.png)
+
+![Three lanes, the car in the middle](images/mfd_l20_three_lanes_ego.png) ![Three lanes, own lane unknown, middle likely](images/mfd_l20_three_lanes_likely.png)
+
+![Junction on dead reckoning: approximate](images/mfd_l20_junction_dead_reckoning.png)
 
 ### 11.1 Recorded map drives (`tools/mfd_map_drive.py`)
 
@@ -989,7 +1017,8 @@ ignored and logged.
 | `map_lanes` | true | lane boxes and the oncoming tint from the map |
 | `road_geo` | true | the road picture continues on the map: lane beyond the camera, side roads, roundabout as a ring (section 6.7); nothing without roadsense's `roadgeom` and a usable map |
 | `road_geo_way` | true | ... a side road chosen by the turn signal drawn as the way on |
-| `map_junction` | false | the junction / roundabout ahead as a schematic at the left edge (section 6.6) |
+| `map_junction` | true | the junction / roundabout ahead as a schematic at the left edge (section 6.6); false before 2026-11-18 |
+| `map_junction_hacc_share` | 0.4 | ... also while the position error is at most this share of its distance, drawn approximate (amber frame, `~` distance) |
 | `map_junction_m` | 250 | ... from this distance |
 | `map_junction_way` | true | ... with the most likely way on marked (arrow, exit number); false = all arms alike |
 | `map_junction_name` | true | ... with the number or name of the road the way on takes |
@@ -998,7 +1027,7 @@ ignored and logged.
 | `map_road_label` | `off` | road number after a change: `off`, `ref`, `name` |
 | `map_road_label_s` | 8.0 | how long it shows |
 | `map_ahead_s` / `map_ahead_min_m` / `map_ahead_max_m` | 12.0 / 150 / 400 | the next limit appears this many seconds of driving ahead, bounded in metres |
-| `map_min_match` | 0.7 | match confidence (3 s average) the map elements need; they go 0.15 below |
+| `map_min_match` | 0.55 | match confidence (3 s average) the map elements need; they go 0.15 below (0.7 before 2026-11-18) |
 | `map_hold_s` | 2.5 | elements stay this long through a map dropout |
 | `map_min_conf` | 0.5 | confidence from which the next limit and the lanes are shown |
 | `map_path_min_conf` | 0.6 | the far road ends at the first real junction below this |
