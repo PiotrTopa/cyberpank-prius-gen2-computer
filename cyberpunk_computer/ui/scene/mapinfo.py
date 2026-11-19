@@ -44,6 +44,9 @@ LABEL_STABLE_S = 2.0       # a new road number / name must hold this long before
 TUNNEL_HACC_SHARE = 0.1    # tunnel exit distance: shown while hacc <= this share of it
 CONF_HYST = 0.15           # a confidence gate opens at its threshold and closes this far below
 MAX_ADVANCE_S = 3.5        # distances are advanced by odometry for at most this long
+LANES_HOLD_S = 1.0         # the lane boxes stay this long when the map stops giving them (no single-frame gaps)
+TURN_ON_S = 0.3            # turn arrows in the lane boxes appear after they held this long unchanged ...
+TURN_HOLD_S = 1.0          # ... and stay this long through a drop-out (the same number of lanes)
 
 
 class NextLimit(NamedTuple):
@@ -465,6 +468,11 @@ class MapDirector:
         self._conf_s: Optional[float] = None
         self._trusted = False
         self._lanes_on = False
+        self._lanes_gone = 0.0
+        self._turn: Optional[Tuple[Tuple[str, ...], Tuple[bool, ...]]] = None     # arrows shown, lanes of the way
+        self._turn_gone = 0.0
+        self._turn_cand: Optional[Tuple[Tuple[str, ...], Tuple[bool, ...]]] = None
+        self._turn_for = 0.0
         self._nl = _Distance()
         self._nl_kmh: Optional[int] = None
         self._nl_for = 0.0
@@ -487,6 +495,9 @@ class MapDirector:
         self.far_alpha = 0.0
         self.lanes = None
         self.onc_left = False
+        self._lanes_gone = 0.0
+        self._turn = self._turn_cand = None
+        self._turn_gone = self._turn_for = 0.0
         self.label = None
         self.junction = None
         self.junction_approx = False
@@ -503,6 +514,29 @@ class MapDirector:
         self._lab_cand = None
         self._lab_left = 0.0
         self.sig = ()
+
+    def _with_turn(self, lb: LaneBoxes, dt: float) -> LaneBoxes:
+        """The turn arrows as drawn: new ones after TURN_ON_S unchanged, kept through a drop-out of TURN_HOLD_S
+        while the boxes count the same lanes; never for another number of lanes than the boxes."""
+        cand = (lb.turn, lb.path) if lb.turn and len(lb.turn) == lb.fwd else None
+        if cand is None:
+            self._turn_cand, self._turn_for = None, 0.0
+        elif cand != self._turn_cand:
+            self._turn_cand, self._turn_for = cand, 0.0
+        else:
+            self._turn_for += dt
+        if cand is not None and self._turn is not None and cand[0] == self._turn[0]:
+            self._turn, self._turn_gone = cand, 0.0        # the same arrows: the lanes of the way follow at once
+        elif cand is not None and self._turn_for >= TURN_ON_S:
+            self._turn, self._turn_gone = cand, 0.0
+        elif self._turn is not None:
+            self._turn_gone += dt
+            if self._turn_gone > TURN_HOLD_S:
+                self._turn = None
+        if self._turn is not None and len(self._turn[0]) != lb.fwd:
+            self._turn = None
+        t = self._turn
+        return lb._replace(turn=t[0] if t else (), path=t[1] if t else ())
 
     def update(self, inp: Any, d: Any, dt: float) -> None:
         mi: Optional[MapInfo] = getattr(inp, "map", None)
@@ -676,11 +710,15 @@ class MapDirector:
             elif mi.lanes[2] < 0 and mi.lanes_p:
                 k = max(range(len(mi.lanes_p)), key=lambda i: mi.lanes_p[i])
                 likely = k if mi.lanes_p[k] >= 0.45 else -1
-            self.lanes = LaneBoxes(*mi.lanes, likely, mi.lanes_turn, mi.lanes_path)
+            self._lanes_gone = 0.0
+            self.lanes = self._with_turn(LaneBoxes(*mi.lanes, likely, mi.lanes_turn, mi.lanes_path), dt)
             self.onc_left = mi.onc_left is True
+        elif self.lanes is not None and self.on_lanes and self._lanes_gone + dt <= LANES_HOLD_S:
+            self._lanes_gone += dt                    # gone for a moment (roadsense's trust, a scene without them)
         else:
             self.lanes = None
             self.onc_left = False
+            self._turn = self._turn_cand = None
 
         # ── road label: for a while after the road changed ──
         self.label = None

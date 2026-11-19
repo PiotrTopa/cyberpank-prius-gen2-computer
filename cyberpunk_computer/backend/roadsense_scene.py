@@ -791,11 +791,25 @@ def roadgeom_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 TURN_ARROWS_AHEAD_M = 120.0    # painted turn arrows are shown in the lane boxes from this far before their stretch
 
 
+def route_active(rd: Any) -> bool:
+    """Is a navigation route being followed? The one condition for the turn arrows in the lane boxes (L36).
+
+    Owner's ruling 2026-11-19: no boxes with directions without navigation. No route source exists in the
+    system today: the car has no navigation feed, and roadsense's ``view.road.route`` is null (roadsense >= L36;
+    absent before). The arrows' "lanes of the way" (``tp``) are the map's own guess of the most likely path,
+    and the driver's turn signal (``view.road.way.source == "intent"``) is not a route either. So this is
+    False and ``tl`` / ``tp`` are never sent. A future route feed switches them on by giving
+    ``view.road.route = {"active": true, ...}``."""
+    rt = rd.get("route") if isinstance(rd, dict) else None
+    return isinstance(rt, dict) and rt.get("active") is True
+
+
 def road_lanes_to_scene(rd: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """``view.road.lanes`` -> scene ``map.lanes`` (the lane boxes): n / fwd / back counts, ``ego`` the lit lane
     (from the left), ``lk`` the likely lane when none is lit, ``p`` the probability per own lane, ``c`` the
-    confidence of the lit lane, ``onc_left``; near a junction with painted arrows ``tl`` (per own lane a string
-    of l / t / r / u / m, "" = no arrow) and ``tp`` (1 per lane that leads where the most likely path goes)."""
+    confidence of the lit lane, ``onc_left``; only while a navigation route is followed (``route_active``,
+    never today) and near a junction with painted arrows ``tl`` (per own lane a string of l / t / r / u / m,
+    "" = no arrow) and ``tp`` (1 per lane that leads where the way goes)."""
     ln = rd.get("lanes") if isinstance(rd, dict) else None
     if not isinstance(ln, dict) or _num(ln.get("forward")) is None:
         return None
@@ -809,7 +823,7 @@ def road_lanes_to_scene(rd: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if (ln.get("probs_from") == "left" and isinstance(pr, list) and len(pr) == fwd
             and all(isinstance(v, (int, float)) for v in pr)):
         out["p"] = [round(float(v), 2) for v in pr]
-    tn = ln.get("turn")
+    tn = ln.get("turn") if route_active(rd) else None
     if isinstance(tn, dict) and isinstance(tn.get("arrows"), list) and len(tn["arrows"]) == fwd \
             and all(isinstance(a, str) for a in tn["arrows"]):
         d = _num(tn.get("dist_m"))

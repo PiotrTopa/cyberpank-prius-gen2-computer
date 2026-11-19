@@ -867,13 +867,18 @@ def test_lane_boxes_come_from_the_view_with_turn_arrows():
              "count_source": "map:tagged",
              "turn": {"lanes": [["left"], ["through"], ["through", "right"]], "arrows": ["l", "t", "tr"], "count": 3,
                       "dist_m": 80.0, "junction_m": 160.0, "path": [False, True, True], "here": False}}
-    ln = road_lanes_to_scene({"lanes": lanes})
-    assert ln == {"n": 4, "fwd": 3, "back": 1, "lk": 1, "src": "map:tagged", "c": 0.0, "p": [0.1, 0.6, 0.3],
-                  "tl": ["l", "t", "tr"], "tp": [0, 1, 1]}
+    plain = {"n": 4, "fwd": 3, "back": 1, "lk": 1, "src": "map:tagged", "c": 0.0, "p": [0.1, 0.6, 0.3]}
+    # no navigation route (L36, owner 2026-11-19): the plain boxes, never the arrows, whatever roadsense sends
+    assert road_lanes_to_scene({"lanes": lanes}) == plain                          # roadsense before L36: no route key
+    assert road_lanes_to_scene({"lanes": lanes, "route": None}) == plain           # roadsense >= L36: route null
+    assert road_lanes_to_scene({"lanes": lanes, "route": {"active": False}}) == plain
+    route = {"active": True}                                                       # a future route feed
+    ln = road_lanes_to_scene({"lanes": lanes, "route": route})
+    assert ln == dict(plain, tl=["l", "t", "tr"], tp=[0, 1, 1])
     far = dict(lanes, turn=dict(lanes["turn"], dist_m=300.0))
-    assert "tl" not in road_lanes_to_scene({"lanes": far})           # announced, but not near yet
+    assert "tl" not in road_lanes_to_scene({"lanes": far, "route": route})        # announced, but not near yet
     other = dict(lanes, turn=dict(lanes["turn"], arrows=["l", "t"], dist_m=0.0))
-    assert "tl" not in road_lanes_to_scene({"lanes": other})         # another number of lanes than the boxes
+    assert "tl" not in road_lanes_to_scene({"lanes": other, "route": route})      # another number of lanes than the boxes
     assert road_lanes_to_scene({"lanes": dict(lanes, forward=None)}) is None
     # in the builder they replace the fused block's lanes (the display channel decides what is lit)
     b = SceneBuilder(cfg(max_hz=50.0))
@@ -881,8 +886,10 @@ def test_lane_boxes_come_from_the_view_with_turn_arrows():
                        "lanes": {"count": 2, "forward": 2, "backward": 0, "ego_index": 0}}), 0.0)
     b.feed(json.dumps(view_msg(1, 1_000_000_000, road=view_road(lanes=lanes))), 0.0)
     sc = b.build(0.0)
-    assert sc["map"]["lanes"]["fwd"] == 3 and sc["map"]["lanes"]["tl"] == ["l", "t", "tr"]
-    b.feed(json.dumps(view_msg(2, 1_100_000_000, road=view_road(lanes=lanes, trusted=False))), 0.1)
+    assert sc["map"]["lanes"]["fwd"] == 3 and "tl" not in sc["map"]["lanes"]       # no route: no arrows
+    b.feed(json.dumps(view_msg(2, 1_050_000_000, road=dict(view_road(lanes=lanes), route={"active": True}))), 0.05)
+    assert b.build(0.05)["map"]["lanes"]["tl"] == ["l", "t", "tr"]
+    b.feed(json.dumps(view_msg(3, 1_100_000_000, road=view_road(lanes=lanes, trusted=False))), 0.1)
     assert b.build(0.1)["map"]["lanes"] is None
 
 

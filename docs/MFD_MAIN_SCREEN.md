@@ -347,7 +347,8 @@ Elements:
 | lanes | `lanes` (`fwd`, `back`, `ego`, `onc_left`, `c`) | the lane boxes bottom-right from the map: one per lane of the own direction (at most 5) with the own one lit, oncoming lanes (at most 2) as violet boxes with a pointer towards the car, a 3 px gap between the directions. A neighbour lane the camera sees on the left is filled violet instead of blue when the map says it is oncoming | lanes confidence at least 0.5 (off under 0.35) and a known ego lane. Since 2026-11-18 (roadsense L20, an
 ego-lane filter with a probability per lane, scene `lanes.p`): an ego lane roadsense cannot name shows the
 count with no lane lit, the most likely lane outlined in the own-lane colour when it holds 0.45 or more
-(demo shot 83). With one lane per direction and no neighbour seen: no boxes, as before. When the camera sees a lane where the map has none (left of lane 0 on a one-way road, right of the rightmost lane) the map is ignored and the camera's boxes are drawn as before | `map_lanes` (on), `lane_indicator` |
+(demo shot 83). With one lane per direction and no neighbour seen: no boxes, as before. Since L36 the boxes stay
+through a drop-out of up to 1 s (`LANES_HOLD_S`), and turn arrows are drawn only with a navigation route (section 7.5). When the camera sees a lane where the map has none (left of lane 0 on a one-way road, right of the rightmost lane) the map is ignored and the camera's boxes are drawn as before | `map_lanes` (on), `lane_indicator` |
 | tunnel exit | `tunnel` (`in`, `exit_m`, `src` containing `map`) | bottom-left, above the lamp chip / status: a portal pictogram and the distance in Terminus 14 (`640 m`, `1.8 km` from 1000 m). Within 100 m the tunnel frames end there and the mouth is drawn as a bright arch | only in a tunnel the map knows. On dead reckoning beyond 20 m position error the distance stays while the error is under 10 % of it (recorded 2.3 km tunnel: shown from 2.3 km down to about 350 m, then hidden) | `map_tunnel` (on) |
 | road number | `road` (`ref`, `cls`, `name`) | bottom-left: the first ref as a plate (white on red for motorway / trunk / primary, black on yellow for secondary, outline otherwise), with `name` also the street name (18 characters) | off by default. When on: 8 s after the ref (or name) changed and held for 2 s | `map_road_label` `off` / `ref` / `name`, `map_road_label_s` |
 
@@ -722,10 +723,11 @@ that one message of one frame. The alert functions keep reading the measurement 
 | lanes, edges, path, lead, ego light | `vw` | `view` (L19) | `view` (lines, objects) |
 | road beyond the camera, side roads, ring | `geo` | topic `roadgeom` | `view.road` (`centre`, `branches`, `ring`, `way`) |
 | junction / roundabout schematic | `map.jv` | topic `map` (`ahead.junction_view`) | `view.road.junction` (the same object, its distance carried to the frame, `approximate` -> `"ap": true`) |
-| lane boxes | `map.lanes` | topic `fused` (`lanes`) | `view.road.lanes`: `n`, `fwd`, `back`, `ego` (the lane roadsense lights, with its own hysteresis), `lk` (the likely lane when none is lit), `p`, `c`, `onc_left`, and near a junction with painted arrows `tl` / `tp` |
+| lane boxes | `map.lanes` | topic `fused` (`lanes`) | `view.road.lanes`: `n`, `fwd`, `back`, `ego` (the lane roadsense lights, with its own hysteresis), `lk` (the likely lane when none is lit), `p`, `c`, `onc_left`, and only while a navigation route is followed (never today, L36) near a junction with painted arrows `tl` / `tp` |
 | far road beyond 100 m when `geo` is absent | `map.shape` | topic `map` | unchanged (the only map element still drawn straight from a measurement topic; it has its own camera-agreement gate, section 6.5). To decide: drop it, now that `geo` covers the case |
 
-`map.lanes` near a junction with painted turn arrows (map pack format 2, OpenStreetMap `turn:lanes`):
+`map.lanes` near a junction with painted turn arrows (map pack format 2, OpenStreetMap `turn:lanes`), sent
+only while a navigation route is followed (below):
 
 ```
 "lanes": {"n": 4, "fwd": 3, "back": 1, "ego": 1, "c": 0.9, "p": [0.05, 0.9, 0.05],
@@ -739,6 +741,48 @@ lane, in the ego-lane colour on the lanes of the most likely way, dim on the oth
 on the road; like the schematic's bright arm, the "likely way" is the map's guess, not a route.
 
 ![Turn arrows in the lane boxes](images/mfd_l22_turn_arrows.png) ![Turn arrows, own lane unknown, junction approximate](images/mfd_l22_turn_arrows_likely_approx.png)
+
+**Turn arrows only with navigation (L36, owner's ruling 2026-11-19: "remove the boxes with direction with no
+nav active; lanes arrows flicking pls fix").** The arrows were drawn from 120 m before every junction with
+tagged turn lanes, with no route, and the "lanes of the way" were the map's own guess. They are now behind one
+condition, `roadsense_scene.route_active(view.road)`: true only when roadsense's `view.road.route` is
+`{"active": true, ...}`. No route source exists in the system today (the car has no navigation feed;
+roadsense >= L36 sends `route: null`, older roadsense no `route` key; the turn signal, `way.source:
+"intent"`, is not a route), so `tl` / `tp` are never sent and the boxes are drawn plain. A future route feed
+switches them on without a change here; the drawing code (`maplayer.lane_boxes`) is unchanged.
+
+The plain lane boxes (count, own lane lit, likely lane outlined, oncoming boxes) stay: they are the lane
+layout element of section 6.5 (drawn since L20, with or without a junction ahead), not the arrows the owner
+asked to remove. Overrule: `map_lanes` false hides them as well.
+
+Against flicker (measured on the drives of 2026-11-19 with `tools/mfd_chain_replay.py`, section 11.0):
+roadsense L36
+fixed the source (the arrows vanished on every frame older than its map message; a held, monotone stretch;
+arrows only for as many lanes as the boxes count; a new lane count after 2 s). The `MapDirector` adds a second
+line: the boxes stay through a drop-out of up to 1 s (`LANES_HOLD_S`; roadsense's trust, a scene without
+them), and arrows (when a route sends them) appear after 0.3 s unchanged (`TURN_ON_S`), stay through a
+drop-out of 1 s (`TURN_HOLD_S`) and are never kept for another number of lanes. No single scene switches
+either on or off.
+
+| on the glass, per minute (before -> after) | 20261119-104128 | 20261119-113201 | 20261119-151146 |
+|---|---|---|---|
+| turn arrows on/off, car code before, roadsense before | 4.93 | 0.54 | 13.96 |
+| turn arrows on/off, car code before, roadsense L36 | 0.21 | 0.27 | 0.61 |
+| turn arrows on/off, car code L36 (no route) | 0 | 0 | 0 |
+| lane boxes (2+ lanes) on/off | 0.31 -> 0.31 | 0.54 -> 0.40 | 1.13 -> 1.04 |
+| of which shorter than 3 s | 1 -> 1 | 4 -> 1 | 3 -> 2 |
+| box count changes | 0.18 -> 0.18 | 0 -> 0 | 0.22 -> 0.22 |
+
+The remaining box on/off follow roadsense's map trust (a match lost for seconds), not a single frame. 151146
+is the drive with the camera knocked about 8 degrees off its calibration. Reproduce (system python3 with
+numpy; `--car` replays another checkout's car code, `--roadsense` another roadsense):
+
+```
+python3 tools/mfd_chain_replay.py REC/20261119-151146 --roadsense ~/projects/roadsense --car OLD_CHECKOUT   # before
+python3 tools/mfd_chain_replay.py REC/20261119-151146 --roadsense ROADSENSE_L36                           # after
+```
+
+![Junction approach, no route: plain boxes](images/mfd_l36_junction_no_route.png) ![The same with a route active](images/mfd_l36_junction_route.png)
 
 What roadsense now decides and the screen no longer has to: whether the map layer may be drawn at all
 (`view.road.position.trusted`: match confidence over about 2 s with hysteresis 0.55 / 0.40, a 2.5 s hold over
@@ -999,7 +1043,7 @@ python -m cyberpunk_computer.ui.scene.demo --live --scale 3                  # t
 python -m cyberpunk_computer.ui.scene.demo --bench                           # frame cost incl. the simulation
 ```
 
-`--shots` writes `NN_name.png` (native 480 x 240) and `NN_name@4x.png` for 85 cases (84: turn arrows in the lane boxes before a signalled junction, the car in the middle lane; 85: turn arrows with the own lane unknown and the junction marked approximate by roadsense (L22); 82: a junction on dead reckoning, drawn approximate; 83: three lanes from the map with the own lane unknown and the middle one likely (2026-11-18); 70..79: the junction view as a crossroads with signals, a T-junction, five arms, a roundabout before and on the ring, a low-confidence path that shows nothing; the traffic light with a second signal group, an ambiguous choice and a light over another lane; the two last map cases moved to 80..81): the states of
+`--shots` writes `NN_name.png` (native 480 x 240) and `NN_name@4x.png` for 87 cases (86: the junction approach of 84 as the backend sends it without a navigation route, plain boxes; 87: the same with a route active (L36); 84: turn arrows in the lane boxes before a signalled junction, the car in the middle lane; 85: turn arrows with the own lane unknown and the junction marked approximate by roadsense (L22); 82: a junction on dead reckoning, drawn approximate; 83: three lanes from the map with the own lane unknown and the middle one likely (2026-11-18); 70..79: the junction view as a crossroads with signals, a T-junction, five arms, a roundabout before and on the ring, a low-confidence path that shows nothing; the traffic light with a second signal group, an ambiguous choice and a light over another lane; the two last map cases moved to 80..81): the states of
 section 4, the five lamp states on the road and three parked, 18 scenery variants covering every
 place, light and weather label, four lane layouts, the top line with the speed switched back on, a full sign row, the cruise slot states, the three speed-limit provenance styles, 17 map-layer cases (55..71: next limit in the top line, at the roadside and in the `beside` variant, far road with a roundabout and switched off, three lane layouts from the map, tunnel exit in metres, kilometres and with the mouth in view, dead reckoning, a poor position, the road-number variants, synthetic position = no map) and `signs_legend`
 with every pictogram. Shots 1..51 are byte-identical to the set before the map layer. `--copy-to` also writes the 4x images there as `<prefix>NN_name.png`
