@@ -366,6 +366,7 @@ class MfdPowerManager:
         controller: Optional[object] = None,
         iface_configured: Optional[Callable[[str, str], bool]] = None,
         frontend_connected: Optional[Callable[[], Optional[bool]]] = None,
+        tree_reset_age: Optional[Callable[[], Optional[float]]] = None,
     ) -> None:
         self.config = config
         self._publish = publish
@@ -375,6 +376,10 @@ class MfdPowerManager:
         self._iface_configured = iface_configured or self._default_iface_configured
         self._frontend_connected = frontend_connected or self._default_frontend_connected
         self._clock = clock
+        # Seconds since the top USB hub last re-enumerated (None = never /
+        # unknown). A whole-tree drop takes the gadget down from the host side;
+        # cutting the Pi's power then only adds a hard cut and a 50 s boot.
+        self._tree_reset_age = tree_reset_age or (lambda: None)
         # Port power controller (backend.port_power.RelayPortPower on the car:
         # the Pi's VBUS goes through powerbox relay ch3, with data-off
         # sequencing and lossy-command verification). Falls back to the legacy
@@ -395,6 +400,8 @@ class MfdPowerManager:
         self._last_ok_ping: Optional[float] = None  # wall clock of last good ping
         self._unreachable_since: Optional[float] = None  # monotonic, ON-state watchdog
         self._power_cycles: int = 0                 # boot-timeout + watchdog cycles
+        self._wd_cycles_in_row: int = 0             # watchdog cycles without a good ping since
+        self._tree_hold_logged = False
         self._boot_started: Optional[float] = None  # monotonic, boot duration measure
         self._last_boot_s: Optional[float] = None   # last power-on -> reachable time
         # Dark standby: what the Pi was last told, and how many repeats are left.
@@ -695,6 +702,7 @@ class MfdPowerManager:
             "state_since": self._state_since,
             "last_ok_ping": self._last_ok_ping,
             "power_cycles": self._power_cycles,
+            "watchdog_cycles_in_row": self._wd_cycles_in_row,
             "last_boot_s": self._last_boot_s,
             "dark": self._dark,
             "frontend_restarts": self._frontend_restarts,
@@ -795,6 +803,15 @@ class MfdPowerManager:
                     if self._boot_started is not None:
                         self._last_boot_s = round(now - self._boot_started, 1)
                     self._enter(STATE_ON)
+            tree_age = self._tree_reset_age()
+            if (self._state == STATE_BOOTING and now >= (self._deadline or 0)
+                    and tree_age is not None and tree_age < cfg.unreachable_recover_s):
+                # The tree fell under the booting board: give it one more
+                # quiet window instead of a hard cut mid-boot.
+                logger.warning("MFD boot timeout right after a USB tree reset "
+                               "(%.0fs ago): waiting %.0fs more", tree_age,
+                               cfg.unreachable_recover_s)
+                self._deadline = now + cfg.unreachable_recover_s
             if self._state == STATE_BOOTING and now >= (self._deadline or 0):
                 # Boot never completed: power-cycle and try again. Also covers
                 # the board being physically absent — we just keep retrying at
@@ -821,15 +838,33 @@ class MfdPowerManager:
             if reachable:
                 self._last_ok_ping = time.time()
                 self._unreachable_since = None
+                self._wd_cycles_in_row = 0
+                self._tree_hold_logged = False
             else:
                 # Unreachable-in-ON watchdog: a dead cdc_ether TX queue only
                 # recovers with a VBUS cycle (USBDEVFS_RESET verified useless
                 # 2026-08-10). Give the link unreachable_recover_s to come
-                # back on its own, then cycle.
+                # back on its own, then cycle. The window restarts at every
+                # whole-tree USB drop (host side, not the Pi): during a drop
+                # storm (2026-11-19, ~1/min) the old watchdog hard-cut the Pi
+                # every ~5 min while the tree kept falling under it. Each
+                # cycle in a row without a good ping doubles the window.
+                window = cfg.unreachable_recover_s * (2 ** min(self._wd_cycles_in_row, 4))
+                tree_age = self._tree_reset_age()
                 if self._unreachable_since is None:
                     self._unreachable_since = now
+                elif tree_age is not None and tree_age < window:
+                    if not self._tree_hold_logged:
+                        logger.warning(
+                            "MFD board unreachable after a USB tree reset "
+                            "%.0fs ago: not power-cycling until the tree has "
+                            "been quiet for %.0fs", tree_age, window)
+                        self._tree_hold_logged = True
+                    self._unreachable_since = now - tree_age
                 elif (cfg.unreachable_recover_s > 0 and
-                        now - self._unreachable_since >= cfg.unreachable_recover_s):
+                        now - self._unreachable_since >= window):
+                    self._wd_cycles_in_row += 1
+                    self._tree_hold_logged = False
                     self._power_cycle(
                         "board unreachable for %.0fs in ON (dead gadget?)"
                         % (now - self._unreachable_since))
