@@ -195,7 +195,9 @@ def main():
                      "readout": getattr(director, "lead_shown_m", None) if director.lead is not None else None,
                      "light": lp, "light_id": (inp.light.oid if inp.light is not None and hasattr(inp.light, "oid") else None),
                      "rs_ego": cur_ego is not None, "redraw": redraw, "road_view": director.view_step == 14,
-                     "lanes": [None if director.lanes[i] is None else (director.lanes[i][2], director.lanes[i][5])
+                     # a line may end before 30 m (a display lane source reports its own reach): None there
+                     "lanes": [None if director.lanes[i] is None or len(director.lanes[i]) < 3 else
+                               (director.lanes[i][2], director.lanes[i][5] if len(director.lanes[i]) > 5 else None)
                                for i in (1, 2)]})
         t += dt
 
@@ -251,7 +253,8 @@ def main():
             a, c = r0["lanes"][k], r1["lanes"][k]
             if a is not None and c is not None:
                 for x in (0, 1):
-                    lane_steps[(k, x)].append(c[x] - a[x])
+                    if a[x] is not None and c[x] is not None:
+                        lane_steps[(k, x)].append(c[x] - a[x])
     print("  ego light drawn: step after the car's motion %s; lateral %s" % (stats(ldx, 2.0), stats(ldy, 0.5)))
     print("  ego light drawn on %d frames, of them %d while roadsense had no ego light (%.1f %%)" % (
         shown, ghost, 100.0 * ghost / max(1, shown)))
