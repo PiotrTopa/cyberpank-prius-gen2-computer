@@ -110,6 +110,34 @@ Check that the UI is rendering (fb0 changes between two reads):
 python3 -c "import hashlib,time;r=lambda:hashlib.md5(open('/dev/fb0','rb').read(480*240*4)).hexdigest();a=r();time.sleep(1);print('rendering:',a!=r())"
 ```
 
+## 5. Colour calibration (panel LUT, off)
+
+Measured 2026-11-19 by photographing the glass beside a calibrated MacBook (raw chart, gains 1.00).
+Values are camera-encoded and normalised to the Mac's white:
+
+| Patch | Measured on the MFD | Reading |
+|---|---|---|
+| White | R 254, G 259, B 186 | yellow white, blue ~30 % short |
+| Grey ramp 46 / 116 / 185 / 232 / 255 | 76 / 177 / 230 / 254 / 248 | lifted midtones, highlights clip above ~210 |
+| Blue 255 | 12, 156, 275 (Mac: 108, 112, 300) | azure (green in blue) |
+| Green 255 | 139, 273, 11 (Mac: 66, 275, 31) | yellowish (red in green) |
+
+A per-channel LUT that linearises the ramp and neutralises white was built and deployed, then switched
+off: the user preferred the uncorrected look (the neutral white is ~25 % dimmer). The tooling stays:
+
+- `tools/calib/make_color_chart.py`: the 480x240 chart (grey ramp, primaries at 100/50/25 %,
+  near-black steps, UI theme colours, natural tones) as PNG and raw BGRA.
+- `tools/calib/show_on_mfd.sh`: stops `mfd.service` and writes the raw chart to `/dev/fb0`
+  (no gains, no LUT); `show_on_mfd.sh restore` starts the UI again. The backend's key-off dark
+  standby blanks it, so keep ACC on.
+- `tools/calib/fit_lut.py [strength]`: fits `mfd_lut.bin` (768 bytes: R, G, B tables) from the
+  sampled ramp; strength 1.0 = fully neutral white, lower keeps more brightness. It also writes
+  `chart_corrected.bgra` to preview the result on the glass.
+- To enable: copy the table to the Pi and set `MFD_LUT_FILE=<path>` in the `mfd.service` drop-in
+  (`equalizer.conf`), then restart. It costs the direct blit into the mapped framebuffer (~4 % fewer
+  frames on the Zero). Hue cross-talk (blue, green) cannot be fixed by a 1D LUT; correct palette
+  colours in `ui/colors.py` instead.
+
 ## Open gaps
 
 - Cause of the stuck GPIO2 is open: a short on the VGA666 board or a damaged Pi pad. Test: GPIO2 as

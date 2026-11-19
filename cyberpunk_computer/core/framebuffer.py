@@ -46,14 +46,14 @@ def _build_gain_lut(gain: float):
 
 # Panel correction LUT (tone curve + white balance), fitted from a photo of the
 # glass next to a calibrated screen by tools/calib/fit_lut.py: 768 bytes, the
-# R, G and B tables. Loaded from MFD_LUT_FILE, else the packaged file below;
-# MFD_LUT_FILE=none disables it. Gains apply first, then the panel table.
-DEFAULT_PANEL_LUT = os.path.join(os.path.dirname(__file__), "mfd_panel_lut.bin")
+# R, G and B tables. Opt-in: loaded only when MFD_LUT_FILE names a file (the
+# user preferred the uncorrected look, 2026-11-19; see docs/MFD_VIDEO_TIMINGS.md
+# §5). Gains apply first, then the panel table.
 
 
 def _load_panel_lut():
-    """(r, g, b) 256-byte tables, or None when absent/disabled/invalid."""
-    path = os.environ.get("MFD_LUT_FILE", DEFAULT_PANEL_LUT)
+    """(r, g, b) 256-byte tables, or None when unset/disabled/invalid."""
+    path = os.environ.get("MFD_LUT_FILE", "")
     if not path or path.lower() == "none" or not os.path.exists(path):
         return None
     try:

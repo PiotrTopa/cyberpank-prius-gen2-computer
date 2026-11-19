@@ -8,9 +8,15 @@ def _tables(tmp_path, data):
     return str(p)
 
 
-def test_packaged_lut_is_valid():
-    with open(fb.DEFAULT_PANEL_LUT, "rb") as f:
-        assert len(f.read()) == 768
+def test_off_by_default(monkeypatch):
+    monkeypatch.delenv("MFD_LUT_FILE", raising=False)
+    assert fb._load_panel_lut() is None
+
+
+def test_fitted_lut_is_valid():
+    from pathlib import Path
+    lut = Path(__file__).resolve().parent.parent / "tools/calib/mfd_lut.bin"
+    assert len(lut.read_bytes()) == 768
 
 
 def test_lut_file_loaded_and_applied(tmp_path, monkeypatch):
