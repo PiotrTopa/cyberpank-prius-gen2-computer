@@ -380,3 +380,24 @@ health v9). The INA cannot see anything shorter than about a second.
 
 State verified 18:55:36: holders `[]`, `roadsense_mode auto`, stack off, relays 3/4/5 off, the Pi in
 its normal 20 min grace after the hold was released, `panda_enabled true`, 12.59 V.
+
+## Bench session, 2026-11-19 evening (computer taken out of the car)
+
+The owner took the computer to the bench and made connections sturdier; the suspect is the flat
+cable connector of the phone's USB sub-board, found loose (owner's assessment, no visible damage).
+This is the weak point already listed for this phone.
+
+- Run 1 (bench supply 11.8-12.0 V, relays 2-5 on, roadsense running, Pi not yet up, camera not
+  attached): 0 drops of the top hub `1-1` and 0 `error -71` in about 20 min.
+- Run 2 (same, ACC forced on with `powerbox_acc_sim`, Pi up): 0 drops, 0 new `-71`, 25 min.
+- The only `-71` lines (70, in four bursts) and the only `1-1.3` disconnects (4) sit at commanded
+  relay 3 switch-offs after ACC-off holds: not the fault.
+- Car rate with the same relays was one drop per 2-6 min, so about 45 clean minutes fits a fix.
+  Not proven for the car: bench supply, no camera, and the reseated connector cannot be separated.
+- Not explained by a loose phone connector alone: why the drops needed relay 3 on.
+
+Side findings:
+- The ACC input flapped about 13 times a minute on the bench (cause not established; ask how ACC
+  was fed).
+- The Pi booted in 175 s once and 125 s once against the watchdog's 180 s boot limit; five power
+  cycles in a row cut it before it came up. The limit is too close to the boot time.
