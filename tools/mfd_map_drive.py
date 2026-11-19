@@ -166,9 +166,13 @@ def as_real(msg: dict) -> dict:
             if isinstance(inp.get("motion"), dict):
                 inp["motion"]["tag"] = "prius-can"
             inp["synthetic"] = False
-    elif msg.get("type") == "roadgeom":
-        if isinstance(msg.get("map"), dict):
-            msg["map"]["synthetic"] = False
+    elif msg.get("type") == "view":
+        rd = msg.get("road")
+        if isinstance(rd, dict):
+            if isinstance(rd.get("map"), dict):
+                rd["map"]["synthetic"] = False
+            if isinstance(rd.get("position"), dict):
+                rd["position"]["synthetic"] = False
     elif msg.get("type") == "fused":
         sl = msg.get("speed_limit")
         if isinstance(sl, dict):
@@ -234,8 +238,8 @@ class Replay:
         self.speed = 0.0
         self.hacc_add = hacc_add
         # a recording of roadsense's tools/roadgeom_drive.py carries the camera side too
-        # (road, lanes, roadgeom): it is replayed as it is, nothing is derived here
-        self.full = any(m.get("type") == "roadgeom" for _, m in self.msgs)
+        # (road, lanes, view with view.road): it is replayed as it is, nothing is derived here
+        self.full = any(m.get("type") == "view" for _, m in self.msgs)
         self._last_sc: dict = {}
 
     def seek(self, t: float) -> None:

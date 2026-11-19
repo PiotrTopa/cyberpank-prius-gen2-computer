@@ -288,7 +288,7 @@ def _MAP_DEMO(src: str, kmh: int) -> Dict[str, Any]:
 
 def _map_drive(next_m: Optional[float] = 120.0, next_kmh: int = 90, bend: float = 1.0, end: str = "",
                lanes=(1, 1, 0), tunnel_m: Optional[float] = None, state: str = "good", hacc: float = 3.0,
-               ref: str = "DK46", cls: str = "primary", name: str = "Opolska", **extra: Any):
+               ref: str = "DK46", cls: str = "primary", name: str = "Opolska", turn=None, **extra: Any):
     """A scene ``map`` block as a function of the timeline: a usable map on a road
     that bends right from 200 m (``bend``), distances as they are at 19.5 s and
     shrinking with the 52 km/h of the demo drive (docs/MFD_MAIN_SCREEN.md 6.5)."""
@@ -305,12 +305,16 @@ def _map_drive(next_m: Optional[float] = 120.0, next_kmh: int = 90, bend: float 
             tun = {"in": True, "exit_m": max(0, int(tunnel_m - gone)), "src": "map+vision"}
         m = {"ok": True, "state": state, "conf": 0.93, "limit": {"kmh": 50, "src": "map", "conf": 0.8},
              "road": {"cls": cls, "ref": ref, "name": name},
-             "lanes": {"n": lanes[0] + lanes[1], "fwd": lanes[0], "back": lanes[1], "ego": lanes[2],
-                       "onc_left": lanes[1] > 0 and lanes[2] == 0, "c": 0.8},
+             "lanes": ({"n": lanes[0] + lanes[1], "fwd": lanes[0], "back": lanes[1], "ego": lanes[2],
+                        "onc_left": lanes[1] > 0 and lanes[2] == 0, "c": 0.8} if lanes[2] >= 0 else
+                       {"n": lanes[0] + lanes[1], "fwd": lanes[0], "back": lanes[1], "c": 0.0,
+                        "p": list(lanes[3])}),        # L20: the ego lane unknown, probabilities per lane
              "tunnel": tun, "ahead": ahead,
              "pos": {"src": "gnss" if state == "good" else "dead_reckoning", "hacc": hacc},
              "in": {"gnss": "headunit", "fix": "3d", "motion": "vehicle", "tag": "prius-can"},
              "shape": {"ds": 40, "x": xs, "y": [0 if x < 200 else int(bend * (x - 200) ** 2 / 1600) for x in xs]}}
+        if turn is not None:                          # L22: painted turn arrows per own lane, lanes of the likely way
+            m["lanes"]["tl"], m["lanes"]["tp"] = list(turn[0]), list(turn[1])
         m.update({k: (v(t) if callable(v) else v) for k, v in extra.items()})
         return m
 
@@ -506,6 +510,30 @@ SHOTS = (
      dict(_MAP_ROAD, map=_map_drive(syn=True))),
     ("map_none", 19.5, "live", None, "the same road without a map",
      dict(_MAP_ROAD)),
+    # ── lane L20: approximate position, the ego lane from roadsense's filter ──
+    ("junction_approx_dead_reckoning", 19.5, "live", None,
+     "junction view on dead reckoning (35 m error, 180 m to go): amber frame, ~ distance",
+     dict(_MAP_ROAD, map=_map_drive(next_m=None, state="dead_reckoning", hacc=35.0,
+                                    jv=_jv("j", 180, [[-90, "xe", 0, 0], [0, "xep", 1, 0], [90, "xe", 0, 0]],
+                                           ctl="s", to="Ozimska")))),
+    ("map_lanes_three_likely", 19.5, "live", None,
+     "map: three lanes, roadsense cannot name the car's lane; the middle one is likely (outlined, 0.6)",
+     dict(_MAP_ROAD, lanes="1", map=_map_drive(next_m=None, lanes=(3, 0, -1, (0.15, 0.6, 0.25)), bend=0.0))),
+    # ── lane L22 (roadsense 2.0): turn arrows in the lane boxes, roadsense's own "approximate" mark ──
+    ("map_lanes_turn_arrows", 19.5, "live", None,
+     "three lanes before a signalled junction: left | straight on | straight on + right; the car in the middle, "
+     "the lanes of the likely way bright",
+     dict(_MAP_ROAD, lanes="1", map=_map_drive(next_m=None, lanes=(3, 0, 1), bend=0.0,
+                                               turn=(("l", "t", "tr"), (0, 1, 1)),
+                                               jv=_jv("j", 90, [[-90, "xe", 0, 0], [0, "xep", 0, 0], [90, "xe", 1, 0]],
+                                                      ctl="s", to="Ozimska")))),
+    ("map_lanes_turn_arrows_likely_approx", 19.5, "live", None,
+     "turn arrows with the own lane unknown (the left one likely), the junction marked approximate by roadsense "
+     "(a held position)",
+     dict(_MAP_ROAD, lanes="1", map=_map_drive(next_m=None, lanes=(2, 1, -1, (0.55, 0.45)), bend=0.0,
+                                               turn=(("lt", "tr"), (1, 1)),
+                                               jv=lambda t: dict(_jv("j", 140, [[-90, "xe", 1, 0], [0, "xep", 0, 0],
+                                                                                [90, "xe", 1, 0]], ctl="g")(t), ap=True)))),
 )
 
 

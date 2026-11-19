@@ -35,6 +35,7 @@ from cyberpunk_computer.backend.roadsense_scene import (
     resample,
     road_to_scene,
     rules_to_scene,
+    view_to_scene,
 )
 
 FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "roadsense_ws_2026-11-14.jsonl.gz")
@@ -472,7 +473,7 @@ def test_feed_publishes_while_active_and_reconnects(server):
         assert server.accepted == 0 and not got        # idle: no connection at all
         feed.set_active(True)
         assert wait_for(lambda: len(got) >= 3)
-        assert server.paths[0] == "/ws?topics=road,lights,speed_limit,env,rules,fused,map,lead,lanes,roadgeom"
+        assert server.paths[0] == "/ws?topics=road,lights,speed_limit,env,rules,fused,map,lead,lanes,view"
         assert all(set(s) >= {"seq", "lanes", "edges", "lead"} for s in got)
         # roadsense restarts: the stream drops, the feed reconnects on its own
         n = len(got)
@@ -753,19 +754,31 @@ def test_junction_view_goes_out_compact_and_only_with_a_usable_map():
     for bad in (None, {}, {"kind": "junction", "dist_m": 10, "confidence": 0.9, "arms": []}):
         assert map_junction_to_scene(_map_msg(bad)) is None
     assert map_junction_to_scene({"type": "map", "ahead": None}) is None
-    # in the builder: rides inside "map" while the fused map layer is in use, never without it
-    road = next(ln for ln in load_lines() if peek_type(ln) == "road")
-    for ok in (True, False):
+    # roadsense 2.0: the junction comes with the display channel (view.road.junction: the same object with the
+    # distance carried to the frame and an "approximate" mark); it rides inside "map" while the fused map layer
+    # is in use and roadsense trusts the position, never without. The `map` topic alone draws nothing.
+    from cyberpunk_computer.backend.roadsense_scene import junction_to_scene
+    assert junction_to_scene(dict(jv, approximate=True, why=["dead_reckoning"]))["ap"] is True
+    assert "ap" not in junction_to_scene(dict(jv, approximate=False))
+    for ok, trusted, want in ((True, True, True), (False, True, False), (True, False, False)):
         b = SceneBuilder(SceneFeedConfig())
         b.feed(json.dumps({"type": "fused", "map": {"available": ok, "state": "good" if ok else "no_source"}}), 0.0)
         b.feed(json.dumps(_map_msg(jv)), 0.0)
-        b.feed(road, 0.0)
+        b.feed(json.dumps(view_msg(1, 1_000_000_000, road=view_road(junction=dict(jv, approximate=True),
+                                                                    trusted=trusted))), 0.0)
         scene = b.build(0.0)
-        assert ("jv" in scene["map"]) is ok
+        assert ("jv" in scene["map"]) is want
         assert "map_jv" not in scene
+        if want:
+            assert scene["map"]["jv"]["ap"] is True and scene["map"]["jv"]["m"] == 171
+    b = SceneBuilder(SceneFeedConfig())                       # without the display channel: no junction picture
+    b.feed(json.dumps({"type": "fused", "map": {"available": True, "state": "good"}}), 0.0)
+    b.feed(json.dumps(_map_msg(jv)), 0.0)
+    b.feed(next(ln for ln in load_lines() if peek_type(ln) == "road"), 0.0)
+    assert "jv" not in b.build(0.0)["map"]
 
 
-# ── fused road geometry (roadsense topic roadgeom -> scene "geo") ────────────
+# ── fused road geometry (roadsense view.road -> scene "geo") ─────────────────
 
 def roadgeom_msg(**kw):
     xs = [0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0] + [60.0 + 4.0 * i for i in range(1, 60)]
@@ -813,20 +826,121 @@ def test_roadgeom_becomes_the_compact_geo_block():
     assert roadgeom_to_scene({"type": "roadgeom"}) is None
 
 
+def view_road(junction=None, trusted=True, approximate=False, synthetic=False, lanes=None, **geom):
+    """A `view.road` object (roadsense 2.0): the fused geometry of roadgeom_msg() plus position, junction, lanes."""
+    rd = roadgeom_msg(**geom)
+    rd.pop("type")
+    rd.update(position={"state": "good", "trusted": trusted, "approximate": approximate, "synthetic": synthetic,
+                        "hacc_m": 4.0, "why": ["dead_reckoning"] if approximate else []},
+              junction=junction,
+              lanes=lanes or {"count": 2, "forward": 1, "backward": 1, "ego_index": 0, "likely_index": None,
+                              "probs": [1.0], "probs_from": "left", "confidence": 1.0, "oncoming_left": True,
+                              "count_source": "map:tagged", "turn": None})
+    return rd
+
+
 def test_builder_attaches_geo_only_with_a_usable_fresh_map():
+    """The road picture comes with the display channel (view.road), of the same frame as the lanes."""
     b = SceneBuilder(cfg(max_hz=50.0))
     fused = {"type": "fused", "map": {"available": True, "state": "good", "match_confidence": 0.9}}
 
-    def scene_at(t, seq):
-        b.feed(json.dumps({"type": "road", "seq": seq, "lane_lines": [], "road_edges": [], "leads": []}), t)
+    def scene_at(t, seq, **road):
+        b.feed(json.dumps(view_msg(seq, int(t * 1e9), road=view_road(**road))), t)
         return b.build(t)
 
-    b.feed(json.dumps(roadgeom_msg()), 0.0)
     assert "geo" not in scene_at(0.0, 1)                     # no map block yet
     b.feed(json.dumps(fused), 0.1)
-    b.feed(json.dumps(roadgeom_msg()), 0.1)
     assert scene_at(0.1, 2)["geo"]["v"] == 60.0
-    assert "geo" not in scene_at(0.8, 3)                     # the topic is 0.7 s old: stale
-    b.feed(json.dumps(roadgeom_msg()), 0.9)
-    b.feed(json.dumps({"type": "map", "state": "good", "input": {"gnss": {"source": "synthetic"}, "synthetic": True}}), 0.9)
-    assert "geo" not in scene_at(0.9, 4)                     # a synthetic position never reaches the picture
+    assert "geo" not in scene_at(0.2, 3, trusted=False)      # roadsense does not trust the position
+    assert "geo" not in scene_at(0.3, 4, map={"used": False, "why": "disagree"})    # camera and map disagree
+    g = scene_at(0.4, 5, approximate=True)["geo"]
+    assert g["ap"] is True                                   # dead reckoning: side roads are "about there"
+    assert "geo" not in scene_at(0.5, 6, synthetic=True)     # a synthetic position never reaches the picture
+    b.feed(json.dumps({"type": "map", "state": "good", "input": {"gnss": {"source": "synthetic"}, "synthetic": True}}), 0.6)
+    assert "geo" not in scene_at(0.6, 7)
+
+
+def test_lane_boxes_come_from_the_view_with_turn_arrows():
+    from cyberpunk_computer.backend.roadsense_scene import road_lanes_to_scene
+    lanes = {"count": 4, "forward": 3, "backward": 1, "ego_index": None, "likely_index": 1,
+             "probs": [0.1, 0.6, 0.3], "probs_from": "left", "confidence": 0.0, "oncoming_left": None,
+             "count_source": "map:tagged",
+             "turn": {"lanes": [["left"], ["through"], ["through", "right"]], "arrows": ["l", "t", "tr"], "count": 3,
+                      "dist_m": 80.0, "junction_m": 160.0, "path": [False, True, True], "here": False}}
+    ln = road_lanes_to_scene({"lanes": lanes})
+    assert ln == {"n": 4, "fwd": 3, "back": 1, "lk": 1, "src": "map:tagged", "c": 0.0, "p": [0.1, 0.6, 0.3],
+                  "tl": ["l", "t", "tr"], "tp": [0, 1, 1]}
+    far = dict(lanes, turn=dict(lanes["turn"], dist_m=300.0))
+    assert "tl" not in road_lanes_to_scene({"lanes": far})           # announced, but not near yet
+    other = dict(lanes, turn=dict(lanes["turn"], arrows=["l", "t"], dist_m=0.0))
+    assert "tl" not in road_lanes_to_scene({"lanes": other})         # another number of lanes than the boxes
+    assert road_lanes_to_scene({"lanes": dict(lanes, forward=None)}) is None
+    # in the builder they replace the fused block's lanes (the display channel decides what is lit)
+    b = SceneBuilder(cfg(max_hz=50.0))
+    b.feed(json.dumps({"type": "fused", "map": {"available": True, "state": "good"},
+                       "lanes": {"count": 2, "forward": 2, "backward": 0, "ego_index": 0}}), 0.0)
+    b.feed(json.dumps(view_msg(1, 1_000_000_000, road=view_road(lanes=lanes))), 0.0)
+    sc = b.build(0.0)
+    assert sc["map"]["lanes"]["fwd"] == 3 and sc["map"]["lanes"]["tl"] == ["l", "t", "tr"]
+    b.feed(json.dumps(view_msg(2, 1_100_000_000, road=view_road(lanes=lanes, trusted=False))), 0.1)
+    assert b.build(0.1)["map"]["lanes"] is None
+
+
+# ── roadsense 2.0 display channel (topic view, lane L19) ─────────────────────
+
+VIEW_X = [0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 100.0, 120.0]
+
+
+def view_msg(seq, ts_ns, lead_x=12.0, road=None):
+    return {"type": "view", "seq": seq, "ts_mono_ns": ts_ns, "x": VIEW_X,
+            "lines": [{"id": "lane:1", "kind": "lane_line", "y": [-1.7] * 12 + [None, None], "alpha": 1.0, "conf": 0.9},
+                      {"id": "lane:2", "kind": "lane_line", "y": [1.7] * 14, "alpha": 0.4, "conf": 0.5},
+                      {"id": "edge:1", "kind": "road_edge", "y": [4.0] * 14, "alpha": 1.0}],
+            "path": {"id": "path", "kind": "path", "y": [0.0] * 8 + [None] * 6},
+            "objects": [{"id": "lead:3", "kind": "vehicle", "role": "lead", "x": lead_x, "y": 0.2, "vx": -1.0,
+                         "alpha": 1.0, "attrs": {}},
+                        {"id": "light:7", "kind": "traffic_light", "role": "ego", "x": 41.0, "y": 2.5, "vx": -10.0,
+                         "vy": 0.0, "alpha": 0.6, "attrs": {"state": "red", "ego_state": "red", "held": True,
+                                                            "alt": {"state": "green", "side": "left"}}},
+                        {"id": "light:8", "kind": "traffic_light", "role": "other", "x": 45.0, "y": -3.0,
+                         "attrs": {"state": "green"}}],
+            "road": road}
+
+
+def test_view_to_scene():
+    vw = view_to_scene(view_msg(5, 123_456_789_000))
+    assert vw["t"] == 123_456
+    assert vw["lanes"][0] is None and vw["lanes"][1]["y"][:3] == [-1.7, -1.7, -1.7]
+    assert len(vw["lanes"][1]["y"]) == 11 - 1                       # cut where the line ends (100 m not drawn)
+    assert vw["lanes"][2]["f"] == 0.4 and "f" not in vw["lanes"][1]
+    assert vw["edges"][1]["y"][0] == 4.0 and vw["edges"][0] is None
+    assert vw["path"]["y"][-1] == 0.0 and len(vw["path"]["y"]) == 7    # to 40 m
+    assert vw["lead"] == {"id": "lead:3", "d": 12.0, "y": 0.2, "v": -1.0}
+    lt = vw["light"]
+    assert (lt["id"], lt["state"], lt["d"], lt["y"], lt["vx"], lt["f"], lt["held"]) == ("light:7", "red", 41.0, 2.5,
+                                                                                  -10.0, 0.6, True)
+    assert lt["alt"] == {"s": "green", "side": "l"}
+
+
+def test_scene_is_built_per_view_message_with_its_own_frame():
+    """roadsense sends road, lead, lanes, view per frame. Built on the road message the scene used to
+    carry the previous frame's lead and lanes now and then (4.8 % of the scenes on the 2026-11-17 drive); built on
+    the view message everything is of one frame, and the 15 kB road message is not decoded at all."""
+    b = SceneBuilder(cfg(max_hz=50.0))
+    lead = {"type": "lead", "seq": 1, "present": True, "dist_m": 12.0, "lateral_m": 0.2, "v_rel_mps": -1.0,
+            "track_id": 3}
+    lanes = {"type": "lanes", "seq": 1, "x": VIEW_X, "lines": [{"present": False}] * 4, "edges": [{"present": False}] * 2}
+    b.feed('{"type":"road","seq":1,"broken json', 10.0)        # never decoded in view mode
+    b.feed(json.dumps(view_msg(0, 9_900_000_000)), 9.95)        # an earlier frame: view mode on
+    b.build(9.95)
+    b.feed('{"type":"road","seq":1,"broken json', 10.0)
+    assert b.build(10.0) is None                                # the frame is not complete yet
+    b.feed(json.dumps(lead), 10.001)
+    b.feed(json.dumps(lanes), 10.002)
+    b.feed(json.dumps(view_msg(1, 10_000_000_000)), 10.003)
+    sc = b.build(10.003)
+    assert sc["seq"] == 1 and sc["lead"]["d"] == 12.0 and sc["lead_src"] == "tracked"
+    assert sc["vw"]["t"] == 10_000 and sc["vw"]["light"]["state"] == "red"
+    assert sc["path"]["y"][0] == 0.0
+    assert b.decode_errors == 0
+    assert b.build(10.05) is None                               # nothing new

@@ -1089,16 +1089,17 @@ def test_map_elements_survive_a_short_dropout_and_go_after_the_hold():
 
 def test_low_match_confidence_hides_map_elements_with_hysteresis():
     from cyberpunk_computer.ui.scene.mapinfo import parse_map
-    assert map_director(_map_full(conf=0.55), seconds=5.0)[0].map.mark == ""
+    # thresholds since L20: trusted from a 3 s average of 0.55, lost under 0.40
+    assert map_director(_map_full(conf=0.45), seconds=5.0)[0].map.mark == ""
     d, inp = map_director(_map_full(conf=0.95))
-    # dips at side roads (one message in four at 0.5) do not hide it ...
+    # dips at side roads (one message in four at 0.3) do not hide it ...
     for i in range(12):
-        m = _map_full(conf=0.5 if i % 4 == 0 else 0.9, pos={"src": "gnss", "hacc": 3.0 + i * 0.01})
+        m = _map_full(conf=0.3 if i % 4 == 0 else 0.9, pos={"src": "gnss", "hacc": 3.0 + i * 0.01})
         live_step(d, inp._replace(map=parse_map({"map": m})), 0.5)
         assert d.map.mark == "good", i
     # ... a lasting low confidence does (after the hold)
-    for i in range(12):
-        m = _map_full(conf=0.5, pos={"src": "gnss", "hacc": 4.0 + i * 0.01})
+    for i in range(20):
+        m = _map_full(conf=0.35, pos={"src": "gnss", "hacc": 4.0 + i * 0.01})
         live_step(d, inp._replace(map=parse_map({"map": m})), 0.5)
     assert d.map.mark == "" and d.map.next_limit is None
 
@@ -1157,7 +1158,7 @@ def test_map_lanes_give_the_boxes_and_mark_the_oncoming_lane():
     three = _map_full(lanes={"n": 3, "fwd": 3, "back": 0, "ego": 2, "onc_left": False, "c": 0.8})
     inp = map_inputs(three)
     assert mdrawn(inp, 3.0)[0] != mdrawn(inp, 3.0, map_lanes=False)[0]      # boxes although no lane is seen
-    assert map_director(three)[0].map.lanes == (3, 0, 2)
+    assert map_director(three)[0].map.lanes[:3] == (3, 0, 2)
     low = _map_full(lanes={"n": 3, "fwd": 3, "back": 0, "ego": 2, "c": 0.3})
     assert map_director(low)[0].map.lanes is None
     unknown = _map_full(lanes={"n": 3, "fwd": 3, "back": 0, "c": 0.8})     # ego lane not known
@@ -1274,16 +1275,23 @@ def test_junction_view_is_parsed():
         assert parse_map({"map": _map_full(jv=bad)}).junction is None
 
 
-def test_junction_view_is_off_by_default_and_gated_by_distance_confidence_and_position():
-    assert map_director(_map_full(jv=_JV))[0].map.junction is None                 # tuning map_junction is off
+def test_junction_view_is_on_by_default_and_gated_by_distance_confidence_and_position():
+    # on by default since L20; the tuning still switches it off
+    assert map_director(_map_full(jv=_JV), map_junction=False)[0].map.junction is None
+    assert map_director(_map_full(jv=_JV))[0].map.junction is not None
     d, _ = map_director(_map_full(jv=_JV), map_junction=True)
     jv = d.map.junction
     assert jv is not None and 130 < jv.m < 145                                     # 180 m, 3 s at 50 km/h driven
     assert map_director(_map_full(jv=dict(_JV, m=600)), map_junction=True)[0].map.junction is None
     assert map_director(_map_full(jv=dict(_JV, m=600)), map_junction=True, map_junction_m=700)[0].map.junction is not None
     assert map_director(_map_full(jv=dict(_JV, c=0.3)), map_junction=True)[0].map.junction is None
-    assert map_director(_map_full(jv=_JV, pos={"src": "dead_reckoning", "hacc": 45.0}),
+    # a poor position: shown as approximate while the error is small against the distance, else hidden
+    d, _ = map_director(_map_full(jv=_JV, state="dead_reckoning", pos={"src": "dead_reckoning", "hacc": 45.0}))
+    assert d.map.junction is not None and d.map.junction_approx
+    assert map_director(_map_full(jv=_JV, pos={"src": "dead_reckoning", "hacc": 80.0}),
                         map_junction=True)[0].map.junction is None
+    d, _ = map_director(_map_full(jv=_JV, pos={"src": "gnss", "hacc": 4.0}))
+    assert not d.map.junction_approx
     # on the ring the picture stays although the path confidence is gone
     on = dict(_JV_RING, m=0, c=0.2, ring={"r": 16, "n": 3, "p": 3, "on": True, "car": 70})
     assert map_director(_map_full(jv=on), map_junction=True)[0].map.junction.on_ring
@@ -1307,7 +1315,7 @@ def test_junction_view_draws_in_its_panel_only():
         hot = pygame.Color(*mdrawn(map_inputs(_map_full()))[1].pal["lane_ego"])
         assert any(surf.get_at(p) == hot for p in changed)
     # flag off: the same picture as without a view
-    assert mdrawn(map_inputs(_map_full(jv=_JV)))[0] == mdrawn(map_inputs(_map_full()))[0]
+    assert mdrawn(map_inputs(_map_full(jv=_JV)), map_junction=False)[0] == mdrawn(map_inputs(_map_full()))[0]
 
 
 def test_light_uncertainty_and_other_group_are_shown():
@@ -1441,3 +1449,188 @@ def test_geo_redraws_when_it_changes_and_costs_nothing_without_it():
     live_step(d0, drive_inputs(), 1.0)
     r.render(d0, drive_inputs(), 10.0)
     assert r._geo_p is None and r._x_end == 1e9
+
+
+# ── roadsense 2.0 display channel ("vw", lane L19) ─────────────────────────────
+
+def vw_scene(seq, t_ms, lead=None, light=None, lanes_f=1.0):
+    ln = {"y": [-1.75] * 11, "prob": 0.9}
+    if lanes_f < 1.0:
+        ln["f"] = lanes_f
+    return {"seq": seq, "lanes": [None, None, None, None], "edges": [None, None], "lead": None,
+            "vw": {"t": t_ms, "lanes": [None, ln, {"y": [1.75] * 11, "prob": 0.9}, None], "edges": [None, None],
+                   "lead": lead, "light": light}}
+
+
+def test_standing_behind_a_live_lead_redraws_the_road():
+    """Owner 2026-11-18: the lead froze until the car started. With the car standing (no motion, view open)
+    the scene is redrawn when the drawn lead moves; before L19 the road picture was not redrawn at all."""
+    from cyberpunk_computer.ui.scene.render import SceneRenderer
+    r = SceneRenderer((238, 216))
+    d = SceneDirector()
+    drive = SceneInputs(speed_kmh=30, real_speed_kmh=30, gear="D", ready=True, rs_state="running", rs_ok=True,
+                        road=parse_scene(vw_scene(1, 1000, lead={"id": "lead:1", "d": 3.0, "y": 0.0, "v": 0.0})))
+    step(d, drive, 2.0)                                   # the view opens
+    stand = drive._replace(speed_kmh=0.0, real_speed_kmh=0.0)
+    step(d, stand, 1.0)
+    t, n0 = 50.0, None
+    for k in range(40):                                   # 4 s standing, the lead's value creeps by 0.6 m
+        road = parse_scene(vw_scene(10 + k, 2000 + 100 * k,
+                                    lead={"id": "lead:1", "d": 3.0 + 0.015 * k, "y": 0.0, "v": 0.0}))
+        inp = stand._replace(road=road)
+        for _ in range(2):
+            d.update(inp, 0.05)
+            t += 0.05
+            r.render(d, inp, t)
+        if n0 is None:
+            n0 = r.redraws
+    assert not d.moving and d.view_step == VIEW_STEPS
+    assert r.redraws - n0 >= 10                           # the picture follows the lead
+    assert abs(d.lead.dist_m - (3.0 + 0.015 * 39)) < 0.1
+
+
+def test_lead_readout_has_a_hysteresis():
+    d = SceneDirector()
+    base = SceneInputs(speed_kmh=30, real_speed_kmh=30, gear="D", rs_state="running", rs_ok=True)
+    shown = []
+    for k in range(60):                                   # a live value wobbling around 4.5 m
+        dist = 4.5 + 0.12 * (1 if k % 2 else -1)
+        d.update(base._replace(road=parse_scene(vw_scene(k + 1, 1000 + 80 * k,
+                                                         lead={"id": "lead:1", "d": dist, "y": 0, "v": 0}))), 0.08)
+        shown.append(d.lead_shown_m)
+    assert len(set(shown[5:])) == 1
+
+
+def test_light_moves_smoothly_between_samples_with_a_jittery_link():
+    """vw samples arrive 3-12 per second, each 0.1-0.16 s old; the light (approached at 10 m/s) is placed by the
+    sample's frame time and carried by its velocity in between: no step, although samples are 1-3 m apart."""
+    import random
+    from cyberpunk_computer.ui.scene.inputs import _traffic_light
+    rnd = random.Random(2)
+    d = SceneDirector()
+    base = SceneInputs(speed_kmh=36, real_speed_kmh=36, gear="D", rs_state="running", rs_ok=True)
+    clock, steps, prev, inp, next_arrival, seq = 0.0, [], None, None, 0.0, 0
+    while clock < 4.0:
+        clock += 0.05
+        if clock >= next_arrival:
+            seq += 1
+            t_src = clock - 0.1 - rnd.uniform(0.0, 0.06)
+            light = {"id": "light:7", "state": "red", "d": 60.0 - 10.0 * t_src, "y": 2.0, "vx": -10.0, "vy": 0.0}
+            inp = base._replace(road=parse_scene(vw_scene(seq, t_src * 1000.0, light=light)),
+                                light=_traffic_light(light))
+            next_arrival = clock + rnd.uniform(0.08, 0.3)
+        d.update(inp, 0.05)
+        if prev is not None:
+            steps.append(abs(d.light_pos[0] - prev + 10.0 * 0.05))
+        prev = d.light_pos[0]
+    assert max(steps[10:]) < 0.5
+    assert abs(d.light_pos[0] - (60.0 - 10.0 * clock)) < 2.0   # where the light is now, not 0.15 s ago
+
+
+def test_no_stale_health_light_while_the_scene_feed_is_live():
+    st = running(AppState())
+    st = replace(st, roadsense=replace(st.roadsense, health={"lights": {"state": "red", "dist_m": 40.0}}))
+    feed = SceneFeed(clock=lambda: 10.0)
+    feed.push(SCENE_EVENT, scene(1))                      # a live scene without a light
+    assert read_inputs(st, feed).light is None
+    assert read_inputs(st, SceneFeed()).light is not None   # no feed at all: the mirror is all there is
+
+
+def test_ego_lane_probabilities_unknown_lane_shows_the_count_and_the_likely_lane():
+    """roadsense >= L20: an ego lane it cannot name comes with the probability per lane; the boxes then show
+    the count with no lane lit, the most likely one outlined when it holds 0.45 or more."""
+    unk = _map_full(lanes={"n": 3, "fwd": 3, "back": 0, "c": 0.0, "p": [0.1, 0.6, 0.3]})
+    d = map_director(unk)[0]
+    assert d.map.lanes[:4] == (3, 0, -1, 1)
+    flat = _map_full(lanes={"n": 3, "fwd": 3, "back": 0, "c": 0.0, "p": [0.34, 0.33, 0.33]})
+    assert map_director(flat)[0].map.lanes[:4] == (3, 0, -1, -1)
+    known = _map_full(lanes={"n": 3, "fwd": 3, "back": 0, "ego": 1, "c": 0.8, "p": [0.05, 0.9, 0.05]})
+    a = mdrawn(map_inputs(known), 3.0, map_far_road=False)[0]
+    b = mdrawn(map_inputs(unk), 3.0, map_far_road=False)[0]
+    c = mdrawn(map_inputs(flat), 3.0, map_far_road=False)[0]
+    assert a != b != c
+
+
+def test_scene_carries_the_ego_lane_probabilities():
+    from cyberpunk_computer.backend.roadsense_scene import fused_to_scene
+    fu = {"map": {"available": True, "state": "good", "match_confidence": 0.9},
+          "lanes": {"count": 3, "forward": 3, "backward": 0, "ego_index": None, "oncoming_left": False,
+                    "probs": [0.1, 0.62, 0.28], "probs_from": "left", "source": "map:tagged+vision",
+                    "confidence": 0.0}}
+    ln = fused_to_scene(fu)["lanes"]
+    assert ln["p"] == [0.1, 0.62, 0.28] and "ego" not in ln
+    fu["lanes"]["probs_from"] = "right"
+    assert "p" not in fused_to_scene(fu)["lanes"]
+
+
+def test_turn_arrows_are_drawn_in_the_lane_boxes_near_a_junction():
+    """roadsense 2.0 (view.road.lanes.turn, from the map pack's turn lanes): per own lane the painted arrows; the
+    boxes then carry them (l left, t straight on, r right), the lanes of the most likely way brighter."""
+    from cyberpunk_computer.ui.scene.mapinfo import parse_map
+    plain = _map_full(lanes={"n": 3, "fwd": 3, "back": 0, "ego": 1, "c": 0.9, "p": [0.05, 0.9, 0.05]})
+    arrows = _map_full(lanes={"n": 3, "fwd": 3, "back": 0, "ego": 1, "c": 0.9, "p": [0.05, 0.9, 0.05],
+                              "tl": ["l", "t", "tr"], "tp": [0, 1, 1]})
+    mi = parse_map({"map": arrows})
+    assert mi.lanes_turn == ("l", "t", "tr") and mi.lanes_path == (False, True, True)
+    d = map_director(arrows)[0]
+    assert d.map.lanes.turn == ("l", "t", "tr") and d.map.lanes.path == (False, True, True)
+    a = mdrawn(map_inputs(plain), 3.0, map_far_road=False)[0]
+    b = mdrawn(map_inputs(arrows), 3.0, map_far_road=False)[0]
+    other = _map_full(lanes={"n": 3, "fwd": 3, "back": 0, "ego": 1, "c": 0.9, "p": [0.05, 0.9, 0.05],
+                             "tl": ["tr", "t", "l"], "tp": [0, 1, 1]})
+    c = mdrawn(map_inputs(other), 3.0, map_far_road=False)[0]
+    assert a != b != c
+    # arrows for another number of lanes than the boxes are ignored, never mis-assigned
+    bad = _map_full(lanes={"n": 3, "fwd": 3, "back": 0, "ego": 1, "c": 0.9, "tl": ["l", "t"]})
+    assert parse_map({"map": bad}).lanes_turn == ()
+    # roadsense's likely lane is used as sent
+    lk = _map_full(lanes={"n": 3, "fwd": 3, "back": 0, "c": 0.0, "lk": 2, "p": [0.3, 0.3, 0.4]})
+    assert map_director(lk)[0].map.lanes[:4] == (3, 0, -1, 2)
+
+
+def test_junction_marked_approximate_by_roadsense_is_drawn_approximate():
+    jv = {"k": "j", "m": 150, "c": 0.9, "arms": [[0, "xep", 0, 0], [90, "xe", 1, 0]]}
+    d = map_director(_map_full(jv=jv))[0]
+    assert d.map.junction is not None and not d.map.junction_approx
+    d = map_director(_map_full(jv=dict(jv, ap=True)))[0]
+    assert d.map.junction is not None and d.map.junction_approx
+
+
+def test_lines_sweep_evenly_although_samples_arrive_unevenly():
+    """roadsense makes 13 frames a second, the backend passes on at most 10: the samples' frame times are 75 or
+    225 ms apart while they arrive every 100 ms. A line sweeping at a constant rate (a turn) must move by about
+    the same amount on every drawn frame, not in a stair (56 steps over 0.3 m at 30 m in 29 min before L22)."""
+    d = SceneDirector()
+    base = SceneInputs(speed_kmh=40, real_speed_kmh=40, gear="D", rs_state="running", rs_ok=True)
+    rate = 4.0                                            # m/s to the left, at every point
+    t_src, clock, k, inp, steps, prev = 0.0, 0.0, 0, None, [], None
+    next_arrival = 0.0
+    while clock < 6.0:
+        clock += 0.05
+        if clock >= next_arrival:
+            k += 1
+            t_src += 0.075 if k % 2 else 0.225
+            sc = vw_scene(k, t_src * 1000.0)
+            for ln in sc["vw"]["lanes"]:
+                if ln:
+                    ln["y"] = [y - rate * t_src for y in ln["y"]]      # the wire is y right
+            inp = base._replace(road=parse_scene(sc))
+            next_arrival += 0.15
+        d.update(inp, 0.05)
+        if d.lanes[1] is not None:
+            if prev is not None:
+                steps.append(d.lanes[1][5] - prev)
+            prev = d.lanes[1][5]
+    steps = steps[20:]
+    mean = sum(steps) / len(steps)
+    assert abs(mean - rate * 0.05) < 0.02                 # it keeps up with the line
+    assert max(steps) < 1.5 * mean and min(steps) > 0.5 * mean
+
+
+def test_roadsense_trust_is_adopted_not_judged_twice():
+    """roadsense 2.0 decides in view.road whether the map layer may be drawn (match confidence over 2 s with
+    hysteresis) and marks the scene (map.tr). The screen's own 3 s gate then does not delay the same decision:
+    with a match confidence under its threshold the junction still shows; without the mark it does not."""
+    jv = {"k": "j", "m": 150, "c": 0.9, "arms": [[0, "xep", 0, 0], [90, "xe", 1, 0]]}
+    assert map_director(_map_full(jv=jv, conf=0.45, tr=True), seconds=1.0)[0].map.junction is not None
+    assert map_director(_map_full(jv=jv, conf=0.45), seconds=1.0)[0].map.junction is None
