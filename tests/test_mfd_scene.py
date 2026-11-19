@@ -1588,6 +1588,39 @@ def test_turn_arrows_are_drawn_in_the_lane_boxes_near_a_junction():
     assert map_director(lk)[0].map.lanes[:4] == (3, 0, -1, 2)
 
 
+def test_lane_boxes_and_turn_arrows_do_not_flicker():
+    """L36: the boxes stay through a short drop-out (roadsense's trust, a scene without them), new turn arrows
+    need TURN_ON_S unchanged and survive a drop-out of TURN_HOLD_S; a single frame never switches them."""
+    from cyberpunk_computer.ui.scene.tuning import Tuning
+    box = {"n": 3, "fwd": 3, "back": 0, "ego": 1, "c": 0.9, "p": [0.05, 0.9, 0.05]}
+    plain, nolanes = _map_full(lanes=box), _map_full(lanes=None)
+    arrows = _map_full(lanes=dict(box, tl=["l", "t", "tr"], tp=[0, 1, 1]))
+    d = SceneDirector(Tuning({}))
+    inp = lambda m: map_inputs(m, speed_kmh=50, real_speed_kmh=50)      # noqa: E731
+    live_step(d, inp(plain), 2.0)
+    assert d.map.lanes is not None and d.map.lanes.turn == ()
+    live_step(d, inp(nolanes), 0.5)                                     # gone for half a second: held
+    assert d.map.lanes is not None
+    live_step(d, inp(plain), 0.5)
+    live_step(d, inp(nolanes), 1.5)                                     # gone for longer: off
+    assert d.map.lanes is None
+    live_step(d, inp(plain), 1.0)
+    live_step(d, inp(arrows), 0.05)                                     # one frame of arrows: not drawn
+    assert d.map.lanes.turn == ()
+    live_step(d, inp(plain), 0.5)
+    assert d.map.lanes.turn == ()
+    live_step(d, inp(arrows), 0.5)                                      # held TURN_ON_S: drawn
+    assert d.map.lanes.turn == ("l", "t", "tr")
+    live_step(d, inp(plain), 0.5)                                       # a drop-out: kept
+    assert d.map.lanes.turn == ("l", "t", "tr")
+    live_step(d, inp(plain), 1.0)                                       # longer than TURN_HOLD_S: gone
+    assert d.map.lanes.turn == ()
+    live_step(d, inp(arrows), 0.5)
+    two = _map_full(lanes={"n": 2, "fwd": 2, "back": 0, "ego": 1, "c": 0.9, "p": [0.1, 0.9]})
+    live_step(d, inp(two), 0.05)                                        # the boxes count other lanes: never kept
+    assert d.map.lanes.fwd == 2 and d.map.lanes.turn == ()
+
+
 def test_junction_marked_approximate_by_roadsense_is_drawn_approximate():
     jv = {"k": "j", "m": 150, "c": 0.9, "arms": [[0, "xep", 0, 0], [90, "xe", 1, 0]]}
     d = map_director(_map_full(jv=jv))[0]

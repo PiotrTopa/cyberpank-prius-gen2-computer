@@ -288,7 +288,8 @@ def _MAP_DEMO(src: str, kmh: int) -> Dict[str, Any]:
 
 def _map_drive(next_m: Optional[float] = 120.0, next_kmh: int = 90, bend: float = 1.0, end: str = "",
                lanes=(1, 1, 0), tunnel_m: Optional[float] = None, state: str = "good", hacc: float = 3.0,
-               ref: str = "DK46", cls: str = "primary", name: str = "Opolska", turn=None, **extra: Any):
+               ref: str = "DK46", cls: str = "primary", name: str = "Opolska", turn=None, view_lanes=None,
+               route=None, **extra: Any):
     """A scene ``map`` block as a function of the timeline: a usable map on a road
     that bends right from 200 m (``bend``), distances as they are at 19.5 s and
     shrinking with the 52 km/h of the demo drive (docs/MFD_MAIN_SCREEN.md 6.5)."""
@@ -315,6 +316,11 @@ def _map_drive(next_m: Optional[float] = 120.0, next_kmh: int = 90, bend: float 
              "shape": {"ds": 40, "x": xs, "y": [0 if x < 200 else int(bend * (x - 200) ** 2 / 1600) for x in xs]}}
         if turn is not None:                          # L22: painted turn arrows per own lane, lanes of the likely way
             m["lanes"]["tl"], m["lanes"]["tp"] = list(turn[0]), list(turn[1])
+        if view_lanes is not None:
+            # L36: the lane boxes as the backend makes them from roadsense's view.road (turn arrows only while a
+            # navigation route is followed: roadsense_scene.route_active)
+            from ...backend.roadsense_scene import road_lanes_to_scene
+            m["lanes"] = road_lanes_to_scene({"lanes": view_lanes, "route": route})
         m.update({k: (v(t) if callable(v) else v) for k, v in extra.items()})
         return m
 
@@ -322,6 +328,13 @@ def _map_drive(next_m: Optional[float] = 120.0, next_kmh: int = 90, bend: float 
 
 
 _MAP_ROAD = dict(_OPEN_ROAD, limit=None, lamps=_NO_LAMPS, **_env("rural_road", "day"))
+# roadsense's view.road.lanes 80 m before a junction with painted arrows (L22 / L36), the car in the middle lane
+_VIEW_LANES_TURN = {"count": 3, "forward": 3, "backward": 0, "count_source": "map:tagged", "ego_index": 1,
+                    "likely_index": None, "probs": [0.05, 0.9, 0.05], "probs_from": "left", "confidence": 0.9,
+                    "oncoming_left": False, "count_held": False,
+                    "turn": {"lanes": [["left"], ["through"], ["through", "right"]], "arrows": ["l", "t", "tr"],
+                             "count": 3, "dist_m": 80.0, "junction_m": 140.0, "path": [False, True, True],
+                             "path_source": "map", "here": False, "held": False}}
 _JV_ON = {"map_junction": True}
 
 
@@ -534,6 +547,15 @@ SHOTS = (
                                                turn=(("lt", "tr"), (1, 1)),
                                                jv=lambda t: dict(_jv("j", 140, [[-90, "xe", 1, 0], [0, "xep", 0, 0],
                                                                                 [90, "xe", 1, 0]], ctl="g")(t), ap=True)))),
+    # ── lane L36: turn arrows only with a navigation route (owner 2026-11-19); none exists today ──
+    ("map_lanes_junction_no_route", 19.5, "live", None,
+     "the junction approach of shot 84 as the backend sends it today, without a navigation route: plain lane "
+     "boxes, the own lane lit, no arrows",
+     dict(_MAP_ROAD, lanes="1", map=_map_drive(next_m=None, bend=0.0, view_lanes=_VIEW_LANES_TURN, route=None))),
+    ("map_lanes_junction_route", 19.5, "live", None,
+     "the same with a route active (a future navigation feed: view.road.route.active): the painted arrows",
+     dict(_MAP_ROAD, lanes="1", map=_map_drive(next_m=None, bend=0.0, view_lanes=_VIEW_LANES_TURN,
+                                               route={"active": True}))),
 )
 
 

@@ -19,7 +19,11 @@ still knew about it:
     mfd     the MapDirector showed the schematic (map_junction) or the road picture with side roads / ring
 
     .venv-fe/bin/python tools/mfd_chain_replay.py SESSION_DIR --labels LABELS.csv [--map MAP.jsonl]
-        [--tuning '{"map_junction": true}'] [--roadsense ~/projects/roadsense]
+        [--tuning '{"map_junction": true}'] [--roadsense ~/projects/roadsense] [--car OTHER_CHECKOUT]
+
+Always printed as well (lane L36): how often the lane boxes (two or more own lanes: one lane alone draws no
+box) and their turn arrows switch on or off on the glass (the MapDirector's output per scene), and how often
+the number of boxes changes, per minute of session time. `--car` takes this repository's code from another checkout (the code before / after on the same data).
 """
 
 from __future__ import annotations
@@ -35,11 +39,12 @@ from types import SimpleNamespace
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
+CAR = [REPO]                 # the checkout whose car code is replayed (--car)
 
 
 def _load(name, rel):
     import importlib.util
-    spec = importlib.util.spec_from_file_location(name, os.path.join(REPO, rel))
+    spec = importlib.util.spec_from_file_location(name, os.path.join(CAR[0], rel))
     mod = importlib.util.module_from_spec(spec)
     sys.modules[name] = mod
     spec.loader.exec_module(mod)
@@ -56,7 +61,10 @@ def main(argv=None) -> int:
                                                          os.path.expanduser("~/projects/roadsense")))
     ap.add_argument("--before-s", type=float, default=12.0)
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--car", help="another checkout of this repository whose code is replayed")
     a = ap.parse_args(argv)
+    if a.car:
+        CAR[0] = os.path.abspath(a.car)
     sys.path.insert(0, os.path.join(a.roadsense, "tools"))
     from replay_lib import Pipeline, read_session       # roadsense's own offline pipeline (api 2)
     # loaded by file: the packages' __init__ pull in the whole backend / pygame, which this needs neither of
@@ -80,6 +88,9 @@ def main(argv=None) -> int:
     last_t = None
     cur = {"pos": False, "map": False, "jv": False}
     arrows = lanes_lit = lanes_likely = 0
+    flick = {"boxes": 0, "arrows": 0, "count": 0}
+    prev_lb = None
+    t_first = None
     for m in read_session(a.session, a.map):
         t_ns = m.get("ts_mono_ns")
         typ = m.get("type")
@@ -119,6 +130,16 @@ def main(argv=None) -> int:
         inp = SimpleNamespace(map=mi, geo=geo, real_speed_kmh=speed * 3.6, limit_kmh=None)
         d = SimpleNamespace(vision="live", moving=speed > 0.5, xs=(), lanes=(None, None, None, None), path=None)
         md.update(inp, d, dt)
+        t_first = t if t_first is None else t_first
+        lb = md.lanes
+        if dt > 0.0:
+            # boxes as drawn: two or more lanes of the own direction (one lane alone draws no box)
+            cur_lb = (lb is not None and lb.fwd >= 2, bool(lb is not None and lb.turn), lb.fwd if lb is not None else None)
+            if prev_lb is not None:
+                flick["boxes"] += cur_lb[0] != prev_lb[0]
+                flick["arrows"] += cur_lb[1] != prev_lb[1]
+                flick["count"] += cur_lb[0] and prev_lb[0] and cur_lb[2] != prev_lb[2]
+            prev_lb = cur_lb
         mp = sc.get("map") or {}
         g = sc.get("geo") or {}
         scene_has = bool(mp.get("jv")) or bool(g.get("br") or g.get("ring"))
@@ -142,6 +163,10 @@ def main(argv=None) -> int:
     print("driving scenes %d: share of the time  %s" % (len(drv), json.dumps(share)))
     print("lane boxes while driving: own lane lit on %d scenes, likely lane only on %d, with turn arrows on %d" % (
         lanes_lit, lanes_likely, arrows))
+    mins = max(1e-9, ((timeline[-1][0] - t_first) if timeline else 0.0) / 60.0)
+    print("on the glass over %.1f min: lane boxes on/off %d (%.2f/min), turn arrows on/off %d (%.2f/min), "
+          "box count changes %d (%.2f/min)" % (mins, flick["boxes"], flick["boxes"] / mins, flick["arrows"],
+                                                flick["arrows"] / mins, flick["count"], flick["count"] / mins))
     if not a.labels:
         return 0
     tl_t = [x[0] for x in timeline]
