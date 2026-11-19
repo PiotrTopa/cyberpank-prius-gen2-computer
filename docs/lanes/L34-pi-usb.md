@@ -323,3 +323,60 @@ idle panda. The relay-3-only rate over the evening was bursty and lower than in 
 (8 drops in 47 min, 0.17/min, against 0.5-1/min with everything on).
 State verified 18:32:07: env file sha256 `0f98c2fb...7601` as before, no backup file, backend active
 with `panda_enabled true`, all relays off, holders `[]`, `roadsense_mode auto`, no `l34` units, 12.64 V.
+
+## Part 8 + the owner's two blocks (18:35-18:55 CET), ignition off, stack off, phone 21 C
+The 90-minute relay-3-on/off session of part 9 was called off before it started; nothing of it ran.
+
+### Two blocks, back to back
+| Block | Relays on | Window | Tree drops | `-71` lines | Pi | 12 V |
+|---|---|---|---|---|---|---|
+| 1: relay 3 only (gateway + panda), reader on | 3 | 18:39:48-18:46:48 (7 min) | **2** (18:43:47, 18:46:33); 1 in the first 5 min | 8 | off | 12.58 V, 0.245 A |
+| 2: all the others | 2 (Pi), 4 (camera hub), 5 (RS485) | 18:49:18-18:54:18 (5 min) | **0** | 0 | on, attached 18:49:01 (first try), no watchdog cut | 12.52 V, 0.354 A |
+
+(A 60 s relay-3-only step at 18:36:41 gave 0 drops. Switching block 2 on makes relay 3 close for
+5 s, 18:48:11-18:48:16: the rail hold drives the gateway relay on its edge.) Caveat: 2 against 0 in
+7 and 5 minutes is not significant alone; it agrees with every earlier comparison (relay-3-only this
+evening 8 drops in 51 min; relay 3 off in quiet states 0 in 13 min; afternoon 21 in 14.5 min against
+0 in 22 min).
+
+### A. The phone's VBUS (proven / not exposed)
+* The "USB 5 V" of part 1 is the PMI8998 RRADC channel `usbin_v` (`iio:device1/in_voltage0_raw` x
+  19.53 mV): the voltage on the phone's own USB-C VBUS pin at the PMIC, the node its OTG boost
+  drives. It is not the hub's own 5 V and not a powerbox reading (the powerbox measures only 12 V).
+* Sampled at 49 Hz for 12 min (block 1 and the steps, max gap 27 ms): `usbin_v` 5.547-5.566 V
+  (raw 284/285) throughout; through both drops it only moved by the same one count (19.5 mV) that
+  follows the load. Boost status register 0x1109 = 0x0a in all 35 250 samples (0x0a = healthy per
+  the CMDB; the latched-off value is 0x04), interrupt status 0x1110 = 0x00 (no OTG fault / over-
+  current), 0x110a = 0x00, 0x1310 = 0x04 constant. Regulator `usb_vbus`: enabled, 1 user, limit 3 A.
+  So: no VBUS loss of 20 ms or longer and no boost fault at a drop. Shorter dips cannot be seen.
+* Second by second over the day (Prometheus), `usbin_v` does not dip at any of 21 sampled drops.
+* The reading sits at 4.94-5.06 V in the 12:17 boot and at 5.43-5.57 V in the 14:51 and 15:34 boots
+  (5.49 V also in the 18 Nov test, TODO 3e). Drops occurred in both regimes. Why the level differs by
+  boot is not known (boost setting, or the powered hub lifting the pin: the phone does not tell).
+* Not exposed by this phone: VBUS current in either direction (`usbin_i` returns "no data"), so
+  neither the boost's load nor a back-feed from the powered hub can be read; charger `online 0`,
+  `voltage_now 0` (it reports nothing in host mode); no typec/extcon/role nodes; no kernel message
+  from the charger, boost or dwc3 drivers at any drop today (only the hub lines).
+  `usbmon` absent.
+
+### B. What the gateway + panda branch draws (powerbox INA219 on the 12 V input, 1 Hz, clips at 3.2 A)
+| State | 12 V current | Step over all-off | Power step |
+|---|---|---|---|
+| all off (phone idle, top hub, powerbox) | 0.126 A at 12.65 V (120 s) | - | - |
+| relay 3 on, panda reader ON | 0.245 A at 12.59 V (459 s; also 0.244 A in two earlier blocks) | +0.119 A | +1.50 W |
+| relay 3 on, panda reader OFF (panda in power save) | 0.234 A at 12.62 V (1348 s, parts 6b/7) | +0.108 A | +1.36 W |
+| relay 3 on, CAN traffic flowing (15:04, 13.9 V; against relay 5 only) | 0.406 A against 0.274 A | +0.132 A | +1.83 W |
+| relays 2 + 4 + 5 on (block 2) | 0.354 A at 12.52 V | +0.228 A | +2.85 W |
+
+The step includes the relay coil (12 V coil of the opto board, about 30-35 mA, 0.4 W; not measured
+here). Without it the branch takes about 1.1 W asleep with the reader on; at an assumed 85 %
+converter efficiency that is about 0.92 W = 185 mA at 5 V for the hub chip, the RP2040 gateway with
+its CAN/AVC-LAN/RS485 parts and the panda together; about 23 mA of it is the panda being kept awake;
+about 225 mA with CAN traffic. Typical figures: RP2040 board with USB about 25-30 mA, a 4-port
+USB 2.0 hub chip about 30-70 mA, a panda about 80-150 mA awake: sum 135-250 mA. Nothing is out of
+line, and the current does not change in the seconds before a drop (0.22-0.24 A flat). The panda's
+hardware type is not in the backend state (USB: `bbaa:ddcc`, bcdDevice 0a00, fw `DEV-f120999e-DEBUG`,
+health v9). The INA cannot see anything shorter than about a second.
+
+State verified 18:55:36: holders `[]`, `roadsense_mode auto`, stack off, relays 3/4/5 off, the Pi in
+its normal 20 min grace after the hold was released, `panda_enabled true`, 12.59 V.
