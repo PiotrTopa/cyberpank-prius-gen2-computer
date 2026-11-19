@@ -264,3 +264,30 @@ the running backend is the normal configuration. Ways to do it: (a) one line
 `BACKEND_PANDA_ENABLED=0` in `/etc/prius/backend.env` for the test, removed after (two restarts);
 (b) a `/run` drop-in with `BindReadOnlyPaths=<copy of the env file with that line>:/etc/prius/backend.env`
 (installed file untouched, two restarts); (c) the panda unplugged by hand (no restart).
+
+## Part 6b (17:29-17:46 CET): panda reader off versus on, relay 3 only, back to back
+One detached root unit on the phone (`l34seq`, script `/tmp/l34_seq.sh`, restore trap): backup
+`/etc/prius/backend.env.l34-bak`, one appended line `BACKEND_PANDA_ENABLED=0`, backend restart,
+run A; file restored from the backup (sha256 `0f98c2fb...7601` before = after, backup removed),
+backend restart, run B. Ignition off, Pi off, relays 4/5 off, stack off, phone 20-22 C, 12.6-12.7 V.
+
+| Run | Panda reader | Window | Tree drops | `-71` lines | CAN hub / gateway / panda on the bus |
+|---|---|---|---|---|---|
+| A | OFF (`panda_enabled false`, no panda line in the backend log; gateway link up, `Gateway identified: v3.3.0`) | 17:30:29-17:38:30 (8 min) | **0** | 0 | 100 % |
+| B (control) | ON (2 panda connects) | 17:39:58-17:44:59 (5 min) | **1** (17:40:02) | 3 | 99 % |
+
+First error of the drop in B: `usb 1-1.3: clear tt 1 (90b1)` = the panda's bulk IN endpoint 0x81, 4 ms
+before the disconnect, then the powerbox's serial endpoint on `1-1`. 12 V flat (12.63-12.65 V).
+
+Relay 3 only, all runs of the session: reader ON 5 drops in 14 min (2 in 4, 2 in 5, 1 in 5 =
+0.36/min); reader OFF 0 in 8 min, where 2.9 were expected at that rate (chance of 0: about 6 %).
+
+Reading: the host's panda reader is the load under which the tree falls (supported, one run, not yet
+proven); the reader is unchanged since 16-17 Nov and ran at 0.08/min on 18 Nov, so the hub tree's
+new sensitivity since 19 Nov 10:55 is still a second, unexplained ingredient. What the reader does
+while the bus is quiet: a bulk read on 0x81 with a 20 ms timeout, i.e. about 50 cancelled transfers
+per second on a full-speed device behind the CAN hub's transaction translator, plus a control
+transfer every second.
+State verified at 17:45:38: env file sha256 as recorded, no backup file, backend with
+`panda_enabled true`, all relays off, holders `[]`, `roadsense_mode auto`, units `l34seq`/`l34test*`
+gone, 12.68 V.
