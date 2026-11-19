@@ -459,6 +459,9 @@ class BackendService:
 
         # MFD video board power manager (backend.mfd_power).
         self.mfd_power = None
+        # Top-hub re-enumeration watch (whole-tree USB drops, 2026-11-19).
+        from .usb_tree import UsbTreeWatch
+        self.usb_tree = UsbTreeWatch(hub=os.environ.get("BACKEND_USB_TREE_HUB", "1-1"))
         self._mfd_bean_trigger = None
         self._entry_hold = None       # state.rules.satellite_power.EntryHold, lazy
         from .mfd_power import OperatorHold
@@ -1186,6 +1189,7 @@ class BackendService:
             self.mfd_power = MfdPowerManager(
                 mfd_cfg, publish=_publish_mfd,
                 controller=self.port_power.mfd,
+                tree_reset_age=self.usb_tree.last_reset_age,
             )
             # a hold set before a backend restart, with the time it has left
             self._mfd_hold = OperatorHold(mfd_cfg.hold_file, mfd_cfg.hold_s)
@@ -1771,6 +1775,10 @@ class BackendService:
                     self._gateway_recover_tick()
                     self._gateway_usb_power_tick()
                     self._port_power_enforce_tick()
+                    try:
+                        self.usb_tree.poll()
+                    except Exception:
+                        logger.exception("USB tree watch failed")
                     self._mfd_power_tick()
                     self._camera_preview_tick()
                     self._roadsense_power_tick()
