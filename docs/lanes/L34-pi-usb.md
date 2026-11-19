@@ -125,3 +125,58 @@ Side findings of the run:
   drive, then continuous. Nothing in the relay/satellite/panda state changed at 10:55.
 * RS485 traffic with ACC on: ~3 frames/s to node 110 (VFD) through the gateway; no node answers.
 * 12 V around drops (1 Hz): no dip before a drop (min 13.64 V); current falls ~0.36 A after one.
+
+## Part 3 (15:15): not run
+The script found the car in DRIVE at 11.3 km/h before switching anything and stopped.
+
+## Part 4 (16:13-16:51 CET): ignition off, parked, on the battery (12.84 -> 12.63 V), after the 15:34 power cycle
+Script `/tmp/l34_test4.py` on the phone as a user unit (`systemd-run --user`), backend REST only:
+`mfd_hold` (Pi as canary), `satellite_power_hold l34` (relay 5), `set_relay 3`, `roadsense_mode on/off`
+(stack + relay 4). 1 Hz log `/tmp/l34_test4.log`. Restored and verified at 16:51:28: holders `[]`,
+`roadsense_mode auto`, stack off, relays 3/4/5 off, MFD in its normal grace.
+
+### Onset (phase A)
+Boot of 15:34 had 0 tree drops through the 15:36-15:45 drive and the parked hour. Everything on at
+16:14:12 (relays 2-5, stack running). First drop at 16:16:51 (2 min 39 s later), then 16:17:46,
+16:19:18: storm. At onset: 12.29-12.50 V, 0.7-1.4 A, SoC 82.7 C (72 C at 16:14, fan to 40 % at
+16:16:22), first error lines 92 ms before the disconnect on `1-1.4-port2` (camera) and `1-1.3` TT
+together, then `1-1` TT. In the journal that minute: fan on 16:16:22, CAN setup re-sent 16:16:24
+(car asleep, panda 1 frame/s), the 30 s ssh to the Pi 16:16:44. No voltage dip in the 1 Hz samples.
+A drop also happened at 16:14:01, before phase A, with relay 3 and 5 still OFF: 47 s after the Pi was
+powered (16:13:14), i.e. at the moment its USB gadget attaches.
+
+### Counts (4 min each, 12 s settle excluded; "present" = share of 1 Hz samples the device was on the bus)
+
+| When | Relays on (2 always) | Stack | Tree drops | CAN hub / camera hub present | Phone | 12 V |
+|---|---|---|---|---|---|---|
+| 16:14:12-16:19:18 (A) | 3 4 5 | running | 3 | 99 % / 98 % | 72-85 C | 12.41 V, 1.01 A |
+| 16:19:44-16:23:44 | 4 5 | running | 0 | 0 % / 100 % | 79-84 C | 12.43 V, 0.89 A |
+| 16:24:33-16:28:33 | 3 5 (relay 4 stayed off: script slip) | off | 1 | 99 % / 0 % | 34-38 C | 12.64 V, 0.40 A |
+| 16:29:04-16:33:04 | 3 | off | 2 | 98 % / 0 % | 32-33 C | 12.65 V, 0.37 A |
+| 16:33:25-16:37:26 | 5 | off | 0 | 0 % / 0 % | 30 C | 12.69 V, 0.28 A |
+| 16:37:55-16:41:55 | none | off | 0 | 0 % / 0 % | 29 C | 12.70 V, 0.26 A |
+| 16:42:34-16:46:34 (control) | 3 4 5 | running | 4 | 97 % / 97 % | 69-85 C | 12.32 V, 1.06 A |
+| 16:46:48-16:50:48 (repeat) | 4 5 | running | 1 (16:47:51) | 0 % / 99 % | 73-77 C | 12.37 V, 0.89 A |
+
+Relay 3 on: 10 drops in 17.1 min (0.58/min). Relay 3 off: 1 drop in 16 min. Relays really switched:
+with relay 3 off the CAN hub, gateway and panda were absent in every sample; with relay 4 off the
+camera hub was absent in every sample (clean off this time).
+
+Outside the measured windows: drops at 16:24:15 and 16:42:20, both within seconds of relay 3 being
+switched ON (CAN hub attaching to top-hub port 3).
+
+### What the Pi's power cuts do
+MFD watchdog cuts at 16:18:34, 16:43:38, 16:46:28 (Pi on the bus only 8 % of the control state).
+Tree drops followed at +44 s (16:19:18), +18 s (16:43:56), +4 s (16:46:32); the Pi's gadget attaches
+about 46 s after power-on. Same in the afternoon logs: cut 12:44:39 -> drops +18 s, +47 s; cut
+12:49:25 -> +53 s (Pi attach attempt 2 s before); cut 12:54:10 -> +16, +26, +45 s; cut 14:15:59 ->
++38, +55 s (attach attempts 1-4 s before, then `usb 1-1-port2: attempt power cycle`).
+
+### Reading
+Proven: relay 5 (RS485 rail) alone does nothing; the camera hub and the roadsense load are not
+needed (relay 3 alone, phone at 32 C, 0.37 A, 12.65 V: 2 drops in 4 min); the CAN-hub branch on
+top-hub port 3 multiplies the drop rate by about 10; CAN traffic is not needed (car asleep).
+Suspected: the top hub `1-1` (or its 5 V feed / upstream link) cannot stand events on its downstream
+ports: a self-powered device attaching (CAN hub on port 3, Pi on port 2) and whatever the powered
+CAN hub does continuously (its own 5 V meeting the top hub's VBUS on port 3 is the candidate). The
+Pi watchdog adds a loop: drop -> Pi unreachable -> power cut -> Pi attaches 46 s later -> drop.
