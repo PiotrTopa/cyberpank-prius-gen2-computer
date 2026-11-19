@@ -44,6 +44,40 @@ def _build_gain_lut(gain: float):
     return bytes(min(255, int(i * gain + 0.5)) for i in range(256))
 
 
+# Panel correction LUT (tone curve + white balance), fitted from a photo of the
+# glass next to a calibrated screen by tools/calib/fit_lut.py: 768 bytes, the
+# R, G and B tables. Loaded from MFD_LUT_FILE, else the packaged file below;
+# MFD_LUT_FILE=none disables it. Gains apply first, then the panel table.
+DEFAULT_PANEL_LUT = os.path.join(os.path.dirname(__file__), "mfd_panel_lut.bin")
+
+
+def _load_panel_lut():
+    """(r, g, b) 256-byte tables, or None when absent/disabled/invalid."""
+    path = os.environ.get("MFD_LUT_FILE", DEFAULT_PANEL_LUT)
+    if not path or path.lower() == "none" or not os.path.exists(path):
+        return None
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError as exc:
+        logger.warning("Panel LUT %s unreadable (%s), ignoring", path, exc)
+        return None
+    if len(data) != 768:
+        logger.warning("Panel LUT %s has %d bytes (need 768), ignoring", path, len(data))
+        return None
+    logger.info("Panel LUT active: %s", path)
+    return data[0:256], data[256:512], data[512:768]
+
+
+def _compose(gain_lut, panel_lut):
+    """Table applying gain_lut then panel_lut (either may be None)."""
+    if panel_lut is None:
+        return gain_lut
+    if gain_lut is None:
+        return None if panel_lut == bytes(range(256)) else panel_lut
+    return bytes(panel_lut[v] for v in gain_lut)
+
+
 class FramebufferOutput:
     """
     Direct framebuffer output using memory-mapped /dev/fb0.
@@ -88,6 +122,11 @@ class FramebufferOutput:
                 _gain_from_env("MFD_GAIN_G"),
                 _gain_from_env("MFD_GAIN_B"),
             )
+        panel = _load_panel_lut()
+        if panel is not None:
+            self._lut_r = _compose(self._lut_r, panel[0])
+            self._lut_g = _compose(self._lut_g, panel[1])
+            self._lut_b = _compose(self._lut_b, panel[2])
     
     def initialize(self) -> bool:
         """

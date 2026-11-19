@@ -33,6 +33,7 @@ def _pygame():
 
 @pytest.fixture(autouse=True)
 def _no_settings_writes(monkeypatch):
+    monkeypatch.setenv("MFD_LUT_FILE", "none")  # passthrough equalizer here
     import cyberpunk_computer.persistence as persistence
     import cyberpunk_computer.ui.screens.main_screen as ms
     for mod in (persistence, ms):
