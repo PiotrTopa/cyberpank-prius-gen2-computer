@@ -180,3 +180,73 @@ Suspected: the top hub `1-1` (or its 5 V feed / upstream link) cannot stand even
 ports: a self-powered device attaching (CAN hub on port 3, Pi on port 2) and whatever the powered
 CAN hub does continuously (its own 5 V meeting the top hub's VBUS on port 3 is the candidate). The
 Pi watchdog adds a loop: drop -> Pi unreachable -> power cut -> Pi attaches 46 s later -> drop.
+
+## Part 5 (17:07-17:17 CET): relay 3 only, and "is it CAN-side software?"
+
+### Test: only relay 3 on, Pi off, relays 4/5 off, stack off, ignition off
+17:11:33-17:16:33 (Pi's grace had ended at 17:11, so no Pi on the bus and no power cuts). Top hub with
+only the powerbox and the CAN hub (gateway + panda). Phone 20-22 C, 12.64 V, 0.26 A (max 0.36 A).
+**2 tree drops in 5 min (17:11:49, 17:15:19).** First errors 6-32 ms before the disconnect:
+`clear tt` on `1-1.3` for the gateway's serial IN endpoint and the panda's 0x81, and on `1-1` for the
+powerbox's serial IN: every full-speed device at once. 12 V flat through both (12.63-12.65 V).
+Restored and verified 17:17:13: all relays off, holders `[]`, `roadsense_mode auto`.
+`usbmon` is not available on this kernel (no module in `/lib/modules/7.1.0-rc1-sdm845`, kernel
+lockdown `integrity`), so there is no transfer-level capture.
+
+### History against changes
+Tree drops per minute of relay 3 on (boot clocks jump, so only boots with a sane clock are rated):
+
+| Boot | Gateway fw | Backend CAN code | Relay 3 on | Tree drops | Rate |
+|---|---|---|---|---|---|
+| 17 Nov 10:38-16:10 | 3.2.11 | 16-17 Nov commits | n/a | 1 | low |
+| 17 Nov 16:10-19:21 (two drives) | 3.2.11 | same | n/a | 7 | low |
+| 17 Nov 19:21 - 18 Nov 10:30 (3.3.0 flashed 21:47, parked test 18 Nov 09:52-10:30) | 3.2.11 -> 3.3.0 | + 95ae1e5/956d408 (17 Nov 20:49-21:22) | 38 min | 3 | 0.08/min |
+| 18 Nov 21:11 - 19 Nov 09:35 (bench) | not connected | - | 0 | 12 (all with relay 3 off) | - |
+| 19 Nov 10:39-11:46 | 3.3.0 | v2 deploy of 06:50 (no CAN change) | 53 min | 49 (0 in the first 14 min) | 0.92/min |
+| 19 Nov 12:19-14:50 | 3.3.0 | same (+ `usb_tree.py` 14:10) | 82 min | 88 | 1.07/min |
+| 19 Nov 14:51-15:34 (soft reboot) | 3.3.0 | same | 33 min | 12 | 0.36/min |
+| 19 Nov 15:34- (power cycle) | 3.3.0 | same | drive 15:36-15:45: 0; tests: 0.5/min | | |
+
+Car repo: no commit touching the panda reader, the gateway link, CAN setup, discovery or port power
+after 95ae1e5 (17 Nov 21:22); gateway repo: last firmware change b6f60d3/e8556a8 (17 Nov, 3.3.0).
+That code and firmware ran on 18 Nov at 0.08/min and for the first 14 min of 19 Nov 10:41 without a
+drop. No software change lines up with 10:55 on 19 Nov.
+
+### What the host does on that branch (car asleep)
+* Panda (`io/panda_can.py`, libusb): on connect `set_safety_mode` (silent), `set_power_save 0`,
+  heartbeat, reset comms, three identity reads; then continuously a bulk IN on 0x81 with a 20 ms
+  timeout (about 50 timed-out and cancelled transfers per second while the bus is quiet), a heartbeat
+  control transfer every 1 s, a health read every 5 s. Reconnect 2 s after an error; no USB reset.
+* Gateway (CDC serial): CAN setup (16 commands) and nav personality check on every connect; the
+  solicited watchdog re-sends the setup when no reply comes (120 s spacing seen while asleep); RS485
+  discovery job every 5 min; the gateway's own heartbeat 1/s.
+* Port power: `uhubctl` data-enable + relay only on relay 3 edges.
+
+Last logged host action on the branch before each drop (part 4 and 5, relay 3 on):
+
+| Drop | Last action | Age |
+|---|---|---|
+| 16:16:51 | CAN setup re-send (watchdog) | 27 s |
+| 16:17:46 | panda connect | 49 s |
+| 16:19:18 | RS485 discovery job | 11 s |
+| 16:24:15 | CAN setup re-send | 2 s (12 s after panda connect, relay 3 just on) |
+| 16:28:15 | panda connect | 235 s |
+| 16:30:22 | CAN setup re-send | 69 s |
+| 16:32:08 | panda connect | 100 s |
+| 16:42:20 | gateway discovery | 0.1 s (relay 3 on 4 s before) |
+| 16:42:49 | CAN setup re-send | 10 s |
+| 16:43:56 | Pi relay cut | 18 s |
+| 16:44:53 | panda connect | 50 s |
+| 16:46:32 | Pi relay cut | 4 s |
+| 17:11:49 | CAN setup re-send | 12 s |
+| 17:15:19 | panda connect | 204 s |
+
+No fixed delay (0.1-235 s). Two drops came more than 200 s after any logged action, with only the
+continuous polling running. Same result as the 78 drops of the afternoon (part 2).
+
+### Verdict on "CAN-side software jams USB"
+A recent CAN-side software CHANGE as the cause: refuted by the history. The continuous host traffic to
+the two controllers (above all the 50 cancelled bulk reads per second on the panda while the bus is
+quiet) as the load under which a marginal hub fails: undecided; there is no runtime switch to pause
+the panda reader or the gateway link (only `panda_bench`, a counter reset), so it needs either the
+panda unplugged or the backend started once with the panda reader disabled.
