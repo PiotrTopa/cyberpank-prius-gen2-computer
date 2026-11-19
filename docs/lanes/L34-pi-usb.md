@@ -291,3 +291,35 @@ transfer every second.
 State verified at 17:45:38: env file sha256 as recorded, no backup file, backend with
 `panda_enabled true`, all relays off, holders `[]`, `roadsense_mode auto`, units `l34seq`/`l34test*`
 gone, 12.68 V.
+
+## Part 7 (18:02-18:32 CET): reader off / on / off, relay 3 only: the part 6b result does not hold
+Same method (detached root unit `l34seq2`, env file backup + sha256, restore trap; four backend
+restarts, all clean). Ignition off, Pi off, relays 4/5 off, stack off, phone 20-22 C, 12.55-12.69 V.
+
+| Block | Panda reader | Window | Tree drops | Rate |
+|---|---|---|---|---|
+| 6b A | off | 17:30:29-17:38:30 (8 min) | 0 | 0 |
+| 6b B | on | 17:39:58-17:44:59 (5 min) | 1 | 0.20/min |
+| 7 OFF1 | off (`panda_enabled false`, 0 panda connects) | 18:02:54-18:12:55 (10 min) | 1 (18:05:35) | 0.10/min |
+| 7 ON1 | on (1 panda connect) | 18:14:24-18:24:24 (10 min) | 0 | 0 |
+| 7 OFF2 | off (0 panda connects) | 18:25:52-18:30:52 (5 min) | 2 (18:26:37, 18:29:00) | 0.40/min |
+| Reader OFF, 6b + 7 | | 23 min | 3 | 0.13/min |
+| Reader ON, 6b + 7 | | 15 min | 1 | 0.07/min |
+| Reader ON, all relay-3-only runs of the session (parts 4, 5, 6b, 7) | | 24 min | 5 | 0.21/min |
+
+With equal rates, 3 or more of the 4 drops of parts 6b + 7 falling in the reader-off time (23 of 38
+min) has a probability of 0.48; over the whole session (3 in 23 min off, 5 in 24 min on) the two
+rates do not differ either. The zero of part 6b run A was chance.
+
+Drops with the reader off: first errors 5-7 ms before the disconnect on the powerbox's serial IN
+endpoint (`1-1: clear tt (90d2)`, `(9152)`, `(9202)`) and the gateway's serial IN endpoint
+(`1-1.3: clear tt (9122)`, `(91d2)`, `(9222)`), no panda endpoint (it is never opened). 12 V flat
+(12.59-12.63 V, 0.22-0.25 A).
+
+Verdict: the panda reader's polling is NOT the stressor (refuted: the tree drops at the same rate
+with the panda never opened). What remains with relay 3 on and the reader off: the powered CAN hub
+on top-hub port 3, the gateway's serial link (1 heartbeat/s, CAN setup re-sends) and the plugged,
+idle panda. The relay-3-only rate over the evening was bursty and lower than in the afternoon
+(8 drops in 47 min, 0.17/min, against 0.5-1/min with everything on).
+State verified 18:32:07: env file sha256 `0f98c2fb...7601` as before, no backup file, backend active
+with `panda_enabled true`, all relays off, holders `[]`, `roadsense_mode auto`, no `l34` units, 12.64 V.
