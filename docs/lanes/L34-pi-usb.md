@@ -250,3 +250,17 @@ the two controllers (above all the 50 cancelled bulk reads per second on the pan
 quiet) as the load under which a marginal hub fails: undecided; there is no runtime switch to pause
 the panda reader or the gateway link (only `panda_bench`, a counter reset), so it needs either the
 panda unplugged or the backend started once with the panda reader disabled.
+
+## Part 6 (17:25-17:28 CET): panda-reader-off variant NOT run, the drop-in cannot switch it off
+A runtime drop-in `/run/systemd/system/prius-backend.service.d/l34-nopanda.conf` with
+`Environment=BACKEND_PANDA_ENABLED=0` was installed and the backend restarted once (17:26:18; stop to
+start about 12 s, no power-button press, relays re-asserted off, MFD off). The reader stayed ON
+(`Panda broadcast CAN source enabled`, `panda_enabled true`): `/usr/local/sbin/prius-backend` assigns
+`BACKEND_PANDA_ENABLED=1` (and `BACKEND_EXTRA_ARGS=`) as its own defaults before sourcing
+`/etc/prius/backend.env`, and `run` builds the argument list itself, so neither a unit `Environment=`
+nor extra `ExecStart` arguments reach the backend; only the installed env file does. No relay test
+was run. The drop-in was removed and systemd reloaded (17:28); no second restart was needed because
+the running backend is the normal configuration. Ways to do it: (a) one line
+`BACKEND_PANDA_ENABLED=0` in `/etc/prius/backend.env` for the test, removed after (two restarts);
+(b) a `/run` drop-in with `BindReadOnlyPaths=<copy of the env file with that line>:/etc/prius/backend.env`
+(installed file untouched, two restarts); (c) the panda unplugged by hand (no restart).
