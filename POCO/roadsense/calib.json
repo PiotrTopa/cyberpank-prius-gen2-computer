@@ -1,0 +1,7 @@
+{
+ "pitch": 0.0561,
+ "yaw": -0.0621,
+ "roll": 0.0,
+ "height_m": 1.22,
+ "_comment": "radians, openpilot convention; height in metres. pitch/yaw measured 2026-11-19 from the drive 20261119-104128 (pitch +3.21 deg, yaw -3.56 deg); height nominal, not measured"
+}

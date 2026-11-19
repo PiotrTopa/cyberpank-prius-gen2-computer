@@ -341,7 +341,7 @@ template, vault key, or a laptop copy) so a rebuild does not depend on a backup:
 | ssh host keys | `/etc/ssh/ssh_host_*` | vault (optional) |
 | backend config (hand-tuned) | `/etc/prius/backend.env` (+ 5 dated copies) | repo template `backend.env.tmpl` with the car's values |
 | backend data | `/home/user/cyberpunk/data/` (metrics.db, battery.db, alerts, trip logs) | periodic pull to the laptop |
-| roadsense device config | `/etc/roadsense/calib.json`, `mapd.json`, `recorder.json`, `camera*.json`, `api.env` | roadsense repo `deploy/poco/` |
+| roadsense device config | `/etc/roadsense/calib.json`, `mapd.json`, `recorder.json`, `camera*.json`, `api.env` | `calib.json`: this repo `POCO/roadsense/` (measured 2026-11-19); the others: phone backup |
 | roadsense models (complete set) | `/var/lib/roadsense/models` (1.1 GB) | laptop copy + fetch script coverage |
 | recorder sessions (real drives) | `/var/lib/roadsense/rec` (1.2 GB) | pull to the laptop's rides tree |
 | ath10k retry unit, extra watchdog conf | `/etc/systemd/system/ath10k-retry.service`, `/etc/systemd/system.conf.d/watchdog.conf` | car repo `POCO/rootfs` |
