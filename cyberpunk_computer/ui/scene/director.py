@@ -82,6 +82,7 @@ class SceneDirector:
         self.lead: Optional[Lead] = None      # smoothed
         self.lead_alpha = 0.0                 # 0..1 appear/disappear
         self.objects: tuple = ()
+        self._obj_s: dict = {}                 # display-channel road users: id -> drawn (x, y)
         self.lead_shown_m: Optional[int] = None   # the lead's whole-metre read-out (with hysteresis)
         self.light_pos: Optional[Tuple[float, float]] = None   # drawn (distance, lateral LEFT+) of the ego light
         self.light_alpha = 0.0
@@ -381,9 +382,30 @@ class SceneDirector:
             self.lead_alpha = max(0.0, self.lead_alpha - dt / LEAD_FADE_S)
             if self.lead_alpha == 0.0:
                 self.lead = None
-        self.objects = road.objects if self.vision == "live" else ()
+        self.objects = self._carry_objects(road.objects if self.vision == "live" else (), age, dt)
         self._view_age = age
         self._readout()
+
+    def _carry_objects(self, objs, age: float, dt: float) -> tuple:
+        """Road users of the display channel (an id): carried by their velocity from the sample's frame time,
+        corrections eased, like the lead; objects without an id are drawn where they are."""
+        k = 1.0 - math.exp(-dt / VIEW_EASE_S) if dt > 0 else 1.0
+        new, out = {}, []
+        for o in objs:
+            if not o.oid:
+                out.append(o)
+                continue
+            tx, ty = o.x + o.vx * age, o.y + o.vy * age
+            cur = self._obj_s.get(o.oid)
+            if cur is None:
+                x, y = tx, ty
+            else:
+                x, y = cur[0] + o.vx * dt, cur[1] + o.vy * dt
+                x, y = x + (tx - x) * k, y + (ty - y) * k
+            new[o.oid] = (x, y)
+            out.append(o._replace(x=x, y=y))
+        self._obj_s = new
+        return tuple(out)
 
     def _update_light(self, inp: SceneInputs, dt: float) -> None:
         """The drawn position of the ego light. From the display channel: carried by its velocity between two
@@ -428,7 +450,9 @@ class SceneDirector:
                                              q(self.lead_alpha, 0.1), self.lead_shown_m)
         lt = None if self.light_pos is None else (q(self.light_pos[0], 0.25), q(self.light_pos[1], 0.1),
                                                  q(self.light_alpha, 0.1))
-        return (lines, ld, lt, tuple(q(a, 0.1) for a in self.line_alpha))
+        objs = tuple((o.oid or o.kind, o.kind, q(o.x, 0.25), q(o.y, 0.1), q(o.alpha, 0.1)) for o in self.objects)
+        kind = None if self.lead is None else self.lead.kind
+        return (lines, ld, lt, tuple(q(a, 0.1) for a in self.line_alpha), objs, kind)
 
     # -- derived ------------------------------------------------------------------
 

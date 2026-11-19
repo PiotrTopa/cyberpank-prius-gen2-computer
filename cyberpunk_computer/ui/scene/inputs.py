@@ -56,10 +56,25 @@ class RoadLine(NamedTuple):
 
 
 class RoadObject(NamedTuple):
-    kind: str                        # car | truck | bus | bike | person | lamp | cone | ...
+    kind: str                        # car | van | truck | bus | bike | motorbike | person | lamp | cone | ...
     x: float                         # metres ahead
     y: float                         # LEFT positive
     state: str = ""                  # kind-specific (e.g. lamp: "on")
+    alpha: float = 1.0               # display channel: fade in / out
+    oid: str = ""                    # display channel: object id
+    vx: float = 0.0                  # display channel: m/s relative to the car (x forward)
+    vy: float = 0.0                  # display channel: m/s, LEFT positive
+
+
+# roadsense's road-user class labels -> the shapes the renderer draws; anything else (and no class: unknown)
+# is the generic vehicle (the car shape, as before classes existed)
+ROAD_USER_KINDS = {"human": "person", "person": "person", "bike": "bike", "bicycle": "bike",
+                   "motorbike": "motorbike", "motorcycle": "motorbike", "car": "car", "van": "van",
+                   "truck": "truck", "bus": "bus", "tram": "bus"}
+
+
+def road_user_kind(label: Any) -> str:
+    return ROAD_USER_KINDS.get(label, "car") if isinstance(label, str) else "car"
 
 
 class SignItem(NamedTuple):
@@ -307,8 +322,18 @@ def parse_scene(raw: Any) -> Optional[RoadScene]:
             d = _num(lv.get("d"))
             if d is not None and d > 0:
                 f = _num(lv.get("f"))
-                lead = Lead(d, -(_num(lv.get("y")) or 0.0), _num(lv.get("v")), 1.0, "car", accel,
+                lead = Lead(d, -(_num(lv.get("y")) or 0.0), _num(lv.get("v")), 1.0, road_user_kind(lv.get("k")), accel,
                             1.0 if f is None else max(0.0, min(1.0, f)), str(lv.get("id") or ""))
+        # other road users roadsense placed (camera only: approximate); they replace nothing the scene had
+        for o in vw.get("objs") or ():
+            if not isinstance(o, Mapping):
+                continue
+            x, y = _num(o.get("d")), _num(o.get("y"))
+            if x is None or y is None or x <= 0:
+                continue
+            f = _num(o.get("f"))
+            objs.append(RoadObject(road_user_kind(o.get("k")), x, -y, "", 1.0 if f is None else max(0.0, min(1.0, f)),
+                                   str(o.get("id") or ""), _num(o.get("vx")) or 0.0, -(_num(o.get("vy")) or 0.0)))
     return RoadScene(int(seq) if isinstance(seq, (int, float)) else 0,
                      xs, lanes, edges, lead, tuple(objs), path, t)
 

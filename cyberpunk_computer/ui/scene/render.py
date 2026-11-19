@@ -915,7 +915,8 @@ class SceneRenderer:
         pal = self.pal
         w = max(7.0, w)
         tall = kind in ("truck", "bus")
-        h = w * (1.45 if tall else 0.80)
+        van = kind == "van"
+        h = w * (1.45 if tall else 1.0 if van else 0.80)
         x0, x1 = cx - w / 2.0, cx + w / 2.0
         top = by - h
         tyre_h = max(1.0, h * (0.10 if tall else 0.15))
@@ -926,17 +927,24 @@ class SceneRenderer:
         for tx in (x0 + w * 0.05, x1 - w * 0.05 - tw):
             pygame.draw.rect(s, (10, 12, 16), (int(tx), int(by - tyre_h * 1.6), tw, int(tyre_h * 1.6) + 1))
             pygame.draw.rect(s, _k(pal["lane_dim"], k), (int(tx), int(by - tyre_h * 1.6), tw, int(tyre_h * 1.6) + 1), 1)
-        sh = 0.0 if tall else w * 0.13      # shoulder inset of the roof
+        sh = 0.0 if tall else w * (0.05 if van else 0.13)      # shoulder inset of the roof
         body = [(x0, by - tyre_h), (x0, by - h * 0.56), (x0 + sh, top),
                 (x1 - sh, top), (x1, by - h * 0.56), (x1, by - tyre_h)]
         polygon(s, _k(pal["veh_body"], k), body)
         if w >= 12 and not tall:
-            g0, g1 = top + h * 0.09, by - h * 0.58
+            g0, g1 = (top + h * 0.08, by - h * 0.64) if van else (top + h * 0.09, by - h * 0.58)
             glass = [(x0 + sh + w * 0.05, g0), (x1 - sh - w * 0.05, g0),
                      (x1 - w * 0.07, g1), (x0 + w * 0.07, g1)]
             polygon(s, _k(pal["veh_glass"], k), glass)
             polygon(s, _k(pal["lane_dim"], k), glass, 1)
-        elif tall and w >= 12:
+            if van:                         # the split of the two rear doors below the glass
+                pygame.draw.line(s, _k(pal["lane_dim"], k), (cx, g1 + 1), (cx, by - tyre_h - 2))
+        elif kind == "bus" and w >= 10:     # the wide rear window of a bus
+            g0, g1 = top + h * 0.08, top + h * 0.38
+            glass = [(x0 + w * 0.08, g0), (x1 - w * 0.08, g0), (x1 - w * 0.08, g1), (x0 + w * 0.08, g1)]
+            polygon(s, _k(pal["veh_glass"], k), glass)
+            polygon(s, _k(pal["lane_dim"], k), glass, 1)
+        elif tall and w >= 12:              # a truck's box: the door split
             pygame.draw.line(s, _k(pal["lane_dim"], k), (cx, top + 2), (cx, by - tyre_h - 2))
         polygon(s, _k(line, k), body, 1)
         # tail lamps
@@ -958,6 +966,86 @@ class SceneRenderer:
                              (int(cx - pw / 2), int(by - h * 0.34), pw, max(2, int(h * 0.12))), 1)
         return rect
 
+    VEHICLE_WIDTH_M = {"car": 1.8, "van": 1.95, "truck": 2.5, "bus": 2.55}
+
+    def draw_road_user(self, s: pygame.Surface, cx: float, by: float, ppm: float, line: RGB,
+                       kind: str = "car", k: float = 1.0, braking: bool = False,
+                       min_w: float = 7.0) -> pygame.Rect:
+        """A road user seen from behind, standing on ``by``, by its kind: a vehicle (car / van / truck / bus,
+        anything unknown is the car shape), a motorbike, a bicycle or a person. Returns its rectangle."""
+        if kind == "person":
+            return self._draw_person(s, cx, by, ppm, line, k)
+        if kind == "bike":
+            return self._draw_cyclist(s, cx, by, ppm, line, k)
+        if kind == "motorbike":
+            return self._draw_motorbike(s, cx, by, ppm, line, k, braking)
+        w = max(min_w, self.VEHICLE_WIDTH_M.get(kind, 1.8) * ppm)
+        return self.draw_vehicle_rear(s, cx, by, w, line, kind, k, braking)
+
+    def _draw_person(self, s: pygame.Surface, cx: float, by: float, ppm: float, line: RGB, k: float) -> pygame.Rect:
+        """A pedestrian: legs, body, arms and head as 1 px lines."""
+        hh = max(7.0, 1.75 * ppm)
+        col = _k(line, k)
+        hip, sh = by - hh * 0.48, by - hh * 0.78
+        sw = max(1.0, hh * 0.13)
+        draw = pygame.draw.line
+        draw(s, col, (cx - sw * 0.7, by), (cx, hip))
+        draw(s, col, (cx + sw * 0.7, by), (cx, hip))
+        draw(s, col, (cx, hip), (cx, sh))
+        draw(s, col, (cx - sw, hip + hh * 0.06), (cx, sh + 1))
+        draw(s, col, (cx + sw, hip + hh * 0.06), (cx, sh + 1))
+        r = max(1, int(hh * 0.09))
+        pygame.draw.circle(s, col, (int(cx), int(sh - r - 1)), r)
+        return pygame.Rect(int(cx - sw - 1), int(sh - 2 * r - 2), int(2 * sw) + 3, int(by - sh + 2 * r + 3))
+
+    def _draw_cyclist(self, s: pygame.Surface, cx: float, by: float, ppm: float, line: RGB, k: float) -> pygame.Rect:
+        """A cyclist from behind: the rear wheel as a thin upright, the handlebar, the rider over it."""
+        hh = max(8.0, 1.8 * ppm)
+        col = _k(line, k)
+        draw = pygame.draw.line
+        wheel = max(3.0, hh * 0.38)
+        tw = max(1, int(hh * 0.03))
+        pygame.draw.rect(s, col, (int(cx) - tw, int(by - wheel), 2 * tw + 1, int(wheel) + 1))
+        seat = by - hh * 0.48
+        bar_y, bar_w = by - hh * 0.62, max(2.0, hh * 0.18)
+        draw(s, col, (cx - bar_w, bar_y), (cx + bar_w, bar_y))
+        sh = by - hh * 0.82
+        draw(s, col, (cx, seat), (cx, sh))                            # back
+        draw(s, col, (cx, sh + 1), (cx - bar_w, bar_y))               # arms to the bar ends
+        draw(s, col, (cx, sh + 1), (cx + bar_w, bar_y))
+        draw(s, col, (cx - 1, seat), (cx - max(1.0, hh * 0.07), by - wheel * 0.55))   # legs either side of the wheel
+        draw(s, col, (cx + 1, seat), (cx + max(1.0, hh * 0.07), by - wheel * 0.35))
+        r = max(1, int(hh * 0.08))
+        pygame.draw.circle(s, col, (int(cx), int(sh - r - 1)), r)
+        return pygame.Rect(int(cx - bar_w - 1), int(sh - 2 * r - 2), int(2 * bar_w) + 3, int(by - sh + 2 * r + 3))
+
+    def _draw_motorbike(self, s: pygame.Surface, cx: float, by: float, ppm: float, line: RGB, k: float,
+                        braking: bool = False) -> pygame.Rect:
+        """A motorbike from behind: a fat tyre, the tail with its lamp, the rider with a helmet."""
+        pal = self.pal
+        hh = max(8.0, 1.6 * ppm)
+        col = _k(line, k)
+        draw = pygame.draw.line
+        tyre_h, tyre_w = max(2.0, hh * 0.30), max(2, int(hh * 0.08))
+        pygame.draw.rect(s, (10, 12, 16), (int(cx - tyre_w / 2), int(by - tyre_h), tyre_w + 1, int(tyre_h) + 1))
+        pygame.draw.rect(s, _k(pal["lane_dim"], k), (int(cx - tyre_w / 2), int(by - tyre_h), tyre_w + 1, int(tyre_h) + 1), 1)
+        tail_w, tail_y = max(3.0, hh * 0.22), by - hh * 0.42
+        body = [(cx - tail_w, tail_y), (cx + tail_w, tail_y), (cx + tail_w * 0.6, by - tyre_h), (cx - tail_w * 0.6, by - tyre_h)]
+        pygame.draw.polygon(s, _k(pal["veh_body"], k), body)
+        pygame.draw.polygon(s, col, body, 1)
+        lamp = _k(pal["red"] if braking else pal["tail"], k)
+        lw = max(1, int(tail_w * 0.6))
+        pygame.draw.rect(s, lamp, (int(cx - lw / 2), int(tail_y + 1), lw + 1, max(1, int(hh * 0.05))))
+        sh = by - hh * 0.80
+        bar_w = max(2.0, hh * 0.26)
+        draw(s, col, (cx - tail_w * 0.8, tail_y - 1), (cx, sh))       # the rider's back, wide at the seat
+        draw(s, col, (cx + tail_w * 0.8, tail_y - 1), (cx, sh))
+        draw(s, col, (cx, sh + 1), (cx - bar_w, by - hh * 0.58))      # arms to the bars
+        draw(s, col, (cx, sh + 1), (cx + bar_w, by - hh * 0.58))
+        r = max(1, int(hh * 0.10))
+        pygame.draw.circle(s, col, (int(cx), int(sh - r)), r)          # helmet (filled)
+        return pygame.Rect(int(cx - bar_w - 1), int(sh - 2 * r - 1), int(2 * bar_w) + 3, int(by - sh + 2 * r + 2))
+
     def gap_color(self, gap_s: Optional[float]) -> RGB:
         if gap_s is None or gap_s >= GAP_WARN_S:
             return self.pal["value"]
@@ -976,9 +1064,8 @@ class SceneRenderer:
         a = d.lead_alpha * k
         gap = d.time_gap_s(inp.real_speed_kmh)
         col = self.gap_color(gap)
-        w = max(9.0, 1.8 * ppm)
         braking = lead.accel is not None and lead.accel <= LEAD_BRAKING
-        rect = self.draw_vehicle_rear(s, cx, by, w, col, lead.kind, a, braking)
+        rect = self.draw_road_user(s, cx, by, ppm, col, lead.kind, a, braking, min_w=9.0)
         if a < 0.6:
             return
         r = rect.inflate(6, 6)
@@ -1040,16 +1127,14 @@ class SceneRenderer:
             else:
                 pygame.draw.rect(s, col, (head[0] - 1, head[1], 2, 2))
         elif o.kind in ("car", "truck", "bus", "van"):
-            self.draw_vehicle_rear(s, cx, by, max(7.0, 1.8 * ppm), pal["lane_mid"], o.kind, k)
+            self.draw_road_user(s, cx, by, ppm, pal["lane_mid"], o.kind, k * getattr(o, "alpha", 1.0))
         elif o.kind == "cone":
             hh = max(3.0, 0.8 * ppm)
             pygame.draw.polygon(s, _k(pal["orange"], k),
                                 [(cx - hh * 0.4, by), (cx + hh * 0.4, by), (cx, by - hh)])
-        elif o.kind in ("person", "bike"):
-            hh = max(5.0, 1.75 * ppm)
-            col = _k(pal["warn"], k)
-            pygame.draw.line(s, col, (cx, by), (cx, by - hh * 0.75))
-            pygame.draw.circle(s, col, (int(cx), int(by - hh * 0.86)), max(1, int(hh * 0.14)))
+        elif o.kind in ("person", "bike", "motorbike"):
+            # vulnerable road users in the warning colour
+            self.draw_road_user(s, cx, by, ppm, pal["warn"], o.kind, k * getattr(o, "alpha", 1.0))
         else:
             hh = max(3.0, 1.0 * ppm)
             pygame.draw.rect(s, _k(pal["lane_dim"], k), (int(cx - hh / 2), int(by - hh), int(hh), int(hh)), 1)

@@ -684,8 +684,22 @@ view"). The backend subscribes to `view` too; while it is fresh (0.5 s):
        "lead": {"id": "lead:12", "d": 34.2, "y": 0.3, "v": -1.2, "f": 0.6} | null,   # v: relative speed, m/s
        "light": {"id": "light:7", "state": "red", "d": 41.0, "y": 2.5,               # car frame, y right
                  "vx": -12.0, "vy": 0.0, "f": 1.0, "flashing": true, "q": true, "held": true,
-                 "alt": {"s": "green", "side": "l"}} | null}
+                 "alt": {"s": "green", "side": "l"}} | null,
+       "objs": [{"id": "ru:4", "k": "human", "d": 18.0, "y": 4.0, "vx": -8.0, "vy": 0.0, "f": 0.5}]}   # lane L42, nearest first, <= 8
 ```
+
+Road users by class (roadsense lane L42, 2026-11-19): `vw.lead.k` is roadsense's voted class of the lead
+(`human`, `bike`, `motorbike`, `car`, `van`, `truck`, `bus`, `tram`) and `vw.objs` the other road users roadsense
+could place (view objects of kind `road_user`, camera only, positions approximate: about 15 % of the distance at
+20 m, 30 % at 40 m). The backend sends `k` only while the class's confidence reaches 0.5 (0.35 for a person,
+bike or motorbike: those the detector tells from vehicles reliably); without `k` the screen draws the generic
+vehicle (the car shape, as before). The screen (`inputs.road_user_kind`, `render.draw_road_user`) draws the lead
+and the objects by kind: car, van (taller, door split), truck (tall box, door split), bus (tall, wide rear
+window; a tram is drawn as a bus), motorbike (fat tyre, tail lamp, rider), bicycle (thin wheel, rider) and person
+(stick figure), persons and two-wheelers in the warning colour; 1 px lines and flat fills (1-bit). Objects come
+and go with the view's fade (`f`), are carried by their velocity between samples like the lead, and the class
+cannot hop from frame to frame: it is a vote over the object's life in roadsense, and a change of `k` on the
+same id needs twice the evidence of the shown class there.
 
 The screen (`inputs.parse_scene`, `director._update_road_view`, `director._update_light`):
 
@@ -812,8 +826,8 @@ The event `roadsense_scene` (section 7.1) and the health mirror (`RoadsenseState
 | Scene topic | api-derived topic `scene` on `/ws` with exactly the mapping of section 7, 10 Hz: down-sampled lane/edge polylines (11 distances instead of 33), `leads[0]`, the ego light, the limit. Removes the resampling from every consumer and the 15 kB `road` message per model run from the loopback socket (the backend needs 0.6 kB of it) |
 | Road edge confidence | `road_edges[i].prob` (or the `y_std` already sent, summarised) 0..1, per model run, so a doubtful edge can be dimmed or left out like a lane line |
 | Light distance from the road | `lights.ego` `lateral_m` measured from the camera axis, or the path offset at that distance alongside it, m, 3/s (today it is the offset from the planned path) |
-| Other vehicles | `objects[]` entries `{"track_id", "kind", "x" m, "y" m, "v_rel" m/s, "prob"}` for vehicles in adjacent lanes and oncoming, 5..10 Hz. Today modeld has only the lead hypotheses |
-| Lead vehicle class and stop lamps | `lead.kind` (`car`/`van`/`truck`/`bus`/`bike`), `lead.braking` bool, 5 Hz |
+| Other vehicles | `objects[]` entries `{"track_id", "kind", "x" m, "y" m, "v_rel" m/s, "prob"}` for vehicles in adjacent lanes and oncoming, 5..10 Hz. Partly there since roadsense lane L42: `view.objects` of kind `road_user` (camera only, placed where the detector sees the ground contact: from about 19 m outwards with the light views, nearer with the optional road-user view), `vw.objs` here |
+| Lead vehicle class and stop lamps | class: done (roadsense L42, `vw.lead.k`, a vote over the track's life; `van` never comes from the present detector, which has no van class); `lead.braking` bool still wanted, 5 Hz |
 | Lane line type | per lane line `"type": "solid|dashed|double"`, 2 Hz, so dashes can be drawn and scroll (a double or solid centre line also tells that the lane beyond it is oncoming) |
 | Lane layout | `lanes: {"count": n, "ego_index": i, "oncoming_left": bool}` (or a per-lane `direction: same|oncoming|unknown`), 1..2 Hz: how many lanes the carriageway has, which one the car is in, and whether the left neighbour is oncoming. Today only four lines with probabilities exist |
 | Street lamps and roadside furniture | `objects[]` with `kind: "lamp"`, `x`, `y`, `state: "on|off"`, 2..5 Hz (the renderer draws them already; the demo feeds simulated ones). The roadside of section 6.2 is label-driven decoration until then |
@@ -823,7 +837,7 @@ The event `roadsense_scene` (section 7.1) and the health mirror (`RoadsenseState
 | Rule distance | `in_effect[].remaining_m` is sent by roadsense already; a `rules.ahead[].range_m` confidence would let the screen fade a warning that is probably passed |
 | Wet road / wipers | `env.road: "dry|wet|snow"` 0.2 Hz, to tint the road surface (weather says what falls, not what lies) |
 | Enclosed-place exit | `env.exit_in_m` for `tunnel` (portal light ahead), m, 1 Hz, so the tunnel can show its end |
-| Vulnerable road users | `objects[]` with `kind: "person" / "bike"`, 5..10 Hz |
+| Vulnerable road users | partly there (roadsense L42): persons, cyclists and motorbikes in `vw.objs` (`k` `human` / `bike` / `motorbike`) where they can be placed; near ones need the optional road-user view |
 
 ### 8.3 Map layer: the earlier proposals and what became of them
 
@@ -1043,7 +1057,7 @@ python -m cyberpunk_computer.ui.scene.demo --live --scale 3                  # t
 python -m cyberpunk_computer.ui.scene.demo --bench                           # frame cost incl. the simulation
 ```
 
-`--shots` writes `NN_name.png` (native 480 x 240) and `NN_name@4x.png` for 87 cases (86: the junction approach of 84 as the backend sends it without a navigation route, plain boxes; 87: the same with a route active (L36); 84: turn arrows in the lane boxes before a signalled junction, the car in the middle lane; 85: turn arrows with the own lane unknown and the junction marked approximate by roadsense (L22); 82: a junction on dead reckoning, drawn approximate; 83: three lanes from the map with the own lane unknown and the middle one likely (2026-11-18); 70..79: the junction view as a crossroads with signals, a T-junction, five arms, a roundabout before and on the ring, a low-confidence path that shows nothing; the traffic light with a second signal group, an ambiguous choice and a light over another lane; the two last map cases moved to 80..81): the states of
+`--shots` writes `NN_name.png` (native 480 x 240) and `NN_name@4x.png` for 94 cases (88..94, lane L42: the lead as a truck with a car and a bus in the left lane, as a bus, a van with a truck beside it, a motorbike with a cyclist at the edge, a cyclist; pedestrians at the edge and crossing with a cyclist on the left and no lead; a lead of unknown class drawn as the generic car with a van, a car and a pedestrian around it; 86: the junction approach of 84 as the backend sends it without a navigation route, plain boxes; 87: the same with a route active (L36); 84: turn arrows in the lane boxes before a signalled junction, the car in the middle lane; 85: turn arrows with the own lane unknown and the junction marked approximate by roadsense (L22); 82: a junction on dead reckoning, drawn approximate; 83: three lanes from the map with the own lane unknown and the middle one likely (2026-11-18); 70..79: the junction view as a crossroads with signals, a T-junction, five arms, a roundabout before and on the ring, a low-confidence path that shows nothing; the traffic light with a second signal group, an ambiguous choice and a light over another lane; the two last map cases moved to 80..81): the states of
 section 4, the five lamp states on the road and three parked, 18 scenery variants covering every
 place, light and weather label, four lane layouts, the top line with the speed switched back on, a full sign row, the cruise slot states, the three speed-limit provenance styles, 17 map-layer cases (55..71: next limit in the top line, at the roadside and in the `beside` variant, far road with a roundabout and switched off, three lane layouts from the map, tunnel exit in metres, kilometres and with the mouth in view, dead reckoning, a poor position, the road-number variants, synthetic position = no map) and `signs_legend`
 with every pictogram. Shots 1..51 are byte-identical to the set before the map layer. `--copy-to` also writes the 4x images there as `<prefix>NN_name.png`

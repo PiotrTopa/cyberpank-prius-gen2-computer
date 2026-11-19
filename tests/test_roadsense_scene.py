@@ -951,3 +951,29 @@ def test_scene_is_built_per_view_message_with_its_own_frame():
     assert sc["path"]["y"][0] == 0.0
     assert b.decode_errors == 0
     assert b.build(10.05) is None                               # nothing new
+
+
+def test_view_road_users_go_out_with_their_class():
+    """Lane L42: the lead's voted class as `k` (only with confidence >= 0.5, 0.35 for a person / bike / motorbike:
+    below, the screen draws the generic vehicle), the other road users roadsense placed as `objs` (nearest
+    first), unknown class = no `k`."""
+    m = view_msg(5, 123_456_789_000)
+    m["objects"][0]["cls"] = {"label": "truck", "confidence": 0.82, "source": "roadusers"}
+    m["objects"] += [
+        {"id": "ru:4", "kind": "road_user", "role": "other", "x": 30.0, "y": -3.4, "vx": -2.0, "vy": 0.1,
+         "alpha": 0.5, "cls": {"label": "bus", "confidence": 0.7, "source": "roadusers"}},
+        {"id": "ru:2", "kind": "road_user", "role": "other", "x": 18.0, "y": 4.0, "vx": -8.0, "vy": 0.0,
+         "alpha": 1.0, "cls": {"label": "human", "confidence": 0.9, "source": "roadusers"}},
+        {"id": "ru:9", "kind": "road_user", "role": "other", "x": 40.0, "y": 3.0, "alpha": 1.0,
+         "cls": {"label": "car", "confidence": 0.3, "source": "roadusers"}}]
+    vw = view_to_scene(m)
+    assert vw["lead"]["k"] == "truck"
+    assert [o["id"] for o in vw["objs"]] == ["ru:2", "ru:4", "ru:9"]
+    assert vw["objs"][0] == {"id": "ru:2", "d": 18.0, "y": 4.0, "vx": -8.0, "vy": 0.0, "k": "human"}
+    assert vw["objs"][1]["f"] == 0.5 and vw["objs"][1]["k"] == "bus"
+    assert "k" not in vw["objs"][2]                                  # confidence 0.3: unknown
+    m["objects"][0]["cls"] = {"label": "truck", "confidence": 0.4, "source": "roadusers"}
+    assert "k" not in view_to_scene(m)["lead"]
+    assert "objs" not in view_to_scene(view_msg(5, 1))              # no road users: no key
+    m["objects"][0]["cls"] = {"label": "human", "confidence": 0.4, "source": "roadusers"}
+    assert view_to_scene(m)["lead"]["k"] == "human"

@@ -15,7 +15,8 @@ street lamps, red traffic light, stop, scene closes. ``state_at`` /
 (tail / head / high / fog), ``cruise`` (VehicleState cruise fields), ``lanes``
 ("1", "2L", "2R", "3M": lane layout), ``tuning`` (overrides of ui/scene/tuning.py),
 ``lead`` (False = none), ``objects`` (False = none), ``straight``, ``light``
-(the scene's ``light`` block).
+(the scene's ``light`` block), ``lead_kind`` (the lead's road-user class) and ``road_users`` (other road users:
+(kind, x, y right) placed on the road, lane L42).
 
 Vehicle values go through the real state fields; the road arrives the way the
 backend is expected to send it: ``roadsense_scene`` events into a SceneFeed.
@@ -102,6 +103,8 @@ def scene_at(t: float, seq: int, mods: Optional[Dict[str, Any]] = None) -> Optio
                 "v_rel": v_rel, "prob": 0.95, "a": -2.4 if 30.0 <= t < 36.0 else 0.1}
     if mods.get("lead") is False:
         lead = None
+    if lead is not None and "lead_kind" in mods:
+        lead["kind"] = mods["lead_kind"]          # roadsense's road-user class of the lead (lane L42)
     objects: List[Dict[str, Any]] = []
     if 19.0 < t < 36.0:
         # street lamps every 30 m on the right, anchored to the road
@@ -114,6 +117,8 @@ def scene_at(t: float, seq: int, mods: Optional[Dict[str, Any]] = None) -> Optio
                                 "y": round(4.2 - (wander + 0.5 * kappa * x * x), 2), "state": "on"})
     if mods.get("objects") is False:
         objects = []
+    for o in mods.get("road_users") or ():        # other road users roadsense placed (lane L42), y right
+        objects.append({"kind": o[0], "x": o[1], "y": round(o[2] - (wander + 0.5 * kappa * o[1] * o[1]), 2)})
     reach = min(100.0, 25.0 + speed_at(t) / 3.6 * 6.0)       # the plan covers ~6 s
     path = {"y": [round(-(wander * (1 - x / 100.0) + 0.5 * kappa * x * x), 2)
                   for x in xs if x <= reach]}
@@ -556,6 +561,28 @@ SHOTS = (
      "the same with a route active (a future navigation feed: view.road.route.active): the painted arrows",
      dict(_MAP_ROAD, lanes="1", map=_map_drive(next_m=None, bend=0.0, view_lanes=_VIEW_LANES_TURN,
                                                route={"active": True}))),
+    # ── lane L42: road users by class (roadsense's voted class; unknown = the generic car shape) ──
+    ("road_users_lead_truck", 19.5, "live", None,
+     "the lead is a truck; a car in the left lane, a bus further on",
+     {"lead_kind": "truck", "road_users": (("car", 32.0, -3.5), ("bus", 55.0, -3.6)), "straight": True,
+      "objects": False, "light": None}),
+    ("road_users_lead_bus", 19.5, "live", None, "the lead is a bus",
+     {"lead_kind": "bus", "straight": True, "objects": False, "light": None}),
+    ("road_users_lead_van", 19.5, "live", None, "the lead is a van; a truck in the left lane",
+     {"lead_kind": "van", "road_users": (("truck", 40.0, -3.5),), "straight": True, "objects": False, "light": None}),
+    ("road_users_lead_motorbike", 19.5, "live", None, "the lead is a motorbike; a cyclist at the right edge",
+     {"lead_kind": "motorbike", "road_users": (("bike", 12.0, 3.0),), "straight": True, "objects": False,
+      "light": None}),
+    ("road_users_lead_bike", 19.5, "live", None, "the lead is a cyclist",
+     {"lead_kind": "bike", "straight": True, "objects": False, "light": None}),
+    ("road_users_pedestrians", 19.5, "live", None,
+     "no lead; pedestrians at the right edge and one crossing ahead, a cyclist on the left",
+     {"lead": False, "road_users": (("person", 16.0, 3.4), ("person", 18.5, 3.9), ("person", 26.0, 0.8),
+                                    ("bike", 22.0, -2.8)), "straight": True, "objects": False, "light": None}),
+    ("road_users_unknown_lead_traffic", 19.5, "live", None,
+     "lead class unknown (generic car shape); a van and a car in the left lane, a pedestrian on the right",
+     {"road_users": (("van", 21.0, -3.5), ("car", 38.0, -3.4), ("person", 14.0, 3.6)), "straight": True,
+      "objects": False, "light": None}),
 )
 
 

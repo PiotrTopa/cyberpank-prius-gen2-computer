@@ -921,13 +921,34 @@ def _line_to_scene(xs: Any, ln: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return res
 
 
+ROAD_USER_MIN_CONF = 0.5      # a vehicle class below this confidence is drawn as the generic vehicle
+ROAD_USER_MIN_CONF_VRU = 0.35  # person / bike / motorbike: the detector tells them from vehicles reliably (L42)
+ROAD_USER_VRU = ("human", "bike", "motorbike")
+ROAD_USER_MAX = 8
+
+
+def _road_user_kind(cls: Any) -> Optional[str]:
+    """roadsense's voted class label, or None (unknown: the generic vehicle) below the confidence it needs."""
+    if not isinstance(cls, dict) or not isinstance(cls.get("label"), str):
+        return None
+    c = _num(cls.get("confidence"))
+    need = ROAD_USER_MIN_CONF_VRU if cls["label"] in ROAD_USER_VRU else ROAD_USER_MIN_CONF
+    if c is not None and c < need:
+        return None
+    return cls["label"]
+
+
 def view_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """roadsense ``view`` topic (2.0 display channel) -> scene ``vw``: what the screen draws.
 
     t      the frame time of the view message in ms (roadsense CLOCK_MONOTONIC): the screen spaces the samples
            by it, so the transport's jitter (WebSocket, publish cap, ZMQ poll, Wi-Fi) does not move the picture
     lanes  4 x {"y", "f"} (lane:0..3, f = fade 0..1, only while < 1) or null; edges 2 x the same; path {"y"}
-    lead   {"id", "d", "y", "v" (relative speed m/s, the screen extrapolates with it), "f"} or null
+    lead   {"id", "d", "y", "v" (relative speed m/s, the screen extrapolates with it), "f", "k" (what kind of road
+           user: roadsense's voted class label, only while its confidence reaches ROAD_USER_MIN_CONF, 0.35 for
+           a person / bike / motorbike)} or null
+    objs   other road users roadsense could place (view objects of kind "road_user"): [{"id", "k" (class label or
+           absent = unknown), "d", "y" (car frame, y right), "vx", "vy", "f"}], nearest first, at most 8
     light  the ego light: {"id", "state", "d", "y" (car frame, y right), "vx", "vy", "f", "flashing", "q",
            "held", "alt"} or null
     """
@@ -965,7 +986,19 @@ def view_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                                   "v": round(_num(o.get("vx")) or 0.0, 2)}
             if f is not None and f < 1.0:
                 ld["f"] = round(f, 2)
+            k = _road_user_kind(o.get("cls"))
+            if k:
+                ld["k"] = k
             out["lead"] = ld
+        elif o.get("kind") == "road_user":
+            ru: Dict[str, Any] = {"id": o.get("id"), "d": round(x, 1), "y": round(y, 2),
+                                  "vx": round(_num(o.get("vx")) or 0.0, 1), "vy": round(_num(o.get("vy")) or 0.0, 1)}
+            k = _road_user_kind(o.get("cls"))
+            if k:
+                ru["k"] = k
+            if f is not None and f < 1.0:
+                ru["f"] = round(f, 2)
+            out.setdefault("objs", []).append(ru)
         elif o.get("role") == "ego" and o.get("kind") == "traffic_light" and out["light"] is None:
             at = o.get("attrs") if isinstance(o.get("attrs"), dict) else {}
             st = at.get("ego_state") or at.get("state")
@@ -986,6 +1019,8 @@ def view_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 side = alt.get("side")
                 lt["alt"] = {"s": alt["state"], "side": side[:1] if isinstance(side, str) and side else ""}
             out["light"] = lt
+    if out.get("objs"):
+        out["objs"] = sorted(out["objs"], key=lambda r: r["d"])[:ROAD_USER_MAX]
     return out
 
 
