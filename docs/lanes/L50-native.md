@@ -36,6 +36,7 @@ pinned phone.
 
 ## Not verified
 
-The phone numbers above are L48-B's (bench, before its fix was deployed) and its estimates for the car. The
-backend after the pacing fix was not re-measured in this lane: see the roadsense report for the state of the
-phone at the lane's end. The car's frame path can only be measured in the car.
+The per-loop numbers above are L48-B's (bench, before its fix was deployed) and its estimates for the car.
+Lane L49 deployed the pacing fix the same day and measured the backend at 28-29 % of its core on the bench (CAN
+reader about 6 %, scene feed about 6 %); this lane did not measure the backend again. The car's frame path can
+only be measured in the car.
