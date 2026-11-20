@@ -3,7 +3,11 @@ roadsense front: the backend re-publishes the roadsense perception API.
 
 Single-computer layout: the roadsense stack (github.com/PiotrTopa/roadsense,
 MIT, plus the AGPL sign provider roadsense-signs) runs on this same phone with
-its API bound to loopback (``ROADSENSE_API_HOST=127.0.0.1``, port 8090). Clients
+its API bound to loopback (``ROADSENSE_API_HOST=127.0.0.1``, port 8090). Since
+lane L44 (2026-11-20) port 8090 is chris-integrator's consolidated API (same
+paths, topics and shapes; ``/v2/`` beside ``/v1/``; it forwards ``/preview``
+and ``frame.jpg`` to roadsense's debug face on 8091), so one upstream serves
+everything this front publishes. Clients
 (dashboard, MFD, phone apps) read roadsense through the backend instead:
 
     GET /api/v1/roadsense                     index: upstream URL + endpoint list
@@ -16,8 +20,8 @@ its API bound to loopback (``ROADSENSE_API_HOST=127.0.0.1``, port 8090). Clients
 
 The roadsense status page (its ``GET /``) is published for browsers under
 ``/roadsense/`` with the upstream layout kept (``/roadsense/v1/<name>``,
-``/roadsense/preview``, ``/roadsense/ws``); its absolute links are rewritten
-to that prefix. Both fronts sit behind the backend's login (api.auth), so a
+``/roadsense/preview``, ``/roadsense/ws``; chris-integrator's page polls
+``/roadsense/v2/<name>``); its absolute links are rewritten to that prefix. Both fronts sit behind the backend's login (api.auth), so a
 phone browser reaches roadsense through 8080 with one session while 8090
 stays firewalled.
 
@@ -57,6 +61,19 @@ JSON_ENDPOINTS: Dict[str, str] = {
     "camera": "/v1/camera",
     "map": "/v1/map",
     "fused": "/v1/fused",
+    # chris-integrator's consolidated topics (lane L44; an older roadsense answers 404 / 503 for these)
+    "lead": "/v1/lead",
+    "lanes": "/v1/lanes",
+    "view": "/v1/view",
+    "ego_state": "/v1/ego_state",
+    "tracks": "/v1/tracks",
+    "calib": "/v1/calib",
+    "gnss": "/v1/gnss",
+    "vehicle": "/v1/vehicle",
+    "roadgeom": "/v1/roadgeom",
+    "governor": "/v1/governor",
+    "mixer": "/v1/mixer",
+    "version": "/v1/version",
 }
 # Query parameters passed through per endpoint (everything else is dropped).
 ALLOWED_QUERY: Dict[str, Tuple[str, ...]] = {
@@ -66,11 +83,12 @@ FRAME_PATH = "/v1/frame.jpg"
 PREVIEW_PATH = "/preview"
 WS_PATH = "/ws"
 WS_TOPICS = ("road", "signs", "env", "speed_limit", "rules", "lights", "camera", "calib",
-             "map", "fused")
+             "map", "fused", "lead", "lanes", "view", "ego_state", "tracks", "gnss", "vehicle",
+             "governor", "road_users")
 INDEX_PATH = "/"
 # Absolute references in the roadsense status page ("/v1/...", "/preview",
 # "/ws" inside quotes, backticks or url(...)) -> moved under the UI prefix.
-_UI_REF = re.compile(r"""(?<=["'`(])/(v1/|preview\b|ws\b)""")
+_UI_REF = re.compile(r"""(?<=["'`(])/(v1/|v2/|preview\b|ws\b)""")
 
 
 class RoadsenseUnavailable(Exception):
@@ -354,6 +372,11 @@ def register(app, cfg: ProxyConfig, prefix: str, require_auth, ws_authorized,
                       dependencies=auth, include_in_schema=False)
     app.add_api_websocket_route(ui_prefix + "/ws", rs_ws)
     app.add_api_route(ui_prefix + "/v1/{name:path}", rs_json, methods=["GET"],
+                      dependencies=auth, include_in_schema=False)
+    # chris-integrator's status page polls /v2/... (the same handlers as /v1/ there; the whitelist is by name)
+    app.add_api_route(ui_prefix + "/v2/frame.jpg", rs_frame, methods=["GET"],
+                      dependencies=auth, include_in_schema=False)
+    app.add_api_route(ui_prefix + "/v2/{name:path}", rs_json, methods=["GET"],
                       dependencies=auth, include_in_schema=False)
 
 

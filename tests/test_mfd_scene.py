@@ -1667,3 +1667,128 @@ def test_roadsense_trust_is_adopted_not_judged_twice():
     jv = {"k": "j", "m": 150, "c": 0.9, "arms": [[0, "xep", 0, 0], [90, "xe", 1, 0]]}
     assert map_director(_map_full(jv=jv, conf=0.45, tr=True), seconds=1.0)[0].map.junction is not None
     assert map_director(_map_full(jv=jv, conf=0.45), seconds=1.0)[0].map.junction is None
+
+
+# ── lane L42: road users by class ────────────────────────────────────────────
+
+def test_lead_and_road_users_are_drawn_by_class():
+    from cyberpunk_computer.ui.scene.inputs import road_user_kind
+    assert [road_user_kind(k) for k in ("human", "bike", "motorbike", "car", "van", "truck", "bus", "tram", None, "sofa")] == \
+        ["person", "bike", "motorbike", "car", "van", "truck", "bus", "bus", "car", "car"]
+    sc = vw_scene(1, 1000, lead={"id": "lead:1", "d": 20.0, "y": 0.0, "v": 0.0, "k": "bus"})
+    sc["vw"]["objs"] = [{"id": "ru:1", "d": 15.0, "y": 3.5, "vx": 0.0, "vy": 0.0, "k": "human", "f": 0.4},
+                        {"id": "ru:2", "d": 30.0, "y": -3.5, "vx": -5.0, "vy": 0.0}]
+    road = parse_scene(sc)
+    assert road.lead.kind == "bus"
+    assert [(o.kind, o.y, o.alpha, o.oid) for o in road.objects] == [("person", -3.5, 0.4, "ru:1"), ("car", 3.5, 1.0, "ru:2")]
+    assert parse_scene(vw_scene(1, 1000, lead={"id": "lead:1", "d": 20.0, "y": 0.0, "v": 0.0})).lead.kind == "car"
+
+
+def test_every_road_user_shape_renders_as_lead_and_as_object():
+    from cyberpunk_computer.ui.scene.render import SceneRenderer
+    r = SceneRenderer((238, 216))
+    s = pygame.Surface((238, 216))
+    for kind in ("person", "bike", "motorbike", "car", "van", "truck", "bus"):
+        for ppm in (2.0, 8.0, 30.0):
+            s.fill((0, 0, 0))
+            rect = r.draw_road_user(s, 119, 150, ppm, (0, 200, 220), kind, 1.0)
+            assert rect.width > 0 and rect.height > 0
+            s.set_colorkey((0, 0, 0))
+            assert pygame.mask.from_surface(s).count() >= 6, (kind, ppm)
+            s.set_colorkey(None)
+    d = SceneDirector()
+    drive = SceneInputs(speed_kmh=30, real_speed_kmh=30, gear="D", ready=True, rs_state="running", rs_ok=True)
+    for k, kind in enumerate(("truck", "bike", "person", "motorbike", "van")):
+        sc = vw_scene(k + 1, 1000 + 100 * k, lead={"id": "lead:1", "d": 12.0, "y": 0.0, "v": 0.0, "k": {"person": "human"}.get(kind, kind)})
+        sc["vw"]["objs"] = [{"id": "ru:1", "d": 25.0, "y": 3.0, "vx": 0.0, "vy": 0.0, "k": "bike"}]
+        inp = drive._replace(road=parse_scene(sc))
+        step(d, inp, 0.5)
+        assert d.lead.kind == kind
+        r.render(d, inp, 10.0 + k)
+
+
+def test_road_users_are_carried_and_redraw_the_standing_scene():
+    """A road user of the display channel moves with its velocity between samples (no stepping at the sample
+    rate) and, with the car standing, its movement redraws the picture."""
+    from cyberpunk_computer.ui.scene.render import SceneRenderer
+    r = SceneRenderer((238, 216))
+    d = SceneDirector()
+    drive = SceneInputs(speed_kmh=30, real_speed_kmh=30, gear="D", ready=True, rs_state="running", rs_ok=True,
+                        road=parse_scene(vw_scene(1, 1000)))
+    step(d, drive, 2.0)
+    stand = drive._replace(speed_kmh=0.0, real_speed_kmh=0.0)
+    step(d, stand, 1.0)
+    xs, t, n0 = [], 50.0, None
+    for k in range(20):                                   # a pedestrian walking away at 1.5 m/s, samples at 5 Hz
+        sc = vw_scene(10 + k, 2000 + 200 * k)
+        sc["vw"]["objs"] = [{"id": "ru:3", "d": 10.0 + 0.3 * k, "y": 3.0, "vx": 1.5, "vy": 0.0, "k": "human"}]
+        inp = stand._replace(road=parse_scene(sc))
+        for _ in range(4):
+            d.update(inp, 0.05)
+            t += 0.05
+            r.render(d, inp, t)
+            xs.append(d.objects[0].x)
+        if n0 is None:
+            n0 = r.redraws
+    steps = [b - a for a, b in zip(xs[8:], xs[9:])]       # after the clock offset has settled (two samples)
+    assert max(steps) < 0.2 and min(steps) > -0.05       # smooth: no 0.3 m jump at a sample
+    assert r.redraws - n0 >= 15
+    assert d.objects[0].kind == "person"
+
+
+# ── lane L44: chris-integrator's "not known" on the glass ────────────────────────────────────────────────────
+
+def test_camera_not_believable_draws_no_road_and_says_so():
+    """vis.ok false: nothing measured is drawn (lines, lead, road users, path), the director is in `doubt`, the
+    renderer shows the steady CAMERA UNSURE chip; back to live when the camera is believable again."""
+    from cyberpunk_computer.ui.scene.render import SceneRenderer
+    lead = {"id": "lead:1", "d": 20.0, "y": 0.0, "v": 0.0}
+    bad = vw_scene(1, 1000, lead=lead)
+    bad["vis"] = {"ok": False, "why": "vision: fault: model_out_of_range"}
+    road = parse_scene(bad)
+    assert road.vis_ok is False and road.vis_why.startswith("vision: fault")
+    assert road.lead is None and not any(road.lanes) and road.objects == () and road.path is None
+    d = SceneDirector()
+    drive = SceneInputs(speed_kmh=50, real_speed_kmh=50, gear="D", ready=True, rs_state="running", rs_ok=True,
+                        road=road)
+    step(d, drive, 2.0)
+    assert d.vision == "doubt" and d.lead is None and not any(d.lanes) and d.objects == ()
+    r = SceneRenderer((238, 216))
+    tags = []
+    orig = r._chip
+    r._chip = lambda s, x, y, label, color, filled=False: (tags.append(label), orig(s, x, y, label, color, filled))[1]
+    r.render(d, drive, 2.0)
+    assert "CAMERA UNSURE" in tags
+    good = vw_scene(2, 1100, lead=lead)
+    good["vis"] = {"ok": True}
+    step(d, drive._replace(road=parse_scene(good)), 1.0)
+    assert d.vision == "live" and d.lead is not None
+
+
+def test_unknown_lead_is_marked_and_not_drawn():
+    from cyberpunk_computer.ui.scene.render import SceneRenderer
+    sc = vw_scene(1, 1000, lead={"id": "lead:1", "d": 20.0, "y": 0.0, "v": 0.0})
+    sc["lead_unknown"] = True
+    road = parse_scene(sc)
+    assert road.lead_unknown and road.lead is None and any(road.lanes)
+    d = SceneDirector()
+    drive = SceneInputs(speed_kmh=50, real_speed_kmh=50, gear="D", ready=True, rs_state="running", rs_ok=True,
+                        road=road)
+    step(d, drive, 2.0)
+    assert d.vision == "live" and d.lead_unknown and d.lead is None and any(ln is not None for ln in d.lanes)
+    r = SceneRenderer((238, 216))
+    tags = []
+    orig = r._chip
+    r._chip = lambda s, x, y, label, color, filled=False: (tags.append(label), orig(s, x, y, label, color, filled))[1]
+    r.render(d, drive, 2.0)
+    assert "LEAD ?" in tags and "CAMERA UNSURE" not in tags
+
+
+def test_old_roadsense_scene_has_no_marks():
+    """The scene of an older roadsense (no vis, no lead_unknown) reads exactly as before L44."""
+    road = parse_scene(vw_scene(1, 1000, lead={"id": "lead:1", "d": 20.0, "y": 0.0, "v": 0.0}))
+    assert road.vis_ok and not road.lead_unknown and road.lead is not None
+    d = SceneDirector()
+    step(d, SceneInputs(speed_kmh=50, real_speed_kmh=50, gear="D", ready=True, rs_state="running", rs_ok=True,
+                        road=road), 1.0)
+    assert d.vision == "live" and not d.lead_unknown

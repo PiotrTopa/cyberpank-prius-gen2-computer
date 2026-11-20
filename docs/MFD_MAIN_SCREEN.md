@@ -151,6 +151,8 @@ striped sun and the skylines are 80s arcade; the depth scale is logarithmic (sec
 | Driving, signal lost | road data was live and is now older than 7 s | floor grid only, `NO SIGNAL` blinking |
 | Driving, no road data | roadsense running, no scene data received yet (stack starting, scene feed off) | floor grid only, `NO ROAD DATA` (steady, dim); limit sign and traffic light from the health mirror still show |
 | Driving, vision off | roadsense not running | floor grid only (a floor line runs under the car: never a fake lane), `VISION OFF` |
+| Driving, camera not believable (lane L44) | fresh scene data, but chris-integrator holds the camera not believable (scene `vis.ok` false: `view.integrity` / `lanes.valid` false, held 5 s) | floor grid only: no lanes, no lead, no road users, no path, no traffic light (an empty road would look like a clear road); `CAMERA UNSURE` chip, steady, in the quieter amber (`orange`), no blinking. The integrator's reason (`vis.why`) is not drawn (logs, the alert inputs) |
+| Driving, lead unknown (lane L44) | road live and the camera fine, but the lead is not known (`lead_unknown`: the lead topic said `valid: false`, held 5 s, or aged out while road frames still come) | lanes as usual, no vehicle; `LEAD ?` chip, steady, dim. Not the same as "no lead" (no chip) |
 | Closing | standing and in P, power off, or a door open | the swing in reverse |
 
 Rules that hold in every state: nothing is drawn for data that is not there (no lead in the scene
@@ -499,7 +501,9 @@ not changing, on the frontend clock.
  "signs": {"on":    [{"id": "no_stopping", "s": "B-36", "v": 20, "side": "l|r", "q": true}],   # <= 6
            "ahead": [{"id": "roundabout_ahead", "s": "A-8", "m": 60}]},                         # <= 3
  "env": {"light": "day|dusk_dawn|night", "place": "...", "weather": "..."},
- "map": {"ok": true, "state": "good", "conf": 0.97, ...}}     # roadsense map layer + fusion, section 7.2
+ "map": {"ok": true, "state": "good", "conf": 0.97, ...},    # roadsense map layer + fusion, section 7.2
+ "vis": {"ok": false, "why": "vision: fault: ..."},          # chris-integrator: is the camera believable (7.6)
+ "lead_unknown": true}                                        # the lead is not known (not "no lead"; 7.6)
 ```
 
 Units and frame as roadsense: metres, x forward, **y right** (the frontend flips it), origin at the
@@ -511,8 +515,9 @@ Every key is optional; a missing key means "not known" and nothing is drawn for 
 
 ### 7.1 Backend feed (`cyberpunk_computer/backend/roadsense_scene.py`)
 
-The backend reads roadsense's WebSocket `ws://127.0.0.1:8090/ws?topics=road,lights,speed_limit,env,rules,fused,map,lead,lanes,view`
-(roadsense's own API on loopback, not the backend's `/api/v1/roadsense/ws` front) with a stdlib
+The backend reads the consolidated WebSocket `ws://127.0.0.1:8090/ws?topics=road,lights,speed_limit,env,rules,fused,map,lead,lanes,view`
+(since lane L44 chris-integrator's API, before it roadsense's own; same paths, topics and shapes; on
+loopback, not the backend's `/api/v1/roadsense/ws` front) with a stdlib
 RFC 6455 client in its own thread and publishes `roadsense_scene` on the ZMQ PUB channel only (not
 on the dashboard websocket, whose latest-only queue would let scenes displace state snapshots),
 through a latest-only slot per event name (`ZmqServer.enqueue_latest_event`, compact JSON).
@@ -528,7 +533,7 @@ through a latest-only slot per event name (`ZmqServer.enqueue_latest_event`, com
 | `lead` (tracked) | roadsense's api-derived topic `lead` (lead tracker, roadsense since 2026-11-15; one message per road frame) while its last message is younger than 0.5 s: `d` = `dist_m`, `y` = `lateral_m`, `v_rel` = `v_rel_mps`, `a` = `a_lead_mps2`, `prob`, `src: "tracked"`; only when set: `standing`, `departed` (true), `gap` = `time_gap_s`, `d_std` = `dist_std_m`, `ttc` = `ttc_s`, `id` = `track_id` | 0.1 m / 0.01 m / 0.1 m/s / 0.1 m/s2 / 0.01; `lead` is **null** when `present` is false (the tracker has no lead), not the raw value; `prob` is left out while the tracker coasts without a frame (the screen then takes 1). In a hold (`standing`) `d` is frozen by the tracker: the 2-3 m flip of the raw value behind a standing car is gone. `v_rel` is the rate of change of the tracked distance with the car's own speed (vehicle motion through mapd's `ego`, else the model's) |
 | `lead_src` | `"tracked"` while the tracked lead is used | left out on the raw path below; the alert functions read it to know that a null `lead` means "no lead" |
 | `lead_departed` | `lead.departed` while `present` is false | true only then: the lead pulled away and was lost while the car stood; the cue outlives the track (up to 8 s in roadsense). For the alerts' lead departure |
-| `lead.d`, `lead.y` (raw, fallback) | `road.leads[0].x[0]`, `.y[0]` (the "now" hypothesis; m from the camera, y right), only while no fresh `lead` message exists (an older roadsense, or its tracker stalled) | 0.1 m / 0.01 m |
+| `lead.d`, `lead.y` (raw, fallback) | `road.leads[0].x[0]`, `.y[0]` (the "now" hypothesis; m from the camera, y right), only from a roadsense that never sent a `lead` message on this connection (since L44 a stalled or invalid tracker gives `lead_unknown`, never the raw value; section 7.6) | 0.1 m / 0.01 m |
 | `lead.v_rel` (raw) | `road.leads[0].v[0] - road.v_ego` (else `- road.pose.vx`) | 0.1 m/s; both are the model's own estimates, so the car's speed is not mixed in |
 | `lead.a` (raw) | `road.leads[0].a[0]` | 0.1 m/s2, the model's estimate; the screen lights the lead's stop lamps at -1.5 or below |
 | `lead.prob` (raw) | `road.leads[0].prob` | 0.01; `lead` is null below 0.3 (the screen draws from 0.5) |
@@ -575,6 +580,32 @@ Budget, measured on the recorded roadsense messages of `tests/fixtures/roadsense
 
 The frontend client does not log `roadsense_scene` events (formatting one costs more than decoding
 it on the Pi).
+
+### 7.6 What is not known (lane L44, chris-integrator)
+
+chris-integrator states per frame whether the camera is believable (`view.integrity.valid`, validity of the
+vision source) and per product whether it is valid (`lead.valid`, `lanes.valid`, with a `reason`). The backend
+(`SceneBuilder.build`) turns that into two scene keys and never shows a raw camera value in their place:
+
+| Scene key | When | Effect in the scene |
+|---|---|---|
+| `vis: {"ok": false, "why"}` | the frame's `view.integrity.valid` is false, or a `lanes` message said `valid: false` within `invalid_hold_s` (5 s) | `lanes`, `edges` null, no `path`, `lead` null with `lead_unknown`; in `vw` no lines, no path, no lead, no road users |
+| `vis: {"ok": true}` | the integrator says the camera is fine | nothing else changes |
+| `vis` absent | an older roadsense (no `integrity`, no `valid`) | everything as before L44 |
+| `lead_unknown: true` | `vis.ok` false, or the last `lead` message said `valid: false` within 5 s, or the `lead` topic (seen on this connection) aged out | `lead` null and no `lead_departed` cue (a lead that went invalid has no known departure); `lead_src` stays `"tracked"` |
+| (lanes aged out) | the `lanes` topic was seen on this connection and is older than 0.5 s | `lanes`, `edges` null (never the raw lines); a malformed `lanes` message alone is ignored |
+
+`lead.srcs` carries the integrator's `lead.sources[]` (the sensors behind the lead); nothing in this repository
+string-matches `lead.source`. The fused copy `map.lead` carries `valid: false` when the integrator's lead is not
+valid. The alert inputs (`alerts/inputs.py` `_scene_lead`) return `lead_unknown` instead of "no lead" and take no
+fallback (fused copy, raw value) while `vis.ok` is false; the green-light helper does not count an unknown lead as
+a clear road. The screen: section 4 (`CAMERA UNSURE`, `LEAD ?`).
+
+Measured on the recordings of 2026-11-19 through chris-integrator (L43 at 424ef8e) and this backend
+(`tools/mfd_chain_replay.py --glass`, docs/lanes/L44-chris-repoint.md): on the incident drive 151146 the camera is
+held not believable from 206 s to the end (99.3 % of the driving), where the glass showed a phantom lead at about
+5 m before; on the good drive 104128 `CAMERA UNSURE` shows in 6.1 % of the driving, 14 times in 38 min (the
+integrator's false camera faults, L41 section 0, lengthened by the 5 s hold).
 
 ### 7.2 Map layer key `map` (`roadsense_scene.fused_to_scene`, `map_input_to_scene`)
 
@@ -684,8 +715,22 @@ view"). The backend subscribes to `view` too; while it is fresh (0.5 s):
        "lead": {"id": "lead:12", "d": 34.2, "y": 0.3, "v": -1.2, "f": 0.6} | null,   # v: relative speed, m/s
        "light": {"id": "light:7", "state": "red", "d": 41.0, "y": 2.5,               # car frame, y right
                  "vx": -12.0, "vy": 0.0, "f": 1.0, "flashing": true, "q": true, "held": true,
-                 "alt": {"s": "green", "side": "l"}} | null}
+                 "alt": {"s": "green", "side": "l"}} | null,
+       "objs": [{"id": "ru:4", "k": "human", "d": 18.0, "y": 4.0, "vx": -8.0, "vy": 0.0, "f": 0.5}]}   # lane L42, nearest first, <= 8
 ```
+
+Road users by class (roadsense lane L42, 2026-11-19): `vw.lead.k` is roadsense's voted class of the lead
+(`human`, `bike`, `motorbike`, `car`, `van`, `truck`, `bus`, `tram`) and `vw.objs` the other road users roadsense
+could place (view objects of kind `road_user`, camera only, positions approximate: about 15 % of the distance at
+20 m, 30 % at 40 m). The backend sends `k` only while the class's confidence reaches 0.5 (0.35 for a person,
+bike or motorbike: those the detector tells from vehicles reliably); without `k` the screen draws the generic
+vehicle (the car shape, as before). The screen (`inputs.road_user_kind`, `render.draw_road_user`) draws the lead
+and the objects by kind: car, van (taller, door split), truck (tall box, door split), bus (tall, wide rear
+window; a tram is drawn as a bus), motorbike (fat tyre, tail lamp, rider), bicycle (thin wheel, rider) and person
+(stick figure), persons and two-wheelers in the warning colour; 1 px lines and flat fills (1-bit). Objects come
+and go with the view's fade (`f`), are carried by their velocity between samples like the lead, and the class
+cannot hop from frame to frame: it is a vote over the object's life in roadsense, and a change of `k` on the
+same id needs twice the evidence of the shown class there.
 
 The screen (`inputs.parse_scene`, `director._update_road_view`, `director._update_light`):
 
@@ -812,8 +857,8 @@ The event `roadsense_scene` (section 7.1) and the health mirror (`RoadsenseState
 | Scene topic | api-derived topic `scene` on `/ws` with exactly the mapping of section 7, 10 Hz: down-sampled lane/edge polylines (11 distances instead of 33), `leads[0]`, the ego light, the limit. Removes the resampling from every consumer and the 15 kB `road` message per model run from the loopback socket (the backend needs 0.6 kB of it) |
 | Road edge confidence | `road_edges[i].prob` (or the `y_std` already sent, summarised) 0..1, per model run, so a doubtful edge can be dimmed or left out like a lane line |
 | Light distance from the road | `lights.ego` `lateral_m` measured from the camera axis, or the path offset at that distance alongside it, m, 3/s (today it is the offset from the planned path) |
-| Other vehicles | `objects[]` entries `{"track_id", "kind", "x" m, "y" m, "v_rel" m/s, "prob"}` for vehicles in adjacent lanes and oncoming, 5..10 Hz. Today modeld has only the lead hypotheses |
-| Lead vehicle class and stop lamps | `lead.kind` (`car`/`van`/`truck`/`bus`/`bike`), `lead.braking` bool, 5 Hz |
+| Other vehicles | `objects[]` entries `{"track_id", "kind", "x" m, "y" m, "v_rel" m/s, "prob"}` for vehicles in adjacent lanes and oncoming, 5..10 Hz. Partly there since roadsense lane L42: `view.objects` of kind `road_user` (camera only, placed where the detector sees the ground contact: from about 19 m outwards with the light views, nearer with the optional road-user view), `vw.objs` here |
+| Lead vehicle class and stop lamps | class: done (roadsense L42, `vw.lead.k`, a vote over the track's life; `van` never comes from the present detector, which has no van class); `lead.braking` bool still wanted, 5 Hz |
 | Lane line type | per lane line `"type": "solid|dashed|double"`, 2 Hz, so dashes can be drawn and scroll (a double or solid centre line also tells that the lane beyond it is oncoming) |
 | Lane layout | `lanes: {"count": n, "ego_index": i, "oncoming_left": bool}` (or a per-lane `direction: same|oncoming|unknown`), 1..2 Hz: how many lanes the carriageway has, which one the car is in, and whether the left neighbour is oncoming. Today only four lines with probabilities exist |
 | Street lamps and roadside furniture | `objects[]` with `kind: "lamp"`, `x`, `y`, `state: "on|off"`, 2..5 Hz (the renderer draws them already; the demo feeds simulated ones). The roadside of section 6.2 is label-driven decoration until then |
@@ -823,7 +868,7 @@ The event `roadsense_scene` (section 7.1) and the health mirror (`RoadsenseState
 | Rule distance | `in_effect[].remaining_m` is sent by roadsense already; a `rules.ahead[].range_m` confidence would let the screen fade a warning that is probably passed |
 | Wet road / wipers | `env.road: "dry|wet|snow"` 0.2 Hz, to tint the road surface (weather says what falls, not what lies) |
 | Enclosed-place exit | `env.exit_in_m` for `tunnel` (portal light ahead), m, 1 Hz, so the tunnel can show its end |
-| Vulnerable road users | `objects[]` with `kind: "person" / "bike"`, 5..10 Hz |
+| Vulnerable road users | partly there (roadsense L42): persons, cyclists and motorbikes in `vw.objs` (`k` `human` / `bike` / `motorbike`) where they can be placed; near ones need the optional road-user view |
 
 ### 8.3 Map layer: the earlier proposals and what became of them
 
@@ -1043,7 +1088,7 @@ python -m cyberpunk_computer.ui.scene.demo --live --scale 3                  # t
 python -m cyberpunk_computer.ui.scene.demo --bench                           # frame cost incl. the simulation
 ```
 
-`--shots` writes `NN_name.png` (native 480 x 240) and `NN_name@4x.png` for 87 cases (86: the junction approach of 84 as the backend sends it without a navigation route, plain boxes; 87: the same with a route active (L36); 84: turn arrows in the lane boxes before a signalled junction, the car in the middle lane; 85: turn arrows with the own lane unknown and the junction marked approximate by roadsense (L22); 82: a junction on dead reckoning, drawn approximate; 83: three lanes from the map with the own lane unknown and the middle one likely (2026-11-18); 70..79: the junction view as a crossroads with signals, a T-junction, five arms, a roundabout before and on the ring, a low-confidence path that shows nothing; the traffic light with a second signal group, an ambiguous choice and a light over another lane; the two last map cases moved to 80..81): the states of
+`--shots` writes `NN_name.png` (native 480 x 240) and `NN_name@4x.png` for 94 cases (88..94, lane L42: the lead as a truck with a car and a bus in the left lane, as a bus, a van with a truck beside it, a motorbike with a cyclist at the edge, a cyclist; pedestrians at the edge and crossing with a cyclist on the left and no lead; a lead of unknown class drawn as the generic car with a van, a car and a pedestrian around it; 86: the junction approach of 84 as the backend sends it without a navigation route, plain boxes; 87: the same with a route active (L36); 84: turn arrows in the lane boxes before a signalled junction, the car in the middle lane; 85: turn arrows with the own lane unknown and the junction marked approximate by roadsense (L22); 82: a junction on dead reckoning, drawn approximate; 83: three lanes from the map with the own lane unknown and the middle one likely (2026-11-18); 70..79: the junction view as a crossroads with signals, a T-junction, five arms, a roundabout before and on the ring, a low-confidence path that shows nothing; the traffic light with a second signal group, an ambiguous choice and a light over another lane; the two last map cases moved to 80..81): the states of
 section 4, the five lamp states on the road and three parked, 18 scenery variants covering every
 place, light and weather label, four lane layouts, the top line with the speed switched back on, a full sign row, the cruise slot states, the three speed-limit provenance styles, 17 map-layer cases (55..71: next limit in the top line, at the roadside and in the `beside` variant, far road with a roundabout and switched off, three lane layouts from the map, tunnel exit in metres, kilometres and with the mouth in view, dead reckoning, a poor position, the road-number variants, synthetic position = no map) and `signs_legend`
 with every pictogram. Shots 1..51 are byte-identical to the set before the map layer. `--copy-to` also writes the 4x images there as `<prefix>NN_name.png`

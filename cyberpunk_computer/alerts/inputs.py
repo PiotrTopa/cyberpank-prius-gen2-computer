@@ -90,6 +90,7 @@ class Lead:
     ttc_s: Optional[float] = None
     gap_s: Optional[float] = None
     track_id: Optional[int] = None
+    sources: Tuple[str, ...] = ()    # tracked only: the sensors behind it (chris-integrator lead.sources[])
 
 
 @dataclass(frozen=True)
@@ -171,6 +172,10 @@ class AlertInputs:
     roadsense_running: bool = False
     lead: Optional[Lead] = None
     lead_tracked_available: bool = False   # the fused topic carries the tracker's lead
+    # L44: the lead is NOT KNOWN (camera not believable, the tracker's lead invalid or aged out): lead is None
+    # then, and nothing that means "the road ahead is clear" may be derived from it
+    lead_unknown: bool = False
+    vision_ok: Optional[bool] = None       # scene vis.ok (chris-integrator); None = the source does not say
     lanes: Tuple[Optional[Dict[str, Any]], ...] = ()
     light: Optional[Dict[str, Any]] = None
     limit: Optional[Limit] = None
@@ -212,6 +217,12 @@ class AlertInputs:
         if self.lead is not None:
             ld = self.lead
             out["lead"] = {"d": ld.d, "y": ld.y, "v_rel": ld.v_rel, "prob": ld.prob, "src": ld.src}
+            if ld.sources:
+                out["lead"]["sources"] = list(ld.sources)
+        elif self.lead_unknown:
+            out["lead"] = "unknown"
+        if self.vision_ok is False:
+            out["vision_ok"] = False
         if self.map_ok:
             out["map_conf"] = self.map_conf
         return out
@@ -238,51 +249,74 @@ def _scene_limit(scene: Mapping, map_limit: bool = True) -> Tuple[Optional[Limit
     return None, usable
 
 
-def _scene_lead(scene: Mapping) -> Tuple[Optional[Lead], bool]:
-    """The tracked lead, else modeld's ``leads[0]``.
+def _scene_vision_ok(scene: Mapping) -> Optional[bool]:
+    """Scene ``vis.ok`` (chris-integrator: is the camera believable now); None when the source does not say."""
+    vis = scene.get("vis")
+    if isinstance(vis, Mapping) and isinstance(vis.get("ok"), bool):
+        return vis["ok"]
+    return None
 
+
+def _scene_lead(scene: Mapping) -> Tuple[Optional[Lead], bool, bool]:
+    """``(lead, tracked_available, unknown)``: the tracked lead, else modeld's ``leads[0]``.
+
+    0. unknown (L37 / L44): the camera is not believable (scene ``vis.ok``
+       false) or the backend marked the lead unknown (``lead_unknown``: the
+       tracker's lead invalid or aged out) -> ``(None, tracked, True)``; no
+       fallback below is taken then, so nothing that means "the road ahead is
+       clear" comes from it;
     1. roadsense's ``lead`` topic (10-14/s): scene ``lead`` with
        ``lead_src: "tracked"`` (null = the tracker has no lead);
-    2. the same tracker's copy in ``fused`` (about 2/s), scene ``map.lead``;
-    3. modeld's raw ``leads[0]`` (scene ``lead`` without ``lead_src``).
+    2. the same tracker's copy in ``fused`` (about 2/s), scene ``map.lead``
+       (its ``valid: false`` = unknown as well);
+    3. modeld's raw ``leads[0]`` (scene ``lead`` without ``lead_src``), only
+       from a roadsense that says nothing about the camera.
     """
     mp = scene.get("map") if isinstance(scene.get("map"), Mapping) else None
     tl = mp.get("lead") if mp else None
+    tracked_avail = scene.get("lead_src") == "tracked" or isinstance(tl, Mapping)
+    if scene.get("lead_unknown") is True or _scene_vision_ok(scene) is False:
+        return None, tracked_avail, True
     if scene.get("lead_src") == "tracked":
         ld = scene.get("lead")
         if isinstance(ld, Mapping) and _num(ld.get("d")):
+            srcs = ld.get("srcs")
             return Lead(d=float(ld["d"]), y=_num(ld.get("y")) or 0.0, v_rel=_num(ld.get("v_rel")),
                         a=_num(ld.get("a")), prob=None, src="tracked",
                         standing=bool(ld.get("standing")), departed=bool(ld.get("departed")),
                         ttc_s=_num(ld.get("ttc")), gap_s=_num(ld.get("gap")),
-                        track_id=ld.get("id") if isinstance(ld.get("id"), int) else None), True
+                        track_id=ld.get("id") if isinstance(ld.get("id"), int) else None,
+                        sources=tuple(str(x) for x in srcs) if isinstance(srcs, (list, tuple)) else ()), \
+                True, False
         if scene.get("lead_departed") is True:
             # lead gone from the tracker but the departed cue is still up
-            return Lead(d=0.0, src="tracked", departed=True, standing=False), True
-        return None, True
+            return Lead(d=0.0, src="tracked", departed=True, standing=False), True, False
+        return None, True, False
     tracked_avail = isinstance(tl, Mapping)
+    if tracked_avail and tl.get("valid") is False:
+        return None, True, True
     if tracked_avail and tl.get("present") and _num(tl.get("d")):
         return Lead(d=float(tl["d"]), y=_num(tl.get("y")) or 0.0, v_rel=_num(tl.get("v_rel")),
                     a=_num(tl.get("a")), prob=None, src="tracked",
                     standing=bool(tl.get("standing")), departed=bool(tl.get("departed")),
                     ttc_s=_num(tl.get("ttc")), gap_s=_num(tl.get("gap")),
-                    track_id=tl.get("id") if isinstance(tl.get("id"), int) else None), True
+                    track_id=tl.get("id") if isinstance(tl.get("id"), int) else None), True, False
     if tracked_avail and tl.get("departed"):
         # lead gone from the tracker but the departed cue is still up
         return Lead(d=_num(tl.get("d")) or 0.0, src="tracked", departed=True,
-                    standing=False), True
+                    standing=False), True, False
     ld = scene.get("lead")
     if isinstance(ld, Mapping) and _num(ld.get("d")):
         return Lead(d=float(ld["d"]), y=_num(ld.get("y")) or 0.0, v_rel=_num(ld.get("v_rel")),
-                    a=_num(ld.get("a")), prob=_num(ld.get("prob")), src="vision"), tracked_avail
-    return None, tracked_avail
+                    a=_num(ld.get("a")), prob=_num(ld.get("prob")), src="vision"), tracked_avail, False
+    return None, tracked_avail, False
 
 
 def scene_fields(scene: Optional[Mapping], scene_age: Optional[float]) -> Dict[str, Any]:
     if not isinstance(scene, Mapping) or scene_age is None or scene_age > 3.0:
         return {"scene_age": scene_age}
     limit, usable = _scene_limit(scene)
-    lead, tracked = _scene_lead(scene)
+    lead, tracked, unknown = _scene_lead(scene)
     mp = scene.get("map") if isinstance(scene.get("map"), Mapping) else {}
     lanes = scene.get("lanes") if isinstance(scene.get("lanes"), (list, tuple)) else ()
     light = scene.get("light") if isinstance(scene.get("light"), Mapping) else None
@@ -297,6 +331,7 @@ def scene_fields(scene: Optional[Mapping], scene_age: Optional[float]) -> Dict[s
         tn = dict(tn, map_usable=True)
     return {
         "scene_age": scene_age, "lead": lead, "lead_tracked_available": tracked,
+        "lead_unknown": unknown, "vision_ok": _scene_vision_ok(scene),
         "lanes": tuple(lanes), "light": dict(light) if light else None, "limit": limit,
         "map_ok": usable, "map_conf": _num(mp.get("conf")) if usable else None,
         "tunnel": tn, "built_up": bu.get("v") if bu and isinstance(bu.get("v"), bool) else None,

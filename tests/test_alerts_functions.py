@@ -191,6 +191,16 @@ def test_departed_cue_without_a_lead_fires_departure_and_never_headway_or_blocks
     assert r3.fires() == []
 
 
+def test_unknown_lead_never_counts_as_a_clear_road_for_green():
+    # L44: camera not believable / lead invalid: lead None but unknown -> the green-light helper stays quiet
+    r = Rig(StopGoFunction)
+    r.run(3.0, real_kmh=0.0, lead_unknown=True, lead_tracked_available=True,
+          light={"state": "red", "d": 20.0, "rel": 0.7, "agree": 2})
+    r.run(3.0, real_kmh=0.0, lead_unknown=True, lead_tracked_available=True,
+          light={"state": "green", "d": 20.0, "rel": 0.7, "agree": 2})
+    assert r.fires("green_light") == []
+
+
 def test_green_light_cannot_be_switched_on_but_logs_in_shadow():
     r = Rig(StopGoFunction)
     ok, why = r.m.set_mode("green_light", "on")

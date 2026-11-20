@@ -2,6 +2,18 @@
 Prius vehicle feeder: GNSS fixes, vehicle motion, driver controls and body
 signals -> roadsense ``mapd``.
 
+Since lane L44 (2026-11-20) the receiver is chris-integrator (the top
+component of the chris layout: fusion, map box, decisions), on
+``/run/chris/position.sock`` (an alias of its ``feed.sock``); legacy roadsense
+mapd on ``/run/roadsense/position.sock`` is the fallback of the default
+``rundir`` list (a rollback). The integrator's hello lists the vehicle input
+API 1.1 types, so the full set goes out. What this feeder does NOT rely on
+there: error replies (the integrator sends none yet; they are only counted)
+and ``reset`` (listed in its ``accepts`` and sent after a synthetic session as
+before, but the integrator of L39..L43 ignores it: the position of a finished
+synthetic drive lingers until real fixes replace it; the scene feed's
+``SyntheticTaint`` marks that, from ``map.input.gnss.source``).
+
 roadsense owns all position filtering, dead reckoning and map matching and
 decides what it does with the rest (roadsense docs/VEHICLE_API.md: vehicle
 input API 1.1, a superset of the position input API v1). This module only
@@ -182,7 +194,7 @@ class PositionFeederConfig:
     """Knobs of the position feeder (BACKEND_POSITION_*, backend.__main__)."""
     enabled: bool = False
     source: str = "headunit"               # headunit | phone | synthetic | none, or a priority list "headunit,phone"
-    rundir: str = "/run/roadsense"         # mapd's position.sock lives here
+    rundir: str = "/run/chris:/run/roadsense"  # position.sock: chris-integrator (L44), else legacy mapd
     motion_hz: float = 10.0                # motion messages per second (contract 5..50, 10..20 recommended)
     yaw_inputs: Tuple[str, ...] = DEFAULT_YAW_INPUTS   # yaw fields with motion: wheels, steer
     stale_s: float = 0.3                   # 0x0B4 older than this -> no motion (CAN dark)
@@ -1492,6 +1504,8 @@ class PositionFeeder:
                 "reset_sent": self.counts["reset"], "reset_pending": self._reset_pending is not None,
                 "last_reset": self.last_reset,
                 "mapd_accepts": list(f.accepts) if getattr(f, "accepts", None) is not None else None,
+                # who answers on position.sock: "chris-integrator" (L44 layout) or "roadsense-mapd" (legacy)
+                "server": (getattr(f, "server", None) or {}).get("server"),
                 "vehicle_api": self.vehicle_api(),
                 "controls_sent": self.counts["controls"], "body_sent": self.counts["body"],
                 "vehicle_sent": self.counts["vehicle"], "objects_sent": self.counts["objects"],

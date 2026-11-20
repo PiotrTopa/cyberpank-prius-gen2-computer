@@ -42,8 +42,16 @@ head unit ─POST /api/v1/position/gnss─▶ HeadunitGnssSource (validate, time
 ModemManager ─GetLocation (NMEA)─▶ phone-gnss thread ─▶ PhoneGnssSource (queue) ─────────────────────┤
                                                        SourceSelector (priority, hysteresis) ◀────────┘
                                                               │
-PositionFeeder thread, motion_hz (10) ────────────────────────┴──▶ PositionFeed ──▶ /run/roadsense/position.sock (mapd)
+PositionFeeder thread, motion_hz (10) ────────────────────────┴──▶ PositionFeed ──▶ /run/chris/position.sock (chris-integrator)
+                                                                                   (else /run/roadsense/position.sock: legacy mapd)
 ```
+
+Lane L44 (2026-11-20): the receiver is chris-integrator (it serves `position.sock` as an alias of its
+`feed.sock`, vehicle input API 1.1; position estimate and map box inside it). `BACKEND_POSITION_RUNDIR`
+defaults to `/run/chris:/run/roadsense`: the first directory whose `position.sock` accepts wins, so a
+rollback to the old roadsense needs no env change. The integrator sends no error replies (only counted here)
+and ignores `reset` (L39 section 4; `reset_sent` still counts what went out); status `server` names who
+answers (`chris-integrator` / `roadsense-mapd`).
 
 * Off unless `BACKEND_POSITION_FEEDER=1`. Off = no thread, no tap on the panda callback, no routes.
 * Runs only while the roadsense manager is `starting`, `running` or `grace` (mapd is a unit of
@@ -219,7 +227,8 @@ Mirrored on change, at most every 2 s; `null` while the feeder is off.
 `size_bytes`, `mtime` of `BACKEND_ROADSENSE_MAP_PACK`, default `/var/lib/roadsense/maps/current.rsmap`, symlink
 resolved; null when absent): mapd's `map.pack` has region and OSM date but no size.
 
-The roadsense manager's unit mirror (`state.roadsense.units`) now includes `roadsense-mapd.service`.
+The roadsense manager's unit mirror (`state.roadsense.units`) included `roadsense-mapd.service` until lane L44;
+since then it lists `chris-integrator.service` instead (mapd is masked in the chris layout).
 
 ## 7. Configuration and deploy steps (not executed)
 
@@ -233,7 +242,7 @@ The roadsense manager's unit mirror (`state.roadsense.units`) now includes `road
 | `BACKEND_POSITION_PHONE_LINGER_S` | `120` | phone: GNSS stays on this long after roadsense stops |
 | `BACKEND_POSITION_PHONE_POLL_HZ` | `4` | phone: ModemManager `GetLocation` calls per second |
 | `BACKEND_RECORD_INCLUDE` token `position` | not set | trip files also get the fixes sent to mapd (section 12); `all` does not include it |
-| `BACKEND_POSITION_RUNDIR` | `/run/roadsense` | where `position.sock` is |
+| `BACKEND_POSITION_RUNDIR` | `/run/chris:/run/roadsense` | where `position.sock` is; `:`-separated, tried in order (L44) |
 | `BACKEND_POSITION_MOTION_HZ` | `10` | 5..50 |
 | `BACKEND_POSITION_YAW` | `wheels` | comma list of `wheels`, `steer`, `gyro` (0x022 as `yaw_rate_rps`); empty = speed and gear only. With the vehicle API all motion signals go out and only `gyro` matters: with it the yaw-rate sensor is offered for use (`uncalibrated`), without it for roadsense's calibration estimate only (`unverified`) |
 | `BACKEND_POSITION_VEHICLE_API` | `1` | `0` = speak position input API v1 whatever roadsense offers |

@@ -145,9 +145,14 @@ BACKEND_MFD_SSH_USER=piotr
 
 # roadsense perception stack on this same POCO (single computer): the backend
 # powers the camera hub (relay ch4) and starts roadsense.target with ACC, stops
-# it after the key-off grace. The stack's own API serves 8090 here (8080 is the
-# backend); set with `API_PORT=8090 scripts/install-phone.sh` in the roadsense
-# checkout. BACKEND_ROADSENSE_MODE: auto (follow ACC) | on | off.
+# it after the key-off grace. Since lane L44 (chris layout) the API on 8090 is
+# chris-integrator's consolidated API (a unit of roadsense.target through the
+# drop-ins this overlay ships; port from its drop-in or /etc/chris/integrator.env);
+# roadsense's own API is one camera's debug face on 8091 (`API_PORT=8091
+# scripts/install-phone.sh` in the roadsense checkout). 8080 is the backend.
+# Unit list: BACKEND_ROADSENSE_UNITS (default: roadsense_power.DEFAULT_UNITS,
+# with chris-integrator.service, without the legacy roadsense-mapd.service).
+# BACKEND_ROADSENSE_MODE: auto (follow ACC) | on | off.
 BACKEND_ROADSENSE_ENABLED=1
 BACKEND_ROADSENSE_API_PORT=8090
 BACKEND_ROADSENSE_GRACE_S=30
@@ -156,10 +161,13 @@ BACKEND_ROADSENSE_MODE=auto
 # the stack's /ws while it runs and the MFD is on; docs/MFD_MAIN_SCREEN.md 7).
 BACKEND_ROADSENSE_SCENE=1
 BACKEND_ROADSENSE_SCENE_HZ=10
-# Position feeder -> roadsense mapd (CAN motion + head-unit GNSS; docs/POSITION_FEEDER.md).
-# Off until mapd and a map pack are installed. SOURCE: headunit | none | synthetic (demo only).
+# Position feeder -> chris-integrator's vehicle input API (CAN motion + GNSS;
+# docs/POSITION_FEEDER.md): position.sock in /run/chris, legacy roadsense mapd in
+# /run/roadsense as the fallback (':'-separated, tried in order).
+# Off until the stack and a map pack are installed. SOURCE: headunit | none | synthetic (demo only).
 BACKEND_POSITION_FEEDER=0
 BACKEND_POSITION_SOURCE=headunit
+BACKEND_POSITION_RUNDIR=/run/chris:/run/roadsense
 
 # USB topology (main hub 1-1 = Terminus 1a40:0101, 4 ports, cabled 2026-11-04):
 # port 1 powerbox, port 2 MFD Pi (relay ch2), port 3 CAN hub with the gateway +
@@ -201,7 +209,7 @@ systemctl daemon-reload
 # at their next (re)start.
 
 # Firewall: the overlay ships /etc/nftables.d/50_prius_backend.nft (8080-8082
-# accept + the prius_guard table limiting 8080/8081/8082/8090 to lo, wg*, usb*
+# accept + the prius_guard table limiting 8080/8081/8082/8090/8091 to lo, wg*, usb*
 # and the AP address); pmOS loads nftables with policy drop, so reload it when
 # it is running. Validate first: a broken file would leave the old ruleset.
 if systemctl is-active --quiet nftables 2>/dev/null; then
@@ -210,6 +218,28 @@ if systemctl is-active --quiet nftables 2>/dev/null; then
     else
         log "  WARN: nft -c rejects the ruleset; NOT reloading nftables"
     fi
+fi
+
+# chris layout (lane L44): once chris-integrator is installed (its own
+# scripts/install.sh, from the roadsense tree), the legacy position daemon must
+# not run beside it (the position would be estimated twice), the integrator must
+# not start at boot on its own (it is a unit of roadsense.target through the
+# drop-ins of this overlay), and roadsense's debug face must leave 8090 (the
+# integrator's) and 8081 (the backend's ZeroMQ) for 8091. Nothing of this
+# happens while the integrator is not installed: the old layout stays as it is.
+if [ -f /etc/systemd/system/chris-integrator.service ]; then
+    if [ "$(systemctl is-enabled roadsense-mapd.service 2>/dev/null)" != masked ]; then
+        systemctl disable --now roadsense-mapd.service >/dev/null 2>&1 || true
+        systemctl mask roadsense-mapd.service >/dev/null 2>&1 \
+            && log "chris: roadsense-mapd.service disabled + masked" \
+            || log "  WARN: could not mask roadsense-mapd.service"
+    fi
+    systemctl disable chris-integrator.service >/dev/null 2>&1 || true
+    if [ -f /etc/roadsense/api.env ] && grep -qE '^ROADSENSE_API_PORT=(8090|8081)$' /etc/roadsense/api.env; then
+        sed -i -E 's/^ROADSENSE_API_PORT=(8090|8081)$/ROADSENSE_API_PORT=8091/' /etc/roadsense/api.env
+        log "chris: /etc/roadsense/api.env -> ROADSENSE_API_PORT=8091 (restart roadsense.target to apply)"
+    fi
+    systemctl daemon-reload
 fi
 
 # Reload udev so the RP2040 ModemManager-ignore rule (99-prius-rp2040-nomm)

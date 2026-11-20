@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from cyberpunk_computer.api import roadsense_proxy as rp
 from cyberpunk_computer.api.roadsense_proxy import (
     JSON_ENDPOINTS,
     ProxyConfig,
@@ -44,6 +45,20 @@ def test_ws_topics_sanitised():
     assert ws_topics("signs,rules,bogus,signs") == "signs,rules"
     assert ws_topics("bogus") is None
     assert ws_topics(None) is None
+
+
+def test_ui_rewrite_moves_v1_and_v2_links():
+    # L44: chris-integrator's status page polls /v2/...; the old roadsense page used /v1/...
+    page = 'fetch("/v2/health"); fetch(`/v1/road`); <img src="/preview">; new WebSocket(\'/ws?topics=x\')'
+    out = rp.rewrite_ui(page, "/roadsense")
+    assert '"/roadsense/v2/health"' in out and "`/roadsense/v1/road`" in out
+    assert '"/roadsense/preview"' in out and "'/roadsense/ws?topics=x'" in out
+
+
+def test_consolidated_topics_whitelisted():
+    for name in ("lead", "lanes", "view", "ego_state", "tracks", "mixer"):
+        assert rp.JSON_ENDPOINTS[name] == "/v1/" + name
+    assert rp.ws_topics("lead,view,ego_state,bogus") == "lead,view,ego_state"
 
 
 def test_proxy_config_urls():
@@ -219,6 +234,17 @@ def test_json_endpoints_forwarded(stack, name):
 def test_health_body_passthrough(stack):
     _, _, body = _get(stack["api"] + "/api/v1/roadsense/health")
     assert json.loads(body)["fps"]["camera"] == 19.5
+
+
+def test_ui_v2_paths_forwarded(stack):
+    # L44: the status page of chris-integrator polls /v2/<name>; the front maps it through the whitelist
+    _, _, body = _get(stack["api"] + "/roadsense/v2/health")
+    assert json.loads(body)["fps"]["camera"] == 19.5
+    _, _, body = _get(stack["api"] + "/roadsense/v2/lead")
+    assert json.loads(body) == {"type": "lead"}
+    with pytest.raises(urllib.error.HTTPError) as e:
+        _get(stack["api"] + "/roadsense/v2/bogus")
+    assert e.value.code == 404
 
 
 def test_query_whitelist_applied(stack):
@@ -423,3 +449,20 @@ def test_firewall_has_no_roadsense_opening():
              and not l.strip().startswith("#")]
     assert rules and all("8090" not in r for r in rules)
     assert all(p in rules[0] for p in ("8080", "8081", "8082"))
+
+
+def test_chris_integrator_is_a_unit_of_the_stack():
+    # L44: the backend starts / stops roadsense.target only; chris-integrator rides along with it
+    tgt = _unit("etc/systemd/system/roadsense.target.d/50-prius-chris.conf")
+    assert tgt["Wants"] == "chris-integrator.service"
+    ci = (ROOTFS / "etc/systemd/system/chris-integrator.service.d/50-prius.conf").read_text()
+    kv = _unit("etc/systemd/system/chris-integrator.service.d/50-prius.conf")
+    assert kv["PartOf"] == "roadsense.target" and kv["Slice"] == "roadsense.slice"
+    assert "Environment=CHRIS_API_PORT=8090" in ci and "Environment=CHRIS_API_HOST=127.0.0.1" in ci
+    assert "Environment=CHRIS_ROADSENSE_HTTP=http://127.0.0.1:8091" in ci
+    assert "WantedBy" not in kv
+    from cyberpunk_computer.backend.roadsense_power import DEFAULT_UNITS, RoadsenseConfig
+    assert "chris-integrator.service" in DEFAULT_UNITS and "roadsense-mapd.service" not in DEFAULT_UNITS
+    assert RoadsenseConfig().api_port == 8090
+    prov = (REPO / "POCO" / "provision.sh").read_text()
+    assert "systemctl mask roadsense-mapd.service" in prov and "systemctl disable chris-integrator.service" in prov

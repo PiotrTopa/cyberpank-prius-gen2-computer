@@ -51,7 +51,7 @@ POCO F1 (postmarketOS, always on)
   prius-backend   python -m cyberpunk_computer.backend
                   virtual twin (store + rules), metrics SQLite, diagnostics engine
                   REST + WebSocket :8080 (serves dashboard/dist at /), ZMQ PUB :8081 / REP :8082
-  roadsense       separate repos, systemd roadsense.target, ACC only; API :8090
+  roadsense       separate repos, systemd roadsense.target, ACC only; chris-integrator API :8090 (debug :8091)
    │
    ├─ USB hub ─ Gateway (RP2040, NDJSON over CDC): AVC-LAN, solicited CAN (OBD/UDS),
    │            RS485 satellites (ids 100-199)
