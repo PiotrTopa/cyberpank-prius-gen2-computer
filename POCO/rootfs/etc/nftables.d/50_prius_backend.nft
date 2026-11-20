@@ -4,12 +4,15 @@
 #
 # Car computer ports and where they are reachable (docs/AUTH.md):
 #   8080       backend REST/WebSocket/dashboard (token/session auth on top)
-#   8090       roadsense API (no auth of its own; browsers use /roadsense/ on 8080)
+#   8090       chris-integrator consolidated API (lane L44; was roadsense's API; no auth
+#              of its own; browsers use /roadsense/ on 8080). Binds loopback on this car.
+#   8091       roadsense debug face of the camera (raw topics, /preview; loopback; never
+#              offered on the AP)
 #   8081/8082  ZeroMQ PUB/REP the MFD frontend uses (no auth: commands!)
 #
 # prius_guard runs before the pmOS filter chain (priority -10) and DROPS these
 # ports on every interface not listed, whatever accept rules other files add
-# (roadsense's own 50_roadsense.nft opens 8090 everywhere; the guard wins
+# (an old roadsense install's 50_roadsense.nft opens 8090 everywhere; the guard wins
 # because a drop in any input base chain is final). Allowed:
 #   lo           the phone itself (the backend's roadsense proxy, tooling)
 #   wg*          WireGuard (wg-homelab, 10.200.0.14): owner devices + laptop
@@ -24,7 +27,7 @@
 table inet prius_guard {
 	chain input {
 		type filter hook input priority -10; policy accept;
-		tcp dport { 8080, 8081, 8082, 8090 } jump prius_ports
+		tcp dport { 8080, 8081, 8082, 8090, 8091 } jump prius_ports
 	}
 
 	chain prius_ports {

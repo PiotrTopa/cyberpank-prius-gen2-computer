@@ -130,6 +130,7 @@ class StopGoFunction(AlertFunction):
             self.green_since = None
         elif (t.green_enabled and st == "green" and self.last_red is not None
               and now - self.last_red <= t.green_after_red_s and standing_s >= t.stopped_min_s
+              and not inp.lead_unknown       # L44: an unknown lead is not "no lead in the way"
               and (ld is None or ld.d <= 0.0 or ld.d > t.green_no_lead_m)):   # d 0: departed cue only
             if self.green_since is None:
                 self.green_since = now

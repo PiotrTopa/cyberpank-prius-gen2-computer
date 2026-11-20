@@ -18,6 +18,11 @@ Vision (road perception) status
     stale  data older than ``STALE_S``          -> frozen lanes, dimmed,
                                                    no lead (never an old car)
     lost   data older than ``LOST_S``           -> floor + blinking "NO SIGNAL"
+    doubt  fresh data, but chris-integrator says the camera is not believable now (scene ``vis.ok`` false,
+           lane L44) -> floor only (an empty road would look like a clear road) + a steady "CAMERA UNSURE"
+
+``lead_unknown`` (live only): the integrator does not know the lead now (not "no lead") -> no vehicle, a steady
+dim "LEAD ?" mark.
 """
 
 from __future__ import annotations
@@ -74,6 +79,8 @@ class SceneDirector:
         self.door_step: Tuple[int, ...] = (0,) * len(DOOR_KEYS)
         self.odo = 0.0                  # metres travelled (floor scroll)
         self.vision = "off"
+        self.vis_why = ""               # the integrator's reason while vision == "doubt"
+        self.lead_unknown = False       # live, but the lead is not known (L44)
         self.lanes: List[Optional[List[float]]] = [None] * 4
         self.lane_prob: List[float] = [0.0] * 4
         self.edges: List[Optional[List[float]]] = [None] * 2
@@ -223,8 +230,12 @@ class SceneDirector:
             self.vision = "stale"
         else:
             self.vision = "live"
+        if self.vision == "live" and road is not None and not road.vis_ok:
+            self.vision = "doubt"
+        self.vis_why = road.vis_why if self.vision == "doubt" and road is not None else ""
+        self.lead_unknown = bool(self.vision == "live" and road is not None and road.lead_unknown)
 
-        if self.vision in ("off", "wait", "lost"):
+        if self.vision in ("off", "wait", "lost", "doubt"):
             self.lanes = [None] * 4
             self.edges = [None] * 2
             self.path = None

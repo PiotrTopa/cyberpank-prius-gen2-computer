@@ -972,7 +972,7 @@ class BackendService:
                                                   publish_status=_publish_position,
                                                   on_gnss=_record_fix)
             twin.store.dispatch(SetRoadsenseStateAction(position=self.position_feeder.status()))
-            logger.info("position feeder wired (source=%s, %s/position.sock, motion %.0f Hz, yaw %s)",
+            logger.info("position feeder wired (source=%s, position.sock in %s, motion %.0f Hz, yaw %s)",
                         source.name, pcfg.rundir, pcfg.motion_hz, ",".join(pcfg.yaw_inputs) or "-")
             return tap
         except Exception:

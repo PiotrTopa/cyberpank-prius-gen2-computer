@@ -3,9 +3,12 @@
 Development tool for the map elements of the scene (docs/MFD_MAIN_SCREEN.md 6.5).
 Nothing here runs on the car.
 
-    # 1. record: roadsense's fake camera daemons + the REAL mapd on a map pack + the real
-    #    api (fusion), driven in real time by roadsense's synthetic drive; writes the api's
-    #    `fused` and `map` WebSocket messages with their arrival times (gzip JSON lines)
+    # 1. record: roadsense's fake camera daemons + the REAL chris-integrator with its map box
+    #    (chris-mapper) on a map pack, driven in real time by roadsense's synthetic drive into the
+    #    integrator's position.sock; writes the consolidated API's `fused` and `map` WebSocket
+    #    messages with their arrival times (gzip JSON lines). PRIUS_ROADSENSE_REPO = a roadsense
+    #    tree with chris-integrator/ and chris-mapper/ (>= L39). Lane L44: until then this ran the
+    #    legacy mapd + roadsense api (the layout the car left); `--legacy` still does.
     .venv/bin/python tools/mfd_map_drive.py record --demo opole-rural --out /tmp/opole.jsonl.gz
 
     # 2. list what a recording holds (limit changes, curves, tunnels, junctions by time)
@@ -64,15 +67,26 @@ def _default_pack() -> str:
 
 def record(a) -> int:
     from cyberpunk_computer.backend.roadsense_scene import MiniWebSocket
-    py = os.path.join(ROADSENSE, ".venv-models", "bin", "python")
+    py = os.environ.get("PRIUS_ROADSENSE_PYTHON") or next(
+        (p for p in (os.path.join(ROADSENSE, ".venv-models", "bin", "python"),
+                     os.path.join(HOME, "projects", "roadsense", ".venv-models", "bin", "python"))
+         if os.path.exists(p)), "python3")
     pack = a.pack or _default_pack()
     tmp = tempfile.mkdtemp(prefix="mfd-map-drive-")
     rundir = os.path.join(tmp, "run")
-    os.makedirs(rundir)
-    os.makedirs(os.path.join(tmp, "etc"))
+    chris_rundir = os.path.join(tmp, "chris")
+    for d in (rundir, chris_rundir, os.path.join(tmp, "etc"), os.path.join(tmp, "data")):
+        os.makedirs(d)
     port = _free_port()
-    env = dict(os.environ, ROADSENSE_CONFIG_DIR=os.path.join(tmp, "etc"),
-               PYTHONPATH=os.path.join(ROADSENSE, "mapd"))
+    chris = os.path.join(ROADSENSE, "chris-integrator")
+    legacy = a.legacy or not os.path.isdir(chris)
+    if legacy:
+        print("legacy layout: mapd + roadsense api (%s has no chris-integrator/)" % ROADSENSE, file=sys.stderr)
+    env = dict(os.environ, ROADSENSE_CONFIG_DIR=os.path.join(tmp, "etc"), CHRIS_CONFIG_DIR=os.path.join(tmp, "etc"),
+               CHRIS_MAP_PACK=pack,
+               PYTHONPATH=os.pathsep.join([os.path.join(ROADSENSE, "mapd"), chris,
+                                           os.path.join(ROADSENSE, "chris-mapper")]))
+    feed_rundir = rundir if legacy else chris_rundir     # where position.sock is (synth_drive's --rundir)
     logf = open(os.path.join(tmp, "procs.log"), "wb")
     procs = []
     n = 0
@@ -80,13 +94,19 @@ def record(a) -> int:
         procs.append(subprocess.Popen(
             [py, os.path.join(ROADSENSE, "tools", "fake_daemons.py"), "--rundir", rundir, "--no-mapd"],
             stdout=logf, stderr=subprocess.STDOUT))
-        procs.append(subprocess.Popen(
-            [py, "-m", "roadsense_mapd", "--rundir", rundir, "--pack", pack, "--stats", "0"],
-            env=env, stdout=logf, stderr=subprocess.STDOUT))
-        procs.append(subprocess.Popen(
-            [py, "-m", "roadsense_api", "--rundir", rundir, "--datadir", tmp,
-             "--ring", os.path.join(rundir, "roadsense-frames"), "--host", "127.0.0.1", "--port", str(port)],
-            cwd=os.path.join(ROADSENSE, "api"), stdout=logf, stderr=subprocess.STDOUT))
+        if legacy:
+            procs.append(subprocess.Popen(
+                [py, "-m", "roadsense_mapd", "--rundir", rundir, "--pack", pack, "--stats", "0"],
+                env=env, stdout=logf, stderr=subprocess.STDOUT))
+            procs.append(subprocess.Popen(
+                [py, "-m", "roadsense_api", "--rundir", rundir, "--datadir", tmp,
+                 "--ring", os.path.join(rundir, "roadsense-frames"), "--host", "127.0.0.1", "--port", str(port)],
+                cwd=os.path.join(ROADSENSE, "api"), stdout=logf, stderr=subprocess.STDOUT))
+        else:
+            procs.append(subprocess.Popen(
+                [py, "-m", "chris_integrator", "--rundir", chris_rundir, "--datadir", os.path.join(tmp, "data"),
+                 "--config-dir", os.path.join(tmp, "etc"), "--roadsense", rundir, "--host", "127.0.0.1",
+                 "--http-port", str(port)], env=env, cwd=tmp, stdout=logf, stderr=subprocess.STDOUT))
         ws = None
         end = time.monotonic() + 60
         while ws is None:
@@ -97,7 +117,7 @@ def record(a) -> int:
                     raise
                 time.sleep(0.5)
         time.sleep(3.0)
-        cmd = [py, os.path.join(ROADSENSE, "tools", "synth_drive.py"), "--pack", pack, "--rundir", rundir]
+        cmd = [py, os.path.join(ROADSENSE, "tools", "synth_drive.py"), "--pack", pack, "--rundir", feed_rundir]
         cmd += ["--demo", a.demo] if a.demo else ["--from", a.start, "--to", a.goal]
         for w in a.dropout or ():
             cmd += ["--dropout", w]
@@ -471,6 +491,7 @@ def main(argv=None) -> int:
     r.add_argument("--max-s", type=float, default=3600.0)
     r.add_argument("--tail", type=float, default=8.0, help="seconds recorded after the drive ended")
     r.add_argument("--keep", action="store_true")
+    r.add_argument("--legacy", action="store_true", help="the old layout: roadsense mapd + api instead of chris-integrator")
     r.add_argument("synth", nargs="*", help="further synth_drive options (after --)")
     r.set_defaults(fn=record)
     e = sub.add_parser("events")

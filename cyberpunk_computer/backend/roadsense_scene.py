@@ -82,8 +82,11 @@ class SceneFeedConfig:
     env_max_age_s: float = 5.0         # env ~1/s
     rules_max_age_s: float = 3.0       # rules: on change and >= 1/s
     map_max_age_s: float = 3.0         # fused / map: ~2/s (roadsense's own map staleness is 3 s)
-    lead_max_age_s: float = 0.5        # lead (tracker): one per road frame, 10-14/s; older -> road.leads[0]
-    lanes_max_age_s: float = 0.5       # lanes (road-geometry tracker): one per road frame; older -> road.lane_lines
+    lead_max_age_s: float = 0.5        # lead (tracker): one per road frame, 10-14/s; older -> "unknown" once the topic
+                                       # was seen (L44), road.leads[0] only from a roadsense that never sends it
+    lanes_max_age_s: float = 0.5       # lanes (road-geometry tracker): one per road frame; older -> no lines once the
+                                       # topic was seen (L44), road.lane_lines only from a roadsense that never sends it
+    invalid_hold_s: float = 5.0        # a lead / lanes message with valid false keeps "unknown" this long (L37 / L44)
     view_max_age_s: float = 0.5        # view (roadsense 2.0 display channel): one per road frame; while fresh the
                                        # scene is built per view message (no road decode) and carries "vw"
     lane_min_prob: float = 0.2         # below this a lane line goes out as null (UI draws >= 0.3)
@@ -215,8 +218,11 @@ def lanes_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                hysteresis and its geometry is filtered over time), else null
     edges[i] = {"y": edges[i].y at SCENE_XS} for a present road edge, else null
 
-    None when the message is not usable (then the raw road lines stay).
+    None when the message is not usable, and when ``valid`` is false (the camera is not believable: no lines;
+    :class:`SceneBuilder` never falls back to the raw road lines then).
     """
+    if msg.get("valid") is False:
+        return None
     xs = msg.get("x")
     lines, edges = msg.get("lines"), msg.get("edges")
     if not isinstance(xs, list) or not isinstance(lines, list) or not isinstance(edges, list):
@@ -246,9 +252,12 @@ def lead_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     frame's vision probability; left out when the tracker coasts without one,
     the UI then treats it as 1), src = "tracked"; only when set: standing /
     departed (true), gap = time_gap_s, d_std = dist_std_m, ttc = ttc_s,
-    id = track_id. None when ``present`` is false (no lead tracked).
+    id = track_id, srcs = the sensors behind it (``sources[]``, the track's sensor ids; chris-integrator: use it,
+    never string-match ``source``). None when ``present`` is false (no lead tracked) and when ``valid`` is false
+    (chris-integrator / roadsense >= 2.1: the lead is not known; :class:`SceneBuilder` carries that as
+    ``lead_unknown``, distinct from "no lead").
     """
-    if not msg.get("present"):
+    if not msg.get("present") or msg.get("valid") is False:
         return None
     d = _num(msg.get("dist_m"))
     if d is None or d <= 0:
@@ -275,6 +284,9 @@ def lead_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     tid = msg.get("track_id")
     if isinstance(tid, int) and not isinstance(tid, bool):
         out["id"] = tid
+    srcs = msg.get("sources")
+    if isinstance(srcs, list) and srcs:
+        out["srcs"] = [str(x) for x in srcs[:6]]
     return out
 
 
@@ -520,7 +532,9 @@ def fused_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "a": _r(ld.get("a_lead_mps2"), 2), "gap": _r(ld.get("time_gap_s"), 2), "ttc": _r(ld.get("ttc_s"), 2),
             "standing": True if ld.get("standing") else None, "departed": True if ld.get("departed") else None,
             "mode": ld.get("mode") or None,
-            "id": ld.get("track_id") if isinstance(ld.get("track_id"), int) else None})
+            "id": ld.get("track_id") if isinstance(ld.get("track_id"), int) else None,
+            # chris-integrator: the copy says whether the lead is known; false = unknown, not "no lead" (L44)
+            "valid": False if ld.get("valid") is False else None})
     return out
 
 
@@ -1044,6 +1058,11 @@ class SceneBuilder:
         self._slow: Dict[str, Tuple[float, Optional[Dict[str, Any]]]] = {}
         self._lead: Optional[Tuple[float, Optional[Dict[str, Any]], bool]] = None
         self._lanes: Optional[Tuple[float, Optional[Dict[str, Any]]]] = None
+        # L44: the newest "valid: false" of lead / lanes (arrival time, reason); the lanes tracker's validity
+        # depends on the camera only, the lead's also on the ego speed
+        self._lead_invalid: Optional[Tuple[float, str]] = None
+        self._lanes_invalid: Optional[Tuple[float, str]] = None
+        self._lead_valid_seen = False      # the source states validity at all (chris-integrator, roadsense >= 2.1)
         self._view: Optional[Tuple[float, Dict[str, Any]]] = None
         self._view_new = False
         self.decode_errors = 0
@@ -1074,9 +1093,21 @@ class SceneBuilder:
         elif mtype == "fused":
             self._slow["map"] = (now, fused_to_scene(msg))
         elif mtype == "lead":
-            self._lead = (now, lead_to_scene(msg), msg.get("departed") is True)
+            valid = msg.get("valid") is not False
+            if "valid" in msg:
+                self._lead_valid_seen = True
+            if not valid:
+                self._lead_invalid = (now, str(msg.get("reason") or "lead not valid"))
+            # a lead that went invalid raises no departed cue: its departure is not known either
+            self._lead = (now, lead_to_scene(msg), valid and msg.get("departed") is True)
         elif mtype == "lanes":
-            self._lanes = (now, lanes_to_scene(msg))
+            if msg.get("valid") is False:
+                self._lanes_invalid = (now, str(msg.get("reason") or "lanes not valid"))
+                self._lanes = (now, None)
+            else:
+                ls = lanes_to_scene(msg)
+                if ls is not None:          # an unusable (malformed) message is ignored, as before
+                    self._lanes = (now, ls)
         elif mtype == "view":
             # the last message of a road frame (roadsense sends road, lead, lanes, view): a scene built now
             # has the lead, the lanes and the road picture (view.road) of the same frame
@@ -1131,23 +1162,72 @@ class SceneBuilder:
             return None
         self._last_seq = scene["seq"]
         self._last_pub = now
+        hold = self.cfg.invalid_hold_s
+        # ── is the camera believable? (L37 / L44) ──
+        # chris-integrator says so per frame in view.integrity (validity over the vision source) and in
+        # lanes.valid (the lane tracker depends on the camera only). An older roadsense says neither: "vis" is
+        # then left out (not known) and everything below behaves as before.
+        vis: Optional[Dict[str, Any]] = None
+        integ = self._view[1].get("integrity") if vw is not None else None      # type: ignore[index]
+        if isinstance(integ, dict) and "valid" in integ:
+            vis = {"ok": integ.get("valid") is not False}
+            if not vis["ok"]:
+                vis["why"] = str(integ.get("reason") or "camera not believable")
+        if self._lanes_invalid is not None and now - self._lanes_invalid[0] <= hold:
+            if vis is None or vis["ok"]:
+                vis = {"ok": False, "why": self._lanes_invalid[1]}
+        elif vis is None and self._lanes is not None and self._lead_valid_seen:
+            vis = {"ok": True}
+        vis_bad = vis is not None and not vis["ok"]
+        # ── the lead ──
         # the tracked lead (roadsense >= 2026-11-15) replaces modeld's leads[0]
-        # while its topic is fresh, including "no lead" (null); an older
-        # roadsense never sends it and the raw leads[0] stays
-        if self._lead is not None and now - self._lead[0] <= self.cfg.lead_max_age_s:
-            scene["lead"] = self._lead[1]
+        # while its topic is fresh, including "no lead" (null). Once the topic
+        # has been seen on this connection the raw leads[0] is never taken
+        # again: a lead topic that ages out, says valid false (within
+        # invalid_hold_s) or comes while the camera is not believable makes the
+        # lead UNKNOWN ("lead_unknown": true, lead null), which is not "no
+        # lead". An older roadsense never sends the topic and leads[0] stays.
+        lead_unknown = vis_bad
+        if self._lead is not None:
             scene["lead_src"] = "tracked"
-            if self._lead[1] is None and self._lead[2]:
-                # the lead was lost after it pulled away; the cue outlives it
-                scene["lead_departed"] = True
+            fresh = now - self._lead[0] <= self.cfg.lead_max_age_s
+            if not fresh or (self._lead_invalid is not None and now - self._lead_invalid[0] <= hold):
+                lead_unknown = True
+            if lead_unknown:
+                scene["lead"] = None
+            else:
+                scene["lead"] = self._lead[1]
+                if self._lead[1] is None and self._lead[2]:
+                    # the lead was lost after it pulled away; the cue outlives it
+                    scene["lead_departed"] = True
+        elif vis_bad:
+            scene["lead"] = None
+        if lead_unknown:
+            scene["lead_unknown"] = True
+        # ── lanes, edges, path ──
         # the tracked road geometry (roadsense >= 2026-11-16: presence with
         # hysteresis, filtered lines and edges) replaces the raw lane lines and
-        # road edges while its topic is fresh; an older roadsense never sends it
-        if (self._lanes is not None and self._lanes[1] is not None
-                and now - self._lanes[0] <= self.cfg.lanes_max_age_s):
-            scene["lanes"] = self._lanes[1]["lanes"]
-            scene["edges"] = self._lanes[1]["edges"]
+        # road edges while its topic is fresh; an older roadsense never sends it.
+        # Once seen, an aged-out or invalid lanes topic means no lines (never the
+        # raw ones); with the camera not believable there is no line and no path.
+        if vis_bad:
+            scene["lanes"], scene["edges"] = [None] * 4, [None] * 2
+            scene.pop("path", None)
+        elif self._lanes is not None:
             scene["lanes_src"] = "tracked"
+            if self._lanes[1] is not None and now - self._lanes[0] <= self.cfg.lanes_max_age_s:
+                scene["lanes"] = self._lanes[1]["lanes"]
+                scene["edges"] = self._lanes[1]["edges"]
+            else:
+                scene["lanes"], scene["edges"] = [None] * 4, [None] * 2
+        if vis is not None:
+            scene["vis"] = vis
+        if vis_bad and vw is not None:
+            # the display channel draws nothing measured from the camera either (chris-integrator already sends
+            # none then; an intermediate shape might still carry coasting objects)
+            vw = dict(vw, lanes=[None] * 4, edges=[None] * 2, lead=None)
+            vw.pop("path", None)
+            vw.pop("objs", None)
         ages = {"light": self.cfg.lights_max_age_s, "limit": self.cfg.limit_max_age_s,
                 "env": self.cfg.env_max_age_s, "signs": self.cfg.rules_max_age_s,
                 "map": self.cfg.map_max_age_s, "map_in": self.cfg.map_max_age_s,
@@ -1481,3 +1561,54 @@ class RoadsenseSceneFeed:
         if ws is not None:
             ws.close()
         self.stats["connected"] = False
+
+
+# ── bench check (lane L44): what the scene says, without the MFD ─────────────
+
+def _summary(sc: Dict[str, Any]) -> str:
+    vw = sc.get("vw") or {}
+    ld = sc.get("lead")
+    vis = sc.get("vis")
+    return ("seq %s vis %s lead_unknown %s lead %s vw.lead %s lanes %d vw.lines %d objs %d map %s" % (
+        sc.get("seq"), "-" if vis is None else ("ok" if vis.get("ok") else "NOT OK (%s)" % str(vis.get("why"))[:90]),
+        bool(sc.get("lead_unknown")), None if not isinstance(ld, dict) else ld.get("d"),
+        None if not isinstance(vw.get("lead"), dict) else vw["lead"].get("d"),
+        sum(1 for x in sc.get("lanes") or () if x), sum(1 for x in (vw.get("lanes") or []) + (vw.get("edges") or []) if x),
+        len(vw.get("objs") or ()), (sc.get("map") or {}).get("ok")))
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """``python -m cyberpunk_computer.backend.roadsense_scene [--seconds 10] [--port 8090]``: read the consolidated
+    WebSocket with this module's SceneBuilder (as the backend does) and print one line per second: what the MFD
+    would get (vis, lead_unknown, lead, lines, road users, map). Read-only; for the bench, where the road view of
+    the MFD stays closed (it opens only above 3 km/h)."""
+    import argparse
+    ap = argparse.ArgumentParser(description=main.__doc__.split(":")[0])
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=8090)
+    ap.add_argument("--seconds", type=float, default=10.0)
+    a = ap.parse_args(argv)
+    cfg = SceneFeedConfig(host=a.host, port=a.port)
+    ws = MiniWebSocket.connect(a.host, a.port, cfg.path, cfg.connect_timeout_s)
+    b = SceneBuilder(cfg)
+    end, last_print, n = time.monotonic() + a.seconds, 0.0, 0
+    try:
+        while time.monotonic() < end:
+            line = ws.recv(0.5)
+            now = time.monotonic()
+            if line is None:
+                continue
+            n += 1
+            b.feed(line, now)
+            sc = b.build(now)
+            if sc is not None and now - last_print >= 1.0:
+                last_print = now
+                print(_summary(sc), flush=True)
+    finally:
+        ws.close()
+    print("%d messages in %.0f s" % (n, a.seconds))
+    return 0 if n else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

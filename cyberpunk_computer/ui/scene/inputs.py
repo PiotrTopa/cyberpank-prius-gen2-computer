@@ -112,6 +112,11 @@ class RoadScene(NamedTuple):
     objects: Tuple[RoadObject, ...] = ()
     path: Optional[RoadLine] = None                                    # the model's planned path
     t: Optional[float] = None        # display channel: roadsense frame time, s (samples are spaced by it)
+    # L44 (chris-integrator): the camera is not believable now (scene vis.ok false) -> nothing measured is drawn
+    # and the road view says so; vis_why = the integrator's reason (logs / demo, not drawn)
+    vis_ok: bool = True
+    vis_why: str = ""
+    lead_unknown: bool = False       # the lead is not known (not "no lead"): the road view marks it
 
 
 class SceneInputs(NamedTuple):
@@ -334,8 +339,17 @@ def parse_scene(raw: Any) -> Optional[RoadScene]:
             f = _num(o.get("f"))
             objs.append(RoadObject(road_user_kind(o.get("k")), x, -y, "", 1.0 if f is None else max(0.0, min(1.0, f)),
                                    str(o.get("id") or ""), _num(o.get("vx")) or 0.0, -(_num(o.get("vy")) or 0.0)))
+    vis = raw.get("vis")
+    vis_ok = not (isinstance(vis, Mapping) and vis.get("ok") is False)
+    vis_why = str(vis.get("why") or "") if isinstance(vis, Mapping) and not vis_ok else ""
+    lead_unknown = raw.get("lead_unknown") is True
+    if not vis_ok:
+        # the backend sends nothing measured then; never draw a leftover either
+        lanes, edges, path, lead, objs = (None,) * 4, (None,) * 2, None, None, []
+    if lead_unknown:
+        lead = None
     return RoadScene(int(seq) if isinstance(seq, (int, float)) else 0,
-                     xs, lanes, edges, lead, tuple(objs), path, t)
+                     xs, lanes, edges, lead, tuple(objs), path, t, vis_ok, vis_why, lead_unknown)
 
 
 def parse_signs(raw: Any) -> Tuple[Tuple[SignItem, ...], Tuple[SignItem, ...]]:
@@ -520,7 +534,7 @@ def read_perception(state: Any, feed: Optional[SceneFeed] = None, map_limit: boo
     raw_scene = raw_scene if isinstance(raw_scene, Mapping) else {}
     road = parse_scene(raw_scene) if raw_scene else None
     if (road is not None and road.seq == 0 and not any(road.lanes) and road.lead is None
-            and road.path is None):
+            and road.path is None and road.vis_ok and not road.lead_unknown):
         road = None
 
     limit = fused_limit(raw_scene) if (raw_scene and map_limit) else None

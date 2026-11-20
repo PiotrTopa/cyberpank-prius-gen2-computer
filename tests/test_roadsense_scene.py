@@ -296,11 +296,15 @@ def test_builder_prefers_the_tracked_lead_and_falls_back():
     b.feed(rl[2], 0.4)
     s = b.build(0.4)
     assert s["lead"] is None and s["lead_src"] == "tracked" and s["lead_departed"] is True
-    # lead topic stops (older than lead_max_age_s): back to leads[0]
+    # lead topic stops (older than lead_max_age_s): UNKNOWN, never back to the raw leads[0] (L37 / L44)
     b.feed(rl[3], 0.4 + c.lead_max_age_s + 0.1)
     s = b.build(0.4 + c.lead_max_age_s + 0.1)
-    assert "lead_src" not in s and "lead_departed" not in s
-    assert s["lead"] is None or "src" not in s["lead"]
+    assert s["lead"] is None and s["lead_unknown"] is True and "lead_departed" not in s
+    # a new connection (a rollback to a roadsense without the topic) starts over: the raw lead again
+    b.reset()
+    b.feed(rl[4], 2.0)
+    s = b.build(2.0)
+    assert "lead_src" not in s and "lead_unknown" not in s and s["lead"]["d"] > 50
 
 
 def test_rules_become_the_sign_lists():
@@ -697,15 +701,16 @@ def test_builder_prefers_the_tracked_lanes_and_falls_back():
     assert s["lanes_src"] == "tracked"
     assert s["lanes"][0] is None and s["lanes"][1]["y"][0] == -1.75 and s["lanes"][2]["prob"] == 0.3
     assert s["edges"] == [{"y": [-6.5] * len(SCENE_XS)}, None]
-    # stale tracker output (roadsense api restarted, topic gone): back to the raw lines
+    # stale tracker output (topic gone while road frames still come): no lines, never the raw ones (L44)
     b.feed(rl[2], 1.0)
     s = b.build(1.0)
+    assert s["lanes_src"] == "tracked" and s["lanes"] == [None] * 4 and s["edges"] == [None] * 2
+    # an unusable lanes message alone never blanks the road (it is ignored)
+    b2 = SceneBuilder(c)
+    b2.feed(json.dumps({"type": "lanes", "seq": 9}), 1.2)
+    b2.feed(rl[3], 1.2)
+    s = b2.build(1.2)
     assert "lanes_src" not in s and [x is None for x in s["lanes"]] == [x is None for x in raw]
-    # an unusable lanes message never blanks the road
-    b.feed(json.dumps({"type": "lanes", "seq": 9}), 1.2)
-    b.feed(rl[3], 1.2)
-    s = b.build(1.2)
-    assert "lanes_src" not in s and any(x is not None for x in s["lanes"])
 
 
 def test_light_lane_assignment_fields():
@@ -977,3 +982,99 @@ def test_view_road_users_go_out_with_their_class():
     assert "objs" not in view_to_scene(view_msg(5, 1))              # no road users: no key
     m["objects"][0]["cls"] = {"label": "human", "confidence": 0.4, "source": "roadusers"}
     assert view_to_scene(m)["lead"]["k"] == "human"
+
+
+# ── L44: honesty against chris-integrator (camera not believable, lead unknown) ─────────────────────────────
+
+def _frame(b, t, seq, lead=None, lanes=None, view_kw=None, integrity=None):
+    """One chris-integrator frame on the WebSocket: lead, lanes, view (in that order)."""
+    if lead is not None:
+        b.feed(json.dumps(dict(lead, seq=seq)), t)
+    if lanes is not None:
+        b.feed(json.dumps(dict(lanes, seq=seq)), t)
+    vm = view_msg(seq, int(t * 1e9), **(view_kw or {}))
+    if integrity is not None:
+        vm["integrity"] = integrity
+    b.feed(json.dumps(vm), t)
+    return b.build(t)
+
+
+CHRIS_LEAD = {"type": "lead", "present": True, "valid": True, "reason": None, "dist_m": 12.0, "lateral_m": 0.2,
+              "v_rel_mps": -1.0, "track_id": 3, "source": "vision+ego", "sources": ["cam"], "departed": False}
+CHRIS_LANES = {"type": "lanes", "valid": True, "x": VIEW_X, "lines": [{"present": False}] * 4,
+               "edges": [{"present": False}] * 2}
+
+
+def test_chris_healthy_frame_says_vision_ok():
+    b = SceneBuilder(cfg(max_hz=1000.0))
+    s = _frame(b, 1.0, 1, CHRIS_LEAD, CHRIS_LANES, integrity={"valid": True, "reason": None})
+    assert s["vis"] == {"ok": True} and "lead_unknown" not in s
+    assert s["lead"]["d"] == 12.0 and s["lead"]["srcs"] == ["cam"]
+    assert s["vw"]["lead"]["d"] == 12.0
+
+
+def test_camera_not_believable_blanks_everything_measured_and_says_why():
+    b = SceneBuilder(cfg(max_hz=1000.0))
+    _frame(b, 1.0, 1, CHRIS_LEAD, CHRIS_LANES, integrity={"valid": True})
+    bad_lead = dict(CHRIS_LEAD, valid=False, reason="vision: fault: model_out_of_range")
+    bad_lanes = dict(CHRIS_LANES, valid=False, reason="vision: fault: model_out_of_range")
+    # an intermediate integrator that still lets a coasting lead / lines through the view
+    s = _frame(b, 1.1, 2, bad_lead, bad_lanes,
+               integrity={"valid": False, "reason": "vision: fault: model_out_of_range"})
+    assert s["vis"] == {"ok": False, "why": "vision: fault: model_out_of_range"}
+    assert s["lead"] is None and s["lead_unknown"] is True and "lead_departed" not in s
+    assert s["lanes"] == [None] * 4 and s["edges"] == [None] * 2 and "path" not in s
+    assert s["vw"]["lead"] is None and s["vw"]["lanes"] == [None] * 4 and "path" not in s["vw"]
+
+
+def test_invalid_lanes_alone_mark_the_camera_and_hold():
+    """Road mode (no view): lanes.valid false is the camera's verdict; held invalid_hold_s, never raw lines."""
+    c = cfg(max_hz=1000.0)
+    b = SceneBuilder(c)
+    rl = [ln for ln in load_lines() if peek_type(ln) == "road"]
+    b.feed(json.dumps(dict(CHRIS_LANES, valid=False, reason="vision: fault: speed disagrees")), 0.0)
+    b.feed(json.dumps(dict(LEAD_MSG, valid=True)), 0.0)
+    b.feed(rl[0], 0.0)
+    s = b.build(0.0)
+    assert s["vis"]["ok"] is False and s["lanes"] == [None] * 4 and s["lead"] is None and s["lead_unknown"]
+    b.feed(rl[1], 3.0)                       # topics gone, road frames on: still unknown (hold + age-out)
+    s = b.build(3.0)
+    assert s["vis"]["ok"] is False and s["lead"] is None and s["lanes"] == [None] * 4
+
+
+def test_invalid_lead_is_unknown_not_no_lead_and_raises_no_departure():
+    b = SceneBuilder(cfg(max_hz=1000.0))
+    s = _frame(b, 1.0, 1, dict(CHRIS_LEAD, standing=True), CHRIS_LANES, integrity={"valid": True})
+    assert s["lead"]["standing"] is True
+    # ego speed unknown (the vehicle feed went silent): the lead is not known; departed must not fire
+    s = _frame(b, 1.1, 2, dict(CHRIS_LEAD, present=False, valid=False, departed=True,
+                              reason="ego speed unknown: no source"), CHRIS_LANES, integrity={"valid": True})
+    assert s["vis"] == {"ok": True}                          # the camera itself is fine
+    assert s["lead"] is None and s["lead_unknown"] is True and "lead_departed" not in s
+    # the next frames are valid again but the hold keeps "unknown" for invalid_hold_s
+    s = _frame(b, 2.0, 3, CHRIS_LEAD, CHRIS_LANES, integrity={"valid": True})
+    assert s["lead_unknown"] is True
+    s = _frame(b, 7.0, 4, CHRIS_LEAD, CHRIS_LANES, integrity={"valid": True})
+    assert "lead_unknown" not in s and s["lead"]["d"] == 12.0
+    # a valid "no lead" is no lead: null without the unknown flag
+    s = _frame(b, 7.1, 5, dict(CHRIS_LEAD, present=False, dist_m=None), CHRIS_LANES, integrity={"valid": True})
+    assert s["lead"] is None and "lead_unknown" not in s
+
+
+def test_old_roadsense_shapes_unchanged():
+    """The phone runs the old roadsense until the deploy (and after a rollback): no valid keys, no integrity.
+    Nothing new appears and nothing old disappears."""
+    b = SceneBuilder(cfg(max_hz=1000.0))
+    old_lead = {k: v for k, v in CHRIS_LEAD.items() if k not in ("valid", "reason", "sources")}
+    old_lanes = {k: v for k, v in CHRIS_LANES.items() if k != "valid"}
+    s = _frame(b, 1.0, 1, old_lead, old_lanes)
+    assert "vis" not in s and "lead_unknown" not in s
+    assert s["lead"]["d"] == 12.0 and "srcs" not in s["lead"] and s["vw"]["lead"]["d"] == 12.0
+    assert s["vw"]["lanes"][1] is not None and s["path"]
+
+
+def test_fused_lead_copy_carries_validity():
+    from cyberpunk_computer.backend.roadsense_scene import fused_to_scene
+    m = {"type": "fused", "map": {"available": False}, "lead": dict(CHRIS_LEAD, valid=False)}
+    assert fused_to_scene(m)["lead"]["valid"] is False
+    assert "valid" not in fused_to_scene(dict(m, lead=CHRIS_LEAD))["lead"]

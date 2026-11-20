@@ -76,7 +76,7 @@ and installed with `sync.sh` / `provision.sh` ([PROVISIONING.md](PROVISIONING.md
 | `/etc/sysctl.d/10-lockup-panic.conf` | `kernel.panic=10`, `kernel.panic_on_oops=1` |
 | `/etc/udev/rules.d/99-prius-rp2040-nomm.rules` | ModemManager ignores VID `2e8a`; `MODE="0666"` |
 | `/etc/udev/rules.d/70-prius-mfd-usb0.rules` | MFD gadget MAC `02:1e:4d:00:00:01` → `usb0` |
-| `/etc/nftables.d/50_prius_backend.nft` | 8080–8082 TCP; `wlan*` 8787 UDP / 8788 TCP; `prius_guard`: 8080–8082/8090 only on `lo`, `wg*`, `usb*`, AP `10.42.0.1` (not ZMQ) |
+| `/etc/nftables.d/50_prius_backend.nft` | 8080–8082 TCP; `wlan*` 8787 UDP / 8788 TCP; `prius_guard`: 8080–8082/8090/8091 only on `lo`, `wg*`, `usb*`, AP `10.42.0.1` (8080/8090 only; not ZMQ, not 8091) |
 | `/etc/NetworkManager/conf.d/90-dns-none.conf` | `dns=none`, static `/etc/resolv.conf` (1.1.1.1, 9.9.9.9) |
 | `/etc/NetworkManager/conf.d/99-unmanage-usb0.conf` | `usb0` unmanaged |
 | NM conns `prius-wan`, `wg-homelab`, `prius-ap`, `prius-home-wifi`, `prius-dev-wifi` | rendered from `*.nmconnection.tmpl` ([NETWORKING.md](NETWORKING.md)) |
@@ -88,7 +88,10 @@ and installed with `sync.sh` / `provision.sh` ([PROVISIONING.md](PROVISIONING.md
 | `/lib/firmware/qcom/a630_sqe.fw`, `a630_gmu.bin` | Adreno microcode (apk `firmware-qcom-adreno-a630-sqe`, `firmware-qcom-adreno-a630`) |
 | `/etc/sudoers.d/010-user-nopasswd` | passwordless sudo for `user` |
 | `~user/.ssh/authorized_keys` | operator workstation keys |
-| `/etc/roadsense/api.env` | `ROADSENSE_API_PORT=8090` (roadsense repo) |
+| `/etc/roadsense/api.env` | `ROADSENSE_API_PORT=8091` (roadsense repo; the debug face since lane L44, was 8090; provision.sh moves 8090/8081 to 8091 once chris-integrator is installed) |
+| `/etc/systemd/system/roadsense.target.d/50-prius-chris.conf` | this overlay: `Wants=chris-integrator.service` (the integrator starts / stops with the stack) |
+| `/etc/systemd/system/chris-integrator.service.d/50-prius.conf` | this overlay: `PartOf=roadsense.target`, `Slice=roadsense.slice`, API on `127.0.0.1:8090`, debug face `http://127.0.0.1:8091` (`/etc/chris/integrator.env` overrides) |
+| `/etc/chris/*.json`, `/etc/chris/integrator.env`, `/var/lib/chris` (maps, carried state), `/run/chris/{feed,position,integrator}.sock`, `/usr/local/lib/chris` | chris-integrator + chris-mapper (roadsense tree, `chris-integrator/scripts/install.sh`) |
 | `/etc/roadsense/*.json`, `/var/lib/roadsense/models`, `/run/roadsense/*.sock`, `/dev/shm/roadsense-frames` | roadsense config / models / runtime (roadsense `docs/ARCHITECTURE.md`) |
 | apk `uhubctl`, GPU packages | [packages.txt](packages.txt), [GPU_COMPUTE.md](GPU_COMPUTE.md) |
 

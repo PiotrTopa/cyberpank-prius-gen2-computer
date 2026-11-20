@@ -40,7 +40,8 @@ export function MapTab({ state, now }: { state: AppState; now: number }) {
   const meantToRun = rs == null || RUNNING.includes(rsState);
   const data = useRoadsenseMap(meantToRun);
   const feeder: FeederStatus | null = data.position ?? rs?.position ?? null;
-  const mapdUnit = rs?.units?.['roadsense-mapd.service'];
+  // the map box runs inside chris-integrator since lane L44; legacy mapd only on an old roadsense (rollback)
+  const mapdUnit = rs?.units?.['chris-integrator.service'] ?? rs?.units?.['roadsense-mapd.service'];
   const banners = mapBanners({
     rsState: rs ? rsState : null, apiDown: data.apiDown, mapdDown: data.mapdDown,
     map: data.map, fused: data.fused, feeder, nowS: now / 1000,
@@ -65,7 +66,7 @@ export function MapTab({ state, now }: { state: AppState; now: number }) {
           <FeederPanel feeder={feeder} state={state} now={now} />
           <Panel title="Map Layer" code="MAP-01" icon={Layers}>
             <DataRow label="roadsense" value={rsState.toUpperCase() || '--'} />
-            <DataRow label="mapd unit" value={mapdUnit ?? '--'} />
+            <DataRow label="map unit" value={mapdUnit ?? '--'} />
             <p className="text-[0.65rem] text-slate-600">
               The map layer runs with the roadsense stack (key on). Nothing is polled while it is off.
             </p>
@@ -156,7 +157,7 @@ function MapLayerPanel({ map, health, feeder, mapdUnit, mapdDown, apiDown }: {
   return (
     <Panel title="Map Layer" code="MAP-01" icon={Layers}
       right={st ? <Chip tone={STATE_TONE[st] ?? 'dim'}>{st.replace(/_/g, ' ')}</Chip> : undefined}>
-      <DataRow label="mapd unit" value={mapdUnit ?? '--'} tone={mapdUnit === 'active' ? 'green' : mapdUnit ? 'amber' : undefined} />
+      <DataRow label="map unit" value={mapdUnit ?? '--'} tone={mapdUnit === 'active' ? 'green' : mapdUnit ? 'amber' : undefined} />
       <StatusRow label="mapd → api" on={apiDown ? null : health?.daemons?.mapd?.connected ?? !mapdDown}
         onText="CONNECTED" offText="DOWN" />
       <DataRow label="Pack" value={pack ? `${pack.region ?? '?'} · OSM ${pack.osm_timestamp?.slice(0, 10) ?? '?'}` : map ? 'NO PACK' : undefined}

@@ -83,9 +83,10 @@ def _build_roadsense():
 
         BACKEND_ROADSENSE_ENABLED=1
         BACKEND_ROADSENSE_TARGET=roadsense.target
-        BACKEND_ROADSENSE_UNITS=roadsense-camerad-dvr.service,roadsense-modeld.service,...
+        BACKEND_ROADSENSE_UNITS=roadsense-camerad-dvr.service,...,chris-integrator.service  # default: DEFAULT_UNITS
         BACKEND_ROADSENSE_API_HOST=127.0.0.1
-        BACKEND_ROADSENSE_API_PORT=8090      # ROADSENSE_API_PORT on the phone (8080 is ours)
+        BACKEND_ROADSENSE_API_PORT=8090      # chris-integrator's consolidated API (CHRIS_API_PORT; 8080 is ours,
+                                             # roadsense's debug face is on 8091)
         BACKEND_ROADSENSE_CAMERA_RELAY=1     # power the camera hub (relay ch4) with the stack
         BACKEND_ROADSENSE_EARLY_CAMERA_S=180   # BEAN entry: one early session powers the camera hub at most this long (0 = never)
         BACKEND_ROADSENSE_EARLY_CAMERA_TAIL_S=30      # hub kept this long after the entry demand ends
@@ -134,12 +135,14 @@ def _build_roadsense_scene():
 
         BACKEND_ROADSENSE_SCENE=1          # 0 = no roadsense_scene events (needs BACKEND_ROADSENSE_ENABLED)
         BACKEND_ROADSENSE_SCENE_HZ=10      # publish cap, 5..10 per the MFD contract
+        BACKEND_ROADSENSE_SCENE_INVALID_HOLD_S=5   # a lead / lanes "valid: false" keeps "unknown" this long (L44)
     """
     from .roadsense_scene import SceneFeedConfig
     env = os.environ.get
     return SceneFeedConfig(
         enabled=_env_flag("BACKEND_ROADSENSE_SCENE", "1"),
         max_hz=max(1.0, min(10.0, float(env("BACKEND_ROADSENSE_SCENE_HZ") or "10"))),
+        invalid_hold_s=max(0.0, min(30.0, float(env("BACKEND_ROADSENSE_SCENE_INVALID_HOLD_S") or "5"))),
     )
 
 
@@ -154,7 +157,8 @@ def _build_position():
         BACKEND_POSITION_PHONE_UERE_M=4        # phone: hacc_m = HDOP x this
         BACKEND_POSITION_PHONE_LINGER_S=120    # phone: GNSS stays on this long after roadsense stops
         BACKEND_POSITION_PHONE_POLL_HZ=4       # phone: ModemManager polls per second
-        BACKEND_POSITION_RUNDIR=/run/roadsense # mapd's position.sock
+        BACKEND_POSITION_RUNDIR=/run/chris:/run/roadsense  # position.sock: chris-integrator (L44), else legacy mapd;
+                                               # ':'-separated, tried in order
         BACKEND_POSITION_MOTION_HZ=10          # 5..50
         BACKEND_POSITION_YAW=wheels            # yaw fields with motion: wheels, steer, gyro (0x022) (comma list; empty = none).
                                                # With a roadsense that speaks the vehicle input API every motion signal
@@ -213,7 +217,7 @@ def _build_position():
         session_s = 1800.0
     return PositionFeederConfig(
         enabled=True, source=source,
-        rundir=(env("BACKEND_POSITION_RUNDIR") or "/run/roadsense").strip(),
+        rundir=(env("BACKEND_POSITION_RUNDIR") or "/run/chris:/run/roadsense").strip(),
         motion_hz=hz, yaw_inputs=yaw, fix_timeout_s=fix_timeout,
         synthetic_route=(env("BACKEND_POSITION_SYNTHETIC_ROUTE") or "").strip(),
         synthetic_dropouts=tuple(drops),

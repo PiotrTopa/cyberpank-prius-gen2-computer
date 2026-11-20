@@ -22,6 +22,14 @@ is imported from roadsense. Changes against the reference client:
   reads pending replies without sending. ``reset()`` as in the reference
   client (roadsense f51b678).
 
+* ``rundir`` may name several directories separated by ``:`` (lane L44,
+  2026-11-20): the connect tries ``<dir>/position.sock`` of each in order and
+  keeps the first that accepts. The default ``/run/chris:/run/roadsense``
+  reaches chris-integrator (the vehicle input API's home since L44; it serves
+  ``position.sock`` as an alias of its ``feed.sock``) and, when that is not
+  there (an old roadsense after a rollback), legacy mapd. ``path`` is the
+  socket of the current connection (the first candidate while disconnected).
+
 Transport: Unix stream socket ``<rundir>/position.sock``, one JSON object per
 line. The client never blocks the caller: while mapd is away every message is
 dropped and a reconnect is tried at most every ``retry_s``.
@@ -35,11 +43,15 @@ import socket
 import time
 
 API = 1
+DEFAULT_RUNDIR = "/run/chris:/run/roadsense"     # chris-integrator first, legacy mapd as the fallback
 
 
 class PositionFeed:
-    def __init__(self, rundir="/run/roadsense", name="feeder", retry_s=2.0, provides=None):
-        self.path = os.path.join(rundir, "position.sock")
+    def __init__(self, rundir=DEFAULT_RUNDIR, name="feeder", retry_s=2.0, provides=None):
+        self.paths = [os.path.join(d, "position.sock") for d in str(rundir).split(":") if d.strip()]
+        if not self.paths:
+            self.paths = [os.path.join(d, "position.sock") for d in DEFAULT_RUNDIR.split(":")]
+        self.path = self.paths[0]
         self.name, self.retry_s = name, retry_s
         self.provides = provides         # what this feeder will send, declared in the hello (vehicle input API 1.1)
         self.sock = None
@@ -60,16 +72,23 @@ class PositionFeed:
         if now < self._next_try:
             return False
         self._next_try = now + self.retry_s
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            s.connect(self.path)
-            s.setblocking(False)
-            hello = {"type": "hello", "api": API, "name": self.name}
-            if self.provides:
-                hello["provides"] = self.provides
-            s.send((json.dumps(hello) + "\n").encode())
-        except OSError:
-            s.close()
+        s = None
+        for path in self.paths:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                s.connect(path)
+                s.setblocking(False)
+                hello = {"type": "hello", "api": API, "name": self.name}
+                if self.provides:
+                    hello["provides"] = self.provides
+                s.send((json.dumps(hello) + "\n").encode())
+            except OSError:
+                s.close()
+                s = None
+                continue
+            self.path = path
+            break
+        if s is None:
             return False
         self.sock = s
         self.server = self.accepts = None    # of this connection: unknown until its hello reply is read

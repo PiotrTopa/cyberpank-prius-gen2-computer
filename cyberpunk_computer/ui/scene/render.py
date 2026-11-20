@@ -281,7 +281,7 @@ class SceneRenderer:
         # rain and snow keep falling while the road view is open
         fall = int(d.clock * 10) if (d.view_step == VIEW_STEPS
                                      and inp.env_weather in ("rain", "snow")) else 0
-        return (d.view_step, d.door_step, d.vision, int(inp.speed_kmh + 0.5), inp.gear,
+        return (d.view_step, d.door_step, d.vision, d.lead_unknown, int(inp.speed_kmh + 0.5), inp.gear,
                 inp.ready, inp.acc_on, inp.doors, inp.rear_group, inp.door_any, inp.head,
                 inp.high, inp.tail, inp.fog, inp.brake, inp.limit_kmh, inp.limit_source,
                 inp.light, inp.env_light, inp.env_place, inp.env_weather, inp.ice_running,
@@ -1401,6 +1401,12 @@ class SceneRenderer:
             tag = ("NO SIGNAL", pal["warn"] if int(d.clock * 2) % 2 else pal["dim"])
         elif d.vision == "stale":
             tag = ("SIGNAL LOST", pal["warn"] if int(d.clock * 2) % 2 else pal["orange"])
+        elif d.vision == "doubt":
+            # L44: chris-integrator holds the camera not believable: the road is not drawn (it would look clear);
+            # steady and calm, like NO ROAD DATA, in the warning amber's quieter tone
+            tag = ("CAMERA UNSURE", pal["orange"])
+        elif d.lead_unknown:
+            tag = ("LEAD ?", pal["dim"])
         if tag:
             self._chip(s, 4, y - 19 if x > 4 else y, tag[0], tag[1])
         maplayer.corner(self, s, d, y - 19 * (int(x > 4) + int(tag is not None)))

@@ -376,6 +376,37 @@ def test_position_feed_unix_socket_reconnects():
     feed.close()
 
 
+def test_position_feed_rundir_list_prefers_the_first_and_falls_back():
+    # L44: "/run/chris:/run/roadsense": chris-integrator first, legacy mapd when only that is there
+    chris, legacy = tempfile.mkdtemp(), tempfile.mkdtemp()
+    lpath = os.path.join(legacy, "position.sock")
+    lsrv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    lsrv.bind(lpath)
+    lsrv.listen(1)
+    feed = PositionFeed(chris + ":" + legacy, name="t", retry_s=0.0)
+    assert feed.path == os.path.join(chris, "position.sock")    # the first candidate while disconnected
+    assert feed.send({"type": "motion", "speed_mps": 1.0})
+    assert feed.path == lpath
+    lsrv.accept()[0].close()
+    feed.close()
+    cpath = os.path.join(chris, "position.sock")
+    csrv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    csrv.bind(cpath)
+    csrv.listen(1)
+    assert feed.send({"type": "motion", "speed_mps": 1.0})
+    assert feed.path == cpath                                  # both there: the integrator wins
+    conn, _ = csrv.accept()
+    conn.sendall(b'{"type":"hello","api":"1.1","server":"chris-integrator","accepts":["gnss","motion","reset",'
+                 b'"controls","body","vehicle","objects"]}\n')
+    time.sleep(0.05)
+    feed.poll()
+    assert feed.server["server"] == "chris-integrator" and "controls" in feed.accepts
+    feed.close()
+    conn.close()
+    lsrv.close()
+    csrv.close()
+
+
 def test_position_feed_reads_the_hello_accepts_list():
     d = tempfile.mkdtemp()
     path = os.path.join(d, "position.sock")
@@ -616,7 +647,7 @@ def test_env_config(monkeypatch):
     assert _build_position() is None                          # off by default
     monkeypatch.setenv("BACKEND_POSITION_FEEDER", "1")
     c = _build_position()
-    assert c.enabled and c.source == "headunit" and c.rundir == "/run/roadsense"
+    assert c.enabled and c.source == "headunit" and c.rundir == "/run/chris:/run/roadsense"
     assert c.yaw_inputs == ("wheels",) and c.motion_hz == 10.0
     monkeypatch.setenv("BACKEND_POSITION_SOURCE", "synthetic")
     monkeypatch.setenv("BACKEND_POSITION_YAW", "steer")

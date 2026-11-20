@@ -151,6 +151,8 @@ striped sun and the skylines are 80s arcade; the depth scale is logarithmic (sec
 | Driving, signal lost | road data was live and is now older than 7 s | floor grid only, `NO SIGNAL` blinking |
 | Driving, no road data | roadsense running, no scene data received yet (stack starting, scene feed off) | floor grid only, `NO ROAD DATA` (steady, dim); limit sign and traffic light from the health mirror still show |
 | Driving, vision off | roadsense not running | floor grid only (a floor line runs under the car: never a fake lane), `VISION OFF` |
+| Driving, camera not believable (lane L44) | fresh scene data, but chris-integrator holds the camera not believable (scene `vis.ok` false: `view.integrity` / `lanes.valid` false, held 5 s) | floor grid only: no lanes, no lead, no road users, no path, no traffic light (an empty road would look like a clear road); `CAMERA UNSURE` chip, steady, in the quieter amber (`orange`), no blinking. The integrator's reason (`vis.why`) is not drawn (logs, the alert inputs) |
+| Driving, lead unknown (lane L44) | road live and the camera fine, but the lead is not known (`lead_unknown`: the lead topic said `valid: false`, held 5 s, or aged out while road frames still come) | lanes as usual, no vehicle; `LEAD ?` chip, steady, dim. Not the same as "no lead" (no chip) |
 | Closing | standing and in P, power off, or a door open | the swing in reverse |
 
 Rules that hold in every state: nothing is drawn for data that is not there (no lead in the scene
@@ -499,7 +501,9 @@ not changing, on the frontend clock.
  "signs": {"on":    [{"id": "no_stopping", "s": "B-36", "v": 20, "side": "l|r", "q": true}],   # <= 6
            "ahead": [{"id": "roundabout_ahead", "s": "A-8", "m": 60}]},                         # <= 3
  "env": {"light": "day|dusk_dawn|night", "place": "...", "weather": "..."},
- "map": {"ok": true, "state": "good", "conf": 0.97, ...}}     # roadsense map layer + fusion, section 7.2
+ "map": {"ok": true, "state": "good", "conf": 0.97, ...},    # roadsense map layer + fusion, section 7.2
+ "vis": {"ok": false, "why": "vision: fault: ..."},          # chris-integrator: is the camera believable (7.6)
+ "lead_unknown": true}                                        # the lead is not known (not "no lead"; 7.6)
 ```
 
 Units and frame as roadsense: metres, x forward, **y right** (the frontend flips it), origin at the
@@ -511,8 +515,9 @@ Every key is optional; a missing key means "not known" and nothing is drawn for 
 
 ### 7.1 Backend feed (`cyberpunk_computer/backend/roadsense_scene.py`)
 
-The backend reads roadsense's WebSocket `ws://127.0.0.1:8090/ws?topics=road,lights,speed_limit,env,rules,fused,map,lead,lanes,view`
-(roadsense's own API on loopback, not the backend's `/api/v1/roadsense/ws` front) with a stdlib
+The backend reads the consolidated WebSocket `ws://127.0.0.1:8090/ws?topics=road,lights,speed_limit,env,rules,fused,map,lead,lanes,view`
+(since lane L44 chris-integrator's API, before it roadsense's own; same paths, topics and shapes; on
+loopback, not the backend's `/api/v1/roadsense/ws` front) with a stdlib
 RFC 6455 client in its own thread and publishes `roadsense_scene` on the ZMQ PUB channel only (not
 on the dashboard websocket, whose latest-only queue would let scenes displace state snapshots),
 through a latest-only slot per event name (`ZmqServer.enqueue_latest_event`, compact JSON).
@@ -528,7 +533,7 @@ through a latest-only slot per event name (`ZmqServer.enqueue_latest_event`, com
 | `lead` (tracked) | roadsense's api-derived topic `lead` (lead tracker, roadsense since 2026-11-15; one message per road frame) while its last message is younger than 0.5 s: `d` = `dist_m`, `y` = `lateral_m`, `v_rel` = `v_rel_mps`, `a` = `a_lead_mps2`, `prob`, `src: "tracked"`; only when set: `standing`, `departed` (true), `gap` = `time_gap_s`, `d_std` = `dist_std_m`, `ttc` = `ttc_s`, `id` = `track_id` | 0.1 m / 0.01 m / 0.1 m/s / 0.1 m/s2 / 0.01; `lead` is **null** when `present` is false (the tracker has no lead), not the raw value; `prob` is left out while the tracker coasts without a frame (the screen then takes 1). In a hold (`standing`) `d` is frozen by the tracker: the 2-3 m flip of the raw value behind a standing car is gone. `v_rel` is the rate of change of the tracked distance with the car's own speed (vehicle motion through mapd's `ego`, else the model's) |
 | `lead_src` | `"tracked"` while the tracked lead is used | left out on the raw path below; the alert functions read it to know that a null `lead` means "no lead" |
 | `lead_departed` | `lead.departed` while `present` is false | true only then: the lead pulled away and was lost while the car stood; the cue outlives the track (up to 8 s in roadsense). For the alerts' lead departure |
-| `lead.d`, `lead.y` (raw, fallback) | `road.leads[0].x[0]`, `.y[0]` (the "now" hypothesis; m from the camera, y right), only while no fresh `lead` message exists (an older roadsense, or its tracker stalled) | 0.1 m / 0.01 m |
+| `lead.d`, `lead.y` (raw, fallback) | `road.leads[0].x[0]`, `.y[0]` (the "now" hypothesis; m from the camera, y right), only from a roadsense that never sent a `lead` message on this connection (since L44 a stalled or invalid tracker gives `lead_unknown`, never the raw value; section 7.6) | 0.1 m / 0.01 m |
 | `lead.v_rel` (raw) | `road.leads[0].v[0] - road.v_ego` (else `- road.pose.vx`) | 0.1 m/s; both are the model's own estimates, so the car's speed is not mixed in |
 | `lead.a` (raw) | `road.leads[0].a[0]` | 0.1 m/s2, the model's estimate; the screen lights the lead's stop lamps at -1.5 or below |
 | `lead.prob` (raw) | `road.leads[0].prob` | 0.01; `lead` is null below 0.3 (the screen draws from 0.5) |
@@ -575,6 +580,32 @@ Budget, measured on the recorded roadsense messages of `tests/fixtures/roadsense
 
 The frontend client does not log `roadsense_scene` events (formatting one costs more than decoding
 it on the Pi).
+
+### 7.6 What is not known (lane L44, chris-integrator)
+
+chris-integrator states per frame whether the camera is believable (`view.integrity.valid`, validity of the
+vision source) and per product whether it is valid (`lead.valid`, `lanes.valid`, with a `reason`). The backend
+(`SceneBuilder.build`) turns that into two scene keys and never shows a raw camera value in their place:
+
+| Scene key | When | Effect in the scene |
+|---|---|---|
+| `vis: {"ok": false, "why"}` | the frame's `view.integrity.valid` is false, or a `lanes` message said `valid: false` within `invalid_hold_s` (5 s) | `lanes`, `edges` null, no `path`, `lead` null with `lead_unknown`; in `vw` no lines, no path, no lead, no road users |
+| `vis: {"ok": true}` | the integrator says the camera is fine | nothing else changes |
+| `vis` absent | an older roadsense (no `integrity`, no `valid`) | everything as before L44 |
+| `lead_unknown: true` | `vis.ok` false, or the last `lead` message said `valid: false` within 5 s, or the `lead` topic (seen on this connection) aged out | `lead` null and no `lead_departed` cue (a lead that went invalid has no known departure); `lead_src` stays `"tracked"` |
+| (lanes aged out) | the `lanes` topic was seen on this connection and is older than 0.5 s | `lanes`, `edges` null (never the raw lines); a malformed `lanes` message alone is ignored |
+
+`lead.srcs` carries the integrator's `lead.sources[]` (the sensors behind the lead); nothing in this repository
+string-matches `lead.source`. The fused copy `map.lead` carries `valid: false` when the integrator's lead is not
+valid. The alert inputs (`alerts/inputs.py` `_scene_lead`) return `lead_unknown` instead of "no lead" and take no
+fallback (fused copy, raw value) while `vis.ok` is false; the green-light helper does not count an unknown lead as
+a clear road. The screen: section 4 (`CAMERA UNSURE`, `LEAD ?`).
+
+Measured on the recordings of 2026-11-19 through chris-integrator (L43 at 424ef8e) and this backend
+(`tools/mfd_chain_replay.py --glass`, docs/lanes/L44-chris-repoint.md): on the incident drive 151146 the camera is
+held not believable from 206 s to the end (99.3 % of the driving), where the glass showed a phantom lead at about
+5 m before; on the good drive 104128 `CAMERA UNSURE` shows in 6.1 % of the driving, 14 times in 38 min (the
+integrator's false camera faults, L41 section 0, lengthened by the 5 s hold).
 
 ### 7.2 Map layer key `map` (`roadsense_scene.fused_to_scene`, `map_input_to_scene`)
 

@@ -475,6 +475,24 @@ def test_build_inputs_reads_the_lead_topic_first():
     assert i.lead.departed and i.lead.src == "tracked" and i.lead.d == 0.0
 
 
+def test_build_inputs_lead_unknown_is_not_no_lead():
+    """L44: camera not believable (vis.ok false) or the backend's lead_unknown: lead None AND lead_unknown,
+    and no fallback to the fused copy or the raw value is taken."""
+    raw = {"d": 20.0, "y": 0.1, "v_rel": -1.0, "prob": 0.9}
+    fused = {"ok": False, "lead": {"present": True, "d": 19.5}}
+    for scene in ({"lead": raw, "map": fused, "vis": {"ok": False, "why": "vision: fault: x"}},
+                  {"lead": None, "lead_src": "tracked", "lead_unknown": True, "map": fused},
+                  {"lead": raw, "map": {"ok": False, "lead": {"present": True, "d": 19.5, "valid": False}}}):
+        i = build_inputs(_state(), scene, 0.1, 10.0, 10.0, {})
+        assert i.lead is None and i.lead_unknown, scene
+        assert i.compact()["lead"] == "unknown"
+    i = build_inputs(_state(), {"lead": None, "lead_src": "tracked", "vis": {"ok": True}}, 0.1, 10.0, 10.0, {})
+    assert i.lead is None and not i.lead_unknown and i.vision_ok is True       # a known "no lead"
+    i = build_inputs(_state(), {"lead": dict(raw, src="tracked", srcs=["cam", "radar:0"]), "lead_src": "tracked"},
+                     0.1, 10.0, 10.0, {})
+    assert i.lead.sources == ("cam", "radar:0") and i.vision_ok is None
+
+
 def test_build_inputs_on_the_recorded_roadsense_scene():
     """Scenes built by the backend feed from the recorded roadsense messages."""
     import gzip

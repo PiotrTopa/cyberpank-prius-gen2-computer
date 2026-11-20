@@ -614,7 +614,7 @@ def test_firewall_guard_limits_ports():
     text = (ROOTFS / "etc" / "nftables.d" / "50_prius_backend.nft").read_text()
     rules = "\n".join(l for l in text.splitlines() if not l.strip().startswith("#"))
     assert "table inet prius_guard" in rules and "hook input priority -10" in rules
-    assert "tcp dport { 8080, 8081, 8082, 8090 } jump prius_ports" in rules
+    assert "tcp dport { 8080, 8081, 8082, 8090, 8091 } jump prius_ports" in rules
     for allowed in ('iifname "lo" return', 'iifname "wg*" return', 'iifname "usb*" return',
                     'iifname "wlan*" ip saddr 10.42.0.0/24 ip daddr 10.42.0.1 tcp dport { 8080, 8090 } return'):
         assert allowed in rules

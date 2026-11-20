@@ -8,7 +8,10 @@ the AGPL sign provider from roadsense-signs as a separate process). roadsense
 is a set of systemd units gathered under ``roadsense.target``; nothing is
 linked into this process — the backend only drives ``systemctl`` and reads the
 stack's HTTP ``/v1/health`` endpoint, which is the documented boundary between
-the MIT/AGPL stacks and this repository.
+the MIT/AGPL stacks and this repository. Since lane L44 (2026-11-20) that
+endpoint is served by chris-integrator (the consolidated API, port 8090; it is
+a unit of ``roadsense.target`` through the drop-ins in POCO/rootfs) and
+roadsense's own API is one camera's debug face on 8091.
 
 The stack is GPU/CPU heavy (~10-14 road runs/s, 70-95 C without a fan), so it
 runs **only while ACC is on** and is stopped cleanly when the key goes away:
@@ -28,8 +31,12 @@ runs **only while ACC is on** and is stopped cleanly when the key goes away:
   ``systemctl stop --no-block roadsense.target``, wait for every unit to be
   inactive (or ``stop_timeout_s``), then cut the camera hub.
 * RUNNING watchdog: units are polled with ``systemctl is-active`` and the API
-  with ``/v1/health``; an API silent for ``api_dead_restart_s`` restarts the
-  target (at most once per ``restart_cooldown_s``).
+  with ``/v1/health``; a stack unhealthy for ``api_dead_restart_s`` restarts the
+  target (at most once per ``restart_cooldown_s``). Healthy (``stack_ok``) =
+  the API answers AND its ``daemons`` table reports camerad and modeld
+  connected (lane L44: the API on 8090 is chris-integrator's, which answers
+  also while the camera side is dead; an API without a ``daemons`` table is
+  judged by its answer alone). STARTING -> RUNNING waits for the same.
 * A manual ``mode`` (``auto`` | ``on`` | ``off``, API command ``roadsense_mode``)
   overrides the ACC follower: ``on`` keeps the stack up with the key off (bench
   work; the fan rules still apply), ``off`` keeps it down.
@@ -125,15 +132,31 @@ MODE_ON = "on"       # keep the stack up regardless of ACC
 MODE_OFF = "off"     # keep the stack down regardless of ACC
 MODES = (MODE_AUTO, MODE_ON, MODE_OFF)
 
-# Default unit set of the reference deployment (roadsense + roadsense-signs).
+# Default unit set of the reference deployment (roadsense + roadsense-signs +
+# chris-integrator). Since lane L44 (2026-11-20) chris-integrator is the top
+# component: it reads roadsense's sockets, takes the car's feed on
+# /run/chris/position.sock, holds the map box and serves the consolidated API
+# (port 8090 here); roadsense-api is one camera's debug face (8091, loopback).
+# The legacy roadsense-mapd.service is not part of the stack any more (disabled
+# and masked on the phone: the position must not be estimated twice). A unit
+# that is not installed reads "inactive" in ``systemctl is-active``, so this
+# list also works against the old layout (a rollback): there mapd is started
+# and stopped by roadsense.target itself, it is only not mirrored.
 DEFAULT_UNITS = (
     "roadsense-camerad-dvr.service",
     "roadsense-modeld.service",
     "roadsense-envd.service",
-    "roadsense-mapd.service",       # position filter + map matching (needs no camera)
     "roadsense-api.service",
     "roadsense-signd.service",
+    "chris-integrator.service",     # fusion, map box, decisions, consolidated API (PartOf roadsense.target)
 )
+
+# Daemons the consolidated API must report connected before the stack counts
+# as healthy (``stack_ok``): chris-integrator answers its API also while the
+# camera and the road model are dead, so "the API answers" alone no longer
+# means "the perception runs". An API without a ``daemons`` table (an older
+# roadsense) is judged by its answer alone, as before.
+HEALTH_REQUIRED_DAEMONS = ("camerad", "modeld")
 
 # /v1/health keys worth mirroring into the backend state (the rest stays in
 # the roadsense API; the dashboard links to it). "map" / "fused" are roadsense's
@@ -164,7 +187,8 @@ class RoadsenseConfig:
     start_timeout_s: float = 120.0   # API must answer within this after the start
     stop_timeout_s: float = 60.0     # units must be inactive within this after the stop
     tick_s: float = 5.0              # manager cadence within the backend loop
-    api_dead_restart_s: float = 180.0  # RUNNING: API silent this long -> restart (0 = never)
+    api_dead_restart_s: float = 180.0  # RUNNING: stack unhealthy this long -> restart (0 = never)
+    required_daemons: Sequence[str] = HEALTH_REQUIRED_DAEMONS  # health.daemons.<d>.connected for ``stack_ok``
     restart_cooldown_s: float = 300.0  # min spacing between automatic restarts
     mode: str = MODE_AUTO            # initial operator mode
     systemctl_timeout_s: float = 15.0
@@ -294,6 +318,7 @@ class RoadsenseManager:
         self._state_since: float = time.time()
         self._camera_power: Optional[bool] = None
         self._api_ok: Optional[bool] = None
+        self._stack_ok: Optional[bool] = None   # API answers AND camerad + modeld connected (L44)
         self._health: Optional[dict] = None
         self._last_api_ok: Optional[float] = None       # wall clock
         self._api_silent_since: Optional[float] = None  # monotonic (RUNNING)
@@ -409,10 +434,42 @@ class RoadsenseManager:
                     n: bool((d or {}).get("connected")) if isinstance(d, dict) else bool(d)
                     for n, d in res["daemons"].items()
                 }
+            server = (res.get("api") or {}).get("server") if isinstance(res.get("api"), dict) else None
+            if server:
+                self._health["server"] = server        # "chris-integrator" in the chris layout
+            missing = self.missing_daemons(res)
+            self._stack_ok = not missing
+            self._health["stack_ok"] = self._stack_ok
+            if missing:
+                self._health["stack_missing"] = missing
             self._last_api_ok = time.time()
-            self._api_silent_since = None
+            if self._stack_ok:
+                self._api_silent_since = None
         else:
+            self._stack_ok = False
             self._health = None
+
+    def missing_daemons(self, health: dict) -> list:
+        """Required daemons (``config.required_daemons``) the API reports not
+        connected. An API without a ``daemons`` table (an older roadsense)
+        has none missing: its answer alone counts, as before L44. A daemon
+        the table does not list counts as missing."""
+        daemons = health.get("daemons") if isinstance(health, dict) else None
+        if not isinstance(daemons, dict):
+            return []
+        out = []
+        for name in self.config.required_daemons:
+            d = daemons.get(name)
+            up = bool(d.get("connected")) if isinstance(d, dict) else bool(d)
+            if not up:
+                out.append(name)
+        return out
+
+    def _unhealthy_why(self) -> str:
+        if not self._api_ok:
+            return "API silent"
+        missing = (self._health or {}).get("stack_missing") or []
+        return "not connected: " + ", ".join(missing) if missing else "unhealthy"
 
     def _sample_thermals(self) -> None:
         try:
@@ -630,6 +687,7 @@ class RoadsenseManager:
             "acc_on": self._last_acc,
             "camera_power": self._camera_power if self.config.camera_relay else None,
             "api_ok": self._api_ok,
+            "stack_ok": self._stack_ok,
             "api_url": "http://%s:%d" % (self.config.api_host, self.config.api_port),
             "api_port": self.config.api_port,
             "health": self._health,
@@ -659,7 +717,7 @@ class RoadsenseManager:
         }
 
     def _emit(self) -> None:
-        key = (self._state, self._mode, self._camera_power, self._api_ok,
+        key = (self._state, self._mode, self._camera_power, self._api_ok, self._stack_ok,
                self._restarts, self._last_error, self._preview_hold,
                self._early_camera(), tuple(sorted((self._units or {}).items())))
         now = self._clock()
@@ -717,6 +775,7 @@ class RoadsenseManager:
         else:
             self._set_camera(False)
         self._api_ok = None
+        self._stack_ok = None
         self._health = None
         self._api_silent_since = None
         if self._probe is not None:
@@ -800,11 +859,12 @@ class RoadsenseManager:
         elif self._state == STATE_STARTING:
             self._units = self._query_units()
             self._probe_health()
-            if self._api_ok:
+            if self._api_ok and self._stack_ok:
                 self._enter(STATE_RUNNING)
             elif now >= (self._deadline or 0):
-                logger.warning("roadsense: API not answering %.0fs after start; "
+                logger.warning("roadsense: stack not healthy %.0fs after start (%s); "
                                "running degraded (units: %s)", cfg.start_timeout_s,
+                               self._unhealthy_why(),
                                ", ".join("%s=%s" % kv for kv in (self._units or {}).items()))
                 self._api_silent_since = now
                 self._enter(STATE_RUNNING)
@@ -817,14 +877,17 @@ class RoadsenseManager:
             if self._restart_requested:
                 self._restart_requested = False
                 self._restart_target("operator request")
-            elif self._api_ok is False:
+            elif self._api_ok is False or (self._api_ok and self._stack_ok is False):
+                # chris layout: the integrator answers also while camerad / modeld are dead, so
+                # "unhealthy" = API silent OR a required daemon not connected (L44)
                 if self._api_silent_since is None:
                     self._api_silent_since = now
                 elif (cfg.api_dead_restart_s > 0
                       and now - self._api_silent_since >= cfg.api_dead_restart_s
                       and (self._last_restart is None
                            or now - self._last_restart >= cfg.restart_cooldown_s)):
-                    self._restart_target("API silent for %.0fs" % (now - self._api_silent_since))
+                    self._restart_target("%s for %.0fs" % (self._unhealthy_why(),
+                                                          now - self._api_silent_since))
             if not desired:
                 self._enter(STATE_GRACE, self._grace_for())
 

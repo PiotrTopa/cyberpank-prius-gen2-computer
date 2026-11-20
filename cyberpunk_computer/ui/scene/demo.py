@@ -28,7 +28,7 @@ import math
 import os
 import sys
 from dataclasses import replace
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ...state.app_state import AppState, GearPosition
 from .inputs import DEFAULT_XS, SCENE_EVENT, SceneFeed
@@ -145,6 +145,14 @@ def scene_at(t: float, seq: int, mods: Optional[Dict[str, Any]] = None) -> Optio
             out.pop("light", None)
         else:
             out["light"] = mods["light"]
+    # lane L44: chris-integrator's verdicts as the backend carries them (scene vis, lead_unknown)
+    if "vis" in mods:
+        out["vis"] = mods["vis"]
+        if not mods["vis"].get("ok", True):
+            out.update(lanes=[None] * 4, edges=[None] * 2, lead=None, objects=[])
+            out.pop("path", None)
+    if mods.get("lead_unknown"):
+        out["lead"], out["lead_unknown"] = None, True
     return out
 
 
@@ -583,13 +591,23 @@ SHOTS = (
      "lead class unknown (generic car shape); a van and a car in the left lane, a pedestrian on the right",
      {"road_users": (("van", 21.0, -3.5), ("car", 38.0, -3.4), ("person", 14.0, 3.6)), "straight": True,
       "objects": False, "light": None}),
+    # ── lane L44: chris-integrator says what it does not know ──
+    ("camera_unsure", 19.5, "live", None,
+     "chris-integrator holds the camera not believable (model out of range): nothing measured is drawn, the road "
+     "view says CAMERA UNSURE instead of showing an empty road that looks clear",
+     {"vis": {"ok": False, "why": "vision: fault: model_out_of_range"}, "straight": True, "light": None}),
+    ("lead_unknown", 19.5, "live", None,
+     "the camera is fine but the lead is not known (e.g. the ego speed is unknown): lanes drawn, no vehicle, "
+     "LEAD ? (not the same as no lead)",
+     {"vis": {"ok": True}, "lead_unknown": True, "straight": True, "objects": False, "light": None}),
 )
 
 
 def render_shots(out_dir: str, scale: int = 4, copy_to: Optional[str] = None,
-                 prefix: str = "final_") -> List[str]:
+                 prefix: str = "final_", only: Optional[Sequence[str]] = None) -> List[str]:
     """Render every SHOTS entry: ``NN_name.png`` (native) and ``NN_name@4x.png``;
-    the upscaled ones are also copied to ``copy_to`` as ``<prefix>NN_name.png``."""
+    the upscaled ones are also copied to ``copy_to`` as ``<prefix>NN_name.png``.
+    ``only``: just these shot names (no sign legend; e.g. on the Pi, where the whole set takes too long)."""
     import pygame
     os.makedirs(out_dir, exist_ok=True)
     pygame.init()
@@ -597,6 +615,8 @@ def render_shots(out_dir: str, scale: int = 4, copy_to: Optional[str] = None,
     surf = pygame.Surface(SIZE)
     paths = []
     for i, (name, t, vision, stale_from, _caption, mods) in enumerate(SHOTS):
+        if only and name not in only:
+            continue
         sim = Sim(vision, mods=mods)
         sim.stale_from = stale_from
         sim.run_to(t)
@@ -613,6 +633,8 @@ def render_shots(out_dir: str, scale: int = 4, copy_to: Optional[str] = None,
             os.makedirs(copy_to, exist_ok=True)
             pygame.image.save(big, os.path.join(copy_to, "%s%s.png" % (prefix, base)))
         paths.append(p)
+    if only:
+        return paths
     # the sign pictograms, enlarged, as a legend
     from .signs import KNOWN_IDS, S, sign_surface
     from ..fonts import get_tiny_font
@@ -699,12 +721,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--scale", type=int, default=4)
     ap.add_argument("--copy-to", metavar="DIR", help="also copy the upscaled shots there")
     ap.add_argument("--prefix", default="final_", help="file name prefix of the copies")
+    ap.add_argument("--only", help="comma list of shot names (e.g. camera_unsure,lead_unknown)")
     args = ap.parse_args(argv)
     if args.shots or args.bench:
         os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
         os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
     if args.shots:
-        for p in render_shots(args.shots, args.scale, args.copy_to, args.prefix):
+        only = [x.strip() for x in args.only.split(",")] if args.only else None
+        for p in render_shots(args.shots, args.scale, args.copy_to, args.prefix, only):
             print(p)
     if args.bench:
         for k, v in bench().items():

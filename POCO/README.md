@@ -4,7 +4,8 @@ The Xiaomi POCO F1 (`beryllium`, SD845) is the car's only computer: headless,
 always on, phone battery removed and 4.1 V fed to the battery terminals. Remote
 access is LTE + WireGuard. It runs the backend (`prius-backend.service`, API on
 8080) and, while ACC is on, the roadsense perception stack (`roadsense.target`,
-repos `roadsense` (MIT) and `roadsense-signs` (AGPL), API on 8090), which the backend
+repos `roadsense` (MIT) and `roadsense-signs` (AGPL), with chris-integrator on top since
+lane L44: consolidated API on 8090, roadsense debug face on 8091), which the backend
 starts and stops (`backend/roadsense_power.py`). There is no second POCO.
 
 | File | Covers |

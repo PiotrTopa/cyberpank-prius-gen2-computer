@@ -1,5 +1,6 @@
 """Map-driven alert functions on the real roadsense stack: fake camera
-daemons + the real mapd + api, the backend's position feeder with the
+daemons + chris-integrator (map box, consolidated API; was mapd + api before
+lane L44), the backend's position feeder with the
 synthetic drive (Opole), and the backend's own scene feed. The scenes go into
 the alert manager as on the car (shadow mode), with the true speed raised so
 the map look-ahead functions have something to say.
@@ -41,7 +42,7 @@ def _state(kmh):
 def test_map_lookahead_functions_on_a_synthetic_drive(stack):  # noqa: F811
     if not stack.api_port:
         pytest.skip("no Python with aiohttp/numpy/PIL for the roadsense api")
-    cfg = PositionFeederConfig(enabled=True, source="synthetic", rundir=stack.rundir,
+    cfg = PositionFeederConfig(enabled=True, source="synthetic", rundir=stack.chris_rundir,
                                synthetic_dropouts=(), synthetic_start_m=0.0)
     src = SyntheticGnssSource(cfg)
     feeder = PositionFeeder(cfg, src, tap=CanMotionTap())
@@ -79,7 +80,8 @@ def test_map_lookahead_functions_on_a_synthetic_drive(stack):  # noqa: F811
             if inp.map_ok:
                 usable.append(inp)
             m.tick(inp)
-        assert usable, "the map layer never became usable on the synthetic drive"
+        assert usable, "the map layer never became usable on the synthetic drive: %s" % (
+            [((s.get("map") or {}).get("ok"), (s.get("map") or {}).get("why"), (s.get("map") or {}).get("syn")) for s in scenes[-40::4]],)
         assert any(i.ahead for i in usable), "no look-ahead in any usable scene"
         assert any(i.limit is not None and i.limit.from_map_layer for i in usable)
         curves = [i.ahead["curve"] for i in usable if i.ahead.get("curve")]

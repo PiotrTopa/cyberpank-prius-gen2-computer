@@ -107,13 +107,15 @@ class TestAccFollower:
         assert h.state == STATE_STARTING
         assert h.verbs() == ["start"]
         assert ["start", "--no-block", "roadsense.target"] in h.systemctl
-        h.api = {"fps": {"road": 12.5}, "camera_fps": 19.5, "model_ms": 78, "daemons": {"modeld": {"connected": True}}}
+        h.api = {"fps": {"road": 12.5}, "camera_fps": 19.5, "model_ms": 78,
+                 "daemons": {"modeld": {"connected": True}, "camerad": {"connected": True}}}
         h.tick(True)
         assert h.state == STATE_RUNNING
         st = h.m.status()
-        assert st["api_ok"] is True
+        assert st["api_ok"] is True and st["stack_ok"] is True
         assert st["health"]["camera_fps"] == 19.5
-        assert st["health"]["daemons"] == {"modeld": True}
+        assert st["health"]["daemons"] == {"modeld": True, "camerad": True}
+        assert st["health"]["stack_ok"] is True
         assert st["units"] == {"roadsense-modeld.service": "active", "roadsense-api.service": "active"}
         assert st["hottest_zone"] == "cpu7-thermal" and st["hottest_c"] == 44.5
         assert st["temps"]["gpu-top-thermal"] == 33.2
@@ -267,6 +269,49 @@ class TestWatchdogAndModes:
         assert h.verbs() == ["restart"]
         h.tick(True, dt=200)
         assert h.verbs() == ["restart", "restart"]
+
+    def test_integrator_answering_without_camera_is_not_healthy(self):
+        # L44: chris-integrator answers /v1/health also while camerad / modeld are dead; that is not a
+        # healthy stack: no RUNNING from STARTING on the answer alone, and the watchdog restarts
+        h = Harness()
+        h.tick(True)
+        h.tick(True, dt=8)
+        assert h.state == STATE_STARTING
+        dead = {"api": {"server": "chris-integrator"},
+                "daemons": {"camerad": {"connected": False}, "modeld": {"connected": True}, "mapd": {"connected": True}}}
+        h.api = dead
+        h.tick(True)
+        assert h.state == STATE_STARTING
+        st = h.m.status()
+        assert st["api_ok"] is True and st["stack_ok"] is False
+        assert st["health"]["stack_missing"] == ["camerad"] and st["health"]["server"] == "chris-integrator"
+        h.tick(True, dt=60)                       # start timeout: RUNNING degraded, the watchdog counts on
+        assert h.state == STATE_RUNNING
+        h.tick(True, dt=50)
+        assert h.verbs() == ["start"]
+        h.tick(True, dt=60)                       # > 100 s unhealthy
+        assert h.verbs() == ["start", "restart"]
+        assert "camerad" in h.m.status()["health"]["stack_missing"]
+
+    def test_camera_dropout_shorter_than_limit_does_not_restart(self):
+        ok = {"daemons": {"camerad": {"connected": True}, "modeld": {"connected": True}}}
+        h = Harness(target_active=True, api=ok)
+        h.tick(True)
+        assert h.state == STATE_RUNNING
+        h.api = {"daemons": {"camerad": {"connected": False}, "modeld": {"connected": True}}}
+        h.tick(True)
+        h.tick(True, dt=60)
+        h.api = ok                                # the dashcam came back (USB re-enumeration)
+        h.tick(True)
+        h.api = {"daemons": {"camerad": {"connected": False}, "modeld": {"connected": True}}}
+        h.tick(True)
+        h.tick(True, dt=60)
+        assert h.verbs() == []                    # the unhealthy time restarted from zero
+
+    def test_old_roadsense_without_daemons_table_judged_by_answer(self):
+        h = Harness(target_active=True, api={"fps": {}})
+        h.tick(True)
+        assert h.state == STATE_RUNNING and h.m.status()["stack_ok"] is True
 
     def test_api_silence_watchdog_disabled(self):
         h = self._running(api_dead_restart_s=0.0)
