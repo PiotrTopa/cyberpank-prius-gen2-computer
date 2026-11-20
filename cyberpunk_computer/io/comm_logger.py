@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from queue import Queue, Empty
+from collections import deque
 from typing import Optional, Any
 
 from .ports import RawMessage, OutgoingCommand
@@ -115,8 +115,12 @@ class CommLogger:
         self._start_time = 0.0
         self._running = False
         
-        # Write queue for async logging
-        self._queue: Queue = Queue()
+        # Write queue for async logging. A plain deque, not queue.Queue (L48): append/popleft are atomic, so a
+        # producer pays no lock and no condition notify per entry, and the writer is not woken per entry; it wakes
+        # every flush_interval and writes everything queued in one go. In the car the panda reader logs every
+        # changed CAN frame (~800/s); Queue.put was ~1/3 of its time per frame and woke the writer as often.
+        self._queue: deque = deque()
+        self._wake = threading.Event()
         self._writer_thread: Optional[threading.Thread] = None
         
         # Statistics
@@ -205,6 +209,7 @@ class CommLogger:
             
             self._start_time = time.time()
             self._running = True
+            self._wake.clear()
             
             # Start writer thread
             self._writer_thread = threading.Thread(
@@ -227,7 +232,8 @@ class CommLogger:
             return
         
         self._running = False
-        
+        self._wake.set()
+
         # Wait for writer to finish
         if self._writer_thread and self._writer_thread.is_alive():
             self._writer_thread.join(timeout=2.0)
@@ -280,7 +286,7 @@ class CommLogger:
             sequence=msg.sequence
         )
         
-        self._queue.put(entry)
+        self._queue.append(entry)
     
     def log_outgoing(self, cmd: OutgoingCommand, direction: str = "OUT") -> None:
         """
@@ -301,7 +307,7 @@ class CommLogger:
             data=cmd.data
         )
         
-        self._queue.put(entry)
+        self._queue.append(entry)
     
     def log_raw(
         self, 
@@ -329,7 +335,7 @@ class CommLogger:
             timestamp_ms=timestamp_ms
         )
         
-        self._queue.put(entry)
+        self._queue.append(entry)
     
     def _create_entry(
         self,
@@ -357,28 +363,13 @@ class CommLogger:
         return entry
     
     def _writer_loop(self) -> None:
-        """Background thread for writing to file."""
-        buffer = []
-        last_flush = time.time()
-        
-        while self._running or not self._queue.empty():
+        """Background thread for writing to file: every flush_interval (or at
+        stop) everything queued is written and flushed in one go."""
+        interval = max(0.05, float(self._config.flush_interval))
+        while self._running:
+            self._wake.wait(interval)
             try:
-                entry = self._queue.get(timeout=0.1)
-                buffer.append(entry)
-                
-                # Flush if buffer full or time elapsed
-                if len(buffer) >= self._config.buffer_size or \
-                   time.time() - last_flush >= self._config.flush_interval:
-                    self._write_buffer(buffer)
-                    buffer = []
-                    last_flush = time.time()
-                    
-            except Empty:
-                # Flush remaining on timeout
-                if buffer:
-                    self._write_buffer(buffer)
-                    buffer = []
-                    last_flush = time.time()
+                self._flush_queue()
             except Exception as e:
                 logger.error(f"Writer loop error: {e}")
     
@@ -402,13 +393,13 @@ class CommLogger:
     def _flush_queue(self) -> None:
         """Flush all remaining items from queue."""
         buffer = []
+        q = self._queue
         while True:
             try:
-                entry = self._queue.get_nowait()
-                buffer.append(entry)
-            except Empty:
+                buffer.append(q.popleft())
+            except IndexError:
                 break
-        
+
         if buffer:
             self._write_buffer(buffer)
 
