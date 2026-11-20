@@ -372,3 +372,51 @@ def test_backlog_batch_is_coalesced_but_the_tap_sees_every_frame():
     assert len(tapped) == 502
     st = src.status()
     assert st.coalesced == 498 and st.batch_max == 500 and st.frames == 502
+
+
+# ── L48: the old firmware answers an empty queue at once; the reader is paced ──
+
+class InstantEmptyUsb(FakeUsb):
+    """fw f120999e behaviour: an empty CAN queue gives an empty transfer at once
+    (the read timeout never applies). Counts the bulk reads."""
+
+    def __init__(self, script=(), **kw):
+        super().__init__(list(script), **kw)
+        self.reads = 0
+
+    def bulk_read(self, endpoint=0x81, length=16384, timeout_ms=20):
+        self.reads += 1
+        if self.script:
+            return self.script.pop(0)
+        return b""
+
+
+def _reads_in(cfg, seconds=0.4, script=()):
+    usb = InstantEmptyUsb(script)
+    src, got, _ = run_source([usb], 10 ** 9, cfg=cfg, timeout=seconds)
+    src.stop()
+    return usb, got
+
+
+def test_reader_is_paced_when_the_panda_answers_empty_at_once():
+    usb, _ = _reads_in(PandaCanConfig(reconnect_s=0.01, poll_period_s=0.005))
+    # 0.4 s at 5 ms: ~80 reads (scheduling slack allowed), not thousands
+    assert 20 <= usb.reads <= 100, usb.reads
+    hbs = [c for c in usb.controls if c[0] == "out" and c[1] == REQ_HEARTBEAT]
+    assert len(hbs) >= 1                  # heartbeat still sent from the paced loop
+
+
+def test_unpaced_reader_spins_as_before():
+    usb, _ = _reads_in(PandaCanConfig(reconnect_s=0.01, poll_period_s=0.0), seconds=0.2)
+    assert usb.reads > 1000, usb.reads
+
+
+def test_full_transfer_is_followed_by_the_next_read_at_once():
+    # a backlog: full-size transfers come back to back without a pace wait
+    rec = pack_can_buffer([(0x0B4, bytes(2), 0)])     # 8-byte records fill a transfer exactly
+    full = rec * (pc.BULK_READ_SIZE // len(rec))
+    assert len(full) == pc.BULK_READ_SIZE
+    usb, got = _reads_in(PandaCanConfig(reconnect_s=0.01, poll_period_s=1.0, coalesce_over=0),
+                         seconds=0.5, script=[full] * 5)
+    # 5 full transfers and the first short read inside 0.5 s although the pace is 1 s; then it waits
+    assert usb.reads == 6 and len(got) == 5 * (pc.BULK_READ_SIZE // len(rec))

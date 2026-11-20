@@ -520,6 +520,8 @@ def _build_config(args: argparse.Namespace) -> BackendConfig:
         else float(os.environ.get("BACKEND_PANDA_DEDUPE_S") or 0.25),
         # 0 = SILENT (default). 19 = NOOUTPUT (ACKs): bench only, see service.py.
         panda_safety_mode=int(os.environ.get("BACKEND_PANDA_SAFETY_MODE") or 0),
+        # bulk read pace in ms (L48: the car's panda answers an empty queue at once); 0 = unpaced
+        panda_poll_s=float(os.environ.get("BACKEND_PANDA_POLL_MS") or 5) / 1000.0,
         verbose=args.verbose,
     )
 

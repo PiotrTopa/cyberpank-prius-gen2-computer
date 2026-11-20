@@ -237,6 +237,7 @@ class BackendConfig:
     panda_enabled: bool = True
     panda_bus: Optional[int] = None
     panda_dedupe_s: float = 0.25        # identical payload repeated within this -> dropped
+    panda_poll_s: float = 0.005         # bulk read pace (io.panda_can PandaCanConfig.poll_period_s; 0 = unpaced)
     panda_dispatch_min_s: float = 0.1   # state updates of one fast id at most this far apart (log keeps every change)
     panda_status_s: float = 1.0         # state mirror cadence
     # 0 = SAFETY_SILENT (always, in the car). 19 = SAFETY_NOOUTPUT: the panda
@@ -603,7 +604,8 @@ class BackendService:
             twin.ingress.set_broadcast_dispatch_cap(cfg.panda_dispatch_min_s)
             self.panda = PandaCanSource(
                 on_frame=twin.ingress.ingest_broadcast_can,
-                config=PandaCanConfig(bus=cfg.panda_bus, safety_mode=cfg.panda_safety_mode),
+                config=PandaCanConfig(bus=cfg.panda_bus, safety_mode=cfg.panda_safety_mode,
+                                      poll_period_s=cfg.panda_poll_s),
                 # The motion tap sees every frame, before the backlog
                 # coalescing and the ingress filters (a few integer ops for
                 # 5 ids, a set lookup otherwise).

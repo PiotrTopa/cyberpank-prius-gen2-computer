@@ -486,6 +486,16 @@ class PandaCanConfig:
     health_poll_s: float = 5.0
     reconnect_s: float = 2.0           # hub comes up ~9 s after relay ch3 (panda last)
     read_timeout_ms: int = 20
+    # Pace of the bulk reads (L48). The car's panda firmware (f120999e, 2022)
+    # answers a bulk IN at once with an EMPTY transfer when its CAN queue is
+    # empty, so read_timeout_ms never applies and an unpaced loop spins: 4500
+    # transfers/s and 38 % of an A55 core on the bench with 1 frame/s (L48-B,
+    # 2026-11-20). A read that returns less than a full transfer waits out the
+    # rest of this period; a full transfer (a backlog) is followed by the next
+    # read at once. 5 ms adds 0..5 ms to a frame's way into the state, far below
+    # the 0.1 s state rate limit of the fast ids; the panda queues thousands of
+    # frames, ~8 per period at the Prius's 1650 frames/s. 0 = unpaced (as before).
+    poll_period_s: float = 0.005
     # Hint for the whole process: the CPython GIL switch interval bounds how
     # long a busy engine thread can delay the reader after a transfer returns.
     switch_interval_s: Optional[float] = 0.002
@@ -697,7 +707,9 @@ class PandaCanSource:
         assert usb is not None
         next_hb = self._clock()           # heartbeat due immediately after connect
         next_health = self._clock() + cfg.health_poll_s
+        period = cfg.poll_period_s
         while not self._stop.is_set():
+            t_read = self._clock()
             data = usb.bulk_read(EP_CAN_IN, BULK_READ_SIZE, cfg.read_timeout_ms)
             if data:
                 self._handle_bytes(data)
@@ -714,6 +726,10 @@ class PandaCanSource:
             if now >= next_health:
                 next_health = now + cfg.health_poll_s
                 self._poll_health(usb)
+            if period > 0 and len(data) < BULK_READ_SIZE:
+                rest = t_read + period - self._clock()
+                if rest > 0:
+                    self._stop.wait(rest)
 
     def _handle_bytes(self, data: bytes) -> None:
         t_mono = self._clock()
