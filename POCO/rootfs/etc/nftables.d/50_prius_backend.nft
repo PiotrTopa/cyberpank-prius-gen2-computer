@@ -45,10 +45,13 @@ table inet prius_guard {
 # Wi-Fi satellites (docs/SATELLITES.md §4) on the prius AP: UDP 8787 beacons /
 # car probes and TCP 8788 NDJSON sessions, accepted on wlan* only (they carry
 # their own Ed25519 authentication on top).
+# UDP 123 (the backend's SNTP responder) is accepted from the car's own AP subnet
+# only, for RTC-less clients on it (poco2); the base ruleset already accepts it on usb*.
 table inet filter {
 	chain input {
 		tcp dport { 8080, 8081, 8082 } accept comment "accept prius backend API + ZMQ (prius_guard limits interfaces)"
 		iifname "wlan*" udp dport 8787 accept comment "accept prius Wi-Fi satellite beacons"
 		iifname "wlan*" tcp dport 8788 accept comment "accept prius Wi-Fi satellite sessions"
+		iifname "wlan*" ip saddr 10.42.0.0/24 ip daddr 10.42.0.1 udp dport 123 accept comment "accept NTP from prius AP clients (poco2; backend answers BACKEND_NTP_ALLOW only)"
 	}
 }

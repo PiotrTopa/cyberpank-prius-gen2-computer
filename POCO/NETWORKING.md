@@ -186,6 +186,18 @@ auth: [docs/AUTH.md](../docs/AUTH.md). Traffic from the MFD Pi arrives on `usb*`
 accepted by the base ruleset. `provision.sh` reloads nftables only after `nft -c` accepts
 the full ruleset.
 
+UDP 123 (the backend's SNTP responder) is accepted on `usb*` by the base ruleset and, by
+`50_prius_backend.nft`, on `wlan*` from `10.42.0.0/24` to `10.42.0.1`: the MFD Pi and
+`poco2` (headless slave on the AP) take their time from the phone. Which clients get an
+answer is the backend's `BACKEND_NTP_ALLOW` (`192.168.100.0/24,10.42.0.0/24` in
+`/etc/prius/backend.env`).
+
+Restarting nftables flushes the whole ruleset, including NetworkManager's
+`nm-shared-wlan0` table (the AP's masquerade): AP clients keep their link but lose the LTE
+tether, and `nmcli device reapply wlan0` does not bring the table back. After any nftables
+restart in AP mode run `sudo nmcli con up prius-ap` (AP clients drop for a few seconds)
+and check `nft list tables`.
+
 ## USB network lifeline (retired in host mode)
 
 The USB gadget network (box `172.16.42.2/24` ↔ phone `172.16.42.1`) exists only in USB

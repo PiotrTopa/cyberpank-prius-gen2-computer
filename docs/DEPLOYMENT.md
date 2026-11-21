@@ -39,6 +39,9 @@ answers on UDP 123 of the gadget link (`cyberpunk_computer/backend/ntp_server.py
 `BACKEND_NTP_SERVE`, default on with the MFD manager) and only with a synchronized phone clock
 (leap indicator 3 otherwise, which timesyncd ignores). Without the phone a cold boot starts at the
 time saved last (`/var/lib/systemd/timesync/clock`). Check on the Pi: `timedatectl timesync-status`.
+Other clients: `BACKEND_NTP_ALLOW` takes a comma-separated list. The car's `/etc/prius/backend.env` sets
+`BACKEND_NTP_ALLOW=192.168.100.0/24,10.42.0.0/24`, so `poco2` (headless slave on the `prius` AP, no RTC) syncs from
+`10.42.0.1`; `50_prius_backend.nft` accepts UDP 123 from that subnet on `wlan*`.
 A freshly imaged card has the same file from the start (cyberpunk-prius-gateway
 `raspberry_pi_config/zero13-image/timesyncd-prius.conf`, installed and enabled by `boot-tune.sh`);
 the two copies are identical (`tests/test_pi_timesync_conf.py`).

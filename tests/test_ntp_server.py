@@ -77,3 +77,12 @@ def test_udp_round_trip_and_subnet_filter():
     assert other.handle(_request(), ("10.0.0.5", 123), 1.0) is None
     assert other.refused == 1
     assert other.handle(_request(), ("192.168.100.2", 123), 1.0) is not None
+
+
+def test_allow_list_of_networks():
+    srv = SntpServer(allow_net="192.168.100.0/24, 10.42.0.0/24", quality=lambda: 0.05)
+    assert srv.handle(_request(), ("192.168.100.2", 123), 1.0) is not None
+    assert srv.handle(_request(), ("10.42.0.94", 123), 1.0) is not None
+    assert srv.handle(_request(), ("192.168.0.65", 123), 1.0) is None
+    assert srv.refused == 1
+

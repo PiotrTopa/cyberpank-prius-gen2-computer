@@ -448,7 +448,9 @@ def _build_ntp(mfd_enabled: bool) -> dict:
     """SNTP for the MFD Pi (backend/ntp_server.py):
 
         BACKEND_NTP_SERVE=1                    # default: on when the MFD manager is
-        BACKEND_NTP_ALLOW=192.168.100.0/24     # clients answered
+        BACKEND_NTP_ALLOW=192.168.100.0/24     # clients answered; one network or a
+                                               # comma-separated list (the car adds
+                                               # 10.42.0.0/24, the prius AP, for poco2)
     """
     raw = (os.environ.get("BACKEND_NTP_SERVE") or "").strip().lower()
     serve = mfd_enabled if not raw else raw in ("1", "true", "yes", "on")

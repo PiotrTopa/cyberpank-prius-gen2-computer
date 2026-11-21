@@ -1,5 +1,6 @@
 """
-Minimal SNTP server for the MFD Pi on the USB gadget link.
+Minimal SNTP server for the MFD Pi on the USB gadget link (and, when
+allowed, for other RTC-less clients such as ``poco2`` on the car's Wi-Fi AP).
 
 The MFD Pi Zero has no RTC and no internet: it is linked only to the phone
 (``usb0``, phone 192.168.100.1, Pi 192.168.100.2). Without a time source it
@@ -10,7 +11,8 @@ the phone's clock.
 
 Rules:
 
-* Only clients on ``allow_net`` (the gadget subnet) get an answer.
+* Only clients on ``allow_net`` get an answer: one network or a
+  comma-separated list (default: the gadget subnet only).
 * While the phone's own clock is not synchronized (RTC-less phone right
   after boot, before NTP or the HTTPS fallback) the reply carries leap
   indicator 3 ("not synchronized"): timesyncd discards it and keeps its
@@ -22,7 +24,8 @@ Rules:
 
 The socket binds ``0.0.0.0:123`` (needs root; the backend runs as root).
 pmOS's nftables input policy drops UDP 123 on every interface except
-``usb*``.
+``usb*``; ``50_prius_backend.nft`` also accepts it on the car's own AP
+(``wlan*``, 10.42.0.0/24 -> 10.42.0.1).
 """
 
 from __future__ import annotations
@@ -101,7 +104,11 @@ class SntpServer:
                  clock: Callable[[], float] = time.time) -> None:
         self.host = host
         self.port = port
-        self.allow = ipaddress.ip_network(allow_net)
+        # one network or a comma-separated list
+        self.allow = tuple(ipaddress.ip_network(n.strip())
+                           for n in allow_net.split(",") if n.strip())
+        if not self.allow:
+            raise ValueError("allow_net is empty")
         self.quality = quality
         self.clock = clock
         self._sock: Optional[socket.socket] = None
@@ -126,7 +133,7 @@ class SntpServer:
         self._thread = threading.Thread(target=self._loop, name="sntp", daemon=True)
         self._thread.start()
         logger.info("SNTP server for the MFD Pi on %s:%d (clients %s)",
-                    self.host, self.port, self.allow)
+                    self.host, self.port, ", ".join(str(n) for n in self.allow))
         return True
 
     def stop(self) -> None:
@@ -143,7 +150,8 @@ class SntpServer:
 
     def handle(self, data: bytes, addr: Tuple[str, int], t_rx: float) -> Optional[bytes]:
         try:
-            if ipaddress.ip_address(addr[0]) not in self.allow:
+            ip = ipaddress.ip_address(addr[0])
+            if not any(ip in n for n in self.allow):
                 self.refused += 1
                 return None
         except ValueError:

@@ -38,7 +38,9 @@ Code: `cyberpunk_computer/api/auth.py` (decision + routes), `api/auth_cli.py` (`
    Not covered by the token: **ZeroMQ 8081/8082** (the MFD frontend's state feed and command
    channel). It has no authentication; the firewall keeps it to `lo`, `usb*` and `wg*`.
    The MFD Pi needs no token (it talks ZMQ only). UDP 123 (backend NTP for the Pi) is answered
-   on the gadget subnet only (`BACKEND_NTP_ALLOW`) and the base ruleset accepts UDP only on `usb*`.
+   on the networks in `BACKEND_NTP_ALLOW` only: the gadget subnet and, on the car, the AP subnet
+   `10.42.0.0/24` for `poco2`. The firewall accepts UDP 123 on `usb*` and on `wlan*` from
+   `10.42.0.0/24` to `10.42.0.1`.
 
 ## 2. Token
 
