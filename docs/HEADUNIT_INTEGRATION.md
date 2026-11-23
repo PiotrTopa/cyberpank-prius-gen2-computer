@@ -368,3 +368,48 @@ The frontend sends `set_volume`, `set_mute` and `headunit_media` over the ZMQ co
 Bass / mid / treble / balance / fader stay UI values only.
 
 Open: the media-key names; the audible level of the presets in the cabin over CarPlay (ears needed).
+
+## 9. Microphone (measured 2026-11-19, fault open)
+
+Hands-free mic: Kenwood KCA-MC10 (electret, 3.5 mm mono plug, 3 m cable) mounted in the original
+Toyota mic position, plugged into the unit's mic input. Callers report poor sound.
+
+Measured with a recorder app on the unit (`pl.topa.micrec`, `AudioRecord`, 48 kHz; started with
+`cmd activity start-foreground-service -n pl.topa.micrec/.RecService --ei src N --ei secs S --ei ch 2
+--es name X`, output in `/sdcard/Android/data/pl.topa.micrec/files/X.pcm`; captures on the car
+computer in `~user/headunit/mic/`):
+
+| Take | Result |
+|---|---|
+| source MIC (1), stereo | ch0 = mic, ch1 = playback reference (carries the unit's own output, no mic) |
+| ch0 idle | −62 dBFS, peaks ~145, 1 Hz periodic pattern (interference on the mic line; ch1 floor is −74 dBFS) |
+| ch0 speech, normal seat | −57 to −53 dBFS, peaks ~350–500: 6–10 dB over the idle noise |
+| ch0 speech close to the Kenwood vs close to the screen frame | same level (−57 dBFS) in both |
+| ch0 taps | on the Kenwood: peaks 300–500; on the screen frame: peaks 1400–3500 |
+| ch0 during loud speech from the car speakers (level 47/63) | no change |
+| source VOICE_COMMUNICATION (7) | idle −34.5 dBFS, speech peaks −30 dBFS: 3–5 dB over noise, band-limited to 8 kHz |
+
+Reading: the signal arriving at the mic input is ~35 dB below a working electret, so every gain
+stage amplifies mostly noise; gain settings cannot fix it. Which capsule is live (Kenwood, or a mic
+in the unit) is not settled. Settings found: `persist.zj.apm.micgain=1`, `persist.zj.apm.rnn=false`
+(ZLink noise suppression off), `persist.zj.apm.aectype=3`, `persist.zj.apm.delay=200`; system
+setting `volumeSetting_isShow_mic_adjust=1` (a mic slider in the unit's volume settings).
+
+Open: plug seating and which jack; DC bias on the mic jack with the mic unplugged (expect 2–5 V);
+swap test with another electret mic; fallback a USB sound card on the unit's host port (the audio
+policy has a USB input route; ZLink's use of it is untested).
+
+Gain controls found (2026-11-19):
+
+* The vendor volume page (`com.xyauto.Settings/.VolumeSettingActivity`, start with `su 0 am start`)
+  has two mic sliders that are shown only when `volumeSetting_isShow_mic_adjust` is **0** (the name
+  is inverted; it is 1). Their code (`com.fourtech.util.MicVolSettingUtil`) reads and writes a local
+  buffer only in this build, so they do nothing.
+* MediaTek Engineer Mode is installed: `su 0 am start -n com.mediatek.engineermode/.audio.Audio` →
+  Normal Mode → Type Mic → Level N, value 0..255. Read: Level 0 = 64, Level 3 = 144, Level 7 = 184
+  (other levels not read). The MIC source follows a low level and the VOICE_COMMUNICATION source a
+  high one (27 dB apart in the recordings), and both have the same poor speech-to-noise ratio, so
+  the table alone is not expected to cure the fault. Not changed.
+* Analog stage while recording source MIC: `/sys/kernel/debug/mtksocanaaudio` `AUDTOP_CON0 = 0x79b0`.
+* HAL: MediaTek V3 (`audio.primary.ac8227l.so`), mixer controls `Audio_PGA1_Setting`,
+  `Audio_MicSource1_Setting`, `Audio_Preamp1_Switch`, `Audio_AMIC_DCC_Setting`; no `tinymix` on the unit.
