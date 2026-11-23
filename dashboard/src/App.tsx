@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
-import { Bug, Car, Gauge, History, Home, Settings, Stethoscope, Wifi, WifiOff } from 'lucide-react';
+import { BatteryCharging, Bug, Car, Gauge, Home, Settings, Stethoscope, Wifi, WifiOff } from 'lucide-react';
 import type { Satellites, Tab } from './types';
 import { cx } from './lib/format';
 import { useAppStream, useNow, type StreamSub } from './hooks/useAppStream';
@@ -18,7 +18,7 @@ const DebugDrawer = lazy(() => import('./components/DebugDrawer').then((m) => ({
 const TABS: [Tab, string, typeof Home][] = [
   ['home', 'Home', Home],
   ['drive', 'Drive', Gauge],
-  ['history', 'History', History],
+  ['history', 'Battery', BatteryCharging],
   ['car', 'Car', Stethoscope],
   ['system', 'System', Settings],
 ];

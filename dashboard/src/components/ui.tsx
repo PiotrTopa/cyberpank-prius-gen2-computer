@@ -239,3 +239,29 @@ export const Sparkline = ({ points, height = 36, tone = 'cyan', lo, hi }: {
     </svg>
   );
 };
+
+/** Section switch inside a tab: big buttons + a one-line explanation of the
+ *  selected section, so a first-time viewer knows what they are looking at. */
+export function SubNav<T extends string>({ value, options, onChange }: {
+  value: T;
+  options: [T, string, string][];
+  onChange: (v: T) => void;
+}) {
+  const cur = options.find(([id]) => id === value);
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="grid gap-1 p-1 hud-panel" style={{ gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))` }}>
+        {options.map(([id, label]) => (
+          <button key={id} onClick={() => onChange(id)}
+            className={cx(
+              'min-h-10 px-2 py-1.5 text-[0.72rem] uppercase tracking-[0.12em] border transition-colors',
+              value === id ? 'text-hud-cyan border-hud-cyan/50 bg-white/[0.04]' : 'text-slate-500 border-transparent hover:text-slate-200',
+            )}>
+            {label}
+          </button>
+        ))}
+      </div>
+      {cur && <p className="text-[0.75rem] text-slate-500 px-1">{cur[2]}</p>}
+    </div>
+  );
+}
