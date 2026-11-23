@@ -37,7 +37,7 @@ engine thread; snapshots go out latest-only so a slow client never blocks the en
 | Interface | Port | Content |
 |---|---|---|
 | REST | 8080 | `GET /health`; under `/api/v1`: `state`, `metrics/catalog`, `metrics`, `events`, `commands` (list), `POST commands/{name}`, `bean/frames`, `diag/*`, `battery/*` ([BATTERY_HEALTH.md](BATTERY_HEALTH.md)), `camera/preview*`, `position` + `POST position/gnss` (feeder on only), `alerts` ([ALERTS.md](ALERTS.md)), roadsense proxy; `/roadsense/` (roadsense status page), `/login`, `/logout`, `/auth/*` (sessions, pairing). Auth with `BACKEND_AUTH_TOKEN` set: loopback trusted, else bearer token or session cookie ([AUTH.md](AUTH.md)) |
-| WebSocket | 8080 `/api/v1/stream` | state snapshots (dashboard); same auth as REST |
+| WebSocket | 8080 `/api/v1/stream` | state snapshots (dashboard); optional `?keys=&interval=&delta=1` per-client shaping (`api/stream_filter.py`); same auth as REST |
 | ZMQ PUB | 8081 | `{"type":"state","ts","state"}` (latest-only, throttled) and `{"type":"event","ts","name","data"}` (FIFO, never displaced by state) |
 | ZMQ REP | 8082 (no auth; firewalled to lo/usb*/wg*) | `{"command": name, "params": {...}}` → `{"status":"ok"}` on acceptance (execution is asynchronous) or `{"status":"error","reason"}` |
 

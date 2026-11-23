@@ -11,26 +11,29 @@ export const Dot = ({ tone, pulse }: { tone: Tone; pulse?: boolean }) => (
   <span className={cx('h-1.5 w-1.5 shrink-0', TONE_BG[tone], pulse && 'pulse-dot')} />
 );
 
-/** Flat technical panel: hairline frame, uppercase header, optional ref code. */
-export const Panel = ({ title, code, icon: Icon, tone = 'cyan', right, children, className }: {
+/** Flat technical panel: hairline frame, uppercase header. ``stale`` greys the
+ *  body (data older than it should be) and says how old in the header. */
+export const Panel = ({ title, icon: Icon, tone = 'cyan', right, children, className, stale }: {
   title: string;
+  /** legacy reference code; no longer shown */
   code?: string;
   icon: IconType;
   tone?: Tone;
   right?: ReactNode;
   children?: ReactNode;
   className?: string;
+  /** e.g. "stale 3m 10s"; greys the panel body when set */
+  stale?: string | false | null;
 }) => (
   <div className={cx('hud-panel p-4 flex flex-col gap-3', className)}>
-    <div className="flex items-center justify-between gap-2 border-b border-ink-700 pb-2">
-      <div className={cx('flex items-center gap-2', TONE_TEXT[tone])}>
-        <Icon size={14} />
-        <h2 className="text-[0.7rem] font-medium uppercase tracking-[0.22em]">{title}</h2>
-        {code && <span className="text-[0.6rem] text-slate-600 tracking-[0.15em]">{code}</span>}
+    <div className="flex items-center justify-between gap-2 border-b border-ink-700 pb-2 min-h-7">
+      <div className={cx('flex items-center gap-2 min-w-0', TONE_TEXT[tone])}>
+        <Icon size={15} />
+        <h2 className="text-[0.75rem] font-medium uppercase tracking-[0.18em] truncate">{title}</h2>
       </div>
-      {right}
+      {stale ? <span className="text-[0.65rem] text-hud-amber tracking-wider uppercase">{stale}</span> : right}
     </div>
-    {children}
+    <div className={cx('flex flex-col gap-3', stale && 'opacity-45')}>{children}</div>
   </div>
 );
 
@@ -41,7 +44,7 @@ export const DataRow = ({ label, value, unit, tone }: {
   tone?: Tone;
 }) => (
   <div className="flex justify-between items-baseline gap-3">
-    <span className="text-slate-500 text-xs uppercase tracking-wider">{label}</span>
+    <span className="text-slate-500 text-[0.78rem] uppercase tracking-wider">{label}</span>
     <div className="flex items-baseline gap-1">
       <span className={cx('text-base tnum', tone ? TONE_TEXT[tone] : 'text-slate-100')}>
         {value !== undefined && value !== null && value !== '' ? value : '--'}
@@ -143,7 +146,7 @@ export const Toasts = () => {
   const list = useToasts();
   if (list.length === 0) return null;
   return (
-    <div className="fixed bottom-4 right-4 z-[60] flex flex-col gap-2 items-end">
+    <div className="fixed bottom-20 md:bottom-4 right-4 left-4 md:left-auto z-[60] flex flex-col gap-2 items-end">
       {list.map((t) => (
         <div
           key={t.id}
@@ -174,7 +177,7 @@ export const Btn = ({ tone = 'cyan', active, disabled, onClick, children, classN
     disabled={disabled}
     title={title}
     className={cx(
-      'border px-3 py-2 text-[0.7rem] uppercase tracking-[0.15em] transition-colors',
+      'border px-3 py-2 text-[0.72rem] uppercase tracking-[0.12em] transition-colors min-h-10 md:min-h-0 select-none',
       disabled
         ? 'border-ink-700 text-slate-600 cursor-not-allowed'
         : active
@@ -186,3 +189,53 @@ export const Btn = ({ tone = 'cyan', active, disabled, onClick, children, classN
     {children}
   </button>
 );
+
+/** One-of-N control (fan Auto/On/Off, poco2 mode...). Big touch targets. */
+export function Segmented<T extends string>({ value, options, onChange, disabled, tone = 'cyan' }: {
+  value: T | null | undefined;
+  options: [T, string][];
+  onChange: (v: T) => void;
+  disabled?: boolean;
+  tone?: Tone;
+}) {
+  return (
+    <div className="flex">
+      {options.map(([id, label], i) => (
+        <button key={id} disabled={disabled} onClick={() => id !== value && onChange(id)}
+          className={cx(
+            'flex-1 border px-2 py-1.5 min-h-10 md:min-h-8 text-[0.7rem] uppercase tracking-[0.12em] transition-colors select-none',
+            i > 0 && '-ml-px',
+            value === id ? cx(TONE_BORDER[tone], TONE_TEXT[tone], 'bg-white/[0.05] relative z-10') : 'border-ink-500 text-slate-500 hover:text-slate-200',
+            disabled && 'opacity-50 cursor-not-allowed',
+          )}>
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** Tiny inline SVG line (no chart library on the home view). */
+export const Sparkline = ({ points, height = 36, tone = 'cyan', lo, hi }: {
+  points: number[];
+  height?: number;
+  tone?: Tone;
+  lo?: number;
+  hi?: number;
+}) => {
+  if (points.length < 2) return <div className="text-[0.65rem] text-slate-600" style={{ height }}>no history yet</div>;
+  const min = lo ?? Math.min(...points);
+  const max = hi ?? Math.max(...points);
+  const span = max - min || 1;
+  const w = 100;
+  const d = points.map((v, i) => {
+    const x = (i / (points.length - 1)) * w;
+    const y = height - 2 - ((v - min) / span) * (height - 4);
+    return `${i ? 'L' : 'M'}${x.toFixed(2)},${y.toFixed(2)}`;
+  }).join(' ');
+  return (
+    <svg viewBox={`0 0 ${w} ${height}`} preserveAspectRatio="none" className={cx('w-full', TONE_TEXT[tone])} style={{ height }}>
+      <path d={d} fill="none" stroke="currentColor" strokeWidth={1.4} vectorEffect="non-scaling-stroke" />
+    </svg>
+  );
+};

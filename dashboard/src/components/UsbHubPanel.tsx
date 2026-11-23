@@ -3,110 +3,116 @@ import { Usb } from 'lucide-react';
 import type { AppState } from '../types';
 import { sendCommand } from '../lib/api';
 import { Btn, Dot, Panel } from './ui';
-import { cx } from '../lib/format';
+import { cx, fmtUp } from '../lib/format';
 
 const power = (on: boolean | null) =>
   on === null
-    ? { text: 'PWR ?', cls: 'text-slate-600' }
+    ? { text: '?', cls: 'text-slate-600', tone: 'dim' as const }
     : on
-      ? { text: 'PWR ON', cls: 'text-hud-green' }
-      : { text: 'PWR OFF', cls: 'text-slate-500' };
+      ? { text: 'ON', cls: 'text-hud-green', tone: 'green' as const }
+      : { text: 'OFF', cls: 'text-slate-500', tone: 'dim' as const };
 
-const SocketRow = ({ n, name, powered, right }: {
-  n: string;
+const SocketRow = ({ ch, name, detail, powered, action }: {
+  ch: string;
   name: string;
+  detail?: ReactNode;
   powered: boolean | null;
-  right?: ReactNode;
+  action?: ReactNode;
 }) => {
   const p = power(powered);
   return (
-    <div className="flex items-center justify-between gap-2">
-      <span className="text-slate-500 text-xs uppercase tracking-wider">
-        <span className="text-slate-600">{n}</span> {name}
-      </span>
-      <div className="flex items-center gap-2">
-        {right}
-        <span className={cx('text-[0.65rem] tracking-wider', p.cls)}>{p.text}</span>
+    <div className="flex items-center justify-between gap-2 min-h-10">
+      <div className="flex items-center gap-2.5 min-w-0">
+        <Dot tone={p.tone} pulse={!!powered} />
+        <div className="min-w-0">
+          <div className="text-[0.8rem] text-slate-200 uppercase tracking-wider truncate">
+            {name} <span className={cx('text-[0.65rem] ml-1', p.cls)}>{p.text}</span>
+          </div>
+          <div className="text-[0.65rem] text-slate-600 tracking-wider uppercase truncate">
+            {ch}{detail ? <> · {detail}</> : null}
+          </div>
+        </div>
       </div>
+      {action}
     </div>
   );
 };
 
-const LinkChip = ({ up, upText = 'LINK', downText = 'NO LINK' }: {
-  up?: boolean | null; upText?: string; downText?: string;
-}) => (
-  <span className={cx(
-    'flex items-center gap-1 text-[0.6rem] tracking-wider',
-    up ? 'text-hud-cyan' : 'text-slate-600',
-  )}>
-    <Dot tone={up ? 'cyan' : 'red'} pulse={!!up} />
-    {up ? upText : downText}
-  </span>
-);
-
 /**
- * USB hub socket map + live power/link statuses.
+ * Powered USB hub: socket 1 = powerbox on the hub's native port, the rest get
+ * VBUS through the powerbox relay board (powerbox/README.md, since 2026-11):
+ * ch2 = MFD Pi, ch3 = CAN hub (gateway + panda), ch4 = camera hub (dashcam for
+ * roadsense and the preview), ch5 = RS485 satellite rail. Relay states are the
+ * powerbox STATUS "rly" read-back — hardware truth, not the commanded value.
  *
- * Topology (bring-up verified 2026-08-01): socket 1 = powerbox on the hub's
- * only native-PPS port; sockets 2-4 get their VBUS through powerbox relays
- * (ch4 = gateway, ch3 = MFD Pi, ch2 = RTL-SDR; ch1 = spare). Relay states come
- * from the powerbox STATUS "rly" telemetry — actual hardware truth, not the
- * commanded value. The SDR port is the only manually-owned one, so it gets a
- * toggle (backend `set_relay` with desired-state enforcement).
+ * Each load has an owner on the backend, so the actions here go through that
+ * owner, never a raw relay cut: MFD = `mfd_hold`, rail = satellite wake-lock;
+ * the CAN hub follows ACC / the rail holders and the camera hub follows
+ * roadsense or a camera preview.
  */
-export function UsbHubPanel({ state, now }: { state: AppState; now: number }) {
+export function UsbHubPanel({ state, manualHeld }: { state: AppState; manualHeld?: boolean }) {
   const pb = state.powerbox;
   const conn = state.connection ?? { connected: false };
+  const rs = state.roadsense;
   const relays = pb.relays ?? [];
   const relay = (ch: number): boolean | null => {
     const v = relays[ch - 1];
     return v === undefined || v === null ? null : Boolean(v);
   };
-
-  const sdrOn = relay(2);
-  const telemetryLive = pb.connected ?? false;
-
-  // SDR relay is desired-state with a 15 s enforcement tick on the backend.
-  // Pending is derived, not cleared by an effect: it expires when the mirrored
-  // `rly` telemetry converges or the deadline passes (`now` ticks at 1 Hz).
-  const [sdrCmd, setSdrCmd] = useState<{ want: boolean; until: number } | null>(null);
-  const sdrPending = sdrCmd !== null && sdrOn !== sdrCmd.want && now < sdrCmd.until;
-
-  const toggleSdr = async () => {
-    const want = !sdrOn;
-    setSdrCmd({ want, until: now + 25000 });
-    const ok = await sendCommand('set_relay', { channel: 2, on: want });
-    if (!ok) setSdrCmd(null);
+  const live = pb.connected ?? false;
+  const [busy, setBusy] = useState<string | null>(null);
+  const run = async (id: string, name: string, params: Record<string, unknown>) => {
+    setBusy(id);
+    await sendCommand(name, params);
+    setBusy(null);
   };
 
+  const mfdOn = relay(2);
+  const railOn = relay(5) ?? pb.rs485_power ?? null;
+  const preview = rs?.camera_preview;
+
   return (
-    <Panel title="USB Hub" code="USB-01" icon={Usb}
-      right={!telemetryLive
-        ? <span className="text-[0.6rem] text-hud-amber tracking-wider">TELEMETRY STALE</span>
-        : undefined}>
-      <SocketRow n="S1" name="Powerbox" powered={true}
-        right={<LinkChip up={pb.connected} />} />
-      <SocketRow n="S2" name="Gateway" powered={relay(4)}
-        right={<LinkChip up={conn.connected} />} />
-      <SocketRow n="S3" name="MFD Pi" powered={relay(3)}
-        right={
-          <span className="text-[0.6rem] text-slate-500 tracking-wider uppercase">
-            {(conn.mfd_state || '—')}{conn.mfd_reachable ? ' · NET' : ''}
-          </span>
+    <Panel title="USB Hub · relays" icon={Usb}
+      stale={!live ? 'telemetry stale' : null}>
+      <SocketRow ch="native port" name="Powerbox" powered={true}
+        detail={pb.connected ? `link up · fw up ${fmtUp(pb.uptime_s)}` : 'no link'} />
+      <SocketRow ch="relay 2" name="MFD Pi" powered={mfdOn}
+        detail={`${conn.mfd_state ?? '—'}${conn.mfd_reachable ? ' · net' : ''}`}
+        action={
+          <div className="flex gap-1.5">
+            <Btn className="px-2.5 py-1 text-[0.65rem]" tone="green" disabled={busy !== null}
+              title="Keep the MFD powered with the key off (30 min max)"
+              onClick={() => run('mfd1', 'mfd_hold', { on: true })}>
+              {busy === 'mfd1' ? '…' : 'Hold'}
+            </Btn>
+            <Btn className="px-2.5 py-1 text-[0.65rem]" disabled={busy !== null}
+              title="Back to the normal policy (grace, then clean shutdown)"
+              onClick={() => run('mfd0', 'mfd_hold', { on: false })}>
+              {busy === 'mfd0' ? '…' : 'Release'}
+            </Btn>
+          </div>
         } />
-      <SocketRow n="S4" name="RTL-SDR" powered={sdrOn}
-        right={
-          <Btn tone={sdrOn ? 'red' : 'green'} className="px-2 py-0.5 text-[0.6rem]"
-            disabled={!telemetryLive || sdrPending}
-            onClick={toggleSdr}>
-            {sdrPending ? 'WAIT…' : sdrOn ? 'CUT' : 'POWER'}
+      <SocketRow ch="relay 3" name="CAN hub" powered={relay(3)}
+        detail={<>
+          gateway {conn.connected ? 'up' : 'down'}
+          {conn.panda_enabled ? ` · panda ${conn.panda_connected ? 'up' : 'down'}` : ''}
+        </>} />
+      <SocketRow ch="relay 4" name="Camera hub" powered={relay(4)}
+        detail={preview?.active ? `preview ${preview.phase ?? ''}` : rs?.state ? `roadsense ${rs.state}` : undefined} />
+      <SocketRow ch="relay 5" name="RS485 rail" powered={railOn}
+        detail={manualHeld ? 'held from dashboard' : 'satellites'}
+        action={
+          <Btn className="px-2.5 py-1 text-[0.65rem]" tone={manualHeld ? 'red' : 'green'} disabled={busy !== null}
+            title="Manual wake-lock: rail + gateway stay powered while held"
+            onClick={() => run('rail', 'satellite_power_hold', { name: 'dash', on: !manualHeld })}>
+            {busy === 'rail' ? '…' : manualHeld ? 'Release' : 'Hold'}
           </Btn>
         } />
       {conn.gateway_usb_power_desired != null
-        && relay(4) != null
-        && conn.gateway_usb_power_desired !== relay(4) && (
-        <div className="text-[0.6rem] text-hud-amber tracking-wider">
-          GATEWAY PORT CONVERGING (desired {conn.gateway_usb_power_desired ? 'ON' : 'OFF'})
+        && relay(3) != null
+        && conn.gateway_usb_power_desired !== relay(3) && (
+        <div className="text-[0.65rem] text-hud-amber tracking-wider">
+          CAN HUB CONVERGING (desired {conn.gateway_usb_power_desired ? 'ON' : 'OFF'})
         </div>
       )}
     </Panel>

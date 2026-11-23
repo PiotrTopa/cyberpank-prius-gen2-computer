@@ -27,7 +27,12 @@ export interface Powerbox {
   uv_threshold?: number | null;
   uv_recover?: number | null;
   poco_alive?: boolean | null;
-  /** Legacy firmware "p2" echo; there is no second POCO (single computer since 2026-11-04) */
+  /** Box-inside sensors: AHT20 (temperature + humidity) and BMP280 @0x77 */
+  aht_t?: number | null;
+  aht_h?: number | null;
+  bmp_t?: number | null;
+  bmp_p?: number | null;
+  /** Firmware echo of the poco2 power-button line (GP26) */
   poco2_alive?: boolean | null;
   /** Powerbox state machine (fw >= 2.0): normal | shutdown | sleep */
   pm_state?: string;
@@ -56,6 +61,8 @@ export interface Vehicle {
   gear: string;
   ice_running: boolean;
   ready_mode?: boolean;
+  acc_on?: boolean;
+  odometer_km?: number | null;
   ev_mode?: boolean;
   ig_on?: boolean;
   rpm?: number | null;
@@ -102,6 +109,8 @@ export interface Connection {
   mfd_last_ok_ping?: number | null;
   mfd_power_cycles?: number | null;
   mfd_last_boot_s?: number | null;
+  panda_enabled?: boolean;
+  panda_connected?: boolean;
 }
 
 export type SatTransport = 'rs485' | 'ble' | 'wifi';
@@ -229,10 +238,70 @@ export interface CameraPreview {
   scaling?: boolean;
 }
 
+/** One phone's statistics record (backend.host_stats). */
+export interface HostStats {
+  host?: string;
+  t?: number;
+  up_s?: number | null;
+  cpu_c?: number | null;
+  gpu_c?: number | null;
+  hot_zone?: string | null;
+  hot_c?: number | null;
+  cpu_pct?: number | null;
+  load1?: number | null;
+  mem_used_pct?: number | null;
+  power_w?: number | null;
+  disk_used_pct?: number | null;
+  wifi_dbm?: number | null;
+  age_s?: number | null;
+}
+
+/** Both phones + the shared cooling decision (state.hosts). */
+export interface Hosts {
+  poco?: HostStats | null;
+  poco2?: HostStats | null;
+  thermal?: {
+    duty_pct?: number | null;
+    source?: string | null;
+    reason?: string | null;
+    poco_ctrl_c?: number | null;
+    poco2_ctrl_c?: number | null;
+  } | null;
+}
+
+/** Secondary POCO power manager (backend.poco2_power). */
+export interface Poco2 {
+  enabled?: boolean;
+  /** off | booting | on | grace | shutting_down | ... */
+  state?: string;
+  /** auto (follows the MFD) | on | off */
+  mode?: string;
+  host?: string;
+  reachable?: boolean | null;
+  ssh_ok?: boolean | null;
+  state_since?: number | null;
+  last_ok_ping?: number | null;
+  last_boot_s?: number | null;
+  forced_restarts?: number;
+  last_error?: string;
+}
+
+export interface Headunit {
+  enabled?: boolean;
+  present?: boolean;
+  volume?: number | null;
+  last_seen?: number | null;
+  error?: string;
+}
+
 export interface AppState {
   powerbox: Powerbox;
   vehicle: Vehicle;
   energy: Energy;
+  hosts?: Hosts | null;
+  poco2?: Poco2 | null;
+  headunit?: Headunit | null;
+  fuel_log?: Record<string, unknown> | null;
   climate?: Climate;
   connection?: Connection;
   satellites?: Satellites;
@@ -326,5 +395,5 @@ export interface Diagnostics {
 }
 
 export type TimeRange = '1h' | '24h' | '7d';
-export type Tab = 'dashboard' | 'map' | 'satellites' | 'charts' | 'battery' | 'diagnostics' | 'alerts' | 'controls';
+export type Tab = 'home' | 'drive' | 'history' | 'car' | 'system';
 export type Series = { time: string; value: number }[];

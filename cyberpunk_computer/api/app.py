@@ -5,7 +5,9 @@ Surface (versioned under /api/v1), designed for the future Android dashboard:
 
     GET  /health                      liveness + link/connection summary
     GET  /api/v1/state                latest full state snapshot
-    WS   /api/v1/stream               live state snapshots (latest-only)
+    WS   /api/v1/stream               live state snapshots (latest-only; optional
+                                      ?keys=&interval=&delta=1, api.stream_filter)
+    GET  /api/v1/summary/power        power averages, 24 h energy + 12 V sparkline
     GET  /api/v1/metrics/catalog      available signals + commands
     GET  /api/v1/metrics              time-series history (auto/raw/1m/1h/1d)
     GET  /api/v1/events               discrete power/vehicle events
@@ -51,6 +53,8 @@ from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
 from ..metrics import MetricsDatabase
+from .power_summary import compute_power_summary
+from .stream_filter import StreamSubscription
 from .auth import AuthConfig, Authenticator, AuthMiddleware
 from .auth import register_routes as register_auth_routes
 from .bridge import StoreBridge
@@ -201,6 +205,18 @@ def create_app(
             "points": serialize_series(points),
         }
 
+    # ── power summary (one call for the home view) ──────────────────────────
+
+    @app.get(API_PREFIX + "/summary/power", dependencies=[Depends(require_auth)])
+    async def power_summary() -> Dict[str, Any]:
+        """Rolling power averages, 24 h energy and a 24 h 12 V sparkline.
+
+        Replaces the eight /metrics calls the dashboard made every minute. Draw
+        is reported as a magnitude (the INA219 sign depends on its wiring).
+        """
+        now = time.time()
+        return await asyncio.to_thread(lambda: compute_power_summary(db, reads.get(), now))
+
     # ── events ───────────────────────────────────────────────────────────────
 
     @app.get(API_PREFIX + "/events", dependencies=[Depends(require_auth)])
@@ -254,16 +270,47 @@ def create_app(
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
             return
         await websocket.accept()
+        # Optional per-client shaping (api.stream_filter): ?keys=a,b&interval=5&delta=1,
+        # changeable later with {"type": "subscribe", ...}. No params = full 1 Hz state.
+        sub = StreamSubscription.from_params(dict(websocket.query_params))
         client = bridge.register_client()
+
+        def _requeue_latest() -> None:
+            latest = bridge.latest_snapshot()
+            if latest is None:
+                return
+            if client.full():
+                try:
+                    client.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            client.put_nowait(latest)
+
+        async def _reader() -> None:
+            while True:
+                msg = await websocket.receive_json()
+                if isinstance(msg, dict) and msg.get("type") == "subscribe":
+                    sub.update(msg)
+                    _requeue_latest()   # answer a re-subscribe at once, in full
+
+        reader = asyncio.create_task(_reader())
         try:
             while True:
-                envelope = await client.get()
-                await websocket.send_json(envelope)
+                getter = asyncio.ensure_future(client.get())
+                done, _ = await asyncio.wait({getter, reader}, return_when=asyncio.FIRST_COMPLETED)
+                if reader in done:
+                    getter.cancel()
+                    reader.result()     # re-raise the disconnect
+                    break
+                message = sub.shape(getter.result(), time.monotonic())
+                if message is not None:
+                    await websocket.send_json(message)
         except WebSocketDisconnect:
             pass
         except Exception:
             logger.debug("WebSocket stream closed", exc_info=True)
         finally:
+            reader.cancel()
             bridge.unregister_client(client)
 
     # ── roadsense front (same computer, loopback-only upstream) ─────────────

@@ -245,13 +245,14 @@ class _Bridge:
         pass
 
     def latest_snapshot(self):
-        return {"ts": 1.0, "state": {"vehicle": {"speed_kmh": 0}}}
+        return {"type": "state", "ts": 1.0,
+                "state": {"vehicle": {"speed_kmh": 0}, "powerbox": {}, "connection": {}}}
 
     def register_client(self):
         import asyncio
 
         q = asyncio.Queue()
-        q.put_nowait({"type": "state", "ts": 1.0, "state": {}})
+        q.put_nowait(self.latest_snapshot())
         return q
 
     def unregister_client(self, client):
@@ -628,3 +629,15 @@ def test_launcher_keeps_token_off_argv():
     assert "/etc/prius/backend-auth.env" in text
     cli = (ROOTFS / "usr" / "local" / "sbin" / "prius-auth").read_text()
     assert "cyberpunk_computer.api.auth_cli" in cli
+
+
+def test_websocket_stream_subscription(live):
+    from websockets.sync.client import connect
+
+    url = "ws://127.0.0.1:%d/api/v1/stream?token=%s&keys=powerbox&delta=1&interval=30" % (live["port"], TOKEN)
+    with connect(url, open_timeout=5) as ws:
+        first = json.loads(ws.recv(timeout=5))
+        assert first["type"] == "state" and set(first["state"]) == {"powerbox"}
+        ws.send(json.dumps({"type": "subscribe", "keys": ["powerbox", "connection"]}))
+        again = json.loads(ws.recv(timeout=5))
+        assert set(again["state"]) == {"powerbox", "connection"}

@@ -19,6 +19,8 @@ export async function sendCommand(name: string, params: Record<string, unknown> 
       return false;
     }
     toast(`${name} accepted`, 'green', 2500);
+    // The stream speeds up for a while so the command's effect shows quickly.
+    window.dispatchEvent(new Event('prius-command'));
     return true;
   } catch (e) {
     toast(`${name} failed: ${e instanceof Error ? e.message : String(e)}`, 'red', 6000);

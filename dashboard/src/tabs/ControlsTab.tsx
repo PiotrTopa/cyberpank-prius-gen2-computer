@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { BatteryWarning, Fan, LayoutDashboard, Power, SatelliteDish } from 'lucide-react';
+import { BatteryWarning, LayoutDashboard, SatelliteDish } from 'lucide-react';
 import type { AppState, SatelliteNode } from '../types';
 import { fmtAge } from '../lib/format';
 import { sendCommand } from '../lib/api';
@@ -58,17 +58,6 @@ export function ControlsTab({ state, connected, now, satNodes, manualHeld }: {
   const [uvThrDraft, setUvThrDraft] = useState<number | null>(null);
   const [uvRecDraft, setUvRecDraft] = useState<number | null>(null);
   const [uvBusy, setUvBusy] = useState(false);
-  const [fanBusy, setFanBusy] = useState(false);
-
-  // Fan override: null = auto, 0 = forced off, 100 = forced on.
-  const fanOverride = pb.fan_override_pct ?? null;
-  const fanMode: 'off' | 'on' | 'auto' = fanOverride == null ? 'auto' : fanOverride === 0 ? 'off' : 'on';
-  const setFanMode = async (mode: 'off' | 'on' | 'auto') => {
-    setFanBusy(true);
-    if (mode === 'auto') await sendCommand('fan_auto');
-    else await sendCommand('set_fan', { pct: mode === 'on' ? 100 : 0 });
-    setFanBusy(false);
-  };
   const uvThr = uvThrDraft ?? pb.uv_threshold ?? null;
   const uvRec = uvRecDraft ?? pb.uv_recover ?? null;
   const uvDirty = uvThrDraft != null || uvRecDraft != null;
@@ -87,15 +76,6 @@ export function ControlsTab({ state, connected, now, satNodes, manualHeld }: {
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-      <Panel title="Remote Control" code="CTL-02" icon={Power}>
-        <div className="w-full py-7 border border-dashed border-ink-700 text-slate-600 flex flex-col items-center justify-center gap-2 cursor-not-allowed select-none">
-          <Power size={26} />
-          <span className="uppercase tracking-[0.22em] text-xs">Start Vehicle Remotely</span>
-          <span className="uppercase tracking-[0.15em] text-[0.6rem] text-hud-amber">Not wired yet</span>
-        </div>
-        <p className="text-xs text-slate-600 text-center">Will send ACC wake via powerbox · coming soon</p>
-      </Panel>
-
       <Panel title="Satellite Rail (relay 5)" code="CTL-03" icon={SatelliteDish} tone="green"
         right={
           <Chip tone={pb.rs485_power == null ? 'dim' : pb.rs485_power ? 'green' : 'red'}>
@@ -131,32 +111,6 @@ export function ControlsTab({ state, connected, now, satNodes, manualHeld }: {
             ))}
           </div>
         )}
-      </Panel>
-
-      <Panel title="Chassis Fan" code="CTL-05" icon={Fan} tone="cyan"
-        right={
-          <Chip tone={fanMode === 'auto' ? 'green' : fanMode === 'on' ? 'cyan' : 'red'}>
-            {fanMode === 'auto' ? `AUTO · ${pb.fan_duty_pct?.toFixed(0) ?? '--'}%` : fanMode === 'on' ? 'FORCED ON' : 'FORCED OFF'}
-          </Chip>
-        }>
-        <div className="flex gap-3">
-          <Btn className="flex-1 py-3" tone="red" active={fanMode === 'off'} disabled={fanBusy}
-            onClick={() => setFanMode('off')}>
-            {fanBusy ? '…' : 'Off'}
-          </Btn>
-          <Btn className="flex-1 py-3" tone="cyan" active={fanMode === 'on'} disabled={fanBusy}
-            onClick={() => setFanMode('on')}>
-            {fanBusy ? '…' : 'On'}
-          </Btn>
-          <Btn className="flex-1 py-3" tone="green" active={fanMode === 'auto'} disabled={fanBusy}
-            onClick={() => setFanMode('auto')}>
-            {fanBusy ? '…' : 'Auto'}
-          </Btn>
-        </div>
-        <p className="text-xs text-slate-600 text-center">
-          Auto = thermal management: hysteresis on a filtered GPU-led POCO
-          temperature (heatpipe sink). Off/On pin the fan at 0%/100% until Auto is restored.
-        </p>
       </Panel>
 
       <Panel title="Power Protection" code="CTL-04" icon={BatteryWarning} tone="amber"
