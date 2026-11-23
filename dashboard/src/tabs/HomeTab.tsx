@@ -99,6 +99,12 @@ function SystemsPanel({ state, nowS }: { state: AppState; nowS: number }) {
   const p2Host = hosts.poco2;
   const p2Fresh = (hostAge(p2Host, nowS) ?? 1e9) < HOST_STALE_S;
 
+  // Power profile (/etc/prius/power-mode via the backend): full is held with
+  // ACC on or while roadsense is meant to run; full with the key off drains 12 V.
+  const profile = pb.power_mode ?? null;
+  const accOn = !!(pb.acc_on ?? state.vehicle?.acc_on);
+  const rsHolds = !!rs && rs.state != null && rs.state !== 'off';
+  const fullWhileOff = profile === 'full' && !accOn;
   const units = Object.entries(rs?.units ?? {});
   const unitsUp = units.filter(([, s]) => s === 'active').length;
   const chris = rs?.units?.['chris-integrator.service'];
@@ -107,9 +113,23 @@ function SystemsPanel({ state, nowS }: { state: AppState; nowS: number }) {
     <Panel title="What's running" icon={Server} tone="green">
       <div className="-mt-1">
         <SysRow id="poco" name="Car computer · poco" open={open === 'poco'} onToggle={toggle}
-          state={pocoFresh ? 'on' : pb.poco_alive ? 'alive' : 'no stats'}
-          tone={pocoFresh || pb.poco_alive ? 'green' : 'amber'}
-          detail={hosts.poco ? hostLine(hosts.poco) : undefined} />
+          state={profile ? `${profile} power` : pocoFresh ? 'on' : pb.poco_alive ? 'alive' : 'no stats'}
+          tone={!pocoFresh && !pb.poco_alive ? 'amber' : fullWhileOff ? 'amber' : 'green'}
+          detail={fullWhileOff
+            ? `full profile with the car off${rsHolds ? ` · held by roadsense (mode ${rs?.mode})` : ' · no owner'}`
+            : hosts.poco ? hostLine(hosts.poco) : undefined}>
+          <div className="text-[0.68rem] text-slate-500">
+            {hosts.poco ? <>{hostLine(hosts.poco)}<br /></> : null}
+            Power profile: <span className="text-slate-300">{profile ?? '—'}</span>.
+            Full = all 8 cores, used with the key on and whenever roadsense runs;
+            low = big cores offline and Wi-Fi off after its grace, for the parked car.
+          </div>
+          {fullWhileOff && rsHolds && rs?.mode === 'on' && (
+            <Btn disabled={busy} onClick={() => run('roadsense_mode', { mode: 'auto' })}>
+              Roadsense back to auto (lets poco go low)
+            </Btn>
+          )}
+        </SysRow>
 
         <SysRow id="poco2" name="poco2 · headless" open={open === 'poco2'} onToggle={toggle}
           state={p2?.enabled === false ? 'disabled' : p2?.state ?? '—'}
@@ -166,7 +186,7 @@ function SystemsPanel({ state, nowS }: { state: AppState; nowS: number }) {
         <SysRow id="pb" name="Powerbox" open={open === 'pb'} onToggle={toggle}
           state={pb.connected ? (pb.pm_state ?? 'on') : 'no link'}
           tone={!pb.connected ? 'red' : pb.pm_state && pb.pm_state !== 'normal' ? 'amber' : 'green'}
-          detail={`fw up ${fmtUp(pb.uptime_s)} · ${pb.power_mode ?? '—'} power${pb.undervoltage ? ' · UNDER-VOLTAGE' : ''}`} />
+          detail={`fw up ${fmtUp(pb.uptime_s)}${pb.undervoltage ? ' · UNDER-VOLTAGE' : ''}`} />
 
         {hu?.enabled !== false && (
           <SysRow id="hu" name="Head unit" open={open === 'hu'} onToggle={toggle}
