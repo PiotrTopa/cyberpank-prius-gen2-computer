@@ -12,7 +12,10 @@ import { UsbHubPanel } from '../components/UsbHubPanel';
 import { CameraPreviewPanel } from '../components/CameraPreviewPanel';
 
 const n1 = (v?: number | null) => (v == null ? undefined : v.toFixed(1));
-const w = (v?: number | null) => (v == null ? '--' : Math.abs(v).toFixed(1));
+/** Signed watts: + drawn from the 12 V battery, − net charge (solar charger). */
+const w = (v?: number | null) => (v == null ? '--' : `${v < 0 ? '−' : ''}${Math.abs(v).toFixed(1)}`);
+/** Amber while drawing, green while the battery is being charged. */
+const flowTone = (v?: number | null): Tone => (v == null ? 'dim' : v < 0 ? 'green' : 'amber');
 
 /** A host record older than this is shown as stale. */
 const HOST_STALE_S = 30;
@@ -193,19 +196,47 @@ function Tile({ label, value, unit, sub, tone = 'cyan' }: {
 const PowerRow = ({ label, now, s }: { label: string; now?: number | null; s?: PowerSummary['stack'] }) => (
   <div className="grid grid-cols-4 items-baseline text-right tnum">
     <span className="text-left text-slate-500 text-[0.78rem] uppercase tracking-wider">{label}</span>
-    <span className="text-hud-amber text-base">{w(now)}</span>
-    <span className="text-slate-200 text-sm">{w(s?.avg_1h)}</span>
-    <span className="text-slate-400 text-sm">{w(s?.avg_24h)}</span>
+    <span className={cx('text-base', TONE_TEXT[flowTone(now)])}>{w(now)}</span>
+    <span className={cx('text-sm', s?.avg_1h != null && s.avg_1h < 0 ? 'text-hud-green' : 'text-slate-200')}>{w(s?.avg_1h)}</span>
+    <span className={cx('text-sm', s?.avg_24h != null && s.avg_24h < 0 ? 'text-hud-green' : 'text-slate-400')}>{w(s?.avg_24h)}</span>
   </div>
 );
+
+/** Signed power over 24 h as bars around zero: amber up = drawn from the
+ *  battery, green down = net charge from the solar charger. */
+function FlowBars({ points, end, height = 56 }: { points: [number, number][]; end: number; height?: number }) {
+  if (points.length < 2) return <div className="text-[0.65rem] text-slate-600" style={{ height }}>no history yet</div>;
+  const start = end - 86400;
+  const maxUp = Math.max(0.5, ...points.map(([, v]) => v));
+  const maxDn = Math.max(0, ...points.map(([, v]) => -v));
+  const span = maxUp + maxDn;
+  const zero = (maxUp / span) * height;
+  const bw = 100 / 96;
+  return (
+    <svg viewBox={`0 0 100 ${height}`} preserveAspectRatio="none" className="w-full" style={{ height }}>
+      {points.map(([t, v]) => {
+        const x = ((t - start) / 86400) * 100;
+        const h = (Math.abs(v) / span) * height;
+        return (
+          <rect key={t} x={x} width={bw * 0.8} y={v >= 0 ? zero - h : zero} height={Math.max(h, 0.4)}
+            className={v >= 0 ? 'fill-hud-amber' : 'fill-hud-green'} opacity={0.85} />
+        );
+      })}
+      <line x1={0} x2={100} y1={zero} y2={zero} className="stroke-slate-600" strokeWidth={0.6} vectorEffect="non-scaling-stroke" />
+    </svg>
+  );
+}
 
 function PowerPanel({ state, sum }: { state: AppState; sum: PowerSummary | null }) {
   const pb = state.powerbox;
   const volts = (sum?.voltage_24h ?? []).map(([, v]) => v);
+  const flow = sum?.power_24h ?? [];
   return (
     <Panel title="Power" icon={Zap} tone="amber"
       right={sum?.energy_24h_wh != null
-        ? <span className="text-[0.7rem] text-slate-400 tnum">{sum.energy_24h_wh.toFixed(0)} Wh / 24 h</span>
+        ? <span className={cx('text-[0.7rem] tnum', sum.energy_24h_wh < 0 ? 'text-hud-green' : 'text-slate-400')}>
+            net {w(sum.energy_24h_wh).replace(/\.\d$/, '')} Wh / 24 h
+          </span>
         : undefined}>
       <div className="flex flex-col gap-1.5">
         <div className="grid grid-cols-4 text-right text-[0.6rem] text-slate-600 uppercase tracking-wider">
@@ -213,6 +244,16 @@ function PowerPanel({ state, sum }: { state: AppState; sum: PowerSummary | null 
         </div>
         <PowerRow label="Stack" now={pb.power_draw_w} s={sum?.stack} />
         <PowerRow label="poco" now={pb.poco_power_w} s={sum?.poco} />
+      </div>
+      <div className="flex flex-col gap-1">
+        <div className="flex justify-between text-[0.65rem] uppercase tracking-wider tnum">
+          <span className="text-slate-500">Flow · 24 h</span>
+          <span>
+            <span className="text-hud-amber">▲ used {sum?.consumed_24h_wh?.toFixed(0) ?? '--'} Wh</span>
+            <span className="text-hud-green ml-2">▼ solar {sum?.charged_24h_wh?.toFixed(0) ?? '--'} Wh</span>
+          </span>
+        </div>
+        <FlowBars points={flow} end={sum?.ts ?? 0} />
       </div>
       <div className="flex flex-col gap-1">
         <div className="flex justify-between text-[0.65rem] text-slate-500 uppercase tracking-wider">
@@ -315,10 +356,13 @@ export function HomeTab({ state, now, sum, satNodes, satHolders, onOpenSystem }:
           sub={sum?.voltage_min_24h != null ? `min ${sum.voltage_min_24h.toFixed(2)} V / 24 h` : stale ?? 'live'} />
         <Tile label="Car" value={acc == null ? '--' : acc ? 'ACC ON' : 'OFF'} tone={acc ? 'green' : 'dim'}
           sub={state.vehicle?.ready_mode ? 'ready' : pb.undervoltage ? 'under-voltage' : pb.pm_state ?? undefined} />
-        <Tile label="Draw now" value={w(pb.power_draw_w)} unit="W" tone="amber"
-          sub={sum?.stack.avg_1h != null ? `1 h avg ${sum.stack.avg_1h.toFixed(1)} W` : undefined} />
-        <Tile label="Used · 24 h" value={sum?.energy_24h_wh != null ? sum.energy_24h_wh.toFixed(0) : undefined} unit="Wh" tone="amber"
-          sub={sum?.energy_24h_wh != null && v ? `≈ ${(sum.energy_24h_wh / v).toFixed(1)} Ah` : undefined} />
+        <Tile label={pb.power_draw_w != null && pb.power_draw_w < 0 ? 'Charging now' : 'Draw now'}
+          value={w(pb.power_draw_w)} unit="W" tone={flowTone(pb.power_draw_w)}
+          sub={pb.power_draw_w != null && pb.power_draw_w < 0 ? 'solar > load'
+            : sum?.stack.avg_1h != null ? `1 h avg ${w(sum.stack.avg_1h)} W` : undefined} />
+        <Tile label="Net · 24 h" value={sum?.energy_24h_wh != null ? w(sum.energy_24h_wh).replace(/\.\d$/, '') : undefined} unit="Wh"
+          tone={flowTone(sum?.energy_24h_wh)}
+          sub={sum?.consumed_24h_wh != null ? `used ${sum.consumed_24h_wh.toFixed(0)} · solar ${sum.charged_24h_wh?.toFixed(0) ?? 0}` : undefined} />
       </section>
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 items-start">

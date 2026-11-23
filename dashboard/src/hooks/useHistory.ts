@@ -44,7 +44,8 @@ export function useHistory(timeRange: TimeRange): HistoryData {
         return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       };
 
-      // Draw is plotted as a magnitude: the INA219 sign depends on its wiring.
+      // Stack power keeps its sign (negative = solar charging the battery);
+      // poco's own draw is always a load.
       const series = async (res: Response, digits: number, abs = false): Promise<Series> => {
         if (!res.ok) return [];
         const d = await res.json();
@@ -54,7 +55,7 @@ export function useHistory(timeRange: TimeRange): HistoryData {
       };
 
       const [voltageHistory, tempHistory, currentHistory, pocoHistory] = await Promise.all([
-        series(voltRes, 2), series(tempRes, 1), series(pbPowerRes, 2, true), series(pocoPowerRes, 2, true),
+        series(voltRes, 2), series(tempRes, 1), series(pbPowerRes, 2), series(pocoPowerRes, 2, true),
       ]);
       setData({ voltageHistory, tempHistory, currentHistory, pocoHistory });
     } catch (e) {

@@ -211,8 +211,8 @@ def create_app(
     async def power_summary() -> Dict[str, Any]:
         """Rolling power averages, 24 h energy and a 24 h 12 V sparkline.
 
-        Replaces the eight /metrics calls the dashboard made every minute. Draw
-        is reported as a magnitude (the INA219 sign depends on its wiring).
+        Replaces the eight /metrics calls the dashboard made every minute. Stack
+        power is signed: negative = net charge from the solar charger.
         """
         now = time.time()
         return await asyncio.to_thread(lambda: compute_power_summary(db, reads.get(), now))

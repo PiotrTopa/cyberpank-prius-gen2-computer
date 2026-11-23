@@ -73,19 +73,26 @@ def test_merge_patch_minimal():
     assert merge_patch({"a": 1}, {"a": 1}) == {}
 
 
-def test_power_summary(tmp_path):
+def test_power_summary_keeps_the_sign(tmp_path):
+    """Stack power > 0 = drawn from the battery, < 0 = solar charging it."""
     db = MetricsDatabase(str(tmp_path / "m.db"))
     conn = db.connect()
     now = 1_800_000_000.0
     samples = []
-    for i in range(7200):  # 2 h at 1 Hz, stack -6 W (sign of the shunt), poco 4 W, 12.5 V
+    for i in range(7200):  # 2 h at 1 Hz: first hour 6 W drawn, second hour 4 W charged
         t = now - 7200 + i
-        samples += [("powerbox_power", t, -6.0), ("poco_power", t, 4.0), ("powerbox_voltage", t, 12.5)]
+        stack = 6.0 if i < 3600 else -4.0
+        samples += [("powerbox_power", t, stack), ("poco_power", t, 4.0), ("powerbox_voltage", t, 12.5)]
     db.write_samples(conn, samples)
     db.rollup(conn, now=now + 120)
     out = compute_power_summary(db, conn, now)
-    assert out["stack"]["avg_1m"] == 6.0 and out["stack"]["avg_1h"] == 6.0
+    assert out["stack"]["avg_1m"] == -4.0 and out["stack"]["avg_1h"] == -4.0
+    assert abs(out["stack"]["avg_24h"] - 1.0) < 0.05
     assert out["poco"]["avg_5m"] == 4.0
-    assert 11.5 < out["energy_24h_wh"] < 12.5
+    assert 5.8 < out["consumed_24h_wh"] < 6.2
+    assert 3.8 < out["charged_24h_wh"] < 4.2
+    assert 1.8 < out["energy_24h_wh"] < 2.2
     assert out["voltage_min_24h"] == 12.5
+    pw = out["power_24h"]
+    assert pw[0][1] == 6.0 and pw[-1][1] == -4.0
     assert 8 <= len(out["voltage_24h"]) <= 9 and out["voltage_24h"][0][1] == 12.5

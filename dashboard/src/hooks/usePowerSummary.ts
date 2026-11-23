@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { API_URL } from '../lib/api';
 
+/** Signed W: stack > 0 = drawn from the 12 V battery, < 0 = net solar charge. */
 export interface PowerAvgs {
   avg_1m: number | null;
   avg_5m: number | null;
@@ -12,7 +13,12 @@ export interface PowerSummary {
   ts: number;
   stack: PowerAvgs;
   poco: PowerAvgs;
+  /** net Wh over 24 h (+ drawn from the battery, − net solar charge) */
   energy_24h_wh: number | null;
+  consumed_24h_wh: number | null;
+  charged_24h_wh: number | null;
+  /** [epoch s, W] signed stack power, 15-minute buckets over 24 h */
+  power_24h: [number, number][];
   /** [epoch s, V] 15-minute buckets over 24 h */
   voltage_24h: [number, number][];
   voltage_min_24h: number | null;

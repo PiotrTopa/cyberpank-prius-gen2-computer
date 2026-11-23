@@ -29,7 +29,7 @@ export function TelemetryTab({ hist, timeRange, onTimeRange }: {
         ))}
       </div>
       <Chart title="Aux Battery 12V" icon={Zap} data={hist.voltageHistory} color="#6ee7f2" unit="V" />
-      <Chart title="Stack Draw" icon={Cpu} data={hist.currentHistory} color="#ffb454" unit="W" />
+      <Chart title="Stack Power (− = solar charging)" icon={Cpu} data={hist.currentHistory} color="#ffb454" unit="W" />
       <Chart title="POCO Draw" icon={Cpu} data={hist.pocoHistory} color="#ffb454" unit="W" />
       <Chart title="Cabin Temperature" icon={Thermometer} data={hist.tempHistory} color="#e879c8" unit="°C" />
     </div>
