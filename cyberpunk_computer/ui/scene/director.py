@@ -91,6 +91,8 @@ class SceneDirector:
         self.lead: Optional[Lead] = None      # smoothed
         self.lead_alpha = 0.0                 # 0..1 appear/disappear
         self.objects: tuple = ()
+        self.around: Optional[tuple] = None       # the radar view's objects all round (vw.rd), carried like objects
+        self._ar_s: dict = {}
         self._obj_s: dict = {}                 # display-channel road users: id -> drawn (x, y)
         self.lead_shown_m: Optional[int] = None   # the lead's whole-metre read-out (with hysteresis)
         self.light_pos: Optional[Tuple[float, float]] = None   # drawn (distance, lateral LEFT+) of the ego light
@@ -249,6 +251,7 @@ class SceneDirector:
             self.lead = None
             self.lead_alpha = 0.0
             self.objects = ()
+            self.around = None
             return
         if road is None:
             return
@@ -312,6 +315,7 @@ class SceneDirector:
             if self.lead_alpha == 0.0:
                 self.lead = None
         self.objects = road.objects if self.vision == "live" else ()
+        self.around = None
         self._readout()
 
     # -- display channel (roadsense view) -------------------------------------------
@@ -401,12 +405,21 @@ class SceneDirector:
             if self.lead_alpha == 0.0:
                 self.lead = None
         self.objects = self._carry_objects(road.objects if self.vision == "live" else (), age, dt)
+        if self.vision == "live" and road.around is not None:
+            self.around, self._ar_s = self._carry(road.around, age, dt, self._ar_s)
+        else:
+            self.around, self._ar_s = None, {}
         self._view_age = age
         self._readout()
 
     def _carry_objects(self, objs, age: float, dt: float) -> tuple:
         """Road users of the display channel (an id): carried by their velocity from the sample's frame time,
         corrections eased, like the lead; objects without an id are drawn where they are."""
+        out, self._obj_s = self._carry(objs, age, dt, self._obj_s)
+        return out
+
+    @staticmethod
+    def _carry(objs, age: float, dt: float, store: dict):
         k = 1.0 - math.exp(-dt / VIEW_EASE_S) if dt > 0 else 1.0
         new, out = {}, []
         for o in objs:
@@ -414,7 +427,7 @@ class SceneDirector:
                 out.append(o)
                 continue
             tx, ty = o.x + o.vx * age, o.y + o.vy * age
-            cur = self._obj_s.get(o.oid)
+            cur = store.get(o.oid)
             if cur is None:
                 x, y = tx, ty
             else:
@@ -422,8 +435,7 @@ class SceneDirector:
                 x, y = x + (tx - x) * k, y + (ty - y) * k
             new[o.oid] = (x, y)
             out.append(o._replace(x=x, y=y))
-        self._obj_s = new
-        return tuple(out)
+        return tuple(out), new
 
     def _update_light(self, inp: SceneInputs, dt: float) -> None:
         """The drawn position of the ego light. From the display channel: carried by its velocity between two

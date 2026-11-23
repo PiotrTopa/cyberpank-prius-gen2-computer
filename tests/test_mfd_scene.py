@@ -1900,7 +1900,7 @@ def test_radar_view_draws_symbols_tags_and_status_inside_its_rectangle():
     assert rv.col["lead"] in cols and rv.col["vru"] in cols
     assert rv.col["red"] not in {tuple(s.get_at((x, y)))[:3] for x in range(238) for y in range(40, 216)}
     tags = [b for _, b in rv.tags]
-    assert 1 <= len(tags) <= 4 and "lead:1" in [i for i, _ in rv.tags]
+    assert 1 <= len(tags) <= 5 and "lead:1" in [i for i, _ in rv.tags]
     bounds = pygame.Rect(0, 0, 238, 216)
     for i, a in enumerate(tags):
         assert bounds.contains(a)
@@ -1913,7 +1913,7 @@ def test_radar_view_draws_symbols_tags_and_status_inside_its_rectangle():
 def test_radar_view_tag_text_is_one_bit():
     """Every pixel of a tag is the black ground or one of the tag's own colours: no anti-aliased shades."""
     rv, d, _ = radar_drawn()
-    allowed = {(0, 0, 0), rv.col["text"], rv.col["value"], rv.col["label"], rv.col["red"]}
+    allowed = {(0, 0, 0), rv.col["text"], rv.col["value"], rv.col["label"], rv.col["red"], rv.col["dim"]}
     for _, box in rv.tags:
         for x in range(box.left, box.right):
             for y in range(box.top, box.bottom):
@@ -1965,7 +1965,7 @@ def test_radar_range_steps_up_at_once_and_down_only_after_a_hold():
     for _ in range(int(1.0 / 0.05)):
         d.update(inp, 0.05)
         rv.update(d, inp, 0.05)
-    assert rv.range_m == 50                                               # one step down after the hold
+    assert rv.range_m == 60                                               # one step down after the hold
     far = inp._replace(road=parse_scene(radar_scene(900, 99_000, [], {"id": "lead:1", "d": 70.0, "y": 0.0,
                                                                          "v": 0.0})))
     d.update(far, 0.05)
@@ -1989,6 +1989,136 @@ def test_radar_view_is_cached_while_nothing_moves():
     n = rv.redraws
     run(140, 40, 52.0)
     assert rv.redraws == n and len(rv._static) == 1
+
+
+# all round (vw.rd, chris-integrator's view.around): seen ahead, remembered beside and behind
+RADAR_AROUND = [
+    {"id": "ru:1", "k": "car", "d": 12.0, "y": 3.3, "vx": -14.0, "vy": 0.0, "s": "p", "m": "s"},
+    {"id": "ru:3", "k": "car", "d": 30.0, "y": -3.5, "vx": -26.0, "vy": 0.0, "m": "m"},
+    {"id": "ru:9", "k": "car", "d": -8.0, "y": 3.3, "vx": -14.0, "vy": 0.0, "s": "p", "m": "s", "st": "r",
+     "ago": 6.0, "sd": 3.0},
+    {"id": "ru:10", "k": "human", "d": -6.0, "y": -5.0, "vx": -14.0, "vy": -1.0, "m": "m", "st": "r", "ago": 3.0,
+     "sd": 4.0, "s": "t", "ttc": 1.0},                                 # a sender's threat on a remembered one
+    {"id": "ru:11", "k": "car", "d": 6.0, "y": -14.0, "vx": -14.0, "vy": 8.0, "m": "m", "st": "c", "ago": 0.5},
+    {"id": "lead:1", "k": "car", "d": 25.0, "y": 0.1, "vx": -0.5, "vy": 0.0, "L": 1, "sd": 1.2}]
+
+
+def radar_around_drawn(around=RADAR_AROUND, seconds=2.0, speed=50.0, tuning=None, objs=RADAR_CITY[:2]):
+    from cyberpunk_computer.ui.scene.radar import RadarView
+    from cyberpunk_computer.ui.scene.render import SceneRenderer
+    from cyberpunk_computer.ui.scene.tuning import Tuning
+    r = SceneRenderer((238, 216), tuning=Tuning(tuning or {}))
+    rv = RadarView(r, (238, 216))
+    d = SceneDirector()
+    inp = SceneInputs(speed_kmh=speed, real_speed_kmh=speed, gear="D", ready=True, rs_state="running", rs_ok=True)
+    t = 0.0
+    for k in range(int(seconds / 0.05)):
+        sc = radar_scene(k + 1, 1000 + 50 * k, objs, RADAR_LEAD)
+        sc["vw"]["rd"] = [dict(o, d=o["d"] + o["vx"] * 0.05 * k, y=o["y"] + o["vy"] * 0.05 * k) for o in around]
+        inp = inp._replace(road=parse_scene(sc))
+        d.update(inp, 0.05)
+        rv.update(d, inp, 0.05)
+        t += 0.05
+    rv.render(d, inp, t)
+    return rv, d, inp
+
+
+def test_radar_around_fields_are_parsed_and_a_remembered_object_is_never_a_threat():
+    sc = radar_scene(1, 1000, RADAR_CITY, RADAR_LEAD)
+    assert parse_scene(sc).around is None                                # an older integrator: no all-round list
+    sc["vw"]["rd"] = RADAR_AROUND
+    road = parse_scene(sc)
+    by = {o.oid: o for o in road.around}
+    assert by["ru:9"].track == "memory" and by["ru:9"].ago == 6.0 and by["ru:9"].x == -8.0
+    assert by["ru:10"].state == "" and by["ru:10"].ttc is None              # remembered: never a threat
+    assert by["ru:11"].track == "coast" and by["ru:3"].track == ""
+    assert by["lead:1"].lead and not by["ru:3"].lead
+    assert [o.oid for o in road.objects] == ["ru:1", "ru:2", "ru:3", "ru:4", "ru:5"]   # objs unchanged
+
+
+def test_radar_view_draws_all_round_with_the_car_in_the_centre():
+    rv, d, inp = radar_around_drawn()
+    assert d.around is not None and rv.cy == 108 and rv.ppm == 100 / rv.range_m
+    items = {it.oid: it for it in rv._items(d, inp)}
+    assert set(items) == {o["id"] for o in RADAR_AROUND}                 # the all-round list, the lead in it
+    assert items["ru:9"].track == "memory"
+    px, py = rv.to_px(items["ru:9"].x, items["ru:9"].y)
+    assert py > rv.cy                                                     # behind: below the centre
+    ghost = rv._colour(items["ru:9"], True)
+    assert max(ghost) < max(rv.col["traffic"])                           # remembered: dimmer than seen
+    assert ghost in {tuple(rv.surface.get_at((x, y)))[:3] for x in range(px - 3, px + 4) for y in range(py - 5, py + 6)}
+    # nothing remembered is red; nothing in this scene is red below the limit-sign corner
+    assert rv.col["red"] not in region_colours(rv.surface, (0, 40, 238, 176))
+    # the scope: the rim at R_PX around the centre
+    from cyberpunk_computer.ui.scene import radar as R
+    assert tuple(rv.surface.get_at((rv.cx + R.R_PX, rv.cy)))[:3] == rv.col["rim"] or \
+        tuple(rv.surface.get_at((rv.cx + R.R_PX - 1, rv.cy)))[:3] == rv.col["tick"]
+
+
+def test_radar_remembered_objects_never_set_the_range():
+    far_behind = [{"id": "ru:20", "k": "truck", "d": -70.0, "y": 0.0, "vx": -8.0, "vy": 0.0, "m": "m", "st": "r",
+                   "ago": 4.0, "sd": 3.0},
+                  {"id": "ru:21", "k": "car", "d": 8.0, "y": 0.2, "vx": 0.0, "vy": 0.0, "L": 1}]
+    rv, d, inp = radar_around_drawn(far_behind, seconds=6.0, speed=10.0, objs=[])
+    assert rv.range_m == 20
+
+
+def test_radar_data_blocks_mark_the_track_and_do_not_overlap():
+    rv, d, inp = radar_around_drawn()
+    from cyberpunk_computer.ui.scene.radar import RadarView
+    items = {it.oid: it for it in rv._items(d, inp)}
+    assert RadarView.ident(items["lead:1"]) == "LEAD"
+    assert RadarView.ident(items["ru:9"]) == "C9 MEM 6s"
+    assert RadarView.ident(items["ru:11"]).endswith("CST")
+    boxes = [b for _, b in rv.tags]
+    assert "lead:1" in [i for i, _ in rv.tags] and len(boxes) <= 5
+    keep = rv._keepouts()
+    for i, a in enumerate(boxes):
+        assert pygame.Rect(0, 0, 238, 216).contains(a)
+        assert a.collidelist(keep) < 0
+        for b in boxes[i + 1:]:
+            assert not a.colliderect(b)
+
+
+def test_radar_history_dots_follow_a_moving_target_and_not_a_standing_one():
+    rv, d, inp = radar_around_drawn(seconds=3.0)
+    assert "ru:3" in rv._trail and len(rv._trail["ru:3"]) >= 4          # oncoming car: dots behind it
+    assert "ru:1" not in rv._trail                                       # parked: none
+    assert "ru:9" not in rv._trail                                       # remembered: no new plots
+    it = {i.oid: i for i in rv._items(d, inp)}["ru:3"]
+    odo, hx, hy = rv._trail["ru:3"][2]
+    qx, qy = rv.to_px(hx - (rv.odo - odo), hy)
+    assert qy < rv.to_px(it.x, it.y)[1]                                   # it came from further ahead
+
+
+def test_radar_sweep_composites_without_redrawing_the_picture():
+    stand = [dict(o, vx=0.0, vy=0.0) for o in RADAR_AROUND if o["id"] in ("ru:1", "ru:9", "lead:1")]
+    rv, d, inp = radar_around_drawn(stand, speed=0.0, objs=[], tuning={"radar_sweep": True})
+    inp = inp._replace(real_speed_kmh=0.0, speed_kmh=0.0)
+    n, sw = rv.redraws, rv.sweeps
+    t = 10.0
+    for _ in range(20):                                                  # one second, nothing moves
+        d.clock += 0.05
+        t += 0.05
+        if rv.due(d, inp, t):
+            rv.render(d, inp, t)
+    from cyberpunk_computer.ui.scene import radar as R
+    assert rv.redraws == n and rv.sweeps - sw >= int(R.SWEEP_HZ) - 1
+    # without the sweep (the default) nothing is due while nothing moves
+    rv2, d2, inp2 = radar_around_drawn(stand, speed=0.0, objs=[])
+    inp2 = inp2._replace(real_speed_kmh=0.0, speed_kmh=0.0)
+    d2.animating = False
+    d2.clock += 0.3
+    assert not rv2.due(d2, inp2, 99.0)
+
+
+def test_radar_centre_ahead_moves_the_centre_down_at_the_larger_ranges():
+    far = [{"id": "lead:1", "k": "car", "d": 55.0, "y": 0.0, "vx": 0.0, "vy": 0.0, "L": 1}]
+    rv, d, inp = radar_around_drawn(far, objs=[], tuning={"radar_centre": "ahead"})
+    from cyberpunk_computer.ui.scene import radar as R
+    assert rv.range_m == 60 and rv.cy == R.AHEAD_CY and rv.to_px(60.0, 0.0)[1] == 8
+    rv2, _, _ = radar_around_drawn(far, objs=[])
+    assert rv2.cy == 108
 
 
 def _radar_sim(t, radar_on, vw, toggle_at=18.0):

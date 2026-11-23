@@ -1137,6 +1137,49 @@ def test_view_road_users_carry_the_radar_view_fields():
     assert "rdr" not in view_to_scene(m)
 
 
+def test_view_around_goes_out_as_rd_all_round_with_remembered_ones_marked():
+    """chris-integrator's view.around (every object all round the car, lane radar-view-360) -> vw.rd: relative
+    velocity from the ground velocity and the view's ego speed, st c / r with the age, the lead marked, never a
+    threat or obstacle on a remembered object; objs (the road view's) unchanged; capped at AROUND_MAX with
+    threats, obstacles and the lead first, then the nearest all round."""
+    from cyberpunk_computer.backend.roadsense_scene import AROUND_MAX
+    m = view_msg(5, 1)
+    m["ego"] = {"speed_mps": 14.0}
+    m["objects"] += [_radar_obj(1, 20.0, 3.4, motion="stationary", parked=True)]
+    before = view_to_scene(dict(m, alert=None))
+    m["alert"] = None
+    m["around"] = [
+        {"id": "ru:1", "x": 20.0, "y": 3.4, "sd": 0.4, "k": "car", "mv": "s", "fl": "p"},
+        {"id": "ru:7", "x": -14.2, "y": 3.3, "sd": 3.5, "st": "memory", "ago": 6.1, "k": "car", "mv": "s",
+         "fl": "pt", "ttc": 1.0},
+        {"id": "ru:8", "x": 8.0, "y": -29.0, "gx": 0.0, "gy": 9.0, "sd": 1.2, "st": "coast", "ago": 0.4,
+         "mv": "m"},
+        {"id": "ru:9", "x": 40.0, "y": 0.2, "sd": 0.8, "k": "van", "mv": "s", "fl": "o", "ttc": 2.9},
+        {"id": "lead:3", "x": 26.0, "y": 0.1, "gx": 13.6, "gy": 0.0, "sd": 0.7, "k": "car", "mv": "m", "fl": "L"}]
+    vw = view_to_scene(m)
+    assert vw["objs"] == before["objs"]
+    by = {o["id"]: o for o in vw["rd"]}
+    assert [o["id"] for o in vw["rd"]] == ["ru:7", "ru:1", "lead:3", "ru:8", "ru:9"]      # nearest first, all round
+    assert by["ru:1"]["vx"] == -14.0 and by["ru:1"]["s"] == "p" and "st" not in by["ru:1"]
+    assert by["ru:7"]["st"] == "r" and by["ru:7"]["ago"] == 6.1 and by["ru:7"]["s"] == "p" and "ttc" not in by["ru:7"]
+    assert by["ru:8"]["st"] == "c" and by["ru:8"]["vy"] == 9.0 and "k" not in by["ru:8"]
+    assert by["ru:9"]["s"] == "o" and by["ru:9"]["ttc"] == 2.9
+    assert by["lead:3"]["L"] == 1 and by["lead:3"]["vx"] == -0.4
+    # parsed by the screen: the remembered one is drawn behind and never red
+    from cyberpunk_computer.ui.scene.inputs import parse_scene
+    road = parse_scene({"seq": 1, "x": [0, 10, 20], "vw": vw})
+    rb = {o.oid: o for o in road.around}
+    assert rb["ru:7"].track == "memory" and rb["ru:7"].x < 0 and rb["ru:7"].state == "parked"
+    # the cap: what stands in the way and the lead first, then the nearest
+    m["around"] += [{"id": "ru:%d" % (20 + i), "x": -5.0 - 3.0 * i, "y": -3.3, "sd": 1.0, "st": "memory",
+                     "ago": 1.0, "fl": "p"} for i in range(AROUND_MAX + 4)]
+    rd = view_to_scene(m)["rd"]
+    ids = [o["id"] for o in rd]
+    assert len(rd) == AROUND_MAX and {"ru:9", "lead:3"} <= set(ids) and "ru:%d" % (20 + AROUND_MAX + 3) not in ids
+    del m["alert"]
+    assert "rd" not in view_to_scene(m)                              # no radar this frame: no all-round list
+
+
 def test_view_road_users_cap_keeps_what_stands_in_the_way():
     """More road users than ROAD_USER_MAX: what stands in the way (threat, obstacle) is kept first, then the moving
     ones, then the parked ones, each nearest first; the list goes out nearest first."""
