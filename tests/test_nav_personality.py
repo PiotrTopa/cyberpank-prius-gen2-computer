@@ -191,17 +191,17 @@ def frame(m, s, data, b=False):
 
 def test_nav_blobs_fit_and_crc_is_zlib_over_length_prefixed_blobs():
     blobs = P.nav_blobs()
-    assert len(blobs) == 21 and sum(map(len, blobs)) <= P.MAX_BYTES
+    assert len(blobs) == 22 and sum(map(len, blobs)) <= P.MAX_BYTES
     crc = 0
     for b in blobs:
         crc = zlib.crc32(len(b).to_bytes(2, "big") + b, crc)
     assert P.body_crc(blobs) == crc
     # language and time format end up in the blobs; nothing else changes
     other = P.nav_blobs(lang="06", time_fmt="old")
-    assert [i for i, (x, y) in enumerate(zip(blobs, other)) if x != y] == [12, 13, 14]
+    assert [i for i, (x, y) in enumerate(zip(blobs, other)) if x != y] == [13, 14, 15]
     # first rule: roll call, retry on NAK, clears all flags, replies at once
     r = blobs[0]
-    assert r[:13] == bytes([0, 0x03, 0x01, 0x10, 0xFF, 0xFF, 3, 3, 0, 0, 0, 0xFF, 3])
+    assert r[:13] == bytes([0, 0x03, 0x01, 0x10, 0xFF, 0xFF, 3, 3, 0, 0, P.S_ROLL, 0xFF, 3])
     assert r[13:16] == bytes.fromhex("120100")
     with pytest.raises(ValueError):
         P.Periodic(run_set=0, send_set=1, first_ms=0, period_ms=5000).encode()
@@ -229,7 +229,7 @@ def test_blank_gateway_gets_rules_written_and_saved_once():
     assert emu.pers == "active"
     assert gw.flash_writes == 1
     sets = [p for dev, p in gw.cmds if dev == 2 and p.get("op") == "set"]
-    assert len(sets) == 21 and [p["i"] for p in sets] == list(range(21))
+    assert len(sets) == 22 and [p["i"] for p in sets] == list(range(22))
     assert gw.flash[0] == P.nav_blobs() and gw.flash[1] is True and gw.flash[2] == 0x178
     assert gw.slots == {0: False, 1: False}                 # RAM slots cleared: one source of truth
     assert gw.clock == 19 * 3600 + 9 * 60 + 26              # gateway clock set from the phone
@@ -375,6 +375,38 @@ def test_au_echo_nak_is_not_retried_by_host():
     emu.on_gateway_line({"id": 2, "d": {"m": "178", "s": "110", "c": 15, "d": ROLL_CALL_REPLY.split(),
                                         "echo": 1, "nak": 1}})
     assert host_frames(gw) == [("110", ROLL_CALL_REPLY, False)]
+
+
+# ── late start: the gateway got its power after the roll call ───────────────
+
+def test_late_start_announces_once_and_display_setup_follows():
+    gw = FakeGateway(flash=(P.nav_blobs(), True, 0x178))
+    gw.ack = 0x178
+    announce = ("1FF", "01 12 13 58 24 85", True)
+    # car, 2026-11-22 20:36:41: first frame after power-on is 12 01 01
+    assert gw.receive(frame("110", "FFF", "12 01 01", b=True)).get("au") == 1
+    assert gw.bus_tx == [announce]
+    late = P.nav_blobs()[1]
+    assert late[8:12] == bytes([0, P.S_ROLL, P.S_ROLL, 0])
+    assert _frames(late, 13 + late[12])[0]["delay"] == P.LATE_ANNOUNCE_MS
+    # the display re-runs 12 01 01 after the announce: plain answer, no second announce
+    gw.receive(frame("110", "FFF", "12 01 01", b=True))
+    assert gw.bus_tx[1:] == [("110", "00 01 12 12 58 28 29 32 60 74 A4 56", False)]
+    gw.receive(frame("110", "178", "00 12 58 42 02 01"))
+    assert gw.state & (P.S_SCREEN | P.S_GRANTED) == P.S_SCREEN | P.S_GRANTED
+    assert gw.bus_tx.count(announce) == 1
+
+
+def test_normal_start_never_announces():
+    gw = FakeGateway(flash=(P.nav_blobs(), True, 0x178))
+    gw.ack = 0x178
+    gw.receive(frame("110", "FFF", "12 01 00", b=True))
+    gw.receive(frame("110", "FFF", "12 01 01", b=True))
+    assert [t[1] for t in gw.bus_tx] == [ROLL_CALL_REPLY, "00 01 12 12 58 28 29 32 60 74 A4 56"]
+    # a new roll call starts a new session and still counts as heard
+    gw.receive(frame("110", "FFF", "12 01 00", b=True))
+    gw.receive(frame("110", "FFF", "12 01 01", b=True))
+    assert ("1FF", "01 12 13 58 24 85", True) not in gw.bus_tx
 
 
 # ── early-frame buffer ───────────────────────────────────────────────────────

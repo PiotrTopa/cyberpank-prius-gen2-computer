@@ -52,6 +52,7 @@ OP_SEC = 0x83
 # State flags of the nav personality.
 S_SCREEN = 0x01          # display shows screen 58 (granted by us)
 S_GRANTED = 0x02         # a screen grant happened in this bus session (heartbeat phase runs)
+S_ROLL = 0x04            # the display's roll call 12 01 00 was heard (or made up for) in this session
 
 # Nav replies (ground truth: captures/2026-10-07/NAV_EMULATION_SPEC.md, the
 # 2026-10-14 sessions the real display accepted).
@@ -59,6 +60,11 @@ IDENT_EN = "02 F9 D1 13 0A 58 A6 9A 80 80"
 IDENT_NL = "02 F9 D1 3D 0A 58 A6 E4 80 8C"
 ROLL_CALL_REPLY = "00 01 12 10 58 24 85"                     # "I host logicals 58, 24, 85"
 ROLL_CALL_1_REPLY = "00 01 12 12 58 28 29 32 60 74 A4 56"
+LIVE_ANNOUNCE = "01 12 13 58 24 85"                          # 178->1FF, real nav 2026-10-14 15:07:09
+#: Delay of the announce after a 12 01 01 whose roll call we missed: the quiet
+#: gap of the display's start-up burst (its frames end ~0.45 s after 12 01 01,
+#: the next ones come at ~1.25 s; it wants the nav screen at ~3.2 s).
+LATE_ANNOUNCE_MS = 600
 
 
 @dataclass(frozen=True)
@@ -207,7 +213,18 @@ def nav_rules(lang: str = "02", ident: str = IDENT_EN, time_fmt: str = "new",
         # Roll call: new session (all flags cleared), answer at once; a NAKed
         # answer is resent up to 3 times (2026-10-14 cold start).
         Rule(parse_hex("12 01 00"), (frame(DISPLAY, ROLL_CALL_REPLY),), lmin=3, lmax=3,
-             clr=0xFF, retry_nak=True, name="rollcall"),
+             clr=0xFF, set=S_ROLL, retry_nak=True, name="rollcall"),
+        # Late start: 12 01 01 without the roll call before it. The gateway got
+        # its power after the display's 12 01 00 (every cold start of
+        # 2026-11-22: first frame heard is 12 01 01, 0.1..0.6 s after power-on),
+        # so the display never registered 178, answered 12 01 01 or not; with
+        # the nav screen as the last screen it then opened screen 58 by itself
+        # and dropped it 2.3 s later ("check the system"). Announce like the
+        # real nav on a live bus: the display re-runs 12 01 01 and the whole
+        # setup at once (30 ms), well before it wants the screen. Once per
+        # session (S_ROLL), so the re-run gets the plain answer below.
+        Rule(parse_hex("12 01 01"), (frame(BCAST_1FF, LIVE_ANNOUNCE, LATE_ANNOUNCE_MS, broadcast=True),),
+             lmin=3, lmax=3, need_clr=S_ROLL, set=S_ROLL, name="rollcall1_late"),
         Rule(parse_hex("12 01 01"), (frame(DISPLAY, ROLL_CALL_1_REPLY),), lmin=3, lmax=3,
              name="rollcall1"),
         # Display screen broadcast 12 01 60 XX: track screen 58 (heartbeats).

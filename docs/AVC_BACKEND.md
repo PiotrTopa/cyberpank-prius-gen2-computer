@@ -124,7 +124,7 @@ On every serial (re)connect and on `GATEWAY_READY` the backend sends, in nav_emu
 **Gateway personality (firmware 3.3.0, `comm/avc/personality.py`).** The gateway keeps a rule
 table in flash and answers the display itself from power-on, before the backend is connected
 (format and commands: `cyberpunk-prius-gateway/gateway-rp2350/README.md`, "Personality").
-`personality.nav_rules()` is the table above as rules, with the same delays: 21 rules, 918 bytes,
+`personality.nav_rules()` is the table above as rules, with the same delays: 22 rules, 950 bytes,
 crc `5B267644` for `--nav-lang 02` (it changes with the language). On every connect the emulator
 sends `whoami`; with firmware >= 3.3.0 it then
 
