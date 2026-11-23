@@ -1707,6 +1707,48 @@ def test_every_road_user_shape_renders_as_lead_and_as_object():
         r.render(d, inp, 10.0 + k)
 
 
+def test_parked_cars_are_dimmed_and_what_stands_in_the_way_is_red():
+    """The radar's marks: a parked car is drawn dimmed (dimmer than the same car in traffic), a thing standing on
+    the path in red; the alert on the lead turns the lead red."""
+    from cyberpunk_computer.ui.scene.render import SceneRenderer
+
+    def shot(objs, alert=None, lead=None):
+        r = SceneRenderer((238, 216))
+        d = SceneDirector()
+        sc = vw_scene(1, 1000, lead=lead)
+        sc["vw"]["objs"] = objs
+        if alert:
+            sc["vw"]["alert"] = alert
+        inp = SceneInputs(speed_kmh=50, real_speed_kmh=50, gear="D", ready=True, rs_state="running", rs_ok=True,
+                          road=parse_scene(sc))
+        step(d, inp, 2.0)
+        return r.render(d, inp, 10.0).copy(), d, r
+
+    car = {"id": "ru:1", "d": 18.0, "y": 3.2, "vx": 0.0, "vy": 0.0, "k": "car"}
+    plain, d, r = shot([car])
+    parked, d2, _ = shot([dict(car, s="p")])
+    assert d2.objects[0].state == "parked" and d.objects[0].state == ""
+
+    def light(surf):
+        w, h = surf.get_size()
+        return sum(sum(surf.get_at((x, y))[:3]) for x in range(0, w, 2) for y in range(0, h, 2))
+
+    assert light(parked) < light(plain)                                    # the same car, dimmer
+    red = r.pal["red"]
+
+    def has(surf, col):
+        w, h = surf.get_size()
+        return any(tuple(surf.get_at((x, y))[:3]) == tuple(col) for x in range(w) for y in range(h))
+
+    assert not has(plain, red)
+    blocked, d3, _ = shot([{"id": "ru:2", "d": 25.0, "y": 0.0, "vx": -10.0, "vy": 0.0, "k": "car", "s": "o"}],
+                          alert={"lvl": "o", "d": 25.0, "y": 0.0})
+    assert d3.alert == ("obstacle", 25.0, 0.0, None, False) and has(blocked, red)
+    on_lead, d4, _ = shot([], alert={"lvl": "t", "d": 30.0, "y": 0.0, "ttc": 2.0, "lead": True},
+                          lead={"id": "lead:1", "d": 30.0, "y": 0.0, "v": -12.0, "k": "car"})
+    assert d4.alert[0] == "threat" and d4.alert[4] and has(on_lead, red)
+
+
 def test_road_users_are_carried_and_redraw_the_standing_scene():
     """A road user of the display channel moves with its velocity between samples (no stepping at the sample
     rate) and, with the car standing, its movement redraws the picture."""

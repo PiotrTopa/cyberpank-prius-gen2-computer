@@ -81,6 +81,7 @@ class SceneDirector:
         self.vision = "off"
         self.vis_why = ""               # the integrator's reason while vision == "doubt"
         self.lead_unknown = False       # live, but the lead is not known (L44)
+        self.alert = None               # live: the radar's obstacle / threat ahead (inputs.RoadScene.alert)
         self.lanes: List[Optional[List[float]]] = [None] * 4
         self.lane_prob: List[float] = [0.0] * 4
         self.edges: List[Optional[List[float]]] = [None] * 2
@@ -234,6 +235,7 @@ class SceneDirector:
             self.vision = "doubt"
         self.vis_why = road.vis_why if self.vision == "doubt" and road is not None else ""
         self.lead_unknown = bool(self.vision == "live" and road is not None and road.lead_unknown)
+        self.alert = road.alert if self.vision == "live" and road is not None else None
 
         if self.vision in ("off", "wait", "lost", "doubt"):
             self.lanes = [None] * 4

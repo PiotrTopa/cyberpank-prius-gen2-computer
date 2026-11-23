@@ -962,7 +962,11 @@ def view_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
            user: roadsense's voted class label, only while its confidence reaches ROAD_USER_MIN_CONF, 0.35 for
            a person / bike / motorbike)} or null
     objs   other road users roadsense could place (view objects of kind "road_user"): [{"id", "k" (class label or
-           absent = unknown), "d", "y" (car frame, y right), "vx", "vy", "f"}], nearest first, at most 8
+           absent = unknown), "d", "y" (car frame, y right), "vx", "vy", "f", "s" (what the integrator's radar
+           says of it, when it says: "p" parked beside the path, "o" stands on the path, "t" reached within
+           seconds at the present speeds)}], nearest first, at most 8
+    alert  the one thing ahead to shout about (the view's `alert`: the radar's obstacle / threat), or absent:
+           {"lvl": "t" | "o", "d", "y" (right), "ttc" (s or absent), "lead": true when it is the lead}
     light  the ego light: {"id", "state", "d", "y" (car frame, y right), "vx", "vy", "f", "flashing", "q",
            "held", "alt"} or null
     """
@@ -1012,6 +1016,10 @@ def view_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 ru["k"] = k
             if f is not None and f < 1.0:
                 ru["f"] = round(f, 2)
+            at = o.get("attrs") if isinstance(o.get("attrs"), dict) else {}
+            mark = "t" if at.get("threat") else "o" if at.get("obstacle") else "p" if at.get("parked") else ""
+            if mark:
+                ru["s"] = mark
             out.setdefault("objs", []).append(ru)
         elif o.get("role") == "ego" and o.get("kind") == "traffic_light" and out["light"] is None:
             at = o.get("attrs") if isinstance(o.get("attrs"), dict) else {}
@@ -1035,6 +1043,15 @@ def view_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             out["light"] = lt
     if out.get("objs"):
         out["objs"] = sorted(out["objs"], key=lambda r: r["d"])[:ROAD_USER_MAX]
+    al = msg.get("alert")
+    if isinstance(al, dict) and al.get("level") in ("threat", "obstacle") and _num(al.get("x")) is not None:
+        a: Dict[str, Any] = {"lvl": "t" if al["level"] == "threat" else "o", "d": round(_num(al.get("x")), 1),
+                             "y": round(_num(al.get("y")) or 0.0, 2)}
+        if _num(al.get("ttc_s")) is not None:
+            a["ttc"] = round(_num(al.get("ttc_s")), 1)
+        if al.get("lead"):
+            a["lead"] = True
+        out["alert"] = a
     return out
 
 

@@ -178,6 +178,16 @@ class GuardianTuning:
 
 
 @dataclass
+class ObstacleTuning:
+    min_kmh: float = 20.0
+    max_kmh: float = 160.0
+    debounce_s: float = 0.2             # on top of the radar's own hold
+    cooldown_s: float = 8.0
+    max_scene_age_s: float = 0.6
+    suppress_when_braking: bool = True  # the driver has seen it
+
+
+@dataclass
 class LaneTuning:
     min_speed_kmh: float = 60.0
     min_prob: float = 0.6
@@ -193,6 +203,7 @@ class AlertTuning:
     speed_limit: SpeedLimitTuning = field(default_factory=SpeedLimitTuning)
     stop_go: StopGoTuning = field(default_factory=StopGoTuning)
     headway: HeadwayTuning = field(default_factory=HeadwayTuning)
+    obstacle: ObstacleTuning = field(default_factory=ObstacleTuning)
     curve: CurveTuning = field(default_factory=CurveTuning)
     tunnel: TunnelTuning = field(default_factory=TunnelTuning)
     eco: EcoTuning = field(default_factory=EcoTuning)

@@ -13,6 +13,7 @@ from cyberpunk_computer.alerts.functions.guardian import GuardianFunction
 from cyberpunk_computer.alerts.functions.headway import HeadwayFunction
 from cyberpunk_computer.alerts.functions.lane import LaneDepartureFunction
 from cyberpunk_computer.alerts.functions.maintenance import MaintenanceFunction
+from cyberpunk_computer.alerts.functions.obstacle import ObstacleFunction
 from cyberpunk_computer.alerts.functions.speed_limit import SpeedLimitFunction
 from cyberpunk_computer.alerts.functions.stop_go import StopGoFunction
 from cyberpunk_computer.alerts.functions.tunnel import TunnelRecircFunction
@@ -67,7 +68,7 @@ def test_every_type_ships_in_shadow_except_lane_departure_off():
     m = AlertManager(default_functions(AlertTuning(), AlertSettings(None)))
     modes = {a: m.mode(a) for a in m.specs}
     assert modes.pop("lane_departure") == "off"
-    assert set(modes.values()) == {"shadow"} and len(modes) == 18
+    assert set(modes.values()) == {"shadow"} and len(modes) == 19
 
 
 # ── 1. speed limit ───────────────────────────────────────────────────────────
@@ -226,6 +227,31 @@ def test_headway_coach_sustained_short_gap_only_above_50():
     r2.run(20.0, real_kmh=70.0, lead=Lead(d=18.0, v_rel=0.0, prob=0.5))  # weak lead
     r2.run(20.0, real_kmh=70.0, lead=Lead(d=18.0, v_rel=0.0, prob=0.9), steering_deg=40.0)  # curve
     assert r2.fires() == []
+
+
+def test_obstacle_ahead_is_what_the_radar_raises_and_is_quiet_while_braking():
+    thing = {"level": "obstacle", "d": 42.0, "y": 0.2, "ttc": None, "lead": False}
+    r = Rig(ObstacleFunction, modes={"obstacle_ahead": "on"})
+    r.run(0.6, real_kmh=70.0, obstacle=thing)
+    f = r.fires("obstacle_ahead")
+    assert len(f) == 1 and f[0]["text"] == "OBSTACLE 42m" and r.m.current()["severity"] == "warning"
+    r = Rig(ObstacleFunction, modes={"obstacle_ahead": "on"})
+    r.run(0.6, real_kmh=90.0, obstacle=dict(thing, level="threat", ttc=2.1))
+    assert r.fires("obstacle_ahead")[0]["text"] == "OBSTACLE 2.1s"
+    for kw in (dict(brake=True), dict(real_kmh=10.0), dict(scene_age=1.5), dict(obstacle=None), dict(gear="P")):
+        rr = Rig(ObstacleFunction)
+        args = dict(real_kmh=70.0, obstacle=thing)
+        args.update(kw)
+        rr.run(2.0, **args)
+        assert rr.fires("obstacle_ahead") == [], kw
+
+
+def test_the_scenes_alert_becomes_the_obstacle_input_unless_the_camera_is_not_believed():
+    from cyberpunk_computer.alerts.inputs import scene_fields
+    sc = {"vw": {"alert": {"lvl": "t", "d": 30.0, "y": -0.1, "ttc": 2.1, "lead": True}}}
+    assert scene_fields(sc, 0.1)["obstacle"] == {"level": "threat", "d": 30.0, "y": -0.1, "ttc": 2.1, "lead": True}
+    assert scene_fields(dict(sc, vis={"ok": False, "why": "x"}), 0.1)["obstacle"] is None
+    assert scene_fields({"vw": {}}, 0.1)["obstacle"] is None
 
 
 def test_distance_warning_ttc_gates():

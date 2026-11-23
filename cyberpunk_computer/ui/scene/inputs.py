@@ -59,12 +59,15 @@ class RoadObject(NamedTuple):
     kind: str                        # car | van | truck | bus | bike | motorbike | person | lamp | cone | ...
     x: float                         # metres ahead
     y: float                         # LEFT positive
-    state: str = ""                  # kind-specific (e.g. lamp: "on")
+    state: str = ""                  # kind-specific (e.g. lamp: "on"; a road user: "parked" beside the path,
+                                     # "obstacle" standing on it, "threat" reached within seconds)
     alpha: float = 1.0               # display channel: fade in / out
     oid: str = ""                    # display channel: object id
     vx: float = 0.0                  # display channel: m/s relative to the car (x forward)
     vy: float = 0.0                  # display channel: m/s, LEFT positive
 
+
+ROAD_USER_MARKS = {"p": "parked", "o": "obstacle", "t": "threat"}
 
 # roadsense's road-user class labels -> the shapes the renderer draws; anything else (and no class: unknown)
 # is the generic vehicle (the car shape, as before classes existed)
@@ -117,6 +120,9 @@ class RoadScene(NamedTuple):
     vis_ok: bool = True
     vis_why: str = ""
     lead_unknown: bool = False       # the lead is not known (not "no lead"): the road view marks it
+    # the radar's obstacle / threat ahead, or None: (level "threat" | "obstacle", metres ahead, m LEFT positive,
+    # time to reach it in s or None, it is the lead)
+    alert: Optional[Tuple[str, float, float, Optional[float], bool]] = None
 
 
 class SceneInputs(NamedTuple):
@@ -337,19 +343,26 @@ def parse_scene(raw: Any) -> Optional[RoadScene]:
             if x is None or y is None or x <= 0:
                 continue
             f = _num(o.get("f"))
-            objs.append(RoadObject(road_user_kind(o.get("k")), x, -y, "", 1.0 if f is None else max(0.0, min(1.0, f)),
+            objs.append(RoadObject(road_user_kind(o.get("k")), x, -y, ROAD_USER_MARKS.get(o.get("s"), ""),
+                                   1.0 if f is None else max(0.0, min(1.0, f)),
                                    str(o.get("id") or ""), _num(o.get("vx")) or 0.0, -(_num(o.get("vy")) or 0.0)))
     vis = raw.get("vis")
     vis_ok = not (isinstance(vis, Mapping) and vis.get("ok") is False)
     vis_why = str(vis.get("why") or "") if isinstance(vis, Mapping) and not vis_ok else ""
     lead_unknown = raw.get("lead_unknown") is True
+    alert = None
+    al = vw.get("alert") if isinstance(vw, Mapping) else None
+    if isinstance(al, Mapping) and al.get("lvl") in ("t", "o") and _num(al.get("d")) is not None:
+        alert = ("threat" if al["lvl"] == "t" else "obstacle", _num(al.get("d")), -(_num(al.get("y")) or 0.0),
+                 _num(al.get("ttc")), bool(al.get("lead")))
     if not vis_ok:
         # the backend sends nothing measured then; never draw a leftover either
         lanes, edges, path, lead, objs = (None,) * 4, (None,) * 2, None, None, []
+        alert = None
     if lead_unknown:
         lead = None
     return RoadScene(int(seq) if isinstance(seq, (int, float)) else 0,
-                     xs, lanes, edges, lead, tuple(objs), path, t, vis_ok, vis_why, lead_unknown)
+                     xs, lanes, edges, lead, tuple(objs), path, t, vis_ok, vis_why, lead_unknown, alert)
 
 
 def parse_signs(raw: Any) -> Tuple[Tuple[SignItem, ...], Tuple[SignItem, ...]]:

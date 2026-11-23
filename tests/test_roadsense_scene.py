@@ -958,6 +958,29 @@ def test_scene_is_built_per_view_message_with_its_own_frame():
     assert b.build(10.05) is None                               # nothing new
 
 
+def test_view_road_users_carry_the_radars_marks_and_the_alert():
+    """What chris-integrator's radar says of a road user goes out as `s` (parked beside the path: the screen
+    dims it; standing on the path; reached within seconds), and the view's `alert` as `alert`."""
+    m = view_msg(5, 123_456_789_000)
+    m["objects"] += [
+        {"id": "ru:1", "kind": "road_user", "role": "other", "x": 20.0, "y": 3.5, "alpha": 1.0,
+         "attrs": {"source": "radar", "parked": True, "obstacle": False, "threat": False}},
+        {"id": "ru:2", "kind": "road_user", "role": "other", "x": 45.0, "y": 0.2, "alpha": 1.0,
+         "attrs": {"source": "radar", "parked": False, "obstacle": True, "threat": False}},
+        {"id": "ru:3", "kind": "road_user", "role": "other", "x": 30.0, "y": 0.1, "alpha": 1.0,
+         "attrs": {"source": "radar", "parked": False, "obstacle": True, "threat": True}},
+        {"id": "ru:4", "kind": "road_user", "role": "other", "x": 60.0, "y": -3.0, "alpha": 1.0,
+         "attrs": {"source": "radar", "parked": False, "obstacle": False, "threat": False}}]
+    m["alert"] = {"level": "threat", "id": "ru:3", "x": 30.0, "y": 0.1, "ttc_s": 2.14, "lead": False}
+    vw = view_to_scene(m)
+    assert [(o["id"], o.get("s")) for o in vw["objs"]] == [("ru:1", "p"), ("ru:3", "t"), ("ru:2", "o"), ("ru:4", None)]
+    assert vw["alert"] == {"lvl": "t", "d": 30.0, "y": 0.1, "ttc": 2.1}
+    m["alert"] = {"level": "obstacle", "id": "ru:9", "x": 50.0, "y": 0.0, "ttc_s": None, "lead": True}
+    assert view_to_scene(m)["alert"] == {"lvl": "o", "d": 50.0, "y": 0.0, "lead": True}
+    m["alert"] = None
+    assert "alert" not in view_to_scene(m)
+
+
 def test_view_road_users_go_out_with_their_class():
     """Lane L42: the lead's voted class as `k` (only with confidence >= 0.5, 0.35 for a person / bike / motorbike:
     below, the screen draws the generic vehicle), the other road users roadsense placed as `objs` (nearest

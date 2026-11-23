@@ -17,6 +17,7 @@ accelerates.
 | True-speed chip near the limit | built, shadow | as above | `speed_limit.py`, `ui/scene/alerts.py` | shown with the limit notice only |
 | Speed-limit preview ("90 in 650 m") | planned | GNSS (map `ahead.limit`) | — | first step: chip in `render.py` from scene `map.ahead.limit` (MFD_MAIN_SCREEN 8.3) |
 | Forward collision / closing-speed warning (advisory) | built, shadow | lead `d`, `v_rel`, true speed, brake, steering | `alerts/functions/headway.py` (`distance_warning`) | not a certified FCW |
+| Obstacle on the path (advisory); parked cars drawn dimmed | built, shadow | scene `vw.alert` and `vw.objs[].s` (chris-integrator `view.alert` and road-user marks, from its radar), true speed, brake | `alerts/functions/obstacle.py` (`obstacle_ahead`), `ui/scene/render.py` | camera-only radar: a standing car is confirmed late at motorway speed; not a certified FCW |
 | Headway / tailgating coach | built, shadow | lead, true speed | `headway.py` (`headway_coach`) | ≥ 50 km/h only |
 | Lead-vehicle departure | built, shadow | lead (tracked or vision), true speed, gear | `alerts/functions/stop_go.py` | uses roadsense's tracked lead (topic `lead`, else `fused.lead`) and its `departed` cue when present |
 | Traffic-light green reminder | built, disabled: waiting for validated traffic-light reliability | ego light with relevance | `stop_go.py` (`green_light`, shadow only) | first step: review its shadow log against dashcam |

@@ -172,6 +172,9 @@ class AlertInputs:
     roadsense_running: bool = False
     lead: Optional[Lead] = None
     lead_tracked_available: bool = False   # the fused topic carries the tracker's lead
+    # chris-integrator's radar: the obstacle / threat on the path (scene vw.alert), or None:
+    # {"level": "threat" | "obstacle", "d", "y", "ttc" (s or None), "lead": bool}
+    obstacle: Optional[Dict[str, Any]] = None
     # L44: the lead is NOT KNOWN (camera not believable, the tracker's lead invalid or aged out): lead is None
     # then, and nothing that means "the road ahead is clear" may be derived from it
     lead_unknown: bool = False
@@ -329,7 +332,15 @@ def scene_fields(scene: Optional[Mapping], scene_age: Optional[float]) -> Dict[s
         tn = dict(tn, map_usable=False)
     elif tn is not None:
         tn = dict(tn, map_usable=True)
+    vw = scene.get("vw") if isinstance(scene.get("vw"), Mapping) else {}
+    al = vw.get("alert") if isinstance(vw.get("alert"), Mapping) else None
+    obstacle = None
+    if al is not None and al.get("lvl") in ("t", "o") and _num(al.get("d")) is not None and unknown is False \
+            and _scene_vision_ok(scene) is not False:
+        obstacle = {"level": "threat" if al["lvl"] == "t" else "obstacle", "d": float(_num(al.get("d"))),
+                    "y": _num(al.get("y")) or 0.0, "ttc": _num(al.get("ttc")), "lead": bool(al.get("lead"))}
     return {
+        "obstacle": obstacle,
         "scene_age": scene_age, "lead": lead, "lead_tracked_available": tracked,
         "lead_unknown": unknown, "vision_ok": _scene_vision_ok(scene),
         "lanes": tuple(lanes), "light": dict(light) if light else None, "limit": limit,

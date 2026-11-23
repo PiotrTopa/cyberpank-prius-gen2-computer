@@ -71,6 +71,7 @@ DOOR_LABELS = ("DRIVER", "PASS", "RL", "RR", "BACK")
 CHASE_CY_OFFSET = 14           # chase camera centre below the scene centre (px)
 SKY_H = 68                     # backdrop strip height (px above the horizon)
 LEAD_BRAKING = -1.5            # lead acceleration (m/s2) shown as stop lamps
+PARKED_DIM = 0.6               # a parked vehicle (the radar's mark) is drawn at this share of the brightness
 SIGN_PITCH = 21
 
 # Headlamp beams on the road: reach (m ahead of the nose), parked-view reach,
@@ -879,7 +880,7 @@ class SceneRenderer:
                       inp: SceneInputs, v: float, k: float) -> None:
         items = []     # (distance, draw function)
         for o in d.objects:
-            items.append((o.x, lambda o=o: self._draw_object(s, cam, o, v, k)))
+            items.append((o.x, lambda o=o: self._draw_object(s, cam, o, v, k, d.clock)))
         lt = inp.light
         if lt is not None and d.light_pos is not None and d.vision == "live":
             items.append((d.light_pos[0], lambda: self._draw_light_world(s, cam, lt, d, v)))
@@ -1064,6 +1065,8 @@ class SceneRenderer:
         a = d.lead_alpha * k
         gap = d.time_gap_s(inp.real_speed_kmh)
         col = self.gap_color(gap)
+        if d.alert is not None and d.alert[4]:       # the radar: the lead stands in the way / is reached in seconds
+            col = self.pal["red"]
         braking = lead.accel is not None and lead.accel <= LEAD_BRAKING
         rect = self.draw_road_user(s, cx, by, ppm, col, lead.kind, a, braking, min_w=9.0)
         if a < 0.6:
@@ -1108,7 +1111,7 @@ class SceneRenderer:
                 pygame.draw.polygon(s, vc, [(sx, y2 + 10), (sx + 6, y2 + 10), (sx + 3, y2 + 4)])
             s.blit(vt, (sx + 9, y2))
 
-    def _draw_object(self, s: pygame.Surface, cam: Camera, o, v: float, k: float) -> None:
+    def _draw_object(self, s: pygame.Surface, cam: Camera, o, v: float, k: float, clock: float = 0.0) -> None:
         g = self._place(cam, o.x, o.y, v)
         if g is None:
             return
@@ -1126,8 +1129,16 @@ class SceneRenderer:
                 self._add_glow(s, head, max(3, int(1.1 * ppm) + 2), pal["orange"])
             else:
                 pygame.draw.rect(s, col, (head[0] - 1, head[1], 2, 2))
+        elif o.kind in ("car", "truck", "bus", "van", "person", "bike", "motorbike") and o.state in ("obstacle", "threat"):
+            # stands on our path / reached within seconds: red, in a frame that blinks for a threat
+            rect = self.draw_road_user(s, cx, by, ppm, pal["red"], o.kind, k * getattr(o, "alpha", 1.0), min_w=9.0)
+            if o.state == "obstacle" or int(clock * 4) % 2:
+                pygame.draw.rect(s, _k(pal["red"], k), rect.inflate(6, 6), 1)
         elif o.kind in ("car", "truck", "bus", "van"):
-            self.draw_road_user(s, cx, by, ppm, pal["lane_mid"], o.kind, k * getattr(o, "alpha", 1.0))
+            # a parked one is part of the street, not of the traffic: dimmed
+            parked = o.state == "parked"
+            self.draw_road_user(s, cx, by, ppm, pal["lane_dim"] if parked else pal["lane_mid"], o.kind,
+                                k * getattr(o, "alpha", 1.0) * (PARKED_DIM if parked else 1.0))
         elif o.kind == "cone":
             hh = max(3.0, 0.8 * ppm)
             pygame.draw.polygon(s, _k(pal["orange"], k),
