@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react';
-import { ChevronDown, Fan, Server, Thermometer, Wind, Zap } from 'lucide-react';
+import { ChevronDown, Cpu, Fan, Server, Thermometer, Wind, Zap } from 'lucide-react';
 import type { AppState, HostStats, SatelliteNode } from '../types';
 import { cx, fmtAge, fmtUp } from '../lib/format';
 import { sendCommand } from '../lib/api';
@@ -74,6 +74,43 @@ function SysRow({ id, name, state, tone, detail, open, onToggle, children }: {
       </button>
       {has && open && <div className="pb-3 pl-4 flex flex-col gap-2">{children}</div>}
     </div>
+  );
+}
+
+const RESET_CAUSE: Record<number, string> = { 1: 'power-on', 3: 'watchdog' };
+
+/** The powerbox itself: link, state machine, firmware, protection. Everything
+ *  else on the car hangs off it, so it sits above "What's running". */
+function PowerboxPanel({ state, now }: { state: AppState; now: number }) {
+  const pb = state.powerbox;
+  const link = !!pb.connected;
+  const pm = pb.pm_state ?? (link ? 'normal' : null);
+  const tone: Tone = !link ? 'red' : pb.undervoltage || (pm && pm !== 'normal') ? 'amber' : 'green';
+  const errs = (pb.relay_err_count ?? 0) + (pb.relay_fix_count ?? 0);
+  return (
+    <Panel title="Powerbox" icon={Cpu} tone={tone}
+      right={<span className={cx('text-[0.7rem] uppercase tracking-wider', TONE_TEXT[tone])}>
+        {!link ? 'no link' : pb.undervoltage ? 'under-voltage' : pm}
+      </span>}>
+      <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-[0.75rem]">
+        <span className="text-slate-500 uppercase tracking-wider">Link</span>
+        <span className="text-right text-slate-200">{link ? `up · ${fmtAge(pb.last_update_time, now)} ago` : 'down'}</span>
+        <span className="text-slate-500 uppercase tracking-wider">Firmware up</span>
+        <span className="text-right text-slate-200 tnum">
+          {fmtUp(pb.uptime_s)}{pb.reset_cause != null ? ` · ${RESET_CAUSE[pb.reset_cause] ?? `reset ${pb.reset_cause}`}` : ''}
+        </span>
+        <span className="text-slate-500 uppercase tracking-wider">ACC line</span>
+        <span className={cx('text-right', pb.acc_on ? 'text-hud-green' : 'text-slate-400')}>{pb.acc_on == null ? '--' : pb.acc_on ? 'on' : 'off'}</span>
+        <span className="text-slate-500 uppercase tracking-wider">UV cut / recover</span>
+        <span className="text-right text-slate-200 tnum">
+          {pb.uv_threshold != null ? `${pb.uv_threshold.toFixed(1)} / ${pb.uv_recover?.toFixed(1) ?? '--'} V` : '--'}
+        </span>
+        {errs > 0 && <>
+          <span className="text-slate-500 uppercase tracking-wider">Relay repairs / errors</span>
+          <span className="text-right text-hud-amber tnum">{pb.relay_fix_count ?? 0} / {pb.relay_err_count ?? 0}</span>
+        </>}
+      </div>
+    </Panel>
   );
 }
 
@@ -183,10 +220,6 @@ function SystemsPanel({ state, nowS }: { state: AppState; nowS: number }) {
           <Btn disabled={busy || rs?.state !== 'running'} onClick={() => run('roadsense_restart')}>Restart stack</Btn>
         </SysRow>
 
-        <SysRow id="pb" name="Powerbox" open={open === 'pb'} onToggle={toggle}
-          state={pb.connected ? (pb.pm_state ?? 'on') : 'no link'}
-          tone={!pb.connected ? 'red' : pb.pm_state && pb.pm_state !== 'normal' ? 'amber' : 'green'}
-          detail={`fw up ${fmtUp(pb.uptime_s)}${pb.undervoltage ? ' · UNDER-VOLTAGE' : ''}`} />
 
         {hu?.enabled !== false && (
           <SysRow id="hu" name="Head unit" open={open === 'hu'} onToggle={toggle}
@@ -386,7 +419,10 @@ export function HomeTab({ state, now, sum, satNodes, satHolders, onOpenSystem }:
       </section>
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 items-start">
-        <SystemsPanel state={state} nowS={nowS} />
+        <div className="flex flex-col gap-3">
+          <PowerboxPanel state={state} now={now} />
+          <SystemsPanel state={state} nowS={nowS} />
+        </div>
         <div className="flex flex-col gap-3">
           <PowerPanel state={state} sum={sum} />
           <ThermalPanel state={state} />
