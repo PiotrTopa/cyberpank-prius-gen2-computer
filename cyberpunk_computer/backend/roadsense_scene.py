@@ -938,7 +938,7 @@ def _line_to_scene(xs: Any, ln: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 ROAD_USER_MIN_CONF = 0.5      # a vehicle class below this confidence is drawn as the generic vehicle
 ROAD_USER_MIN_CONF_VRU = 0.35  # person / bike / motorbike: the detector tells them from vehicles reliably (L42)
 ROAD_USER_VRU = ("human", "bike", "motorbike")
-ROAD_USER_MAX = 8
+ROAD_USER_MAX = 10           # the integrator sends at most 12; 10 keeps the event small on the phone -> Pi link
 
 
 def _road_user_kind(cls: Any) -> Optional[str]:
@@ -952,6 +952,21 @@ def _road_user_kind(cls: Any) -> Optional[str]:
     return cls["label"]
 
 
+_MOTION = {"stationary": "s", "moving": "m"}
+_KEEP_RANK = {"t": 0, "o": 0, "": 1, "p": 2}
+ROAD_USER_SD_MIN = 0.5        # a range sigma below this is not sent (the radar view draws no bar for it)
+
+
+def _radar_extras(out: Dict[str, Any], ttc: Any, sd: Any) -> None:
+    """The radar view's extras of a road user / the lead: time to reach it and the range sigma, when known."""
+    t = _num(ttc)
+    if t is not None and t >= 0.0:
+        out["ttc"] = round(t, 1)
+    s = _num(sd)
+    if s is not None and s >= ROAD_USER_SD_MIN:
+        out["sd"] = round(s, 1)
+
+
 def view_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """roadsense ``view`` topic (2.0 display channel) -> scene ``vw``: what the screen draws.
 
@@ -961,12 +976,20 @@ def view_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     lead   {"id", "d", "y", "v" (relative speed m/s, the screen extrapolates with it), "f", "k" (what kind of road
            user: roadsense's voted class label, only while its confidence reaches ROAD_USER_MIN_CONF, 0.35 for
            a person / bike / motorbike)} or null
+           radar view (lane radar-view) only when known: "ttc" (time to reach it, s), "sd" (1 sigma of the
+           distance, m, from 0.5 m)
     objs   other road users roadsense could place (view objects of kind "road_user"): [{"id", "k" (class label or
-           absent = unknown), "d", "y" (car frame, y right), "vx", "vy", "f", "s" (what the integrator's radar
-           says of it, when it says: "p" parked beside the path, "o" stands on the path, "t" reached within
-           seconds at the present speeds)}], nearest first, at most 8
+           absent = unknown), "d", "y" (car frame, y right), "vx", "vy" (relative to the car, m/s), "f", "s" (what
+           the integrator's radar says of it, when it says: "p" parked beside the path, "o" stands on the path, "t"
+           reached within seconds at the present speeds); only when known (radar view): "m" (the radar's motion
+           verdict: "s" stationary, "m" moving; absent = unknown), "w": 1 (it drives with the car's traffic),
+           "ttc" (time to reach it, s), "sd" (1 sigma of the distance, m, from 0.5 m), "c": 1 (the camera alone
+           placed it: approximate)}], nearest first, at most ROAD_USER_MAX; when there are more, what stands in
+           the way (t, o) is kept first, then the moving ones, then the parked ones, each nearest first
     alert  the one thing ahead to shout about (the view's `alert`: the radar's obstacle / threat), or absent:
            {"lvl": "t" | "o", "d", "y" (right), "ttc" (s or absent), "lead": true when it is the lead}
+    rdr    1 while the integrator's radar spoke for this frame (the view carries its `alert` key, null or not),
+           absent otherwise: the radar view says NO RADAR DATA without it
     light  the ego light: {"id", "state", "d", "y" (car frame, y right), "vx", "vy", "f", "flashing", "q",
            "held", "alt"} or null
     """
@@ -1007,6 +1030,9 @@ def view_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             k = _road_user_kind(o.get("cls"))
             if k:
                 ld["k"] = k
+            lat = o.get("attrs") if isinstance(o.get("attrs"), dict) else {}
+            _radar_extras(ld, lat.get("ttc_s"), lat.get("dist_std_m") if _num(lat.get("dist_std_m")) is not None
+                          else o.get("sx"))
             out["lead"] = ld
         elif o.get("kind") == "road_user":
             ru: Dict[str, Any] = {"id": o.get("id"), "d": round(x, 1), "y": round(y, 2),
@@ -1020,6 +1046,14 @@ def view_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             mark = "t" if at.get("threat") else "o" if at.get("obstacle") else "p" if at.get("parked") else ""
             if mark:
                 ru["s"] = mark
+            mv = _MOTION.get(at.get("motion"))
+            if mv:
+                ru["m"] = mv
+            if at.get("with_traffic") is True:
+                ru["w"] = 1
+            _radar_extras(ru, at.get("ttc_s"), o.get("sx"))
+            if isinstance(at.get("source"), str) and at["source"] != "radar":
+                ru["c"] = 1
             out.setdefault("objs", []).append(ru)
         elif o.get("role") == "ego" and o.get("kind") == "traffic_light" and out["light"] is None:
             at = o.get("attrs") if isinstance(o.get("attrs"), dict) else {}
@@ -1042,7 +1076,13 @@ def view_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 lt["alt"] = {"s": alt["state"], "side": side[:1] if isinstance(side, str) and side else ""}
             out["light"] = lt
     if out.get("objs"):
-        out["objs"] = sorted(out["objs"], key=lambda r: r["d"])[:ROAD_USER_MAX]
+        objs = out["objs"]
+        if len(objs) > ROAD_USER_MAX:
+            # the radar view needs what stands in the way more than the tenth parked car
+            objs = sorted(objs, key=lambda r: (_KEEP_RANK.get(r.get("s", ""), 1), r["d"]))[:ROAD_USER_MAX]
+        out["objs"] = sorted(objs, key=lambda r: r["d"])
+    if "alert" in msg:
+        out["rdr"] = 1
     al = msg.get("alert")
     if isinstance(al, dict) and al.get("level") in ("threat", "obstacle") and _num(al.get("x")) is not None:
         a: Dict[str, Any] = {"lvl": "t" if al["level"] == "threat" else "o", "d": round(_num(al.get("x")), 1),

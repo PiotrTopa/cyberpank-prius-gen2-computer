@@ -1101,3 +1101,53 @@ def test_fused_lead_copy_carries_validity():
     m = {"type": "fused", "map": {"available": False}, "lead": dict(CHRIS_LEAD, valid=False)}
     assert fused_to_scene(m)["lead"]["valid"] is False
     assert "valid" not in fused_to_scene(dict(m, lead=CHRIS_LEAD))["lead"]
+
+
+def _radar_obj(i, x, y, **attrs):
+    a = {"source": "radar", "motion": "moving", "parked": False, "obstacle": False, "threat": False,
+         "with_traffic": False, "ttc_s": None}
+    a.update(attrs)
+    return {"id": "ru:%d" % i, "kind": "road_user", "role": "other", "x": x, "y": y, "vx": -10.0, "vy": 0.0,
+            "sx": None, "alpha": 1.0, "attrs": a, "cls": {"label": "car", "confidence": 0.9, "source": "radar"}}
+
+
+def test_view_road_users_carry_the_radar_view_fields():
+    """Radar view (lane radar-view): per road user the radar's motion verdict (m), with_traffic (w), the time to
+    reach it (ttc), the range sigma from 0.5 m (sd) and the camera-only mark (c); the lead's ttc / sd; `rdr` while
+    the radar spoke (the view carries its `alert` key, null or not). Short keys, only when known."""
+    m = view_msg(5, 123_456_789_000)
+    m["objects"][0]["attrs"] = {"ttc_s": 3.04, "dist_std_m": 1.26}
+    m["objects"] += [
+        dict(_radar_obj(1, 20.0, 3.4, motion="stationary", parked=True), sx=0.31),
+        dict(_radar_obj(2, 35.0, 0.1, with_traffic=True, threat=True, ttc_s=2.46), sx=2.04),
+        _radar_obj(3, 48.0, -3.5, motion="unknown"),
+        {"id": "ru:4", "kind": "road_user", "role": "other", "x": 15.0, "y": 5.0, "vx": -10.0, "vy": -1.0,
+         "sx": None, "alpha": 1.0, "attrs": {"source": "roadusers", "approximate": True},
+         "cls": {"label": "human", "confidence": 0.9, "source": "roadusers"}}]
+    m["alert"] = None
+    vw = view_to_scene(m)
+    assert vw["rdr"] == 1 and "alert" not in vw
+    assert vw["lead"]["ttc"] == 3.0 and vw["lead"]["sd"] == 1.3
+    by = {o["id"]: o for o in vw["objs"]}
+    assert by["ru:1"]["m"] == "s" and by["ru:1"]["s"] == "p" and "sd" not in by["ru:1"] and "w" not in by["ru:1"]
+    assert by["ru:2"]["m"] == "m" and by["ru:2"]["w"] == 1 and by["ru:2"]["ttc"] == 2.5 and by["ru:2"]["sd"] == 2.0
+    assert "m" not in by["ru:3"] and "c" not in by["ru:3"] and "ttc" not in by["ru:3"]
+    assert by["ru:4"]["c"] == 1 and "m" not in by["ru:4"]
+    del m["alert"]                                                   # the radar did not speak for this frame
+    assert "rdr" not in view_to_scene(m)
+
+
+def test_view_road_users_cap_keeps_what_stands_in_the_way():
+    """More road users than ROAD_USER_MAX: what stands in the way (threat, obstacle) is kept first, then the moving
+    ones, then the parked ones, each nearest first; the list goes out nearest first."""
+    from cyberpunk_computer.backend.roadsense_scene import ROAD_USER_MAX
+    m = view_msg(5, 1)
+    m["objects"] += [_radar_obj(10 + i, 5.0 + 4.0 * i, 3.3, motion="stationary", parked=True) for i in range(10)]
+    m["objects"] += [_radar_obj(1, 60.0, 0.0, obstacle=True), _radar_obj(2, 55.0, -3.5),
+                     _radar_obj(3, 66.0, 0.2, threat=True)]
+    vw = view_to_scene(m)
+    ids = [o["id"] for o in vw["objs"]]
+    assert len(ids) == ROAD_USER_MAX
+    assert {"ru:1", "ru:2", "ru:3"} <= set(ids)
+    assert [o["d"] for o in vw["objs"]] == sorted(o["d"] for o in vw["objs"])
+    assert "ru:19" not in ids and "ru:18" not in ids and "ru:17" not in ids     # the farthest parked ones go
