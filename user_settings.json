@@ -40,5 +40,15 @@
     "aux_battery": true,
     "environment": true,
     "odometer": false
+  },
+  "satellites": {
+    "nodes": {}
+  },
+  "power": {
+    "undervoltage_threshold": null,
+    "undervoltage_recover": null
+  },
+  "diagnostics": {
+    "autoclear": {}
   }
 }
