@@ -103,6 +103,8 @@ class ActionType(Enum):
     PANDA_BENCH = auto()      # bench bookkeeping (reset counters)
     SET_MFD_STATUS = auto()  # MFD video board power manager status (backend)
     SET_ROADSENSE_STATE = auto()  # partial update of RoadsenseState (backend.roadsense_power)
+    SET_POCO2_STATE = auto()  # partial update of Poco2State (backend.poco2_power)
+    SET_HOST_STATS = auto()   # partial update of HostsState (backend.host_stats, shared fan)
     
     # VFD Satellite actions (device 110)
     UPDATE_VFD_SATELLITE = auto()  # Update VFD computed state
@@ -138,6 +140,8 @@ class ActionType(Enum):
     HEADUNIT_COMMAND = auto()         # head unit audio command (backend.headunit)
     SET_HEADUNIT_STATE = auto()       # head unit status mirror (volume, mute, presence)
     ROADSENSE_MODE = auto()           # roadsense stack operator mode (auto|on|off)
+    POCO2_MODE = auto()               # secondary POCO operator mode (auto|on|off)
+    POCO2_RESTART = auto()            # secondary POCO restart (ssh, or forced via the button)
     ROADSENSE_RESTART = auto()        # restart roadsense.target
     INPUT_EVENT = auto()              # human-interface event (frontend/satellite HID)
     SET_FAN_OVERRIDE = auto()   # manual chassis-fan override (None = auto)
@@ -1777,6 +1781,39 @@ class RoadsenseModeAction(Action):
     def __init__(self, mode: str, source: ActionSource = ActionSource.UI):
         super().__init__(ActionType.ROADSENSE_MODE, source)
         self.mode = mode
+
+
+class Poco2ModeAction(Action):
+    """Operator mode for the secondary POCO power manager: ``auto`` (follow
+    ACC), ``on`` (keep it running) or ``off`` (shut it down and keep it off).
+    Not reduced into state; the manager's status comes back through
+    :class:`SetPoco2StateAction`."""
+    def __init__(self, mode: str, source: ActionSource = ActionSource.UI):
+        super().__init__(ActionType.POCO2_MODE, source)
+        self.mode = mode
+
+
+class Poco2RestartAction(Action):
+    """Restart the secondary POCO: cleanly over SSH, or with ``force`` through
+    a 12 s power-button hold (hung phone)."""
+    def __init__(self, force: bool = False, source: ActionSource = ActionSource.UI):
+        super().__init__(ActionType.POCO2_RESTART, source)
+        self.force = bool(force)
+
+
+class SetPoco2StateAction(Action):
+    """Partial update of :class:`Poco2State` (backend.poco2_power status
+    mirror; only the given fields change)."""
+    def __init__(self, source: ActionSource = ActionSource.INTERNAL, **fields):
+        super().__init__(ActionType.SET_POCO2_STATE, source)
+        self.fields = fields
+
+
+class SetHostStatsAction(Action):
+    """Partial update of :class:`HostsState` (``poco``, ``poco2``, ``thermal``)."""
+    def __init__(self, source: ActionSource = ActionSource.INTERNAL, **fields):
+        super().__init__(ActionType.SET_HOST_STATS, source)
+        self.fields = fields
 
 
 class RoadsenseRestartAction(Action):

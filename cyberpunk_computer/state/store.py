@@ -62,6 +62,8 @@ class StateSlice(Enum):
     AVC = auto()  # AVC-LAN link/display state (screen, lights, touch, nav emulation)
     VISION = auto()  # dashcam vision: auto-light recommendation (io/dashcam_ingest.py)
     ROADSENSE = auto()  # roadsense perception stack on this computer (backend.roadsense_power)
+    POCO2 = auto()  # secondary POCO power manager (backend.poco2_power)
+    HOSTS = auto()  # host statistics of both POCOs + shared fan decision
     BEAN = auto()  # BEAN body bus: message table, known values, capture status (device 203)
     HEADUNIT = auto()  # Android head unit over adb: presence, volume, mute (backend.headunit)
     FUEL_LOG = auto()  # fuelling log: entries + figures (fuel_log.service)
@@ -833,6 +835,18 @@ class Store:
                 ),
             )
             affected.add(StateSlice.CONNECTION)
+
+        elif action.type == ActionType.SET_HOST_STATS:
+            new_h = replace(self._state.hosts, **action.fields)
+            if new_h != self._state.hosts:
+                self._state = replace(self._state, hosts=new_h)
+                affected.add(StateSlice.HOSTS)
+
+        elif action.type == ActionType.SET_POCO2_STATE:
+            new_p2 = replace(self._state.poco2, **action.fields)
+            if new_p2 != self._state.poco2:
+                self._state = replace(self._state, poco2=new_p2)
+                affected.add(StateSlice.POCO2)
 
         elif action.type == ActionType.SET_ROADSENSE_STATE:
             new_rs = replace(self._state.roadsense, **action.fields)

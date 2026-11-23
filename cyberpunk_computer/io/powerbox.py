@@ -70,11 +70,10 @@ BUTTON_POWER_ON_MS = 6000
 BUTTON_FORCE_MS = 35000
 BUTTON_TAP_MS = 300
 
-# There is no second POCO (single-computer layout since 2026-11-04: this POCO
-# runs the backend AND roadsense). Firmware 2.1 keeps the "poco 2" command
-# slots but refuses them (ERROR POCO2_NC, POCO2_BTN_PIN = None); the backend
-# treats them as inert.
-POCO2_BUTTON_CONNECTED = False
+# Secondary POCO (`poco2`, headless slave): its power button is on powerbox
+# GP26 since firmware 2.4.3 (older firmware refuses the "poco 2" commands with
+# ERROR POCO2_NC). False makes the backend treat those commands as inert.
+POCO2_BUTTON_CONNECTED = True
 
 if TYPE_CHECKING:  # avoid import cycles at runtime
     from .ingress import IngressController

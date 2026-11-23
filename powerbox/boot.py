@@ -1,6 +1,6 @@
 # Runs on every reset before main.py and before the REPL.
 #
-# 1. Release the POCO power button. Every RP2040 pad resets with its pull-DOWN
+# 1. Release the POCO power buttons (GP27 main, GP26 secondary). Every RP2040 pad resets with its pull-DOWN
 #    on; on GP27 (active-LOW button) that holds the button "pressed" whenever
 #    main.py is not running (REPL, flash, crash) and the phone boot-loops
 #    (seen 2026-11-04). Keep ACTIVE_HIGH in sync with POCO_BTN_ACTIVE_HIGH in
@@ -14,12 +14,13 @@
 from machine import Pin
 
 ACTIVE_HIGH = False
-BTN_PIN = 27
+BTN_PINS = (27, 26)      # main POCO, secondary POCO (POCOn_BTN_PIN in main.py)
 
-if ACTIVE_HIGH:
-    Pin(BTN_PIN, Pin.OUT, value=0)
-else:
-    Pin(BTN_PIN, Pin.IN, pull=None)
+for _pin in BTN_PINS:
+    if ACTIVE_HIGH:
+        Pin(_pin, Pin.OUT, value=0)
+    else:
+        Pin(_pin, Pin.IN, pull=None)
 
 BEAN_TX_PIN = 7
 BEAN_RX_PIN = 6

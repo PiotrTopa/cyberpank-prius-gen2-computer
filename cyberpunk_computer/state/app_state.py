@@ -480,6 +480,42 @@ class ConnectionState:
 
 
 @dataclass(frozen=True)
+class HostsState:
+    """Statistics of the POCO computers (backend.host_stats) and the shared
+    cooling decision. ``poco`` / ``poco2``: the latest record of each phone
+    (temperatures, CPU and memory use, power; see backend/host_stats.py), with
+    ``age_s`` added; ``None`` while a phone is off or silent. ``thermal``: the
+    chassis fan decision over both phones (one heatpipe, one fan)."""
+    poco: Optional[dict] = None
+    poco2: Optional[dict] = None
+    thermal: Optional[dict] = None
+
+
+@dataclass(frozen=True)
+class Poco2State:
+    """Secondary POCO (``poco2``, headless slave on the ``prius`` AP), as seen
+    by its power manager (backend.poco2_power): power button on the powerbox,
+    clean shutdown / restart over SSH."""
+    enabled: bool = False
+    state: str = ""                      # unknown|off|booting|on|grace|shutting_down|boot_failed
+    mode: str = "auto"                   # auto (follow ACC) | on | off
+    host: str = ""
+    reachable: Optional[bool] = None     # last ping
+    ssh_ok: Optional[bool] = None        # an SSH command succeeded since the last boot
+    state_since: Optional[float] = None  # wall clock
+    last_ok_ping: Optional[float] = None
+    presses: int = 0                     # button presses sent by the manager
+    forced_restarts: int = 0
+    boot_tries: int = 0
+    last_boot_s: Optional[float] = None      # button press -> ping + SSH
+    last_shutdown_s: Optional[float] = None  # power-off request -> silent and settled
+    i_before_off_a: Optional[float] = None   # powerbox 12 V current before the power-off
+    i_after_off_a: Optional[float] = None    # ... and after the phone went off
+    off_drop_a: Optional[float] = None
+    last_error: str = ""
+
+
+@dataclass(frozen=True)
 class RoadsenseState:
     """roadsense perception stack on this computer (backend.roadsense_power).
 
@@ -1048,6 +1084,8 @@ class AppState:
     avc: AvcState = field(default_factory=AvcState)
     vision: VisionState = field(default_factory=VisionState)
     roadsense: RoadsenseState = field(default_factory=RoadsenseState)
+    poco2: Poco2State = field(default_factory=Poco2State)
+    hosts: HostsState = field(default_factory=HostsState)
     bean: BeanState = field(default_factory=BeanState)
     headunit: HeadunitState = field(default_factory=HeadunitState)
     fuel_log: FuelLogState = field(default_factory=FuelLogState)

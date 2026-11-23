@@ -405,3 +405,80 @@ For heat-management work (fan policy for `low` / `full`, report in
 | Camera preview downscale time and frame-read cost on the phone. | Measure on the POCO. |
 | AP draw with a client joined; the AP-vs-off 0.33 W (`poco_power_w`) disagrees with the older "Wi-Fi off saved only ~37 mW" (INA219 A/B, Wi-Fi mode then unrecorded). | INA219 A/B: AP idle, AP + one client, radio off. |
 | `daemon-reload` re-arms the key-off Wi-Fi suspend / netwatch-arm transient timers. | Arm them with `--on-calendar` (absolute time) instead of `--on-active`, or re-check after reloads. |
+
+## Secondary POCO (`poco2`) power management
+
+`poco2` is the second POCO F1 (no display, no battery, own buck regulator): a headless
+slave on the `prius` AP at 10.42.0.94. Its supply is permanent, so "off" means shut
+down. The manager is `cyberpunk_computer/backend/poco2_power.py` (tests
+`tests/test_poco2_power.py`), enabled with `BACKEND_POCO2_ENABLED=1`.
+
+| Action | How |
+|---|---|
+| Power on | powerbox GP26 across its power button (firmware ≥ 2.4.3): 6 s hold. Sent as `{"a":"button","poco":2,"ms":6000}`. |
+| Shut down | SSH `sudo -n systemctl poweroff` with `/etc/prius/poco2_ssh_key`; re-sent every 30 s while it still answers. The button is never used for this (a long hold restarts). |
+| Restart | SSH `sudo -n systemctl reboot`; forced: 12 s button hold. |
+| Liveness | ping; "on" also needs an SSH command to succeed. Echoed to the powerbox as `p2`. |
+
+States (`poco2.state` in `/api/v1/state`): `unknown` → `off` / `on`, `booting`, `grace`,
+`shutting_down`, `boot_failed` (3 presses without an answer; a new round every 10 min).
+
+Modes (`poco2_mode`, initial value `BACKEND_POCO2_MODE`):
+
+- `auto`: follows the MFD board exactly: on with ACC **or** with the MFD's early demand (BEAN entry, operator hold; `early` of `MfdPowerManager`), shut down `BACKEND_POCO2_GRACE_S` after the demand ends. The grace defaults to `BACKEND_MFD_GRACE_S` (1200 s, 20 min); since 2026-11-23 the env pin of 120 s is removed, so both boards share one grace.
+- `on`: started and kept running with the key off (bench).
+- `off`: shut down now and kept off.
+
+12 V under-voltage or a powerbox shutdown overrides every mode (shut down, no grace).
+On and silent for `BACKEND_POCO2_LOST_RECOVER_S` (300 s): one forced restart, at most
+once per 15 min (0 disables; the link is Wi-Fi only).
+
+Commands:
+
+```sh
+curl -X POST http://127.0.0.1:8080/api/v1/commands/poco2_mode    -H 'Content-Type: application/json' -d '{"mode":"on"}'
+curl -X POST http://127.0.0.1:8080/api/v1/commands/poco2_restart -H 'Content-Type: application/json' -d '{"force":false}'
+```
+
+Set-up on `poco2` (once): the public half of `/etc/prius/poco2_ssh_key` in
+`~user/.ssh/authorized_keys`, and `/etc/sudoers.d/poco2-power`:
+
+```
+user ALL=(root) NOPASSWD: /usr/sbin/systemctl poweroff, /usr/sbin/systemctl reboot
+```
+
+The manager records the powerbox 12 V current as a 30 s median before the power-off and
+over the 30 s after the phone went silent (`poco2.i_before_off_a`, `i_after_off_a`, `off_drop_a`).
+
+## Common cooling and host statistics of both POCOs
+
+Both phones sit on one laptop-type heatpipe (two pads, one fan), so the chassis fan
+serves both. `fan_policy.SharedFan` keeps one `ChassisFanPolicy` per phone (same
+numbers, see `docs/THERMAL_MODEL.md`: GPU-led ramp, hot-core term, override, box purge)
+and runs the fan at the higher of the two demands. The profile (`full` with the key
+on, `low` with it off) is the same for both. A `poco2` that is shut down is ignored. A
+`poco2` that runs but has sent no temperatures for 15 s cannot be cooled by feedback:
+with the key on the fan then holds 30 %.
+
+The decision is in `hosts.thermal` of `/api/v1/state`: `duty_pct`, `source`
+(`poco`, `poco2`, `box`, `override`, `idle`), and per phone `<host>_pct`,
+`<host>_ctrl_c`, `<host>_reason`, `<host>_stale`.
+
+Statistics come from `backend/host_stats.py`, one stdlib-only collector for both
+phones. The backend runs it in a thread for `poco`. For `poco2` it starts the same
+file as an agent over SSH (`python3 -u - --period 2`, source on stdin, nothing
+installed on `poco2`) while the power manager has the phone on, and reads one JSON
+line every 2 s. Records are in `hosts.poco` and `hosts.poco2` (`null` while `poco2` is
+off or silent, `age_s` otherwise):
+
+| Field | Meaning |
+|---|---|
+| `cpu_c`, `gpu_c`, `batt_c` | hottest CPU / GPU / battery zone, maximum of the last 10 s (zones read every 0.19 s) |
+| `hot_zone`, `hot_c`, `zones` | hottest zone right now, and every zone |
+| `cpu_pct`, `little_pct`, `big_pct`, `cores_online`, `little_mhz`, `big_mhz`, `load1` | CPU use since the previous record, clocks, load |
+| `mem_total_mb`, `mem_avail_mb`, `mem_used_pct`, `disk_used_pct` | memory and root file system |
+| `gpu_mhz`, `power_w`, `volt_v`, `amp_a`, `up_s` | GPU clock, power at the phone's own gauge, uptime |
+
+Recorded in the metrics database (`/api/v1/metrics`): `poco_*` and `poco2_*` with
+`cpu_temp`, `gpu_temp`, `cpu_usage`, `cpu_big_usage`, `load`, `mem_used`,
+`host_power`; plus `poco2_on`, `fan_duty`, `fan_rpm`, `fan_poco_pct`, `fan_poco2_pct`.

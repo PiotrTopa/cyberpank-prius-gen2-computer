@@ -269,6 +269,65 @@ class ChassisFanPolicy:
         return FanDecision(self.duty_pct, ctrl, reason, poco, box, hot)
 
 
+class SharedFan:
+    """One fan for several phones on a common heatpipe.
+
+    Both POCOs sit on one laptop-type heatpipe (two pads, one fan), so the fan
+    has to satisfy whichever phone needs more. Every phone gets its own
+    :class:`ChassisFanPolicy` (its own filters, hysteresis, hot-core term and
+    override, all calibrated per phone on the same SoC) and the fan runs at
+    the highest demand. The box purge is part of every policy and identical.
+
+    ``readings`` maps host -> ``{"cpu_c", "gpu_c", "present", "fresh"}``:
+    ``present`` = the phone is running, ``fresh`` = its temperatures are
+    current. A running phone without fresh temperatures cannot be cooled by
+    feedback: with the key on (``full``) the fan then holds ``stale_floor_pct``.
+    """
+
+    def __init__(self, cfg: Optional[FanPolicyConfig] = None,
+                 hosts=("poco", "poco2"), stale_floor_pct: float = 30.0) -> None:
+        self.cfg = cfg or FanPolicyConfig()
+        self.hosts = tuple(hosts)
+        self.policies: Dict[str, ChassisFanPolicy] = {h: ChassisFanPolicy(self.cfg) for h in self.hosts}
+        self.stale_floor_pct = stale_floor_pct
+
+    def step(self, now: float, readings: Dict[str, dict], *, ambient_c: Optional[float],
+             box_in_c: Optional[float], box_out_c: Optional[float],
+             power_mode: Optional[str], override_pct: Optional[float] = None):
+        """Returns ``(duty_pct, decisions, detail)``: the fan duty, the
+        :class:`FanDecision` of every host and a flat dict for the state."""
+        decisions: Dict[str, FanDecision] = {}
+        detail: dict = {}
+        duty, source, reason = 0.0, "idle", "idle"
+        for host in self.hosts:
+            r = readings.get(host) or {}
+            fresh = bool(r.get("present")) and bool(r.get("fresh"))
+            d = self.policies[host].step(
+                now, cpu_c=r.get("cpu_c") if fresh else None,
+                gpu_c=r.get("gpu_c") if fresh else None,
+                ambient_c=ambient_c, box_in_c=box_in_c, box_out_c=box_out_c,
+                power_mode=power_mode, override_pct=override_pct)
+            pct = d.duty_pct
+            stale = bool(r.get("present")) and not r.get("fresh")
+            if stale and override_pct is None and power_mode == "full" \
+                    and pct < self.stale_floor_pct:
+                pct, d = self.stale_floor_pct, FanDecision(
+                    self.stale_floor_pct, d.control_c, "stale", d.poco_pct, d.box_pct, d.hot_pct)
+            decisions[host] = d
+            detail[host + "_pct"] = round(pct, 1)
+            detail[host + "_ctrl_c"] = round(d.control_c, 1) if d.control_c is not None else None
+            detail[host + "_reason"] = d.reason
+            detail[host + "_stale"] = stale
+            if pct > duty or (source == "idle" and d.reason != "idle"):
+                duty, source, reason = max(duty, pct), host, d.reason
+        if override_pct is not None:
+            source = "override"
+        elif reason == "box":
+            source = "box"
+        detail.update(duty_pct=round(duty, 1), source=source, reason=reason)
+        return duty, decisions, detail
+
+
 # Lumped plant used by the closed-loop tests and docs/THERMAL_MODEL.md.
 @dataclass
 class ThermalPlant:

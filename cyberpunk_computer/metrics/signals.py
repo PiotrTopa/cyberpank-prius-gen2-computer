@@ -41,6 +41,35 @@ def _delta_v(state: AppState) -> Optional[float]:
     return None
 
 
+def _host(name: str, key: str) -> Getter:
+    """Getter for one figure of a POCO's host statistics (state.hosts)."""
+    def get(state: AppState) -> Optional[float]:
+        rec = getattr(state.hosts, name, None)
+        val = rec.get(key) if isinstance(rec, dict) else None
+        return float(val) if isinstance(val, (int, float)) else None
+    return get
+
+
+def _host_signals(name: str, label: str) -> List[Signal]:
+    return [
+        Signal(name + "_cpu_temp", "°C", _host(name, "cpu_c"), label + " hottest CPU zone (10 s peak)"),
+        Signal(name + "_gpu_temp", "°C", _host(name, "gpu_c"), label + " hottest GPU zone (10 s peak)"),
+        Signal(name + "_cpu_usage", "%", _host(name, "cpu_pct"), label + " CPU use, all cores"),
+        Signal(name + "_cpu_big_usage", "%", _host(name, "big_pct"), label + " CPU use, big cores"),
+        Signal(name + "_load", "", _host(name, "load1"), label + " load average (1 min)"),
+        Signal(name + "_mem_used", "%", _host(name, "mem_used_pct"), label + " memory in use"),
+        Signal(name + "_host_power", "W", _host(name, "power_w"), label + " power at its own gauge"),
+    ]
+
+
+def _thermal(key: str) -> Getter:
+    def get(state: AppState) -> Optional[float]:
+        th = state.hosts.thermal
+        val = th.get(key) if isinstance(th, dict) else None
+        return float(val) if isinstance(val, (int, float)) else None
+    return get
+
+
 # ── Signal catalog ────────────────────────────────────────────────────────
 # Ordering is informational only. Names are the stable API/storage keys.
 SIGNALS: List[Signal] = [
@@ -89,6 +118,15 @@ SIGNALS: List[Signal] = [
     Signal("powerbox_aht_t", "°C", lambda s: s.powerbox.aht_t, "Box inside temperature (AHT20 on powerbox)"),
     Signal("powerbox_aht_h", "%", lambda s: s.powerbox.aht_h, "Box inside humidity (AHT20 on powerbox)"),
     Signal("powerbox_acc", "", lambda s: 1.0 if s.powerbox.acc_on else 0.0, "Ignition/ACC sense via powerbox GP11"),
+    # POCO computers: host statistics (backend.host_stats) and the shared fan
+    *_host_signals("poco", "Car computer"),
+    *_host_signals("poco2", "Secondary POCO"),
+    Signal("poco2_on", "", lambda s: (1.0 if s.poco2.state in ("on", "grace") else 0.0)
+           if s.poco2.enabled else None, "Secondary POCO running"),
+    Signal("fan_duty", "%", lambda s: s.powerbox.fan_duty_pct, "Chassis fan duty"),
+    Signal("fan_rpm", "rpm", lambda s: s.powerbox.fan_rpm, "Chassis fan speed"),
+    Signal("fan_poco_pct", "%", _thermal("poco_pct"), "Fan demand of the car computer"),
+    Signal("fan_poco2_pct", "%", _thermal("poco2_pct"), "Fan demand of the secondary POCO"),
 ]
 
 # Quick lookup by name.

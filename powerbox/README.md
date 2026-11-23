@@ -6,7 +6,7 @@ wakes the POCO F1 through the phone's power button, switches the loads on an
 senses ACC, and hosts the BEAN body-bus receiver and the guarded BEAN
 transmitter. It talks NDJSON over USB-CDC to the backend on the POCO.
 
-Firmware in this directory: **2.4.2** (`VERSION` in `main.py`). On the car: **2.4.2** (`ver` in the
+Firmware in this directory: **2.4.3** (`VERSION` in `main.py`). On the car: **2.4.2** (`ver` in the
 2026-11-17 trip logs). Confirm with `ver` from `POWERBOX_READY` / IDENT.
 
 | File | Role |
@@ -116,7 +116,7 @@ link (board alive, nothing received) is detected by the backend staleness watchd
 | GP27 | POCO power button | IN pulls off / OUT LOW pulse | see *POCO power button* |
 | GP28 | fan tach | IN pull-up, falling-edge IRQ | 2 pulses/rev |
 | GP29 | fan PWM 25 kHz, not inverted | PWM | GPIO duty = fan duty, no transistor. Undriven (bootloader, safe-boot) = full speed; set first thing in `main()`. |
-| — | "poco 2" button | not connected | `POCO2_BTN_PIN = None`; there is one POCO. |
+| GP26 | secondary POCO (`poco2`) power button | IN pulls off / OUT LOW pulse | fw ≥ 2.4.3; same drive as GP27, `{"a":"button","poco":2,"ms":…}`; released in `boot.py` too. |
 
 The ACC level is in STATUS `acc` and the Events messages; with fw ≥ 2.2.0 there is
 no REPL to read the pin directly (see *Safety rules*).
@@ -296,7 +296,7 @@ Near-linear up to ~50 %, flattening above.
 | BEAN receiver | `{"a":"bean_rx",...}` | fw ≥ 2.3.0; see *BEAN receiver* |
 | BEAN transmitter | `{"a":"bean_tx","op":...}` | fw ≥ 2.4.0; see *BEAN transmitter* |
 
-`poco:2` on `button` / `wake` → `ERROR POCO2_NC`, nothing pressed.
+`poco:2` on `button` / `wake` presses the secondary POCO button on GP26 (fw ≥ 2.4.3; `ERROR POCO2_NC` when `POCO2_BTN_PIN = None`).
 
 Error codes besides the above: `RELAY_IO`, `RESTART_FAILED`, `POCO1_NC`,
 `BMP280_READ` / `AHT20_READ` (sensor dropped), `OUT_REMOVED`, `ACC_SIM`, `BEAN_ARGS`,
@@ -786,6 +786,7 @@ Preconditions: fw 2.4.0 flashed (`status` answers), receiver healthy
 | 2.4.0 | `bean_tx.py`; bench ops need the bench override; receiver idle fast path |
 | 2.4.1 | full BEAN batches sent at once (no standing backlog); wrap-safe ticks (no OverflowError after a > 537 s bus sleep, frame `t_ms` on the `ticks_ms` base, `idle_ms`/`age_ms`/`up` do not stick or wrap, dead-phone/boot-grace/TX-arm stamps cannot wrap after 6.2 days); `exn` counter |
 | 2.4.2 | BEAN receiver keeps up with IG on again: decoder cost per word ~halved (attribute table no longer full, `const()`, native inline data path); 2.4.1 lost 7–9 % of frames with IG on |
+| 2.4.3 | secondary POCO power button on GP26 (`button`/`wake` with `poco:2`), released in `boot.py` |
 
 Tests: `tests/test_powerbox_firmware.py` (firmware on CPython with stubs),
 `tests/test_powerbox_io.py`, `tests/test_port_power.py`, `tests/test_bean_rx.py`

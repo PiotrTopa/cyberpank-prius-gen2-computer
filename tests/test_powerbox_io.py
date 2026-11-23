@@ -197,7 +197,7 @@ class TestCommands:
             "PowerboxHardRestartAction"
 
     def test_secondary_button_is_known_disconnected(self):
-        assert POCO2_BUTTON_CONNECTED is False
+        assert POCO2_BUTTON_CONNECTED is True
 
     def test_commander_routes_rs485_rail_to_relay_5(self):
         sent = []

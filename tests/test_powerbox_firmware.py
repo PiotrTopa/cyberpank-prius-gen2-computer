@@ -328,7 +328,7 @@ def _cmd(fw, payload, cfg):
 
 class TestCommandSurface:
     def test_version_bumped(self, fw):
-        assert fw.main.VERSION == "2.4.2"
+        assert fw.main.VERSION == "2.4.3"
         assert fw.main.I2C_FREQ == 100000  # PCF8574 is a 100 kHz part
 
     def test_relay_command_sets_load_channels(self, fw, pm):
@@ -422,7 +422,7 @@ class TestFan:
 class TestButtons:
     def test_pins(self, fw):
         assert fw.main.POCO1_BTN_PIN == 27
-        assert fw.main.POCO2_BTN_PIN is None
+        assert fw.main.POCO2_BTN_PIN == 26
         assert 14 not in (fw.main.POCO1_BTN_PIN, fw.main.FAN_PWM_PIN, fw.main.FAN_TACH_PIN,
                           fw.main.ACC_PIN, fw.main.LED_PIN)
         assert 15 not in (fw.main.POCO1_BTN_PIN, fw.main.FAN_PWM_PIN, fw.main.FAN_TACH_PIN,
@@ -430,10 +430,13 @@ class TestButtons:
         # Button pins never collide with the fan pins (a fan PWM on a button
         # line presses the phone's power button).
         assert fw.main.POCO1_BTN_PIN not in (fw.main.FAN_PWM_PIN, fw.main.FAN_TACH_PIN)
+        assert fw.main.POCO2_BTN_PIN not in (fw.main.FAN_PWM_PIN, fw.main.FAN_TACH_PIN,
+                                             fw.main.POCO1_BTN_PIN, 14, 15)
 
     def test_main_button_released_as_input_no_pulls(self, fw, pm):
-        # PowerManager() constructed GP27 as an input with pulls off; GP28 untouched.
+        # PowerManager() constructed GP27 and GP26 as inputs with pulls off; GP28 untouched.
         assert (27, FakePin.IN, None) in FakePin.log
+        assert (26, FakePin.IN, None) in FakePin.log
         assert not any(p == 28 for p, _, _ in FakePin.log)
 
     def test_press_drives_low_then_releases(self, fw, pm):
@@ -442,17 +445,14 @@ class TestButtons:
             assert pm.pm.btn1.press(300, "test") is True
         assert FakePin.log == [(27, FakePin.OUT, 0), (27, FakePin.IN, None)]
 
-    def test_secondary_commands_rejected_cleanly(self, fw, pm):
+    def test_secondary_button_press(self, fw, pm):
         FakePin.log.clear()
         with Recorder(fw) as rec:
-            _cmd(fw, {"a": "button", "poco": 2, "ms": 6000}, pm.cfg)
-            _cmd(fw, {"a": "wake", "poco": 2}, pm.cfg)
-            pm.pm.tick(None)                     # nothing queued to press
-        assert pm.pm.pending == []
-        assert FakePin.log == []                 # no GPIO touched
-        errs = [l for l in rec.lines if l.get("msg") == "ERROR"]
-        assert [e["code"] for e in errs] == ["POCO2_NC", "POCO2_NC"]
-        assert not any(l.get("ack") in ("button", "wake") for l in rec.lines)
+            _cmd(fw, {"a": "button", "poco": 2, "ms": 2000}, pm.cfg)
+            pm.pm.tick(None)
+        assert FakePin.log == [(26, FakePin.OUT, 0), (26, FakePin.IN, None)]
+        assert not any(l.get("msg") == "ERROR" for l in rec.lines)
+        assert any(l.get("ack") == "button" for l in rec.lines)
 
     def test_main_button_and_wake_still_work(self, fw, pm):
         with Recorder(fw) as rec:
@@ -500,10 +500,11 @@ class TestButtonSafety:
         ns = {}
         exec(compile(src, "boot.py", "exec"), {"__name__": "boot"}, ns)
         assert ns["ACTIVE_HIGH"] == fw.main.POCO_BTN_ACTIVE_HIGH
-        assert ns["BTN_PIN"] == fw.main.POCO1_BTN_PIN
-        # boot.py leaves the button released ...
-        btn = [e for e in FakePin.log if e[0] == 27]
-        assert btn[-1][1:] == (FakePin.IN, None)
+        assert ns["BTN_PINS"] == (fw.main.POCO1_BTN_PIN, fw.main.POCO2_BTN_PIN)
+        # boot.py leaves both buttons released ...
+        for pin in ns["BTN_PINS"]:
+            btn = [e for e in FakePin.log if e[0] == pin]
+            assert btn[-1][1:] == (FakePin.IN, None)
         # ... and the BEAN TX (GP7) driven LOW, RX (GP6) a plain input.
         assert (7, FakePin.OUT, 0) in FakePin.log
         assert (6, FakePin.IN, None) in FakePin.log

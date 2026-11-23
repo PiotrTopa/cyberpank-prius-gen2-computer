@@ -22,7 +22,7 @@ Inbound commands from the computer (device 0):
             rises again or a "wake" arrives
     {"id": 0, "d": {"a": "wake", "poco": 1}}        leave sleep / re-arm ladder
     {"id": 0, "d": {"a": "button", "poco": 1, "ms": 6000}}  pulse the button
-            (poco 2 is NOT connected: both reply ERROR POCO2_NC, no press)
+            (poco 2 = the secondary POCO button on GP26, fw >= 2.4.3)
     {"id": 0, "d": {"a": "hb", "n": 0-255}}         main POCO heartbeat
     {"id": 0, "d": {"a": "p2", "alive": true|false}} host-reported secondary
             POCO liveness (the secondary is not on our USB; the main POCO
@@ -110,8 +110,8 @@ Hardware (Waveshare RP2040-Zero), bench state of 2026-11-03:
              boots the phone from off (verified 2026-11-03). The main POCO is
              never power-switched: it lives on a permanent buck and is only
              ever started/woken through this button.
-    (none)   SECONDARY POCO power button: not connected for now
-             (POCO2_BTN_PIN = None). Must never sit on a fan pin.
+    GP26     SECONDARY POCO power button (fw >= 2.4.3), wired and driven
+             like GP27. Must never sit on a fan pin.
     GP29     Chassis fan PWM, 25 kHz, straight to the fan's PWM wire: GPIO
              duty = fan duty (NOT inverted, no transistor stage). 0 % stops
              the fan. While the firmware is not driving GP29 (bootloader,
@@ -163,7 +163,7 @@ import pcf8574                      # PCF8574 driver + RelayBoard (pin map, NC, 
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-VERSION = "2.4.2"
+VERSION = "2.4.3"
 
 # Device role — reported in the unified identify ("whoami") response and the
 # ready banner so the computer can discover which USB-CDC port is the powerbox
@@ -262,11 +262,11 @@ RESTART_ACK_DELAY_MS = 300
 # (GP27 -> ~100 R -> gate, ~100 k gate->GND, drain -> button line, source ->
 # GND): press = drive HIGH, release = drive LOW, and reset/bootloader leave the
 # MOSFET off by hardware. Keep ACTIVE_HIGH in boot.py in sync.
-# The secondary POCO's button is NOT connected for now (None disables it:
-# commands for poco 2 are refused with ERROR POCO2_NC). When it comes back,
-# assign a free non-fan, non-dead pin here — never GP28/GP29 (fan) or GP14/15.
+# The secondary POCO's button is on GP26 since fw 2.4.3 (None disables it:
+# commands for poco 2 are then refused with ERROR POCO2_NC). Never GP28/GP29
+# (fan) or GP14/15. boot.py releases the same pins: keep BTN_PINS in sync.
 POCO1_BTN_PIN = 27
-POCO2_BTN_PIN = None
+POCO2_BTN_PIN = 26
 POCO_BTN_PRESS_MS = 6000      # power-on hold (POCO F1 board: 3 s fails, 6 s boots)
 POCO_BTN_FORCE_MS = 12000     # forced hard restart hold (POCO F1: 12 s = one clean
                               # reboot; holding longer reboots it every ~8-10 s)

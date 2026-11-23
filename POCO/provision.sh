@@ -169,6 +169,15 @@ BACKEND_POSITION_FEEDER=0
 BACKEND_POSITION_SOURCE=headunit
 BACKEND_POSITION_RUNDIR=/run/chris:/run/roadsense
 
+# Secondary POCO (poco2, headless slave on the prius AP): power button on
+# powerbox GP26 (fw >= 2.4.3), clean shutdown / restart over SSH with the key
+# /etc/prius/poco2_ssh_key (poco2: the public key in ~user/.ssh/authorized_keys
+# and /etc/sudoers.d/poco2-power). BACKEND_POCO2_MODE: auto (follow ACC) | on | off.
+BACKEND_POCO2_ENABLED=1
+BACKEND_POCO2_HOST=10.42.0.94
+BACKEND_POCO2_MODE=auto
+BACKEND_POCO2_GRACE_S=120
+
 # USB topology (main hub 1-1 = Terminus 1a40:0101, 4 ports, cabled 2026-11-04):
 # port 1 powerbox, port 2 MFD Pi (relay ch2), port 3 CAN hub with the gateway +
 # panda (relay ch3), port 4 VIA camera hub (relay ch4). The gateway sits one

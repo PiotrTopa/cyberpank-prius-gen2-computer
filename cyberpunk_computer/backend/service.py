@@ -74,7 +74,7 @@ from .satellites import (
 )
 from .satellite_registry import SatelliteRegistry
 from ..api import ApiServer, StoreBridge
-from .fan_policy import ChassisFanPolicy, FanPolicyConfig
+from .fan_policy import ChassisFanPolicy, FanPolicyConfig, SharedFan
 from .zmq_server import ZmqServer
 
 logger = logging.getLogger(__name__)
@@ -265,6 +265,12 @@ class BackendConfig:
     # map to BACKEND_ROADSENSE_* env vars — see backend.__main__.
     roadsense_enabled: bool = False
     roadsense_config: Optional[object] = None  # RoadsenseConfig; None -> defaults
+    # ── secondary POCO (poco2, headless slave on the prius AP) ───────────────
+    # Power manager (backend.poco2_power): power button on powerbox GP26, clean
+    # shutdown / restart over SSH, ACC follower with operator modes. Knobs map
+    # to BACKEND_POCO2_* env vars — see backend.__main__.
+    poco2_enabled: bool = False
+    poco2_config: Optional[object] = None  # Poco2PowerConfig; None -> defaults
     # Road scene for the MFD main screen (backend.roadsense_scene): reads the
     # stack's /ws while it runs and the MFD is on, publishes the ZMQ event
     # "roadsense_scene" (<= 10 Hz). Needs roadsense_enabled. BACKEND_ROADSENSE_SCENE*.
@@ -352,6 +358,11 @@ class BackendConfig:
     # follows from the bench campaign in docs/THERMAL_MODEL.md.
     chassis_fan_enabled: bool = True
     chassis_fan_tick_s: float = 10.0      # control loop cadence (s); owner 2026-11-17: no faster than 10 s
+    # Host statistics of the POCOs (backend.host_stats): record cadence, and
+    # how old the secondary's record may be before it counts as stale.
+    host_stats_enabled: bool = True
+    host_stats_period_s: float = 2.0
+    host_stats_stale_s: float = 15.0
     fan_policy: FanPolicyConfig = field(default_factory=FanPolicyConfig)
 
     # ── Dashcam vision (io.dashcam_ingest, docs/DASHCAM_70MAI.md) ────────────
@@ -442,7 +453,13 @@ class BackendService:
         self._fan_last_tick: float = 0.0
         self._vfd_clock_last: float = 0.0
         self.ntp = None  # backend.ntp_server.SntpServer when serving the MFD Pi
-        self.fan_policy = ChassisFanPolicy(config.fan_policy)
+        # One fan, both POCOs on one heatpipe: a policy per phone, highest demand wins.
+        self.shared_fan = SharedFan(config.fan_policy)
+        self.fan_policy = self.shared_fan.policies["poco"]
+        # Host statistics of both phones (backend.host_stats).
+        self.host_stats = None         # HostStats (this phone), lazy
+        self.poco2_stats = None        # RemoteHostStats (agent on poco2 over SSH)
+        self._host_stats_last: float = 0.0
         self._fan_last_pct: float = -1.0    # last sent speed (avoid re-sending same value)
         self._fan_last_log_pct: float = -1.0  # edge-triggered logging
 
@@ -469,6 +486,8 @@ class BackendService:
         self._mfd_hold = OperatorHold()  # operator hold (mfd_hold); kept on file once MFD is wired
         # roadsense stack manager (backend.roadsense_power).
         self.roadsense_power = None
+        # secondary POCO power manager (backend.poco2_power).
+        self.poco2_power = None
         # roadsense -> MFD road scene feed (backend.roadsense_scene).
         self.roadsense_scene = None
         # Position feeder -> roadsense mapd (backend.position_feeder).
@@ -1203,6 +1222,33 @@ class BackendService:
                 mfd_cfg.grace_s,
             )
 
+        # Secondary POCO (poco2): power button through the powerbox, clean
+        # shutdown / restart over SSH, ACC follower with operator modes.
+        if cfg.poco2_enabled:
+            from .poco2_power import Poco2PowerConfig, Poco2PowerManager
+            from ..state.actions import SetPoco2StateAction
+
+            p2_cfg = cfg.poco2_config or Poco2PowerConfig()
+
+            def _publish_poco2(status: dict) -> None:
+                twin.store.dispatch(SetPoco2StateAction(enabled=True, host=p2_cfg.host, **status))
+
+            self.poco2_power = Poco2PowerManager(
+                p2_cfg, publish=_publish_poco2,
+                press=lambda ms: commander.press_button(int(ms), poco=2),
+                report_alive=commander.report_poco2_alive,
+            )
+            twin.store.dispatch(SetPoco2StateAction(
+                enabled=True, host=p2_cfg.host, state=self.poco2_power.state, mode=p2_cfg.mode))
+            from .host_stats import RemoteHostStats
+            _p2m = self.poco2_power
+            self.poco2_stats = RemoteHostStats(
+                _p2m._ssh_cmd(), wanted=lambda: _p2m.state in ("on", "grace"),
+                period_s=cfg.host_stats_period_s, host="poco2")
+            self.poco2_stats.start()
+            logger.info("poco2 power manager wired (host=%s mode=%s grace=%.0fs press=%dms)",
+                        p2_cfg.host, p2_cfg.mode, p2_cfg.grace_s, p2_cfg.press_ms)
+
         # roadsense stack (same computer): ACC-follower that powers the camera
         # hub, starts roadsense.target and stops it cleanly after the key-off
         # grace; mirrors its health + the phone's thermal zones into the state.
@@ -1283,6 +1329,20 @@ class BackendService:
                             self.roadsense_power.set_mode(str(action.mode))
                         except ValueError as exc:
                             logger.error("roadsense mode rejected: %s", exc)
+                elif type(action).__name__ == "Poco2ModeAction":
+                    if self.poco2_power is None:
+                        logger.warning("poco2 mode %r ignored: manager disabled "
+                                       "(BACKEND_POCO2_ENABLED=0)", action.mode)
+                    else:
+                        try:
+                            self.poco2_power.set_mode(str(action.mode))
+                        except ValueError as exc:
+                            logger.error("poco2 mode rejected: %s", exc)
+                elif type(action).__name__ == "Poco2RestartAction":
+                    if self.poco2_power is None:
+                        logger.warning("poco2 restart ignored: manager disabled")
+                    else:
+                        self.poco2_power.request_restart(force=bool(action.force))
                 elif type(action).__name__ == "RoadsenseRestartAction":
                     if self.roadsense_power is None:
                         logger.warning("roadsense restart ignored: manager disabled")
@@ -1784,9 +1844,11 @@ class BackendService:
                     self._mfd_power_tick()
                     self._camera_preview_tick()
                     self._roadsense_power_tick()
+                    self._poco2_power_tick()
                     self._roadsense_scene_tick()
                     self._position_feeder_tick()
                     self._poco_power_tick()
+                    self._host_stats_tick()
                     self._chassis_fan_tick()
                     self._vfd_clock_tick()
                     self._satellite_tick()
@@ -1875,6 +1937,7 @@ class BackendService:
                 logger.exception("Gateway entry hold tick failed")
             if self._mfd_hold.check(state.powerbox):
                 early, why = True, "operator hold"
+            self._mfd_early = bool(early)       # poco2 starts on the same demand
             self.mfd_power.tick(acc, early=early, why=why)
         except Exception:
             logger.exception("MFD power tick failed")
@@ -1888,6 +1951,20 @@ class BackendService:
             self.camera_preview.tick()
         except Exception:
             logger.exception("camera preview tick failed")
+
+    def _poco2_power_tick(self) -> None:
+        """Advance the secondary POCO power manager (ACC follower)."""
+        if self.poco2_power is None or self.twin is None:
+            return
+        pb = self.twin.store.state.powerbox
+        try:
+            self.poco2_power.tick(
+                bool(pb.acc_on), acc_known=self._acc_seen,
+                current_a=pb.current_draw_a if pb.connected else None,
+                inhibit=bool(pb.undervoltage or pb.shutdown_requested),
+                early=bool(getattr(self, "_mfd_early", False)))
+        except Exception:
+            logger.exception("poco2 power tick failed")
 
     def _roadsense_power_tick(self) -> None:
         """Advance the roadsense stack manager (ACC follower) and finish a
@@ -2439,6 +2516,52 @@ class BackendService:
                 poco_gpu_temp=gpu_temp,
             ))
 
+    def _host_stats_tick(self) -> None:
+        """Publish the host statistics of both POCOs (state.hosts)."""
+        cfg = self.config
+        if not cfg.host_stats_enabled or self.twin is None:
+            return
+        now = time.monotonic()
+        if now - self._host_stats_last < cfg.host_stats_period_s:
+            return
+        self._host_stats_last = now
+        fields = {}
+        try:
+            if self.host_stats is None:
+                from .host_stats import HostStats
+                self.host_stats = HostStats(host="poco")
+                self.host_stats.start()
+                self.host_stats.record()          # primes the CPU-use delta
+            else:
+                fields["poco"] = dict(self.host_stats.record(), age_s=0.0)
+        except Exception:
+            logger.exception("host stats (local) failed")
+        if self.poco2_stats is not None:
+            rec, age = self.poco2_stats.latest()
+            if rec is not None and age is not None and age <= cfg.host_stats_stale_s:
+                fields["poco2"] = dict(rec, age_s=round(age, 1))
+            else:
+                fields["poco2"] = None
+        if fields:
+            from ..state.actions import SetHostStatsAction
+            self.twin.store.dispatch(SetHostStatsAction(**fields))
+
+    def _fan_readings(self, pb) -> dict:
+        """Temperatures of both phones for the shared fan (see SharedFan)."""
+        readings = {"poco": {"cpu_c": pb.poco_core_temp, "gpu_c": pb.poco_gpu_temp,
+                             "present": True, "fresh": True}}
+        if self.poco2_power is not None:
+            rec, age = (self.poco2_stats.latest() if self.poco2_stats is not None
+                        else (None, None))
+            fresh = rec is not None and age is not None and age <= self.config.host_stats_stale_s
+            readings["poco2"] = {
+                "cpu_c": rec.get("cpu_c") if fresh else None,
+                "gpu_c": rec.get("gpu_c") if fresh else None,
+                "present": self.poco2_power.state in ("on", "grace"),
+                "fresh": fresh,
+            }
+        return readings
+
     def _chassis_fan_tick(self) -> None:
         """Chassis fan controller tick: feed the readings to the policy
         (:mod:`backend.fan_policy`) and send the resulting duty to the powerbox.
@@ -2466,18 +2589,18 @@ class BackendService:
         if override is None and not pb.connected:
             return
 
-        decision = self.fan_policy.step(
-            now,
-            cpu_c=pb.poco_core_temp,
-            gpu_c=pb.poco_gpu_temp,
+        duty, decisions, detail = self.shared_fan.step(
+            now, self._fan_readings(pb),
             ambient_c=pb.bmp2_t if pb.bmp2_t is not None else pb.aht_t,
             box_in_c=pb.bmp_t if pb.bmp_t is not None else pb.aht_t,
             box_out_c=pb.bmp2_t,
             power_mode=pb.power_mode,
             override_pct=override,
         )
-        self._set_fan_pct(decision.duty_pct)
-        self._publish_poco_ema_temp(decision.control_c, decision.duty_pct)
+        self._set_fan_pct(duty)
+        from ..state.actions import SetHostStatsAction
+        self.twin.store.dispatch(SetHostStatsAction(thermal=detail))
+        self._publish_poco_ema_temp(decisions["poco"].control_c, duty)
 
     def _publish_poco_ema_temp(
         self, ema_temp: Optional[float], fan_duty_pct: Optional[float] = None

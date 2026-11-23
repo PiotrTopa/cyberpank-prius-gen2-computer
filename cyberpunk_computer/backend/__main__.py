@@ -444,6 +444,33 @@ def _build_satellites() -> dict:
     return out
 
 
+def _build_poco2():
+    """Secondary POCO power manager (backend.poco2_power) from env vars::
+
+        BACKEND_POCO2_ENABLED=1              # default off
+        BACKEND_POCO2_HOST=10.42.0.94
+        BACKEND_POCO2_SSH_USER=user
+        BACKEND_POCO2_SSH_KEY=/etc/prius/poco2_ssh_key
+        BACKEND_POCO2_MODE=auto              # auto | on | off (initial operator mode)
+        BACKEND_POCO2_GRACE_S=<MFD grace>   # key-off grace before the shutdown (default: BACKEND_MFD_GRACE_S, 1200)
+        BACKEND_POCO2_BOOT_TIMEOUT_S=150     # button press -> ping + SSH
+        BACKEND_POCO2_LOST_RECOVER_S=300     # ON but silent -> forced restart (0 = never)
+    """
+    env = os.environ.get
+    if env("BACKEND_POCO2_ENABLED", "0").strip().lower() not in ("1", "true", "yes", "on"):
+        return False, None
+    from .poco2_power import Poco2PowerConfig
+    return True, Poco2PowerConfig(
+        host=env("BACKEND_POCO2_HOST", "10.42.0.94"),
+        ssh_user=env("BACKEND_POCO2_SSH_USER", "user"),
+        ssh_key=env("BACKEND_POCO2_SSH_KEY", "/etc/prius/poco2_ssh_key"),
+        mode=env("BACKEND_POCO2_MODE", "auto").strip().lower() or "auto",
+        grace_s=float(env("BACKEND_POCO2_GRACE_S", env("BACKEND_MFD_GRACE_S", "1200"))),
+        boot_timeout_s=float(env("BACKEND_POCO2_BOOT_TIMEOUT_S", "150")),
+        lost_recover_s=float(env("BACKEND_POCO2_LOST_RECOVER_S", "300")),
+    )
+
+
 def _build_ntp(mfd_enabled: bool) -> dict:
     """SNTP for the MFD Pi (backend/ntp_server.py):
 
@@ -467,6 +494,7 @@ def _pop_env_token():
 def _build_config(args: argparse.Namespace) -> BackendConfig:
     mfd_enabled, mfd_config = _build_mfd()
     roadsense_enabled, roadsense_config = _build_roadsense()
+    poco2_enabled, poco2_config = _build_poco2()
     return BackendConfig(
         **_build_ntp(mfd_enabled),
         **_build_dashcam(),
@@ -511,6 +539,8 @@ def _build_config(args: argparse.Namespace) -> BackendConfig:
         mfd_config=mfd_config,
         roadsense_enabled=roadsense_enabled,
         roadsense_config=roadsense_config,
+        poco2_enabled=poco2_enabled,
+        poco2_config=poco2_config,
         roadsense_scene_config=_build_roadsense_scene(),
         position_config=_build_position(),
         headunit_config=_build_headunit(),

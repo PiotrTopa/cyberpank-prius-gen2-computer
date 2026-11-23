@@ -194,6 +194,20 @@ def _build_roadsense_mode(params: Dict[str, Any]) -> Action:
     return RoadsenseModeAction(mode, source=ActionSource.UI)
 
 
+def _build_poco2_mode(params: Dict[str, Any]) -> Action:
+    from ..state.actions import Poco2ModeAction
+    mode = str(_require(params, "mode")).strip().lower()
+    if mode not in ("auto", "on", "off"):
+        raise CommandError("'mode' must be one of auto, on, off")
+    return Poco2ModeAction(mode, source=ActionSource.UI)
+
+
+def _build_poco2_restart(params: Dict[str, Any]) -> Action:
+    from ..state.actions import Poco2RestartAction
+    return Poco2RestartAction(_as_bool(params.get("force", False), "force"),
+                              source=ActionSource.UI)
+
+
 def _build_mfd_hold(params: Dict[str, Any]) -> Action:
     from ..state.actions import MfdHoldAction
     return MfdHoldAction(_as_bool(_require(params, "on"), "on"), source=ActionSource.UI)
@@ -757,6 +771,25 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
             "key off (bench), off = keep it stopped. State in `roadsense`."
         ),
         "params": {"mode": "auto | on | off"},
+    },
+    "poco2_mode": {
+        "builder": _build_poco2_mode,
+        "description": (
+            "Operator mode of the secondary POCO (poco2, headless slave): auto = "
+            "follow ACC (power button at key-on, clean SSH shutdown after the "
+            "key-off grace), on = start it and keep it running, off = shut it "
+            "down now and keep it off. State in `poco2`."
+        ),
+        "params": {"mode": "auto | on | off"},
+    },
+    "poco2_restart": {
+        "builder": _build_poco2_restart,
+        "description": (
+            "Restart the secondary POCO: cleanly over SSH (default), or with "
+            "force=true through a 12 s power-button hold (hung phone; risks its "
+            "filesystem). Only acted on while it is on."
+        ),
+        "params": {"force": "bool (default false)"},
     },
     "roadsense_restart": {
         "builder": _build_roadsense_restart,
