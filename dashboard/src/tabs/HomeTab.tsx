@@ -419,16 +419,18 @@ export function HomeTab({ state, now, sum, satNodes, satHolders, onOpenSystem }:
       </section>
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 items-start">
-        <div className="flex flex-col gap-3">
-          <PowerboxPanel state={state} now={now} />
-          <SystemsPanel state={state} nowS={nowS} />
-        </div>
+        {/* Phone order (columns stack): power, environment, what's running,
+            powerbox, thermal, then camera, USB hub, satellites. */}
         <div className="flex flex-col gap-3">
           <PowerPanel state={state} sum={sum} />
-          <ThermalPanel state={state} />
           <EnvironmentPanel state={state} />
         </div>
+        <div className="flex flex-col gap-3">
+          <SystemsPanel state={state} nowS={nowS} />
+          <PowerboxPanel state={state} now={now} />
+        </div>
         <div className="flex flex-col gap-3 md:col-span-2 xl:col-span-1">
+          <ThermalPanel state={state} />
           <CameraPreviewPanel server={state.roadsense?.camera_preview} now={now} />
           <UsbHubPanel state={state} manualHeld={satHolders.includes('manual:dash')} />
           <SatellitesPanel sats={state.satellites ?? {}} nodes={satNodes} holders={satHolders}
