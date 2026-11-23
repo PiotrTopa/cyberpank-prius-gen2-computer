@@ -73,6 +73,7 @@ SKY_H = 68                     # backdrop strip height (px above the horizon)
 LEAD_BRAKING = -1.5            # lead acceleration (m/s2) shown as stop lamps
 PARKED_DIM = 0.6               # a parked vehicle (the radar's mark) is drawn at this share of the brightness
 SIGN_PITCH = 21
+BUTTON_SLOT_W = 38             # bottom-right: room of the radar-view button (page.py); the lane boxes stand left of it
 
 # Headlamp beams on the road: reach (m ahead of the nose), parked-view reach,
 # half-width at the lamps, spread per metre, widest half-width, colours.
@@ -228,6 +229,8 @@ class SceneRenderer:
         # 0.8: on time when the UI loop runs at about the same rate
         self.min_redraw_s = 0.8 / max(0.1, tune.fps_scene)
         self.redraws = 0
+        # the radar-view button sits in the bottom-right corner of the road view (page.py)
+        self.right_inset = BUTTON_SLOT_W if tune.radar_view else 0
 
     @staticmethod
     def _orbit(az: float, el: float, dist: float, f: float, target, cx, cy) -> Camera:
@@ -828,7 +831,7 @@ class SceneRenderer:
             return
         boxes = [False] * int(nl) + [True] + [False] * int(nr)
         bw, bh, gap = 9, 14, 3
-        x = self.w - 5 - len(boxes) * (bw + gap) + gap
+        x = self.w - 5 - self.right_inset - len(boxes) * (bw + gap) + gap
         y = self.h - 19
         for own in boxes:
             if own:

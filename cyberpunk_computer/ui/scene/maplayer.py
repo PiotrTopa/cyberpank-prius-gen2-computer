@@ -283,7 +283,7 @@ def lane_boxes(r: Any, s: pygame.Surface, d: Any) -> bool:
     likely = min(getattr(lb, "likely", -1), fwd - 1)
     back = min(lb.back, 2 if fwd <= 4 else 1)
     bw, bh, gap, sep = 9, 14, 3, 3
-    x = r.w - 5 - (fwd + back) * (bw + gap) + gap - (sep if back else 0)
+    x = r.w - 5 - getattr(r, "right_inset", 0) - (fwd + back) * (bw + gap) + gap - (sep if back else 0)
     y = r.h - 19
     pal = r.pal
     for _ in range(back):

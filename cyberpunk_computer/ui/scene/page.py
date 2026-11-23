@@ -7,6 +7,15 @@ ScenePage: the centre column of the main screen.
     │  strip 194 x 21  │ dots  │  cruise slot, HV power, history, SOC
     └──────────────────────────┘  y = 239
 
+While the road view is open a small button in the scene's bottom-right corner
+switches the scene rectangle to the radar view (radar.py, an ATC-style plan of
+the tracked road users) and back: ``RDR`` on the road view, ``ROAD`` on the
+radar view, one tap toggles (``MainScreen`` registers the touch zone,
+``radar_button_hit_rect``). The choice is kept by the page for the session
+(not across restarts); with the radar view chosen, the road view comes back
+after ``radar_fallback_s`` without radar data, and the radar view returns with
+the data. Parked (the car view), the button is not shown.
+
 ``update()`` steps the director every UI frame (cheap arithmetic);
 ``render_scene()`` and ``render_strip()`` blit cached surfaces that are
 re-drawn only when needed; ``needs_frame()`` tells the frame pacer whether
@@ -23,9 +32,11 @@ import pygame
 
 from ..colors import COLORS
 from .alerts import ALERT_FEED, AlertBanner, AlertFeed
-from .director import SceneDirector
+from .director import VIEW_STEPS, SceneDirector
 from .inputs import FEED, SceneFeed, SceneInputs, read_inputs, read_perception
 from .powerbox import PowerHistory, StatusStrip
+# the radar-view button's geometry (light: the main screen imports it at start-up for the touch zone)
+from .radar_button import BTN_H, BTN_W, radar_button_hit_rect, radar_button_rect  # noqa: F401
 from .render import SceneRenderer
 from .tuning import Tuning, load as load_tuning
 
@@ -60,6 +71,13 @@ class ScenePage:
         self.banner: Optional[AlertBanner] = None
         self._alert_drawn: Optional[tuple] = None
         self._chip_drawn: Optional[tuple] = None
+        # radar view (radar.py): the driver's choice, kept for the session
+        self.radar_on = False
+        self.radar = None                    # RadarView, built with the scene renderer
+        self._radar_quiet = 0.0              # seconds the chosen radar view has had no radar data
+        self._radar_fallen = False           # ... so the road view is shown instead
+        self._btn_drawn: Optional[tuple] = None
+        self._btn_cache: dict = {}
 
     # -- data -------------------------------------------------------------------
 
@@ -100,6 +118,65 @@ class ScenePage:
             # keep the history ticking through quiet seconds
             energy = getattr(self._state, "energy", None)
             self.history.add(getattr(energy, "battery_power_kw", None))
+        self._update_radar(dt)
+
+    # -- radar view ---------------------------------------------------------------
+
+    def radar_button_visible(self) -> bool:
+        """The button is there while the road view is fully open (not parked, not mid camera move)."""
+        return bool(self.tuning.radar_view) and self.director.view_step == VIEW_STEPS
+
+    def radar_shown(self) -> bool:
+        """The scene rectangle shows the radar view now."""
+        return self.radar_on and not self._radar_fallen and self.radar_button_visible()
+
+    def toggle_radar(self) -> None:
+        """One tap on the button: road view <-> radar view (the choice stays for the session)."""
+        if not self.radar_button_visible() and not self.radar_on:
+            return
+        self.radar_on = not self.radar_on
+        self._radar_quiet = 0.0
+        self._radar_fallen = False
+
+    def _update_radar(self, dt: float) -> None:
+        if not self.radar_on:
+            return
+        from .radar import RADAR_STALE_S
+        d = self.director
+        if d.vision == "live" and d.radar_age <= RADAR_STALE_S:
+            self._radar_quiet, self._radar_fallen = 0.0, False
+        else:
+            self._radar_quiet += dt
+            if self._radar_quiet > float(self.tuning.radar_fallback_s):
+                self._radar_fallen = True
+        if self.radar is not None and self.radar_shown():
+            self.radar.update(d, self.inputs, dt)
+
+    def _button_sig(self) -> Optional[tuple]:
+        if not self.radar_button_visible():
+            return None
+        return (self.radar_shown(), self.radar_on)
+
+    def _button_surface(self, sig: tuple) -> pygame.Surface:
+        surf = self._btn_cache.get(sig)
+        if surf is None:
+            shown, on = sig
+            pal = self.scene.pal
+            surf = pygame.Surface((BTN_W, BTN_H))
+            surf.fill((0, 0, 0))
+            if shown:
+                label, frame, text = "ROAD", pal["lane_mid"], pal["value"]
+            elif on:
+                # chosen, but no radar data: the road view is back; the button says the choice still stands
+                surf.fill(COLORS["cyan_dark"])
+                label, frame, text = "RDR", pal["dim"], pal["dim"]
+            else:
+                label, frame, text = "RDR", pal["lane_mid"], pal["value"]
+            pygame.draw.rect(surf, frame, (0, 0, BTN_W, BTN_H), 1)
+            t = self.scene.text(label, 14, text)
+            surf.blit(t, ((BTN_W - t.get_width()) // 2, (BTN_H - 10) // 2 - 1))
+            self._btn_cache[sig] = surf
+        return surf
 
     def _alert_now(self):
         return self.alerts.current() if self.alerts is not None else None
@@ -122,13 +199,34 @@ class ScenePage:
             return True
         if not home:
             return False
+        if self._button_sig() != self._btn_drawn:
+            return True
+        if self.radar_shown():
+            return self.radar is None or self.radar.due(self.director, self.inputs, self._clock())
         return self.scene is None or self.scene.due(self.director, self.inputs, self._clock())
 
     def render_scene(self, surface: pygame.Surface) -> None:
         if self.scene is None:
             self.scene = SceneRenderer((self.width, SCENE_H), tuning=self.tuning)
-        surface.blit(self.scene.render(self.director, self.inputs, self._clock()),
-                     (self.x, self.y))
+        btn = self._button_sig()
+        if btn != self._btn_drawn:
+            # switched: the picture coming back is redrawn from what it shows now
+            self.scene.invalidate()
+            if self.radar is not None:
+                self.radar.invalidate()
+        if btn is not None and btn[0]:
+            if self.radar is None:
+                from .radar import RadarView
+                self.radar = RadarView(self.scene, (self.width, SCENE_H))
+                self.radar.keepout = [pygame.Rect(radar_button_rect(self.width)).inflate(4, 4)]
+            pic = self.radar.render(self.director, self.inputs, self._clock())
+        else:
+            pic = self.scene.render(self.director, self.inputs, self._clock())
+        surface.blit(pic, (self.x, self.y))
+        self._btn_drawn = btn
+        if btn is not None:
+            bx, by, _, _ = radar_button_rect(self.width)
+            surface.blit(self._button_surface(btn), (self.x + bx, self.y + by))
         a = self._alert_now()
         chip_sig = self._chip_sig(a)
         self._chip_drawn = chip_sig
