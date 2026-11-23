@@ -113,6 +113,7 @@ import time
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional, Sequence, Tuple
+from .host_stats import IGNORED_ZONES
 
 logger = logging.getLogger(__name__)
 
@@ -473,7 +474,9 @@ class RoadsenseManager:
 
     def _sample_thermals(self) -> None:
         try:
-            self._temps = dict(self._thermals() or {})
+            # The battery thermistor is fake on this phone (host_stats.IGNORED_ZONES).
+            self._temps = {k: v for k, v in (self._thermals() or {}).items()
+                           if k not in IGNORED_ZONES}
         except Exception:
             self._temps = {}
 

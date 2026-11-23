@@ -187,3 +187,15 @@ def test_state_and_signals():
     assert SIGNALS_BY_NAME["poco2_cpu_temp"].get(s) == 44.0
     assert SIGNALS_BY_NAME["poco2_host_power"].get(s) == 0.8
     assert s.hosts.poco["cpu_c"] == 70.5                      # partial update keeps the rest
+
+
+def test_fake_battery_zone_is_skipped(tmp_path):
+    """No battery on either POCO: the qcom-battery zone is a constant, not a reading."""
+    from cyberpunk_computer.backend.host_stats import discover_zones
+    for i, (typ, milli) in enumerate([("cpu0-thermal", 6000), ("qcom-battery", 20500), ("gpu-top-thermal", 7500)]):
+        z = tmp_path / ("thermal_zone%d" % i)
+        z.mkdir()
+        (z / "type").write_text(typ + "\n")
+        (z / "temp").write_text("%d\n" % milli)
+    types = [t for t, _ in discover_zones(str(tmp_path / "thermal_zone*"))]
+    assert types == ["cpu0-thermal", "gpu-top-thermal"]

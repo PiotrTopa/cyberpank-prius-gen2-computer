@@ -46,6 +46,11 @@ from typing import Callable, Dict, List, Optional, Tuple
 CPU_PREFIXES = ("cpu", "cluster")
 GPU_PREFIXES = ("gpu",)
 BATTERY = "/sys/class/power_supply/qcom-battery"
+# Zones that do not measure anything on our phones: neither POCO has a battery
+# (buck regulator + capacitor instead) and the battery thermistor input reads a
+# constant (~20.5 C). Left in, it showed up as the "hottest zone" whenever the
+# car was colder than that. Skipped everywhere (zones, hot zone, batt_c).
+IGNORED_ZONES = ("qcom-battery",)
 LITTLE = (0, 1, 2, 3)          # SDM845: Silver cores
 BIG = (4, 5, 6, 7)             # Gold cores
 
@@ -73,7 +78,7 @@ def discover_zones(pattern: str = "/sys/class/thermal/thermal_zone*") -> List[Tu
     out = []
     for zone_dir in sorted(glob.glob(pattern)):
         ztype = _read(zone_dir + "/type")
-        if ztype:
+        if ztype and ztype not in IGNORED_ZONES:
             out.append((ztype, zone_dir + "/temp"))
     return out
 

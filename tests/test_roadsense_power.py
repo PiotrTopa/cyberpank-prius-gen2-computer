@@ -842,3 +842,14 @@ class TestEarlyCameraWiring:
         state.bean = self._Bean(6, doors_locked=False)
         tick()
         assert svc.roadsense_power.calls[-1] == (True, True)
+
+
+def test_fake_battery_zone_is_never_the_hottest():
+    """The phone has no battery; its thermistor input reads a constant ~20.5 C.
+    In a cold car it used to win the hottest zone."""
+    h = Harness()
+    h.temps = {"cpu0-thermal": 6.0, "gpu-top-thermal": 7.5, "qcom-battery": 20.5}
+    h.tick(False)
+    st = h.m.status()
+    assert st["hottest_zone"] == "gpu-top-thermal" and st["hottest_c"] == 7.5
+    assert "qcom-battery" not in st["temps"]
