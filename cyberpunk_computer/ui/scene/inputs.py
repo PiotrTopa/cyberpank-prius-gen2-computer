@@ -47,6 +47,8 @@ class Lead(NamedTuple):
     accel: Optional[float] = None    # m/s2 (the model's estimate), negative = braking
     alpha: float = 1.0               # display channel: fade in / out (roadsense view)
     oid: str = ""                    # display channel: object id (a new id = another vehicle)
+    ttc: Optional[float] = None      # radar view: time to reach it, s (vw.lead.ttc)
+    sd: Optional[float] = None       # radar view: 1 sigma of the distance, m (vw.lead.sd)
 
 
 class RoadLine(NamedTuple):
@@ -65,7 +67,15 @@ class RoadObject(NamedTuple):
     oid: str = ""                    # display channel: object id
     vx: float = 0.0                  # display channel: m/s relative to the car (x forward)
     vy: float = 0.0                  # display channel: m/s, LEFT positive
+    # radar view (vw.objs m / w / ttc / sd / c): what the integrator's radar says of it, when it says
+    motion: str = ""                 # "stationary" | "moving" | "" (not known)
+    with_traffic: bool = False       # it drives with the car's traffic
+    ttc: Optional[float] = None      # time to reach it, s
+    sd: Optional[float] = None       # 1 sigma of the distance, m (sent from 0.5 m)
+    cam: bool = False                # placed by the camera alone (approximate; no radar verdicts)
 
+
+ROAD_USER_MOTION = {"s": "stationary", "m": "moving"}
 
 ROAD_USER_MARKS = {"p": "parked", "o": "obstacle", "t": "threat"}
 
@@ -123,6 +133,7 @@ class RoadScene(NamedTuple):
     # the radar's obstacle / threat ahead, or None: (level "threat" | "obstacle", metres ahead, m LEFT positive,
     # time to reach it in s or None, it is the lead)
     alert: Optional[Tuple[str, float, float, Optional[float], bool]] = None
+    radar: bool = False              # the integrator's radar spoke for this frame (vw.rdr)
 
 
 class SceneInputs(NamedTuple):
@@ -334,7 +345,8 @@ def parse_scene(raw: Any) -> Optional[RoadScene]:
             if d is not None and d > 0:
                 f = _num(lv.get("f"))
                 lead = Lead(d, -(_num(lv.get("y")) or 0.0), _num(lv.get("v")), 1.0, road_user_kind(lv.get("k")), accel,
-                            1.0 if f is None else max(0.0, min(1.0, f)), str(lv.get("id") or ""))
+                            1.0 if f is None else max(0.0, min(1.0, f)), str(lv.get("id") or ""),
+                            _num(lv.get("ttc")), _num(lv.get("sd")))
         # other road users roadsense placed (camera only: approximate); they replace nothing the scene had
         for o in vw.get("objs") or ():
             if not isinstance(o, Mapping):
@@ -345,7 +357,9 @@ def parse_scene(raw: Any) -> Optional[RoadScene]:
             f = _num(o.get("f"))
             objs.append(RoadObject(road_user_kind(o.get("k")), x, -y, ROAD_USER_MARKS.get(o.get("s"), ""),
                                    1.0 if f is None else max(0.0, min(1.0, f)),
-                                   str(o.get("id") or ""), _num(o.get("vx")) or 0.0, -(_num(o.get("vy")) or 0.0)))
+                                   str(o.get("id") or ""), _num(o.get("vx")) or 0.0, -(_num(o.get("vy")) or 0.0),
+                                   ROAD_USER_MOTION.get(o.get("m"), ""), o.get("w") == 1, _num(o.get("ttc")),
+                                   _num(o.get("sd")), o.get("c") == 1))
     vis = raw.get("vis")
     vis_ok = not (isinstance(vis, Mapping) and vis.get("ok") is False)
     vis_why = str(vis.get("why") or "") if isinstance(vis, Mapping) and not vis_ok else ""
@@ -361,8 +375,9 @@ def parse_scene(raw: Any) -> Optional[RoadScene]:
         alert = None
     if lead_unknown:
         lead = None
+    radar = isinstance(vw, Mapping) and vw.get("rdr") == 1 and vis_ok
     return RoadScene(int(seq) if isinstance(seq, (int, float)) else 0,
-                     xs, lanes, edges, lead, tuple(objs), path, t, vis_ok, vis_why, lead_unknown, alert)
+                     xs, lanes, edges, lead, tuple(objs), path, t, vis_ok, vis_why, lead_unknown, alert, radar)
 
 
 def parse_signs(raw: Any) -> Tuple[Tuple[SignItem, ...], Tuple[SignItem, ...]]:

@@ -82,6 +82,7 @@ class SceneDirector:
         self.vis_why = ""               # the integrator's reason while vision == "doubt"
         self.lead_unknown = False       # live, but the lead is not known (L44)
         self.alert = None               # live: the radar's obstacle / threat ahead (inputs.RoadScene.alert)
+        self.radar_age = 99.0           # seconds since the last fresh scene the integrator's radar spoke for (vw.rdr)
         self.lanes: List[Optional[List[float]]] = [None] * 4
         self.lane_prob: List[float] = [0.0] * 4
         self.edges: List[Optional[List[float]]] = [None] * 2
@@ -217,6 +218,10 @@ class SceneDirector:
             self._lost = False
         else:
             self._road_age += dt
+        # the radar view (radar.py): how long the integrator's radar has been silent
+        self.radar_age = 0.0 if (fresh and road.radar) else min(99.0, self.radar_age + dt)
+        if not inp.rs_ok:
+            self.radar_age = 99.0
 
         if not inp.rs_ok:
             self.vision = "off" if inp.rs_state in ("", "off", "stopping") else "wait"

@@ -53,7 +53,7 @@ Scene HUD while driving (all on the scene surface):
 |---|---|
 | top line, y 3..29 | the signs. From the left: warning signs ahead, nearest first, each followed by the expected distance in metres (default: up to three, within 400 m). Right-aligned against the limit: the rules in effect (default: up to six; as many as fit, `+n` for the rest); a small pointer under a rule that binds one side of the road. Then the ego traffic light as a three-lamp signal with its distance in metres, the speed-limit sign and the link LED |
 | speed | not shown in the scene (the car has a speedometer). `show_speed` brings back speed (Terminus 28, `display_speed_kmh`), `km/h`, gear and the green `SET nn` chip top-left; the signs then move to a row at y 33..52 |
-| bottom-right | lane boxes: one per lane seen, the own lane lit (only when a neighbouring lane is seen; section 6.4) |
+| bottom-right | the `RDR` button (34 x 22, touch zone 46 x 33) that switches to the radar view (section 6.8); left of it the lane boxes: one per lane seen, the own lane lit (only when a neighbouring lane is seen; section 6.4) |
 | bottom-left | chip `HIGH` while the high beam is on (all lamps with `lamp_chips = all`), above it the perception status (nothing when live) |
 | from the map (section 6.5; only with a usable map) | top-left, before the warnings: the next speed limit as a dashed ring with its distance; under the link LED a 5 x 7 pin (amber on dead reckoning); beyond the camera's 100 m the road up to the horizon; bottom-right the lane boxes from the map's lane count; bottom-left the tunnel exit distance |
 | on the road | lead vehicle with target brackets and its distance (whole metres with a 0.3 m hysteresis: the number changes when the value is 0.8 m from it); under it the time gap when shorter than 2.5 s and the closing/opening speed in km/h with an arrow from 5 km/h |
@@ -452,6 +452,62 @@ roads by that much.
 
 Screenshots: filedrop gallery `set=l17road` (synthetic drive over a made-up network, section 11.1).
 
+### 6.8 Radar view (`scene/radar.py`, lane radar-view, 2026-11-23)
+
+An air-traffic-control style plan view of the road users chris-integrator tracks, in place of the road view in
+the same 238 x 216 rectangle. The status strip, the alert banner, the side panels and the real-speed chip under
+the limit are unchanged.
+
+Screenshots: `python -m cyberpunk_computer.ui.scene.radar_demo --shots DIR` (section 11). On the city street at
+52 km/h: the lead (filled, target corners, tag 26 m / 49 km/h moving our way), parked rows both sides dimmed, an
+oncoming car with its leader pointing down, a cyclist with the traffic (tag), a pedestrian the camera alone
+places (range bar). With a threat: a car pulls out of the parked row, red with a ring blinking at 1 Hz, its tag
+with the time to reach it (1.3 s).
+
+**Switching.** While the road view is fully open, a 34 x 22 px button sits in the bottom-right corner (2 px
+from the edges; its touch zone reaches 10 px further left and 9 px further up, 46 x 33 px in all): `RDR` on the
+road view, `ROAD` on the radar view, Terminus 14. One tap toggles (a long press does the same). The lane boxes
+stand left of it (`render.BUTTON_SLOT_W`, 38 px). The choice is kept by `ScenePage.radar_on` for the session (not
+across a UI restart; nothing in the scene stores preferences); parked (the car view) the button is not drawn and
+the zone is off, and the radar view comes back with the road view. With the radar view chosen and no radar data
+(`vw.rdr`) for `radar_fallback_s` (5 s; until then `NO RADAR DATA` on the radar view) the road view returns and
+the button turns into a lit, dim `RDR` (the choice still stands); the radar view returns with the first radar
+frame. A tap on the lit button cancels the choice. The touch zone (`MainScreen._setup_pointer`, name
+`radar-view`) is registered after the page swipe, so it wins over it; its geometry is in
+`scene/radar_button.py`, which imports nothing heavy (the scene is still imported after the first frame).
+
+**Layout.**
+
+| Element | How |
+|---|---|
+| own car | a filled chevron at the bottom centre, nose (range 0, the camera) 14 px over the bottom edge, heading up |
+| range | linear; one of 25 / 50 / 80 m (the integrator draws road users to 70 m) to the outer ring 10 px from the top: the smallest step that holds the lead, threats, obstacles, moving traffic in the path, persons near it (each + 4 m) and 3 s of driving. A larger step is taken at once, a smaller one only after it has fitted for 4 s (`RANGE_HOLD_S`), one step at a time: the scale does not breathe |
+| lateral scale | up to twice the range scale, at most 8 px/m (+-14 m across at every range; the same as the range scale at 25 m). Without it the lanes and both parked rows were one 30 px column at 50 m. The rings are then half-ellipses (curves of equal distance); the bearing ticks stand at true bearings through the same mapping |
+| rings | 10 / 25 m, 10 / 25 / 50 m or 25 / 50 / 80 m, dotted, dim teal; labels in 04B03 where a ring leaves the picture at the left edge, else on its upper left |
+| bearing ticks | every 15 degrees on the outer ring, 5 % of its radius inward |
+| path, lanes | the planned path (`vw.path`) dashed, the ego lane's two lines (`vw.lanes[1..2]`) thin and dim |
+| road users | fixed-size symbols by kind: vehicle = 5 x 9 box (truck, bus 7 x 13), two-wheeler = diamond, person = ring with a dot; the lead filled, with the road view's target corners |
+| colours | traffic cyan; parked 60 % (as the road view); persons and two-wheelers amber (as the road view); `obstacle` red with a frame; `threat` red with a ring, symbol and ring blinking at 1 Hz (0.5 s on, 0.5 s off, the off phase at 45 %); a fading object is dimmed by its `f` |
+| velocity leader | a line from the symbol to where it is in 1 s at its **ground** velocity (relative `vx` + the car's real speed along x, `vy` across), from 1 m/s, at most 32 px: parked cars have none, an oncoming car's points down, a crossing pedestrian's sideways |
+| range uncertainty | a radial bar of +-1 sigma with end ticks along the bearing when it is at least 3 px each side: `sd` from the scene; for a road user the camera alone placed (`c`) without one, the camera's documented error (`radar.camera_sigma`: 0.0075 x^2, at most 30 % of the distance; 15 % at 20 m, 30 % at 40 m). A tag's distance gets a `~` when sigma is at least 15 % of it |
+| data tags | at most 4, most important first: threats, obstacles, the lead, the nearest road user in the path (+-1.6 m of the path, not parked), the nearest person / two-wheeler within 30 m. Two lines (three for a threat), black ground: distance in whole metres (Terminus 14, white; red for a threat / obstacle) with a 04B03 `m`; ground speed in km/h (Terminus 14, cyan) with one glyph: filled square = standing, triangle = moving (up: our way, down: towards us, left / right: across), `?` = not known (no radar verdict; a camera-only road user); for a threat the time to reach it (`1.3s`, red). Distance and speed with a hysteresis (0.3 m, 1.5 km/h) |
+| tag placement | six candidate places around the symbol (right / left, above / level / below; outside a threat's ring and an obstacle's frame), the one used last first (no hopping); a place must lie inside the picture and clear of the placed tags, the tagged symbols, the own car, the status line, the limit sign and the button; first also clear of the other symbols, then allowed over them. With no free place the tag is left out: tags never overlap |
+| status, bottom-left | the number of objects tracked (Terminus 14 + `TRK`), or the chip `NO RADAR DATA` while no radar frame came for 1.5 s (`RADAR_STALE_S`) or the camera is not live (then no object is drawn: nothing measured, as in the road view) |
+| limit, speed | the limit sign as in the road view (top-right); speed only with `show_speed` |
+
+Data: section 7.4 (`vw.objs[].m / w / ttc / sd / c`, `vw.lead.ttc / sd`, `vw.rdr`); the director carries the
+objects between samples as for the road view (`director._carry_objects`) and counts `radar_age`.
+
+Demo: `python -m cyberpunk_computer.ui.scene.radar_demo --shots DIR` (section 11). The situations are built as
+chris-integrator `view` messages and pass the backend's `view_to_scene`, so the cap on road users and its
+priorities apply as on the car.
+
+What it does not do: no heading for the own car in a curve (the plan turns with the car: the car frame is all
+the scene carries); no oncoming / crossing tag of its own (only the nearest in the path and persons get one
+besides threats, obstacles and the lead); no trail of past positions (the scene carries no history; a trail
+would mean per-object state for a picture redrawn 20 times a second); no persistence of the choice across
+restarts.
+
 ### 6.3 Signs (`scene/signs.py`)
 
 The sign row (section 2) shows `signs.on` (rules in effect that bind the car, without the speed
@@ -716,8 +772,31 @@ view"). The backend subscribes to `view` too; while it is fresh (0.5 s):
        "light": {"id": "light:7", "state": "red", "d": 41.0, "y": 2.5,               # car frame, y right
                  "vx": -12.0, "vy": 0.0, "f": 1.0, "flashing": true, "q": true, "held": true,
                  "alt": {"s": "green", "side": "l"}} | null,
-       "objs": [{"id": "ru:4", "k": "human", "d": 18.0, "y": 4.0, "vx": -8.0, "vy": 0.0, "f": 0.5}]}   # lane L42, nearest first, <= 8
+       "objs": [{"id": "ru:4", "k": "human", "d": 18.0, "y": 4.0, "vx": -8.0, "vy": 0.0, "f": 0.5,  # lane L42, nearest first, <= 10
+                 "s": "p", "m": "s", "w": 1, "ttc": 2.4, "sd": 1.6, "c": 1}],   # radar marks / radar view: only when known
+       "alert": {"lvl": "t", "d": 30.0, "y": 0.1, "ttc": 2.1, "lead": true},   # the radar's obstacle / threat, or absent
+       "rdr": 1}                                                               # the radar spoke for this frame, or absent
 ```
+
+Radar view keys (lane radar-view, 2026-11-23; short keys, each only when known, so a camera-only road user costs
+nothing extra):
+
+| Key | chris-integrator `view` source | Conversion |
+|---|---|---|
+| `objs[].s` | `attrs.threat` / `attrs.obstacle` / `attrs.parked` (lane radar marks, 76f2c43) | `t` / `o` / `p`, in that order |
+| `objs[].m` | `attrs.motion` | `s` stationary, `m` moving; `unknown` and absent: no key |
+| `objs[].w` | `attrs.with_traffic` | `1` when true |
+| `objs[].ttc` | `attrs.ttc_s` | 0.1 s, when a number >= 0 |
+| `objs[].sd` | `sx` (1 sigma of the drawn position along x) | 0.1 m, from 0.5 m |
+| `objs[].c` | `attrs.source` not `radar` (e.g. `roadusers`: the camera's detector) | `1`: placed by the camera alone (no radar verdicts; the screen draws the camera's range error) |
+| `lead.ttc`, `lead.sd` | the lead object's `attrs.ttc_s`, `attrs.dist_std_m` (else `sx`) | as above |
+| `rdr` | the view message carries the key `alert` (null or not): the integrator adds it only while its radar is fresh (`plugins/trackers.py`) | `1`, else absent |
+
+The cap is 10 road users (was 8; the integrator sends at most 12). With more, what stands in the way (`t`, `o`) is
+kept first, then the other non-parked ones, then the parked ones, each nearest first; the list goes out nearest
+first. Size: about 75-90 bytes per road user, so ten add about 0.2 kB to an event at most (about 2 kB/s on the
+phone -> Pi link at 10 Hz); a scene without radar data is unchanged. The car's own speed is not sent: the screen
+has `vehicle.real_speed_kmh` (`SceneInputs.real_speed_kmh`).
 
 Road users by class (roadsense lane L42, 2026-11-19): `vw.lead.k` is roadsense's voted class of the lead
 (`human`, `bike`, `motorbike`, `car`, `van`, `truck`, `bus`, `tram`) and `vw.objs` the other road users roadsense
@@ -1080,6 +1159,29 @@ budget of section 10.3 (about 48 % with a usable map, 60 % allowed). To measure 
 `tools/mfd_bench.py drive 30 --hz 10 --map` with a `geo` block in `MODS` (the demo timeline has none yet).
 Without a usable map the added work is one attribute test per redraw.
 
+### 10.5 Radar view cost (2026-11-23)
+
+Desktop (i7-8850H, pygame-ce 2.5.8, dummy video driver), the demo's city street (the lead and ten road users,
+the cap, of which seven parked; four tags), best of 5 x 1000 redraws of the picture alone, and the whole main screen
+(`MainScreen.update + render`, 300 frames at 20 fps over 15 s of the demo drive, one picture redraw per frame;
+`radar_demo.py --bench`):
+
+| | Road view | Radar view |
+|---|---|---|
+| picture redraw, city street | 0.349 ms | 0.192 ms |
+| picture redraw, a threat pulls out | 0.344 ms | 0.181 ms |
+| picture redraw, pedestrian crossing (five road users) | 0.273 ms | 0.165 ms |
+| whole frame, driving | 1.20 ms | 1.04 ms |
+| static layer (rings, ticks, labels, own car) | | 0.4 / 0.6 / 0.8 ms at 25 / 50 / 80 m, once per range (cached) |
+
+The radar view costs about half the road view per redraw: one blit of the cached layer, the path and two lines,
+at most 11 symbols with leaders and bars, up to four tags from the text cache. It redraws on the same rule
+(something moved by about a pixel, or a threat blinks, at most `fps_scene`), so standing with nothing moving it
+costs a blit per frame. Pi Zero estimate (**not measured on the Pi**): at the 20-30x of a rough rule 3.5-6 ms
+per radar redraw against 7-10 ms for the road view; at the x70 of section 10.2, 13 ms against 24 ms, about
+26 % against 49 % of the core at 20 redraws a second for the picture alone. A range change adds one static layer
+(up to 0.8 ms here, about 55 ms on the Pi at x70) at most every 4 s.
+
 ## 11. Demo and screenshots
 
 ```
@@ -1099,6 +1201,20 @@ limit sign and rules, left curve at night with street lamps, red light with the 
 the scene closes. Vehicle values go through the real state fields; the road goes in as
 `roadsense_scene` events; `mods` override labels, signs, lamps and cruise for the variant shots. The
 street lamps of the demo are simulated data for the `lamp` object kind (section 9).
+
+Radar view (section 6.8):
+
+```
+python -m cyberpunk_computer.ui.scene.radar_demo --shots OUT_DIR [--scale 3]   # 9 PNGs at 1x and 3x
+python -m cyberpunk_computer.ui.scene.radar_demo --bench                       # road view vs radar view
+python -m cyberpunk_computer.ui.scene.radar_demo --live                        # window: SPACE toggles, 1-6 situation
+```
+
+Shots: the road view with the `RDR` button; the radar view on a city street (lead, parked rows both sides, an
+oncoming car, a camera-only pedestrian, a cyclist with the traffic), with a van standing on the path (obstacle),
+with a car pulling out of the parked row (threat, blink phase on and off), at a pedestrian crossing with an
+oncoming cyclist and a bus at its stop, on an open road with a far camera-only lead (80 m range), with the radar
+silent (`NO RADAR DATA`), and 5 s later back in the road view with the lit button.
 
 ### 11.0 Where the map chain loses a junction (`tools/mfd_chain_replay.py`, 2026-11-18)
 
@@ -1212,6 +1328,8 @@ ignored and logged.
 | `map_far_disagree_m` | 8.0 | camera / map difference per 100 m that hides the far road |
 | `map_far_max_m` | 600 | reach of the far road |
 | `cruise_chip` | true | `SET nn` beside the speed while cruise is engaged (with `show_speed`; the cruise slot of the strip shows it always) |
+| `radar_view` | true | the `RDR` / `ROAD` button bottom-right of the road view and the radar view behind it (section 6.8); false: no button, the lane boxes back in the corner |
+| `radar_fallback_s` | 5.0 | with the radar view chosen, the road view comes back after this long without radar data (and the radar view with the data) |
 | `side_ticks` | true | corner ticks on the six side panels |
 | `ambient_panel` | `plain` | `plain` or `level` (section 2) |
 | `fps_scene` | 20.0 | scene redraws per second while it animates (driving, camera swing, doors), and the UI loop rate meanwhile (section 10) |

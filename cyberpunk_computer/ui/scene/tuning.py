@@ -139,6 +139,11 @@ class Tuning:
                                 # this in the road's lateral run over 100 m
     map_far_max_m = 600         # reach of the far road (m)
 
+    # ── radar view (radar.py): ATC-style plan view of the tracked road users ──
+    radar_view = True           # the RDR / ROAD button in the bottom-right corner of the road view
+    radar_fallback_s = 5.0      # with the radar view chosen, the road view comes back after this long
+                                # without radar data (and the radar view when the data returns)
+
     # ── side panels ──
     side_ticks = True           # corner ticks on the six panels
     ambient_panel = "plain"     # plain (empty, as originally) | level (mode + level bar)

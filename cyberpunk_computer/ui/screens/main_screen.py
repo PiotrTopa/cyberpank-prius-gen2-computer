@@ -1645,6 +1645,23 @@ class MainScreen(Screen):
             on_click=lambda x, y: ALERT_FEED.ack(False),
             on_long_press=lambda x, y: ALERT_FEED.ack(True) or True,
             enabled=lambda: ALERT_FEED.current() is not None, name="alert-ack"))
+        # Radar-view button, bottom-right corner of the scene (ui/scene/page.py, radar.py): one tap
+        # switches road view <-> radar view; registered after the swipe zone, so it wins over it.
+        from ..scene.radar_button import radar_button_hit_rect
+        self.add_pointer_zone(PointerZone(
+            radar_button_hit_rect(center_x + 1, 1, center_w - 2),
+            on_click=lambda x, y: self._toggle_radar(),
+            on_long_press=lambda x, y: self._toggle_radar() or True,
+            enabled=self._radar_button_live, name="radar-view"))
+
+    def _radar_button_live(self) -> bool:
+        page = self._scene_page
+        return page is not None and self._current_page == 0 and page.radar_button_visible()
+
+    def _toggle_radar(self) -> None:
+        page = self._scene_page
+        if page is not None:
+            page.toggle_radar()
 
     # -- navigation API (also used by MFD hardware buttons) -----------------
 

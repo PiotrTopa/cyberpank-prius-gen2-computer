@@ -16,7 +16,8 @@ street lamps, red traffic light, stop, scene closes. ``state_at`` /
 ("1", "2L", "2R", "3M": lane layout), ``tuning`` (overrides of ui/scene/tuning.py),
 ``lead`` (False = none), ``objects`` (False = none), ``straight``, ``light``
 (the scene's ``light`` block), ``lead_kind`` (the lead's road-user class) and ``road_users`` (other road users:
-(kind, x, y right) placed on the road, lane L42).
+(kind, x, y right) placed on the road, lane L42), ``vw`` (a function of t returning the scene's display channel
+block, or None; radar_demo.py).
 
 Vehicle values go through the real state fields; the road arrives the way the
 backend is expected to send it: ``roadsense_scene`` events into a SceneFeed.
@@ -153,6 +154,10 @@ def scene_at(t: float, seq: int, mods: Optional[Dict[str, Any]] = None) -> Optio
             out.pop("path", None)
     if mods.get("lead_unknown"):
         out["lead"], out["lead_unknown"] = None, True
+    if callable(mods.get("vw")):
+        vw = mods["vw"](t)                       # the display channel (radar_demo.py), or None: not sent
+        if vw is not None:
+            out["vw"] = vw
     return out
 
 

@@ -1834,3 +1834,254 @@ def test_old_roadsense_scene_has_no_marks():
     step(d, SceneInputs(speed_kmh=50, real_speed_kmh=50, gear="D", ready=True, rs_state="running", rs_ok=True,
                         road=road), 1.0)
     assert d.vision == "live" and not d.lead_unknown
+
+
+# ── radar view (ui/scene/radar.py): ATC-style plan of the tracked road users ─────────────────────────────────
+
+def radar_scene(seq, t_ms, objs=(), lead=None, alert=None, radar=True):
+    sc = vw_scene(seq, t_ms, lead=lead)
+    sc["vw"]["path"] = {"y": [0.0] * 8}
+    if objs:
+        sc["vw"]["objs"] = list(objs)
+    if radar:
+        sc["vw"]["rdr"] = 1
+    if alert:
+        sc["vw"]["alert"] = alert
+    return sc
+
+
+RADAR_CITY = [
+    {"id": "ru:1", "k": "car", "d": 12.0, "y": 3.3, "vx": -14.0, "vy": 0.0, "s": "p", "m": "s"},
+    {"id": "ru:2", "k": "car", "d": 18.0, "y": -6.4, "vx": -14.0, "vy": 0.0, "s": "p", "m": "s", "sd": 0.6},
+    {"id": "ru:3", "k": "car", "d": 38.0, "y": -3.5, "vx": -26.0, "vy": 0.0, "m": "m"},
+    {"id": "ru:4", "k": "human", "d": 15.0, "y": 5.0, "vx": -14.0, "vy": -1.1, "c": 1},
+    {"id": "ru:5", "k": "bike", "d": 9.0, "y": 2.3, "vx": -9.0, "vy": 0.0, "m": "m", "w": 1}]
+RADAR_LEAD = {"id": "lead:1", "d": 25.0, "y": 0.1, "v": -0.5, "k": "car", "ttc": 9.9, "sd": 1.2}
+
+
+def radar_drawn(objs=RADAR_CITY, lead=RADAR_LEAD, alert=None, radar=True, seconds=2.0, clock_extra=0.0):
+    from cyberpunk_computer.ui.scene.radar import RadarView
+    from cyberpunk_computer.ui.scene.render import SceneRenderer
+    r = SceneRenderer((238, 216))
+    rv = RadarView(r, (238, 216))
+    d = SceneDirector()
+    inp = SceneInputs(speed_kmh=50, real_speed_kmh=50, gear="D", ready=True, rs_state="running", rs_ok=True,
+                      limit_kmh=50, limit_source="sign")
+    t = 0.0
+    for k in range(int(seconds / 0.05)):
+        road = parse_scene(radar_scene(k + 1, 1000 + 50 * k, objs, lead, alert, radar))
+        inp = inp._replace(road=road)
+        d.update(inp, 0.05)
+        rv.update(d, inp, 0.05)
+        t += 0.05
+    if clock_extra:
+        d.clock += clock_extra
+    rv.render(d, inp, t)
+    return rv, d, inp
+
+
+def test_radar_view_fields_are_parsed():
+    road = parse_scene(radar_scene(1, 1000, RADAR_CITY, RADAR_LEAD))
+    assert road.radar and road.lead.ttc == 9.9 and road.lead.sd == 1.2
+    by = {o.oid: o for o in road.objects}
+    assert by["ru:1"].motion == "stationary" and by["ru:1"].state == "parked" and not by["ru:1"].cam
+    assert by["ru:5"].motion == "moving" and by["ru:5"].with_traffic
+    assert by["ru:4"].cam and by["ru:4"].motion == "" and by["ru:2"].sd == 0.6
+    old = parse_scene(vw_scene(1, 1000, lead={"id": "lead:1", "d": 20.0, "y": 0.0, "v": 0.0}))
+    assert not old.radar and old.lead.ttc is None and old.lead.sd is None
+    assert not parse_scene(radar_scene(1, 1000, RADAR_CITY, radar=False)).radar
+
+
+def test_radar_view_draws_symbols_tags_and_status_inside_its_rectangle():
+    rv, d, _ = radar_drawn()
+    s = rv.surface
+    assert s.get_size() == (238, 216)
+    cols = region_colours(s, (0, 0, 238, 216))
+    assert rv.col["lead"] in cols and rv.col["vru"] in cols
+    assert rv.col["red"] not in {tuple(s.get_at((x, y)))[:3] for x in range(238) for y in range(40, 216)}
+    tags = [b for _, b in rv.tags]
+    assert 1 <= len(tags) <= 4 and "lead:1" in [i for i, _ in rv.tags]
+    bounds = pygame.Rect(0, 0, 238, 216)
+    for i, a in enumerate(tags):
+        assert bounds.contains(a)
+        for b in tags[i + 1:]:
+            assert not a.colliderect(b)                       # tags never overlap
+        for k in rv.keepout + [rv.host_limit_rect]:
+            assert not a.colliderect(k)                       # nor cover the button or the limit sign
+
+
+def test_radar_view_tag_text_is_one_bit():
+    """Every pixel of a tag is the black ground or one of the tag's own colours: no anti-aliased shades."""
+    rv, d, _ = radar_drawn()
+    allowed = {(0, 0, 0), rv.col["text"], rv.col["value"], rv.col["label"], rv.col["red"]}
+    for _, box in rv.tags:
+        for x in range(box.left, box.right):
+            for y in range(box.top, box.bottom):
+                assert tuple(rv.surface.get_at((x, y)))[:3] in allowed, (box, x, y)
+
+
+def test_radar_view_obstacle_and_threat_are_red_and_the_threat_blinks():
+    obst = [{"id": "ru:7", "k": "van", "d": 30.0, "y": 0.2, "vx": -14.0, "vy": 0.0, "s": "o", "m": "s"}]
+    rv, d, _ = radar_drawn(obst, lead=None, alert={"lvl": "o", "d": 30.0, "y": 0.2})
+    assert rv.col["red"] in region_colours(rv.surface, (0, 40, 238, 160))
+    assert "ru:7" in [i for i, _ in rv.tags]
+    thr = [{"id": "ru:8", "k": "car", "d": 16.0, "y": 1.6, "vx": -12.0, "vy": -0.6, "s": "t", "m": "m",
+            "ttc": 1.3}]
+    on, d1, _ = radar_drawn(thr, lead=None, alert={"lvl": "t", "d": 16.0, "y": 1.6, "ttc": 1.3})
+    a = pygame.image.tobytes(on.surface, "RGB")
+    off, d2, _ = radar_drawn(thr, lead=None, alert={"lvl": "t", "d": 16.0, "y": 1.6, "ttc": 1.3}, clock_extra=0.5)
+    assert pygame.image.tobytes(off.surface, "RGB") != a                  # the blink phase changes the picture
+    assert "ru:8" in [i for i, _ in on.tags]
+    # the blink phase is a redraw reason of its own (the threat keeps blinking while nothing moves)
+    assert on._signature(d1, SceneInputs()) != on._signature(d2, SceneInputs())
+
+
+def test_radar_view_says_no_radar_data_and_draws_no_object_without_the_camera():
+    from cyberpunk_computer.ui.scene.render import SceneRenderer
+    tags = []
+    orig = SceneRenderer._chip
+
+    def spy(self, s, x, y, label, color, filled=False):
+        tags.append(label)
+        return orig(self, s, x, y, label, color, filled)
+    SceneRenderer._chip = spy
+    try:
+        rv, d, _ = radar_drawn(radar=False)
+    finally:
+        SceneRenderer._chip = orig
+    assert "NO RADAR DATA" in tags and d.radar_age > 1.5
+
+
+def test_radar_range_steps_up_at_once_and_down_only_after_a_hold():
+    from cyberpunk_computer.ui.scene import radar as R
+    rv, d, inp = radar_drawn(objs=[], lead={"id": "lead:1", "d": 60.0, "y": 0.0, "v": 0.0})
+    assert rv.range_m == 80
+    near = parse_scene(radar_scene(500, 90_000, [], {"id": "lead:1", "d": 12.0, "y": 0.0, "v": 0.0}))
+    inp = inp._replace(road=near, real_speed_kmh=20.0)
+    for _ in range(int((R.RANGE_HOLD_S - 0.5) / 0.05)):
+        d.update(inp, 0.05)
+        rv.update(d, inp, 0.05)
+    assert rv.range_m == 80                                               # not yet
+    for _ in range(int(1.0 / 0.05)):
+        d.update(inp, 0.05)
+        rv.update(d, inp, 0.05)
+    assert rv.range_m == 50                                               # one step down after the hold
+    far = inp._replace(road=parse_scene(radar_scene(900, 99_000, [], {"id": "lead:1", "d": 70.0, "y": 0.0,
+                                                                         "v": 0.0})))
+    d.update(far, 0.05)
+    rv.update(d, far, 0.05)
+    assert rv.range_m == 80                                               # up at once
+
+
+def test_radar_view_is_cached_while_nothing_moves():
+    objs = [dict(o, vx=0.0, vy=0.0) for o in RADAR_CITY]
+    lead = dict(RADAR_LEAD, v=0.0)
+    rv, d, inp = radar_drawn(objs, lead=lead)
+    stand = inp._replace(speed_kmh=0.0, real_speed_kmh=0.0)
+
+    def run(k0, n, t0):
+        for k in range(n):                     # fresh samples at 20 Hz, nothing moves
+            frame = stand._replace(road=parse_scene(radar_scene(k0 + k, 10_000 + 50 * (k0 + k), objs, lead)))
+            d.update(frame, 0.05)
+            rv.update(d, frame, 0.05)
+            rv.render(d, frame, t0 + 0.05 * k)
+    run(100, 40, 50.0)
+    n = rv.redraws
+    run(140, 40, 52.0)
+    assert rv.redraws == n and len(rv._static) == 1
+
+
+def _radar_sim(t, radar_on, vw, toggle_at=18.0):
+    from cyberpunk_computer.ui.scene import radar_demo
+    return radar_demo.make_sim(t, radar_on, dict(radar_demo._BASE, vw=vw), toggle_at)
+
+
+def _tap(m, x, y):
+    target = m.pointer_target_at(x, y)
+    assert target is not None
+    m.pointer_click(target, x, y)
+    return target
+
+
+def test_radar_button_toggles_by_tap_and_only_in_the_road_view():
+    from cyberpunk_computer.ui.scene import radar_demo
+    from cyberpunk_computer.ui.scene.radar_button import radar_button_hit_rect
+    sim = _radar_sim(20.0, False, radar_demo.city(24.0))
+    m, page = sim.screen, sim.screen.scene_page
+    zx, zy, zw, zh = radar_button_hit_rect(page.x, page.y, page.width)
+    assert zw >= 28 and zh >= 22
+    cx, cy = zx + zw // 2, zy + zh // 2
+    assert page.radar_button_visible() and not page.radar_on
+    assert _tap(m, cx, cy).name == "radar-view"
+    assert page.radar_on and page.radar_shown()
+    surf = pygame.Surface(SIZE)
+    sim.frame(surf)
+    assert page.radar is not None and page.radar.redraws >= 1
+    _tap(m, zx + 2, zy + 2)                                               # the padded corner of the zone
+    assert not page.radar_on and not page.radar_shown()
+    m.show_page(1)                                                        # another page: the zone is off
+    assert m.pointer_target_at(cx, cy) is None or m.pointer_target_at(cx, cy).name != "radar-view"
+    m.show_page(0)
+    parked = demo.Sim("live")                                             # parked: no button, no zone
+    parked.run_to(2.0)
+    p2 = parked.screen.scene_page
+    assert not p2.radar_button_visible()
+    tgt = parked.screen.pointer_target_at(cx, cy)
+    assert tgt is None or tgt.name != "radar-view"
+
+
+def test_radar_view_replaces_only_the_scene_rectangle():
+    """Road view vs radar view of the same moment: every pixel outside the scene rectangle is the same (side
+    panels, strip, alert row); inside, the radar view's button says ROAD."""
+    from cyberpunk_computer.ui.scene import radar_demo
+    a = pygame.Surface(SIZE)
+    b = pygame.Surface(SIZE)
+    road = _radar_sim(24.0, False, radar_demo.city(24.0))
+    road.frame(a)
+    rad = _radar_sim(24.0, True, radar_demo.city(24.0))
+    rad.frame(b)
+    pa, pb = pygame.PixelArray(a), pygame.PixelArray(b)
+    try:
+        for x in range(SIZE[0]):
+            for y in range(SIZE[1]):
+                if 121 <= x < 121 + 238 and 1 <= y < 217:
+                    continue
+                if 121 <= x < 359 and y >= 217:
+                    continue                                              # the strip's power read-out may tick
+                assert pa[x, y] == pb[x, y], (x, y)
+    finally:
+        del pa, pb
+    assert rad.screen.scene_page.radar_shown() and not road.screen.scene_page.radar_shown()
+
+
+def test_radar_view_falls_back_to_the_road_view_without_radar_data_and_returns():
+    from cyberpunk_computer.ui.scene import radar_demo
+    from cyberpunk_computer.ui.scene.tuning import Tuning
+    state = {"radar": True}
+
+    def vw(t):
+        v = radar_demo.city(24.0)(t)
+        if v is not None and not state["radar"]:
+            v.pop("rdr", None)
+        return v
+    sim = _radar_sim(20.0, True, vw, toggle_at=19.0)
+    page = sim.screen.scene_page
+    surf = pygame.Surface(SIZE)
+    assert page.radar_shown()
+    state["radar"] = False
+    sim.run_to(20.0 + Tuning.radar_fallback_s - 1.0)
+    assert page.radar_shown()                                             # NO RADAR DATA for a while ...
+    sim.run_to(20.0 + Tuning.radar_fallback_s + 2.0)
+    sim.frame(surf)
+    assert not page.radar_shown() and page.radar_on                       # ... then the road view, choice kept
+    state["radar"] = True
+    sim.run_to(sim.t + 0.6)
+    assert page.radar_shown()                                             # the radar view returns with the data
+
+
+def test_lane_boxes_stand_left_of_the_radar_button():
+    from cyberpunk_computer.ui.scene.radar_button import radar_button_rect
+    surf, r = drawn(lanes_scene(far_left=0.9, far_right=0.9))
+    bx, by, bw, bh = radar_button_rect(238)
+    assert r.pal["lane_ego"] in region_colours(r.surface, (0, by, bx, bh))     # the boxes are there ...
+    assert r.pal["lane_ego"] not in region_colours(r.surface, (bx, by, bw, bh))  # ... not under the button
