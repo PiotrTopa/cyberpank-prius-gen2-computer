@@ -488,6 +488,9 @@ class BackendService:
         self.roadsense_power = None
         # secondary POCO power manager (backend.poco2_power).
         self.poco2_power = None
+        # Keeps the Wi-Fi AP up while poco2 needs it (backend.wifi_hold).
+        self.wifi_hold = None
+        self._ap_up_since: Optional[float] = None
         # roadsense -> MFD road scene feed (backend.roadsense_scene).
         self.roadsense_scene = None
         # Position feeder -> roadsense mapd (backend.position_feeder).
@@ -1957,14 +1960,36 @@ class BackendService:
         if self.poco2_power is None or self.twin is None:
             return
         pb = self.twin.store.state.powerbox
+        # poco2 is reachable only over our Wi-Fi AP (backend.wifi_hold): tell
+        # the manager whether it is up and since when, and keep it up while
+        # poco2 is (or may be) running or wanted.
+        if self.wifi_hold is None:
+            from .wifi_hold import WifiHold
+            self.wifi_hold = WifiHold()
+        now = time.monotonic()
+        up = self.wifi_hold.ap_up()
+        if not up:
+            self._ap_up_since = None
+        elif self._ap_up_since is None:
+            self._ap_up_since = now
         try:
             self.poco2_power.tick(
                 bool(pb.acc_on), acc_known=self._acc_seen,
                 current_a=pb.current_draw_a if pb.connected else None,
                 inhibit=bool(pb.undervoltage or pb.shutdown_requested),
-                early=bool(getattr(self, "_mfd_early", False)))
+                early=bool(getattr(self, "_mfd_early", False)),
+                net_up=up,
+                net_age_s=(now - self._ap_up_since) if self._ap_up_since is not None else 0.0)
         except Exception:
             logger.exception("poco2 power tick failed")
+        try:
+            if self.poco2_power.needs_network():
+                self.wifi_hold.hold("poco2")
+            else:
+                self.wifi_hold.release("poco2")
+            self.wifi_hold.tick(pb.power_mode)
+        except Exception:
+            logger.exception("Wi-Fi hold tick failed")
 
     def _roadsense_power_tick(self) -> None:
         """Advance the roadsense stack manager (ACC follower) and finish a

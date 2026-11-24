@@ -32,6 +32,14 @@ Power policy (state machine, ticked from the backend loop)::
   is Wi-Fi only, so the default is long.
 * SHUTTING_DOWN re-sends the SSH power-off every ``shutdown_retry_s`` while
   the phone still answers; it never uses the button (a long hold restarts).
+* The phone is reachable only over the car computer's Wi-Fi AP, which the
+  key-off ``low`` profile suspends after its grace. The backend therefore
+  holds the AP up while :meth:`needs_network` (backend.wifi_hold) and tells
+  ``tick`` whether the AP is up (``net_up``) and for how long (``net_age_s``):
+  no button press while the AP is down (a phone booted then is never seen,
+  2026-11-23), a boot timeout does not run while the AP is down, and an
+  unanswered probe does not count as "off" until the AP has been up for
+  ``net_settle_s`` (time for a running phone to find it again).
 * The 12 V current from the powerbox INA219 is recorded as a median over
   ``current_window_s`` before the power-off and over ``off_measure_s`` after
   the phone went silent; the difference is published as ``off_drop_a``
@@ -92,6 +100,7 @@ class Poco2PowerConfig:
     ping_timeout_s: int = 2
     ssh_timeout_s: int = 8
     alive_report_s: float = 30.0     # liveness echo to the powerbox ("p2")
+    net_settle_s: float = 360.0      # AP up this long before silence means "off"
 
 
 class Poco2PowerManager:
@@ -124,6 +133,8 @@ class Poco2PowerManager:
         self._last_tick = float("-inf")
         self._last_probe = float("-inf")
         self._unknown_misses = 0
+        self._wanted: Optional[bool] = None
+        self._net_wait_logged = False
         self._reachable: Optional[bool] = None
         self._ssh_ok: Optional[bool] = None
         self._last_ok: Optional[float] = None       # clock of the last good ping
@@ -330,9 +341,14 @@ class Poco2PowerManager:
         logger.info("poco2: shutting down (%s)", why)
         self._enter(STATE_SHUTTING_DOWN)
 
+    def needs_network(self) -> bool:
+        """The AP must stay up: the phone is (or may be) running, or wanted."""
+        return self._state != STATE_OFF or bool(self._wanted)
+
     def tick(self, acc_on: bool, acc_known: bool = True,
              current_a: Optional[float] = None, inhibit: bool = False,
-             early: bool = False) -> None:
+             early: bool = False, net_up: bool = True,
+             net_age_s: float = float("inf")) -> None:
         """Advance the manager. ``acc_on``/``acc_known``: the debounced ACC
         state and whether the powerbox has reported it yet; ``current_a``: the
         12 V current from the powerbox INA219 (None = unknown); ``inhibit``:
@@ -340,7 +356,9 @@ class Poco2PowerManager:
         phone is not wanted whatever the mode says; ``early``: the MFD's own
         start demand that is not ACC (BEAN entry, operator hold): in auto mode
         it wants the phone exactly like ACC, so both boards start together and
-        share the key-off grace."""
+        share the key-off grace. ``net_up`` / ``net_age_s``: whether the car
+        computer's Wi-Fi AP is up and since how many seconds (see the module
+        docstring)."""
         now = self._clock()
         cfg = self.config
         if current_a is not None:
@@ -368,6 +386,13 @@ class Poco2PowerManager:
             wanted = False
         else:
             wanted = (bool(acc_on) or bool(early)) if (acc_known or early) else None     # None = hold
+        self._wanted = wanted
+        settled = net_up and net_age_s >= cfg.net_settle_s
+        if not net_up and wanted and not self._net_wait_logged:
+            logger.info("poco2: wanted, waiting for the Wi-Fi AP before pressing")
+            self._net_wait_logged = True
+        elif net_up:
+            self._net_wait_logged = False
 
         state = self._state
 
@@ -375,7 +400,7 @@ class Poco2PowerManager:
             if self._probe(now):
                 self._ssh_ok = self._ssh_check()
                 self._enter(STATE_ON)
-            else:
+            elif settled:
                 self._unknown_misses += 1
                 if self._unknown_misses >= 3:
                     self._enter(STATE_OFF)
@@ -388,6 +413,8 @@ class Poco2PowerManager:
                 self._boot_started = None
                 self._ssh_ok = self._ssh_check()
                 self._enter(STATE_ON)
+            elif wanted and not net_up:
+                pass                                     # no AP: it would boot unseen
             elif wanted and state == STATE_OFF:
                 self._start_boot(now, "power on")
             elif wanted and self._deadline is not None and now >= self._deadline:
@@ -400,6 +427,8 @@ class Poco2PowerManager:
                 self._enter(STATE_OFF)
 
         elif state == STATE_BOOTING:
+            if not net_up and self._deadline is not None:
+                self._deadline = max(self._deadline, now + cfg.tick_s)   # the timeout waits for the AP
             up = self._probe(now)
             if self._await_down:
                 if not up or self._silent_for(now) > 0:
@@ -467,7 +496,7 @@ class Poco2PowerManager:
                 if wanted is False and silent >= cfg.off_settle_s:
                     logger.info("poco2: went silent while not wanted, taking it as off")
                     self._enter(STATE_OFF)
-                elif (wanted and cfg.lost_recover_s > 0 and silent >= cfg.lost_recover_s
+                elif (wanted and net_up and cfg.lost_recover_s > 0 and silent >= cfg.lost_recover_s
                       and now - self._last_force >= cfg.recover_min_interval_s):
                     logger.error("poco2: no answer for %.0f s while ON, forcing a restart", silent)
                     self._forced += 1

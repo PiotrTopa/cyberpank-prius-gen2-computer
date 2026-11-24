@@ -430,6 +430,19 @@ Modes (`poco2_mode`, initial value `BACKEND_POCO2_MODE`):
 - `off`: shut down now and kept off.
 
 12 V under-voltage or a powerbox shutdown overrides every mode (shut down, no grace).
+
+Wi-Fi AP hold (since 2026-11-24, `backend/wifi_hold.py`): poco2 is reachable only over the
+`prius` AP, which the key-off `low` profile suspends after `/etc/prius/wifi-grace` (20 min).
+While poco2 is wanted or not known to be off (`unknown`, `booting`, `on`, `grace`,
+`shutting_down`, `boot_failed`), the backend stops a pending `prius-wifi-suspend.timer` and
+runs `prius-wifi resume` when wlan0 has no 10.42.0.1 (at most once a minute). No button press
+while the AP is down, the boot timeout waits for it, and a silent probe counts as "off" only
+after the AP has been up 360 s (`net_settle_s`: time for a running poco2 to rejoin). When poco2
+is off and not wanted again, in `low` the backend runs `prius-power apply`, which re-arms a
+fresh Wi-Fi grace. So a backend restart with the key off keeps Wi-Fi up for about 6 + 20 min.
+Before this, a poco2 started after the grace (2026-11-23 20:48, MFD operator hold) booted,
+found no AP, and ran unseen all night (+0.65 W on the 12 V).
+
 On and silent for `BACKEND_POCO2_LOST_RECOVER_S` (300 s): one forced restart, at most
 once per 15 min (0 disables; the link is Wi-Fi only).
 

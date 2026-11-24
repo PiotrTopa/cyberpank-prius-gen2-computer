@@ -334,3 +334,45 @@ def test_mfd_early_demand_starts_it_without_acc_and_holds_the_grace():
     r.run(False, 70, early=False)
     assert r.m.state in (STATE_SHUTTING_DOWN, STATE_OFF)
     assert r.spawned
+
+
+# ── the Wi-Fi AP gate (2026-11-23: started with the AP suspended, never seen) ──
+
+def test_no_press_while_the_ap_is_down_then_press_once_it_is_up():
+    r = Rig(up=False, mode=MODE_ON)
+    r.tick(False, n=4, net_up=False, net_age_s=0.0)        # UNKNOWN: waits, no press
+    assert r.m.state == STATE_UNKNOWN and r.presses == []
+    assert r.m.needs_network()
+    r.tick(False, n=80, net_up=True, net_age_s=400.0)      # AP settled: off, then press
+    assert r.presses and r.m.state in (STATE_BOOTING, STATE_ON)
+
+
+def test_unknown_is_not_taken_as_off_before_the_ap_has_settled():
+    r = Rig(up=False)
+    r.tick(False, n=10, net_up=True, net_age_s=60.0)       # AP just came back
+    assert r.m.state == STATE_UNKNOWN
+    r.up = True                                            # the running phone reconnects
+    r.tick(False, net_up=True, net_age_s=120.0)
+    assert r.m.state == STATE_ON                           # adopted, not lost
+
+
+def test_wanted_off_phone_waits_for_the_ap():
+    r = Rig(up=False)
+    r.tick(False, n=4)                                     # -> OFF (AP up, default)
+    assert r.m.state == STATE_OFF
+    assert not r.m.needs_network()
+    r.m.set_mode(MODE_ON)
+    r.tick(False, n=3, net_up=False, net_age_s=0.0)
+    assert r.presses == [] and r.m.needs_network()
+    r.tick(False, net_up=True, net_age_s=5.0)
+    assert len(r.presses) == 1 and r.m.state == STATE_BOOTING
+
+
+def test_boot_timeout_does_not_run_while_the_ap_is_down():
+    r = Rig(up=False, mode=MODE_ON)
+    r.boots_on_press = False
+    r.tick(False, n=4)
+    r.tick(False)
+    assert r.m.state == STATE_BOOTING and len(r.presses) == 1
+    r.tick(False, n=100, net_up=False, net_age_s=0.0)      # 500 s without the AP
+    assert len(r.presses) == 1 and r.m.state == STATE_BOOTING
