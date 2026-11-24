@@ -441,7 +441,10 @@ after the AP has been up 360 s (`net_settle_s`: time for a running poco2 to rejo
 is off and not wanted again, in `low` the backend runs `prius-power apply`, which re-arms a
 fresh Wi-Fi grace. So a backend restart with the key off keeps Wi-Fi up for about 6 + 20 min.
 Before this, a poco2 started after the grace (2026-11-23 20:48, MFD operator hold) booted,
-found no AP, and ran unseen all night (+0.65 W on the 12 V).
+found no AP, and ran unseen all night (+0.65 W on the 12 V). The journal of that boot ends 40 s after power-on: the
+phone froze during boot and ignored every 6 s press until a 12 s hold (2026-11-24 10:30).
+Therefore a press round (3 x 6 s) that gets no answer while the AP is up now ends with one
+forced restart (12 s, at most once per 15 min) before `boot_failed`.
 
 On and silent for `BACKEND_POCO2_LOST_RECOVER_S` (300 s): one forced restart, at most
 once per 15 min (0 disables; the link is Wi-Fi only).

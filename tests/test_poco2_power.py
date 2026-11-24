@@ -175,7 +175,8 @@ def test_mode_off_skips_the_grace_and_mode_on_boots_with_key_off():
 
 
 def test_boot_retries_then_fails_then_new_round():
-    r = Rig(up=False, boot_timeout_s=30, boot_tries=3, boot_retry_s=120)
+    r = Rig(up=False, boot_timeout_s=30, boot_tries=3, boot_retry_s=120,
+            force_after_failed_round=False)
     r.tick(True, n=4)
     assert r.presses == [6000]
     r.run(True, 100)
@@ -376,3 +377,16 @@ def test_boot_timeout_does_not_run_while_the_ap_is_down():
     assert r.m.state == STATE_BOOTING and len(r.presses) == 1
     r.tick(False, n=100, net_up=False, net_age_s=0.0)      # 500 s without the AP
     assert len(r.presses) == 1 and r.m.state == STATE_BOOTING
+
+
+def test_ignored_press_round_ends_in_one_forced_restart():
+    """2026-11-23: poco2 froze 40 s into a boot and ignored every 6 s press."""
+    r = Rig(up=False, boot_timeout_s=30, boot_tries=3, boot_retry_s=120)
+    r.tick(True, n=4)
+    r.run(True, 100)
+    assert r.presses == [6000, 6000, 6000, 12000]
+    assert r.m.state == STATE_BOOTING and r.m.status()["forced_restarts"] == 1
+    r.run(True, 35)
+    assert r.m.state == STATE_BOOT_FAILED and len(r.presses) == 4
+    assert "presses" in r.m.status()["last_error"]
+

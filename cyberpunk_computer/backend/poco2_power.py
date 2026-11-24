@@ -27,6 +27,9 @@ Power policy (state machine, ticked from the backend loop)::
   ``on`` keeps it running, ``off`` keeps it shut down (no grace).
 * A phone found running while OFF (started by hand) is adopted; in ``auto``
   with the key off, or in ``off``, it then goes through the normal shutdown.
+* A press round (``boot_tries`` presses) that gets no answer while the AP is
+  up ends with one forced restart (``force_ms``), then BOOT_FAILED: a phone
+  that ignores short presses is hung, not off.
 * ON and unreachable for ``lost_recover_s``: one forced restart through the
   button, at most once per ``recover_min_interval_s`` (0 disables). The link
   is Wi-Fi only, so the default is long.
@@ -101,6 +104,7 @@ class Poco2PowerConfig:
     ssh_timeout_s: int = 8
     alive_report_s: float = 30.0     # liveness echo to the powerbox ("p2")
     net_settle_s: float = 360.0      # AP up this long before silence means "off"
+    force_after_failed_round: bool = True   # a round of ignored presses ends in one forced restart
 
 
 class Poco2PowerManager:
@@ -135,6 +139,7 @@ class Poco2PowerManager:
         self._unknown_misses = 0
         self._wanted: Optional[bool] = None
         self._net_wait_logged = False
+        self._forced_round = False                  # forced restart used in this press round
         self._reachable: Optional[bool] = None
         self._ssh_ok: Optional[bool] = None
         self._last_ok: Optional[float] = None       # clock of the last good ping
@@ -442,6 +447,7 @@ class Poco2PowerManager:
                 self._boot_tries = 0
                 self._boot_started = None
                 self._last_error = ""
+                self._forced_round = False
                 self._enter(STATE_ON)
             elif self._deadline is not None and now >= self._deadline:
                 self._await_down = False
@@ -456,10 +462,23 @@ class Poco2PowerManager:
                     else:        # answers ping but not SSH: give it another window
                         self._deadline = now + cfg.boot_timeout_s
                         self._boot_tries += 1
+                elif (cfg.force_after_failed_round and not self._forced_round and net_up
+                      and not self._reachable
+                      and now - self._last_force >= cfg.recover_min_interval_s):
+                    # Ignored every short press with the AP up: a phone that is
+                    # off would have booted, so it is most likely hung (seen
+                    # 2026-11-23: frozen 40 s into a boot, all night).
+                    logger.error("poco2: no answer after %d presses with the AP up, "
+                                 "forcing a restart (%d ms)", self._boot_tries, cfg.force_ms)
+                    self._forced_round = True
+                    self._forced += 1
+                    self._last_force = now
+                    self._start_boot(now, "forced restart (no answer to presses)", cfg.force_ms)
                 else:
                     self._last_error = "no answer after %d presses" % self._boot_tries
                     logger.error("poco2: %s; next round in %.0f s",
                                  self._last_error, cfg.boot_retry_s)
+                    self._forced_round = False
                     self._enter(STATE_BOOT_FAILED, cfg.boot_retry_s)
 
         elif state in (STATE_ON, STATE_GRACE):
