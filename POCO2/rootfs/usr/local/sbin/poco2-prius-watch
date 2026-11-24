@@ -1,0 +1,54 @@
+#!/bin/sh
+# poco2-prius-watch - shut poco2 down when it has not been on the car
+# computer's Wi-Fi (NM profile `prius`, SSID prius) for LIMIT seconds.
+#
+# poco2 is a headless slave of the car computer: away from the car (or with the
+# car computer's AP down) nothing manages it, and a phone that cannot be seen
+# keeps draining the 12 V battery (2026-11-23: unseen all night). The car
+# computer starts it again with the power button when it is wanted.
+#
+# The clock is the boot-time uptime (no RTC trouble). Counting starts at boot,
+# and restarts every time the phone is on `prius`.
+# Bench override: create /etc/poco2/stay-up (any content) to disable the shutdown.
+set -u
+
+LIMIT=${POCO2_WATCH_LIMIT_S:-1800}
+CHECK=${POCO2_WATCH_CHECK_S:-60}
+PROFILE=${POCO2_WATCH_PROFILE:-prius}
+OVERRIDE=/etc/poco2/stay-up
+
+uptime_s() { cut -d. -f1 /proc/uptime; }
+on_prius() {
+    [ "$(nmcli -g GENERAL.CONNECTION device show wlan0 2>/dev/null)" = "$PROFILE" ] &&
+    [ "$(nmcli -g GENERAL.STATE device show wlan0 2>/dev/null | cut -d' ' -f1)" = 100 ]
+}
+log() { echo "poco2-prius-watch: $*"; }
+
+last_ok=$(uptime_s)
+warned=0
+log "started: power off after ${LIMIT}s without Wi-Fi profile '$PROFILE' (override: $OVERRIDE)"
+while :; do
+    now=$(uptime_s)
+    if on_prius; then
+        [ "$warned" = 1 ] && log "back on '$PROFILE'"
+        last_ok=$now
+        warned=0
+    else
+        off=$((now - last_ok))
+        if [ "$warned" = 0 ]; then
+            log "not on '$PROFILE' (connection: $(nmcli -g GENERAL.CONNECTION device show wlan0 2>/dev/null || echo none)); power off in $((LIMIT - off))s"
+            warned=1
+        fi
+        if [ "$off" -ge "$LIMIT" ]; then
+            if [ -e "$OVERRIDE" ]; then
+                log "${off}s without '$PROFILE', but $OVERRIDE exists: staying up"
+                last_ok=$now
+            else
+                log "${off}s without '$PROFILE': powering off"
+                systemctl poweroff
+                exit 0
+            fi
+        fi
+    fi
+    sleep "$CHECK"
+done

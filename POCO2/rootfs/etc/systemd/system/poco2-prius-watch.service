@@ -1,0 +1,13 @@
+[Unit]
+Description=Power off poco2 after 30 min without the car computer's Wi-Fi (prius)
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/poco2-prius-watch
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
