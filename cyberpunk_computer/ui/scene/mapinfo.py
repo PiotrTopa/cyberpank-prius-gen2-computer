@@ -196,6 +196,22 @@ class MapInfo(NamedTuple):
     shape_ds: float = 0.0            # metres of path between two shape points
     shape: Tuple[Tuple[float, float], ...] = ()            # (x forward, y left) from the matched position
     junction: Optional[JunctionView] = None                # the junction view (map.jv)
+    nav: bool = False                # a navigation route is being followed (map.nav, the backend's route_active):
+                                     # the ONE switch of everything that looks like navigation (NAV_ONLY below)
+
+
+# Owner's ruling (2026-11-19, repeated 2026-11-27): nothing that looks like navigation while no navigation exists.
+# These elements are drawn only while the scene says a route is being followed (``map.nav`` true, set by the backend
+# from ``view.road.route.active``; no route source exists today, so: never). No tuning switches them on without it:
+#   junction      the junction / roundabout schematic at the left edge (arms, the way on as an arrow, distance, name)
+#   lane_boxes    the map's lane boxes bottom-right (own lanes, oncoming lanes with a pointer) and their turn arrows
+# The camera's own lane boxes (a neighbouring lane seen) are not navigation and stay (tuning ``lane_indicator``).
+NAV_ONLY = ("junction", "lane_boxes")
+
+
+def nav_active(d: Any) -> bool:
+    """The MapDirector says a navigation route is followed: the gate of every NAV_ONLY element."""
+    return getattr(d, "nav", False) is True
 
 
 class Far(NamedTuple):
@@ -302,7 +318,8 @@ def _parse(mp: Mapping) -> MapInfo:
         lanes=lanes, lanes_conf=_f(ln.get("c")) or 0.0, lanes_p=lp, onc_left=onc if isinstance(onc, bool) else None,
         rs_trust=mp.get("tr") is True, lanes_likely=likely, lanes_turn=turn, lanes_path=tpath,
         tunnel_in=tunnel_in, tunnel_exit_m=exit_m if tunnel_in else None,
-        next_limit=nl, junctions=tuple(jn), shape_ds=ds, shape=shape, junction=_junction(mp.get("jv")))
+        next_limit=nl, junctions=tuple(jn), shape_ds=ds, shape=shape, junction=_junction(mp.get("jv")),
+        nav=mp.get("nav") is True)
 
 
 _last: List[Any] = [None, None]
@@ -454,6 +471,7 @@ class MapDirector:
         self.onc_left = False
         self.label: Optional[RoadLabel] = None
         self.junction: Optional[JunctionView] = None     # m = the advanced distance
+        self.nav = False                                 # a navigation route is followed (MapInfo.nav): NAV_ONLY
         self.junction_approx = False                     # position too uncertain for an exact distance
         self.jv_hacc_share = float(g("map_junction_hacc_share", 0.4))
         self.sig: tuple = ()
@@ -500,6 +518,7 @@ class MapDirector:
         self._turn_gone = self._turn_for = 0.0
         self.label = None
         self.junction = None
+        self.nav = False
         self.junction_approx = False
         self.geo = None
         self._jv.m = None
@@ -628,7 +647,8 @@ class MapDirector:
         # its ring; needs a path that is still likely up to the junction and a good position
         # an uncertain position (dead reckoning, a weak receiver) does not hide it while the error is
         # small against the distance: it is then drawn as approximate (L20)
-        jv = mi.junction if self.on_junction else None
+        self.nav = mi.nav is True
+        jv = mi.junction if (self.on_junction and self.nav) else None     # NAV_ONLY: never without a route
         if jv is not None and not accurate and not (mi.hacc is not None and (
                 jv.on_ring or mi.hacc <= self.jv_hacc_share * max(jv.m, 1.0))):
             jv = None

@@ -22,6 +22,7 @@ milliseconds per class on the Pi Zero.
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from collections.abc import Mapping   # isinstance on typing.Mapping is several times slower
@@ -77,6 +78,11 @@ class RoadObject(NamedTuple):
     track: str = ""                  # "" seen now | "coast" in view, not seen for a moment | "memory" remembered
     ago: float = 0.0                 # with track: seconds since a sensor saw it
     lead: bool = False               # it is the lead (the lead track's place)
+    # which way it faces (vw.objs h / hm / ln): where its front points, rad, 0 = the car's own direction, LEFT
+    # positive (+-pi: it faces the car); None = not known (no lamps are drawn then, never "from behind" by default)
+    hdg: Optional[float] = None
+    hdg_sure: bool = False           # its own travel has shown which end is the front
+    length: Optional[float] = None   # m (a vehicle seen from the side is drawn this long)
 
 
 ROAD_USER_MOTION = {"s": "stationary", "m": "moving"}
@@ -89,6 +95,23 @@ AROUND_TRACK = {"c": "coast", "r": "memory"}
 ROAD_USER_KINDS = {"human": "person", "person": "person", "bike": "bike", "bicycle": "bike",
                    "motorbike": "motorbike", "motorcycle": "motorbike", "car": "car", "van": "van",
                    "truck": "truck", "bus": "bus", "tram": "bus"}
+
+
+FACE_REAR_DEG = 50.0      # a vehicle whose front points within this of the car's own direction shows its rear
+FACE_FRONT_DEG = 130.0    # ... beyond this it shows its front (it comes towards the car); between: its side
+
+
+def vehicle_face(hdg: Optional[float]) -> str:
+    """What a vehicle shows the car, from where its front points (rad, 0 = the car's direction, LEFT positive):
+    "rear" | "front" | "left" (its side, nose to the left) | "right" | "" (not known)."""
+    if hdg is None:
+        return ""
+    a = abs(math.degrees(math.atan2(math.sin(hdg), math.cos(hdg))))
+    if a <= FACE_REAR_DEG:
+        return "rear"
+    if a >= FACE_FRONT_DEG:
+        return "front"
+    return "left" if math.sin(hdg) > 0.0 else "right"
 
 
 def road_user_kind(label: Any) -> str:
@@ -362,11 +385,14 @@ def parse_scene(raw: Any) -> Optional[RoadScene]:
             if x is None or y is None or x <= 0:
                 continue
             f = _num(o.get("f"))
+            h = _num(o.get("h"))
             objs.append(RoadObject(road_user_kind(o.get("k")), x, -y, ROAD_USER_MARKS.get(o.get("s"), ""),
                                    1.0 if f is None else max(0.0, min(1.0, f)),
                                    str(o.get("id") or ""), _num(o.get("vx")) or 0.0, -(_num(o.get("vy")) or 0.0),
                                    ROAD_USER_MOTION.get(o.get("m"), ""), o.get("w") == 1, _num(o.get("ttc")),
-                                   _num(o.get("sd")), o.get("c") == 1))
+                                   _num(o.get("sd")), o.get("c") == 1,
+                                   hdg=None if h is None else -math.radians(h), hdg_sure=o.get("hm") == 1,
+                                   length=_num(o.get("ln"))))
     around = None
     if isinstance(vw, Mapping) and isinstance(vw.get("rd"), (list, tuple)):
         ar = []

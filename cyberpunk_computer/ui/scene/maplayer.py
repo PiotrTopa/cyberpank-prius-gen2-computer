@@ -25,7 +25,7 @@ from typing import Any, Tuple
 
 import pygame
 
-from .mapinfo import FAR_FROM_M
+from .mapinfo import FAR_FROM_M, nav_active
 
 RGB = Tuple[int, int, int]
 
@@ -270,6 +270,8 @@ def lane_boxes(r: Any, s: pygame.Surface, d: Any) -> bool:
     one lit) when it has two or more, oncoming lanes (at most two) as dim
     boxes with a pointer towards the car. Returns False when the map has
     nothing to say (the caller then draws the camera's boxes as before)."""
+    if not nav_active(d.map):
+        return False                # no navigation route: the map's boxes are not drawn (mapinfo.NAV_ONLY)
     ok = _lanes_ok(r, d)
     if ok is None:
         return False
@@ -486,7 +488,7 @@ def junction(r: Any, s: pygame.Surface, d: Any) -> None:
     likely path, that exit's number in the middle, the car as a dot once it is
     on the ring. Nothing without ``d.map.junction``."""
     jv = d.map.junction
-    if jv is None:
+    if jv is None or not nav_active(d.map):     # no navigation route: no schematic (mapinfo.NAV_ONLY)
         return
     if not getattr(r.tune, "map_junction_way", True):
         jv = jv._replace(arms=tuple(a._replace(path=False) for a in jv.arms), ring_path=0, to="")

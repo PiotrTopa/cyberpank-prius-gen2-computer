@@ -337,8 +337,14 @@ def _map_drive(next_m: Optional[float] = 120.0, next_kmh: int = 90, bend: float 
         if view_lanes is not None:
             # L36: the lane boxes as the backend makes them from roadsense's view.road (turn arrows only while a
             # navigation route is followed: roadsense_scene.route_active)
-            from ...backend.roadsense_scene import road_lanes_to_scene
+            from ...backend.roadsense_scene import road_lanes_to_scene, route_active
             m["lanes"] = road_lanes_to_scene({"lanes": view_lanes, "route": route})
+            m["nav"] = route_active({"route": route})
+        else:
+            # the map cases of this set show the junction schematic and the map's lane boxes as they look WITH a
+            # navigation route followed (scene `map.nav`); on the car there is none today and neither is drawn
+            # (mapinfo.NAV_ONLY; shots 86 / 87 show the same approach without and with a route)
+            m["nav"] = True
         m.update({k: (v(t) if callable(v) else v) for k, v in extra.items()})
         return m
 

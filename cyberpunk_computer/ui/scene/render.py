@@ -40,7 +40,7 @@ from ..fonts import get_mono_font, get_tiny_font
 from . import maplayer, roadgeo
 from .car import CarRenderer, car_palette
 from .director import DOOR_STEPS, VIEW_STEPS, SceneDirector
-from .inputs import DOOR_KEYS, SceneInputs
+from .inputs import DOOR_KEYS, SceneInputs, vehicle_face
 from .model import Camera
 from .scenery import ENCLOSED, PAN, Scenery, conifer
 from .signs import sign_surface
@@ -184,6 +184,7 @@ class SceneRenderer:
             "veh_body": (0, 30, 36),
             "veh_glass": (26, 22, 56),
             "tail": (220, 30, 34),
+            "head": (236, 226, 170),       # another vehicle's head lamps (it comes towards the car)
             "path": (0, 108, 98),
             "tree": (0, 132, 84),
         }
@@ -914,8 +915,10 @@ class SceneRenderer:
 
     def draw_vehicle_rear(self, s: pygame.Surface, cx: float, by: float, w: float,
                           line: RGB, kind: str = "car", k: float = 1.0,
-                          braking: bool = False) -> pygame.Rect:
-        """A vehicle seen from behind, ``w`` pixels wide, standing on ``by``."""
+                          braking: bool = False, face: str = "rear") -> pygame.Rect:
+        """A vehicle seen along its axis, ``w`` pixels wide, standing on ``by``: from behind (``face`` "rear": red
+        tail lamps, the default), from the front ("front": it comes towards the car, white head lamps low on the
+        body, no red) or with its end not known ("": no lamps at all)."""
         pal = self.pal
         w = max(7.0, w)
         tall = kind in ("truck", "bus")
@@ -941,16 +944,32 @@ class SceneRenderer:
                      (x1 - w * 0.07, g1), (x0 + w * 0.07, g1)]
             polygon(s, _k(pal["veh_glass"], k), glass)
             polygon(s, _k(pal["lane_dim"], k), glass, 1)
-            if van:                         # the split of the two rear doors below the glass
+            if van and face == "rear":      # the split of the two rear doors below the glass
                 pygame.draw.line(s, _k(pal["lane_dim"], k), (cx, g1 + 1), (cx, by - tyre_h - 2))
         elif kind == "bus" and w >= 10:     # the wide rear window of a bus
             g0, g1 = top + h * 0.08, top + h * 0.38
             glass = [(x0 + w * 0.08, g0), (x1 - w * 0.08, g0), (x1 - w * 0.08, g1), (x0 + w * 0.08, g1)]
             polygon(s, _k(pal["veh_glass"], k), glass)
             polygon(s, _k(pal["lane_dim"], k), glass, 1)
-        elif tall and w >= 12:              # a truck's box: the door split
+        elif tall and w >= 12 and face == "rear":   # a truck's box: the door split
             pygame.draw.line(s, _k(pal["lane_dim"], k), (cx, top + 2), (cx, by - tyre_h - 2))
         polygon(s, _k(line, k), body, 1)
+        if face != "rear":
+            if face == "front":
+                # head lamps: low on the body, white; a bar between them (the grille) on a sprite wide enough
+                lw = max(2, int(w * 0.22))
+                lh = max(1, int(h * 0.11))
+                ly = int(by - h * (0.26 if tall else 0.40))
+                white = _k(pal["head"], k)
+                if k > 0.6 and w >= 12:
+                    r = max(3, int(w * 0.16))
+                    self._add_glow(s, (int(x0) + 1 + lw // 2, ly + lh // 2), r, _k(pal["head"], 0.5))
+                    self._add_glow(s, (int(x1) - lw // 2, ly + lh // 2), r, _k(pal["head"], 0.5))
+                if w >= 16:
+                    pygame.draw.line(s, _k(pal["lane_dim"], k), (int(x0) + 2 + lw, ly + lh // 2), (int(x1) - lw - 2, ly + lh // 2))
+                pygame.draw.rect(s, white, (int(x0) + 1, ly, lw, lh))
+                pygame.draw.rect(s, white, (int(x1) - lw, ly, lw, lh))
+            return rect
         # tail lamps
         lw = max(2, int(w * 0.20))
         lh = max(1, int(h * 0.13))
@@ -971,20 +990,73 @@ class SceneRenderer:
         return rect
 
     VEHICLE_WIDTH_M = {"car": 1.8, "van": 1.95, "truck": 2.5, "bus": 2.55}
+    VEHICLE_LENGTH_M = {"car": 4.4, "van": 5.2, "truck": 8.0, "bus": 12.0}
+    VEHICLE_HEIGHT_M = {"car": 1.45, "van": 1.95, "truck": 3.4, "bus": 3.1}
+
+    def draw_vehicle_side(self, s: pygame.Surface, cx: float, by: float, ppm: float, line: RGB, kind: str = "car",
+                          k: float = 1.0, nose_left: bool = True, length: Optional[float] = None,
+                          min_w: float = 7.0, lamps: bool = True) -> pygame.Rect:
+        """A vehicle seen from the side (it crosses, or turns across the road), standing on ``by``, its middle
+        at ``cx``, its nose to the left or to the right: body, cabin, two wheels, a white lamp at the nose and a
+        red one at the tail."""
+        pal = self.pal
+        ln = self.VEHICLE_LENGTH_M.get(kind, 4.4)
+        if length is not None and length > 0.0:
+            ln = max(0.7 * ln, min(1.4 * ln, length))          # the measured length, within the kind's range
+        w = max(min_w * 1.8, ln * ppm)
+        h = max(5.0, self.VEHICLE_HEIGHT_M.get(kind, 1.45) * ppm)
+        x0, x1 = cx - w / 2.0, cx + w / 2.0
+        top = by - h
+        d = -1.0 if nose_left else 1.0                         # towards the nose
+        nose, tail = (x0, x1) if nose_left else (x1, x0)
+        wheel_r = max(1.0, h * (0.10 if kind in ("truck", "bus") else 0.20))
+        polygon = pygame.draw.polygon
+        if kind in ("truck", "bus", "van"):
+            body = [(tail, by - wheel_r), (tail, top), (nose - d * w * 0.06, top), (nose, top + h * 0.35), (nose, by - wheel_r)]
+        else:
+            belt = by - h * 0.55                               # bonnet and boot below the cabin
+            body = [(tail, by - wheel_r), (tail, belt), (tail + d * w * 0.12, belt), (tail + d * w * 0.26, top),
+                    (nose - d * w * 0.36, top), (nose - d * w * 0.20, belt), (nose, belt + h * 0.06), (nose, by - wheel_r)]
+        polygon(s, _k(pal["veh_body"], k), body)
+        if w >= 14 and kind not in ("truck",):
+            g0, g1 = top + h * 0.10, by - h * (0.60 if kind == "car" else 0.55)
+            a, b = (tail + d * w * 0.30, nose - d * w * 0.38) if kind == "car" else (tail + d * w * 0.08, nose - d * w * 0.10)
+            if g1 - g0 >= 1.0:
+                glass = [(a, g0), (b, g0), (b + d * w * 0.06, g1), (a - d * w * 0.06, g1)] if kind == "car" else \
+                    [(a, g0), (b, g0), (b, g1), (a, g1)]
+                polygon(s, _k(pal["veh_glass"], k), glass)
+        polygon(s, _k(line, k), body, 1)
+        for wx in (x0 + w * 0.20, x1 - w * 0.20):
+            r = max(1, int(wheel_r))
+            pygame.draw.circle(s, (10, 12, 16), (int(wx), int(by - r)), r)
+            pygame.draw.circle(s, _k(pal["lane_dim"], k), (int(wx), int(by - r)), r, 1)
+        lw, lh = max(1, int(w * 0.07)), max(1, int(h * 0.12))
+        ly = int(by - h * (0.30 if kind in ("truck", "bus") else 0.48))
+        nose_x, tail_x = (int(nose) + 1, int(tail) - lw) if nose_left else (int(nose) - lw, int(tail) + 1)
+        if lamps:                                              # (not where the nose's side is only a guess)
+            pygame.draw.rect(s, _k(pal["head"], k), (nose_x, ly, lw, lh))
+            pygame.draw.rect(s, _k(pal["tail"], k), (tail_x, ly, lw, lh))
+        return pygame.Rect(int(x0), int(top), int(w) + 1, int(h) + 1)
 
     def draw_road_user(self, s: pygame.Surface, cx: float, by: float, ppm: float, line: RGB,
                        kind: str = "car", k: float = 1.0, braking: bool = False,
-                       min_w: float = 7.0) -> pygame.Rect:
-        """A road user seen from behind, standing on ``by``, by its kind: a vehicle (car / van / truck / bus,
-        anything unknown is the car shape), a motorbike, a bicycle or a person. Returns its rectangle."""
+                       min_w: float = 7.0, face: str = "rear", length: Optional[float] = None) -> pygame.Rect:
+        """A road user standing on ``by``, by its kind: a vehicle (car / van / truck / bus, anything unknown is
+        the car shape), a motorbike, a bicycle or a person. A vehicle is drawn as it shows itself to the car
+        (``face``, inputs.vehicle_face): "rear" (red tail lamps), "front" (it comes towards the car: white head
+        lamps), "left" / "right" (from the side, its nose that way; "left?" / "right?": without lamps) or "" (not
+        known: no lamps). Returns its rectangle."""
         if kind == "person":
             return self._draw_person(s, cx, by, ppm, line, k)
         if kind == "bike":
             return self._draw_cyclist(s, cx, by, ppm, line, k)
         if kind == "motorbike":
             return self._draw_motorbike(s, cx, by, ppm, line, k, braking)
+        if face[:4] == "left" or face[:5] == "right":
+            return self.draw_vehicle_side(s, cx, by, ppm, line, kind, k, face[:4] == "left", length, min_w,
+                                          lamps=face[-1] != "?")
         w = max(min_w, self.VEHICLE_WIDTH_M.get(kind, 1.8) * ppm)
-        return self.draw_vehicle_rear(s, cx, by, w, line, kind, k, braking)
+        return self.draw_vehicle_rear(s, cx, by, w, line, kind, k, braking, face)
 
     def _draw_person(self, s: pygame.Surface, cx: float, by: float, ppm: float, line: RGB, k: float) -> pygame.Rect:
         """A pedestrian: legs, body, arms and head as 1 px lines."""
@@ -1120,6 +1192,15 @@ class SceneRenderer:
             return
         cx, by, ppm = g
         pal = self.pal
+        # which end a vehicle shows: from where its front points (the integrator's heading); a vehicle whose heading
+        # is not sent is drawn without lamps (it was drawn from behind, with tail lamps, whatever it did)
+        # ... and one whose front end is only the tracker's guess (it has not been seen driving: a parked car, a
+        # queue that stood before the camera saw it) keeps its shape but shows no lamps either: by day the
+        # tracker's guess of a standing vehicle's front is wrong for about a third of those that face the car
+        face = vehicle_face(getattr(o, "hdg", None))
+        if not getattr(o, "hdg_sure", False):
+            face = {"rear": "", "front": "", "left": "left?", "right": "right?"}.get(face, face)
+        length = getattr(o, "length", None)
         if o.kind == "lamp":
             # street lamp: mast with an arm towards the road
             h = 4.6 * ppm
@@ -1134,14 +1215,15 @@ class SceneRenderer:
                 pygame.draw.rect(s, col, (head[0] - 1, head[1], 2, 2))
         elif o.kind in ("car", "truck", "bus", "van", "person", "bike", "motorbike") and o.state in ("obstacle", "threat"):
             # stands on our path / reached within seconds: red, in a frame that blinks for a threat
-            rect = self.draw_road_user(s, cx, by, ppm, pal["red"], o.kind, k * getattr(o, "alpha", 1.0), min_w=9.0)
+            rect = self.draw_road_user(s, cx, by, ppm, pal["red"], o.kind, k * getattr(o, "alpha", 1.0), min_w=9.0,
+                                       face=face, length=length)
             if o.state == "obstacle" or int(clock * 4) % 2:
                 pygame.draw.rect(s, _k(pal["red"], k), rect.inflate(6, 6), 1)
         elif o.kind in ("car", "truck", "bus", "van"):
             # a parked one is part of the street, not of the traffic: dimmed
             parked = o.state == "parked"
             self.draw_road_user(s, cx, by, ppm, pal["lane_dim"] if parked else pal["lane_mid"], o.kind,
-                                k * getattr(o, "alpha", 1.0) * (PARKED_DIM if parked else 1.0))
+                                k * getattr(o, "alpha", 1.0) * (PARKED_DIM if parked else 1.0), face=face, length=length)
         elif o.kind == "cone":
             hh = max(3.0, 0.8 * ppm)
             pygame.draw.polygon(s, _k(pal["orange"], k),

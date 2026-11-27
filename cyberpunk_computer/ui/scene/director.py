@@ -30,7 +30,7 @@ from __future__ import annotations
 import math
 from typing import List, Optional, Tuple
 
-from .inputs import DOOR_KEYS, Lead, RoadScene, SceneInputs
+from .inputs import DOOR_KEYS, Lead, RoadScene, SceneInputs, vehicle_face
 from .mapinfo import MapDirector
 
 VIEW_STEPS = 14            # camera positions between hero and chase (cache keys)
@@ -480,7 +480,8 @@ class SceneDirector:
                                              q(self.lead_alpha, 0.1), self.lead_shown_m)
         lt = None if self.light_pos is None else (q(self.light_pos[0], 0.25), q(self.light_pos[1], 0.1),
                                                  q(self.light_alpha, 0.1))
-        objs = tuple((o.oid or o.kind, o.kind, q(o.x, 0.25), q(o.y, 0.1), q(o.alpha, 0.1)) for o in self.objects)
+        objs = tuple((o.oid or o.kind, o.kind, q(o.x, 0.25), q(o.y, 0.1), q(o.alpha, 0.1), vehicle_face(o.hdg), o.hdg_sure)
+                     for o in self.objects)
         kind = None if self.lead is None else self.lead.kind
         return (lines, ld, lt, tuple(q(a, 0.1) for a in self.line_alpha), objs, kind)
 

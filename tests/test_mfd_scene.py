@@ -6,6 +6,7 @@ in an environment without it; run it with the frontend venv:
     SDL_VIDEODRIVER=dummy .venv-fe/bin/python -m pytest tests/test_mfd_scene.py
 """
 
+import math
 import os
 from dataclasses import replace
 
@@ -953,9 +954,11 @@ def test_limit_provenance_styles_are_distinct():
 # ── map layer: ambient elements (ui/scene/mapinfo.py, maplayer.py; MFD_MAIN_SCREEN.md 6.5) ─
 
 def _map_full(**kw):
-    """A usable scene ``map`` block: a straight road with a right bend from 200 m."""
+    """A usable scene ``map`` block: a straight road with a right bend from 200 m. With a navigation route
+    followed (``nav``: the junction schematic and the map's lane boxes are drawn only then; ``nav=False`` is what
+    the backend sends today, test_no_navigation_no_direction_boxes)."""
     xs = list(range(0, 601, 40))
-    m = {"ok": True, "state": "good", "conf": 0.95,
+    m = {"ok": True, "state": "good", "conf": 0.95, "nav": True,
          "limit": {"kmh": 50, "src": "map", "conf": 0.9},
          "road": {"cls": "primary", "ref": "DK46", "name": "Opolska"},
          "lanes": {"n": 2, "fwd": 1, "back": 1, "ego": 0, "onc_left": True, "c": 0.8},
@@ -2215,3 +2218,143 @@ def test_lane_boxes_stand_left_of_the_radar_button():
     bx, by, bw, bh = radar_button_rect(238)
     assert r.pal["lane_ego"] in region_colours(r.surface, (0, by, bx, bh))     # the boxes are there ...
     assert r.pal["lane_ego"] not in region_colours(r.surface, (bx, by, bw, bh))  # ... not under the button
+
+
+# ── navigation-like elements only with navigation (owner 2026-11-19, 2026-11-27) ─────────────────────────────
+
+def test_no_navigation_no_direction_boxes():
+    """Without a navigation route (scene ``map.nav`` absent: what the backend sends while no route source exists)
+    the junction schematic and the map's lane boxes are not drawn, whatever the map block carries and whatever
+    the tuning says. On 2026-11-27, the first drive with a map position since the turn arrows were removed, both
+    were on the glass (the schematic 40 s and 38 s, the boxes 127 s and 84 s of the two evening drives)."""
+    from cyberpunk_computer.ui.scene import mapinfo
+    from cyberpunk_computer.ui.scene.tuning import Tuning
+    assert mapinfo.NAV_ONLY == ("junction", "lane_boxes")
+    lanes3 = {"n": 5, "fwd": 3, "back": 2, "ego": 1, "onc_left": False, "c": 0.9, "p": [0.05, 0.9, 0.05],
+              "tl": ["l", "t", "tr"], "tp": [0, 1, 1]}
+    with_all = dict(jv=_JV, lanes=lanes3)
+    every_on = {n: True for n in Tuning.names() if isinstance(getattr(Tuning, n), bool)}
+    for nav in (False, None, "yes", 0):                        # only the JSON value true is a route
+        m = _map_full(nav=nav, **with_all)
+        if nav is None:
+            m.pop("nav")
+        for tune in ({}, every_on, {"map_junction": True, "map_lanes": True, "map_junction_m": 2000}):
+            d, inp = map_director(m, **tune)
+            assert d.map.nav is False
+            assert d.map.junction is None, (nav, tune)
+            pic, r = mdrawn(inp, **tune)
+            # the picture is the one of the same map block without a junction and without lanes
+            bare, _ = mdrawn(map_inputs(_map_full(nav=False, lanes=None)), **tune)
+            assert pic == bare, (nav, tune)
+    # the same block with a route: both are drawn
+    d, inp = map_director(_map_full(nav=True, **with_all))
+    assert d.map.nav is True and d.map.junction is not None
+    assert mdrawn(inp)[0] != mdrawn(map_inputs(_map_full(nav=False, **with_all)))[0]
+    # the route ends: gone at once with the next scene
+    inp_off = map_inputs(_map_full(nav=False, **with_all), speed_kmh=50, real_speed_kmh=50)
+    live_step(d, inp_off, 0.2)
+    assert d.map.nav is False and d.map.junction is None
+
+
+def test_the_backend_and_the_screen_share_one_navigation_gate():
+    """The scene key the screen reads (``map.nav``) is the one the backend sets from the route, and from nothing else."""
+    import inspect
+    from cyberpunk_computer.backend import roadsense_scene as rs
+    from cyberpunk_computer.ui.scene import mapinfo, maplayer
+    src = inspect.getsource(rs.SceneBuilder.build)
+    assert src.count('mp["nav"] = True') == 1 and "nav = route_active(rd)" in src
+    assert rs.route_active({"route": None}) is False and rs.route_active({}) is False
+    assert rs.route_active({"route": {"active": True}}) is True
+    assert "nav_active(d.map)" in inspect.getsource(maplayer.lane_boxes)
+    assert "nav_active(d.map)" in inspect.getsource(maplayer.junction)
+    assert mapinfo.parse_map({"map": _map_full(nav=True)}).nav is True
+    assert mapinfo.parse_map({"map": _map_full(nav="on")}).nav is False
+
+
+# ── which way another vehicle faces (drive of 2026-11-26/27: oncoming and crossing traffic drawn from behind) ──
+
+def _vw_scene(objs, seq=1):
+    return dict(scene(seq), vw={"t": 1000 * seq, "lanes": [None, {"y": [-1.75] * 5}, {"y": [1.75] * 5}, None],
+                                "edges": [None, None], "lead": None, "objs": objs})
+
+
+def _veh_drawn(obj):
+    pic, r = drawn(drive_inputs(road=parse_scene(_vw_scene([obj]))))
+    return pic, r
+
+
+def test_vehicle_face_from_the_heading():
+    from cyberpunk_computer.ui.scene.inputs import vehicle_face
+    rad = math.radians
+    assert vehicle_face(None) == ""
+    assert [vehicle_face(rad(a)) for a in (0, 30, -45, 50)] == ["rear"] * 4
+    assert [vehicle_face(rad(a)) for a in (180, -180, 150, -135, 130)] == ["front"] * 5
+    assert [vehicle_face(rad(a)) for a in (90, 60, 120)] == ["left"] * 3          # LEFT positive: its nose to the left
+    assert [vehicle_face(rad(a)) for a in (-90, -60, -120)] == ["right"] * 3
+    assert vehicle_face(rad(360 + 170)) == "front"
+
+
+def test_scene_heading_is_right_positive_on_the_wire_and_left_positive_inside():
+    base = {"id": "ru:1", "k": "car", "d": 20.0, "y": -3.5, "vx": -20.0, "vy": 0.0, "m": "m"}
+    o = parse_scene(_vw_scene([dict(base, h=90, hm=1, ln=4.6)])).objects[0]
+    assert abs(o.hdg + math.pi / 2) < 1e-9 and o.hdg_sure and o.length == 4.6      # to the right on the wire
+    o = parse_scene(_vw_scene([base])).objects[0]
+    assert o.hdg is None and not o.hdg_sure and o.length is None
+    o = parse_scene(_vw_scene([dict(base, h=180)])).objects[0]
+    assert abs(abs(o.hdg) - math.pi) < 1e-9 and not o.hdg_sure
+
+
+def test_oncoming_shows_head_lamps_crossing_its_side_and_an_unknown_end_no_lamps():
+    """What the owner saw: oncoming traffic and traffic crossing from the left drawn from behind, with tail lamps
+    (the screen had one vehicle picture, the view sent no heading)."""
+    from cyberpunk_computer.ui.scene.render import SceneRenderer
+
+    def colours(obj):
+        pic, r = _veh_drawn(obj)
+        surf = r.surface
+        want = {"tail": r.pal["tail"], "head": r.pal["head"]}
+        seen = {k: 0 for k in want}
+        for x in range(surf.get_width()):
+            for y in range(surf.get_height() // 3, surf.get_height() * 3 // 4):
+                c = tuple(surf.get_at((x, y))[:3])
+                for k, v in want.items():
+                    seen[k] += c == tuple(v)
+        return seen, pic
+
+    base = {"id": "ru:1", "k": "car", "d": 18.0, "y": -3.5, "vx": 0.0, "vy": 0.0, "m": "m"}
+    rear, p_rear = colours(dict(base, h=0, hm=1))                  # drives with the car: its rear, tail lamps
+    assert rear["tail"] > 0 and rear["head"] == 0
+    front, p_front = colours(dict(base, h=180, hm=1))              # oncoming: head lamps, nothing red
+    assert front["head"] > 0 and front["tail"] == 0
+    side, p_side = colours(dict(base, h=90, hm=1, ln=4.4))         # crossing from the left to the right
+    assert side["head"] > 0 and side["tail"] > 0                   # a white lamp at the nose, a red one at the tail
+    side_l, p_side_l = colours(dict(base, h=-90, hm=1, ln=4.4))
+    assert len({p_rear, p_front, p_side, p_side_l}) == 4
+    # the front end is the tracker's guess (never seen driving), or no heading is sent at all: no lamps
+    for obj in (dict(base, h=0), dict(base, h=180), dict(base, h=90, ln=4.4), base):
+        seen, _ = colours(obj)
+        assert seen == {"tail": 0, "head": 0}, obj
+    # a crossing vehicle is drawn as long as it is, an oncoming one as wide as its kind
+    r = SceneRenderer((238, 216))
+    s = pygame.Surface((238, 216))
+    a = r.draw_road_user(s, 100, 150, 10.0, (255, 255, 255), "car", face="left", length=4.4)
+    b = r.draw_road_user(s, 100, 150, 10.0, (255, 255, 255), "car", face="front")
+    assert a.width >= 44 and 18 <= b.width <= 20
+    assert r.draw_road_user(s, 100, 150, 10.0, (255, 255, 255), "bus", face="right", length=30.0).width <= 12.0 * 1.4 * 10 + 2
+
+
+def test_the_backend_passes_the_views_heading_to_the_screen():
+    from cyberpunk_computer.backend.roadsense_scene import view_to_scene
+    ru = {"id": "ru:7", "kind": "road_user", "role": "other", "x": 21.3, "y": -3.4, "vx": -22.0, "vy": 0.1,
+          "sx": 2.0, "sy": 0.4, "alpha": 1.0, "attrs": {"source": "radar", "motion": "moving"},
+          "cls": {"label": "car", "confidence": 0.8}, "near": [21.5, -2.7], "hdg": -3.05, "hdg_std": 0.1,
+          "hdg_src": "motion", "len": 4.4, "wid": 1.8}
+    msg = {"type": "view", "ts_mono_ns": 5_000_000_000, "x": [0.0, 10.0, 20.0], "lines": [], "objects": [ru]}
+    o = view_to_scene(msg)["objs"][0]
+    assert (o["d"], o["y"], o["h"], o["hm"], o["ln"]) == (21.3, -3.4, -175, 1, 4.4)
+    o = view_to_scene(dict(msg, objects=[dict(ru, hdg_src="guess")]))["objs"][0]
+    assert o["h"] == -175 and "hm" not in o
+    old = {k: v for k, v in ru.items() if k not in ("near", "hdg", "hdg_std", "hdg_src", "len", "wid")}
+    o = view_to_scene(dict(msg, objects=[old]))["objs"][0]          # an integrator before 2026-11-27: no heading
+    assert "h" not in o and "hm" not in o and "ln" not in o
+

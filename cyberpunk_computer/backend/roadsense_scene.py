@@ -806,7 +806,10 @@ TURN_ARROWS_AHEAD_M = 120.0    # painted turn arrows are shown in the lane boxes
 
 
 def route_active(rd: Any) -> bool:
-    """Is a navigation route being followed? The one condition for the turn arrows in the lane boxes (L36).
+    """Is a navigation route being followed? The one condition for everything on the screen that looks like
+    navigation: the turn arrows in the lane boxes (L36), and since 2026-11-27 the junction schematic (`map.jv`)
+    and the map's lane boxes themselves (scene `map.nav`; the owner saw both again on 2026-11-27, the first drive
+    with a map position since L36: "they were supposed to be disabled completely until navigation is implemented").
 
     Owner's ruling 2026-11-19: no boxes with directions without navigation. No route source exists in the
     system today: the car has no navigation feed, and roadsense's ``view.road.route`` is null (roadsense >= L36;
@@ -1045,7 +1048,10 @@ def view_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
            reached within seconds at the present speeds); only when known (radar view): "m" (the radar's motion
            verdict: "s" stationary, "m" moving; absent = unknown), "w": 1 (it drives with the car's traffic),
            "ttc" (time to reach it, s), "sd" (1 sigma of the distance, m, from 0.5 m), "c": 1 (the camera alone
-           placed it: approximate)}], nearest first, at most ROAD_USER_MAX; when there are more, what stands in
+           placed it: approximate), "h" (where its front points, whole degrees, 0 = the car's own direction, positive
+           to the right, +-180 = towards the car; absent = not known: the screen then draws no lamps), "hm": 1 (its
+           own travel has shown which end is the front; absent: the tracker's guess), "ln" (its length, m)}],
+           nearest first, at most ROAD_USER_MAX; when there are more, what stands in
            the way (t, o) is kept first, then the moving ones, then the parked ones, each nearest first
     alert  the one thing ahead to shout about (the view's `alert`: the radar's obstacle / threat), or absent:
            {"lvl": "t" | "o", "d", "y" (right), "ttc" (s or absent), "lead": true when it is the lead}
@@ -1124,6 +1130,16 @@ def view_to_scene(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             _radar_extras(ru, at.get("ttc_s"), o.get("sx"))
             if isinstance(at.get("source"), str) and at["source"] != "radar":
                 ru["c"] = 1
+            # which way it faces (chris-integrator 2026-11-27: the view's `hdg`, where its front points, rad, 0 = the
+            # car's own direction, positive to the right): the screen draws its rear, its front or its side by it
+            hd = _num(o.get("hdg"))
+            if hd is not None:
+                ru["h"] = int(round(math.degrees(hd)))
+                if o.get("hdg_src") == "motion":
+                    ru["hm"] = 1
+                ln = _num(o.get("len"))
+                if ln is not None and ln > 0.0:
+                    ru["ln"] = round(ln, 1)
             out.setdefault("objs", []).append(ru)
         elif o.get("role") == "ego" and o.get("kind") == "traffic_light" and out["light"] is None:
             at = o.get("attrs") if isinstance(o.get("attrs"), dict) else {}
@@ -1385,8 +1401,15 @@ class SceneBuilder:
         if isinstance(rd, dict) and isinstance(scene.get("map"), dict):
             mp = dict(scene["map"])
             pos = rd.get("position") if isinstance(rd.get("position"), dict) else {}
+            # Navigation-like elements only with navigation (owner 2026-11-19 and 2026-11-27): the junction
+            # schematic (`jv`) is sent, and `nav` set, only while a route is followed (route_active: never today).
+            # The screen draws the schematic and the map's lane boxes only with `nav` (ui/scene/mapinfo.NAV_ONLY);
+            # `lanes` stays in the scene as data (the tint of an oncoming neighbour lane reads it).
+            nav = route_active(rd)
+            if nav:
+                mp["nav"] = True
             if mp.get("ok") and pos.get("trusted") and not pos.get("synthetic") and not self.taint.tainted:
-                jv = junction_to_scene(rd.get("junction"))
+                jv = junction_to_scene(rd.get("junction")) if nav else None
                 if jv:
                     mp["jv"] = jv
                 geo = roadgeom_to_scene(rd)

@@ -770,10 +770,11 @@ def test_junction_view_goes_out_compact_and_only_with_a_usable_map():
         b.feed(json.dumps({"type": "fused", "map": {"available": ok, "state": "good" if ok else "no_source"}}), 0.0)
         b.feed(json.dumps(_map_msg(jv)), 0.0)
         b.feed(json.dumps(view_msg(1, 1_000_000_000, road=view_road(junction=dict(jv, approximate=True),
-                                                                    trusted=trusted))), 0.0)
+                                                                    trusted=trusted, route={"active": True}))), 0.0)
         scene = b.build(0.0)
         assert ("jv" in scene["map"]) is want
         assert "map_jv" not in scene
+        assert scene["map"]["nav"] is True                    # a route is followed (the screen's gate)
         if want:
             assert scene["map"]["jv"]["ap"] is True and scene["map"]["jv"]["m"] == 171
     b = SceneBuilder(SceneFeedConfig())                       # without the display channel: no junction picture
@@ -831,10 +832,12 @@ def test_roadgeom_becomes_the_compact_geo_block():
     assert roadgeom_to_scene({"type": "roadgeom"}) is None
 
 
-def view_road(junction=None, trusted=True, approximate=False, synthetic=False, lanes=None, **geom):
-    """A `view.road` object (roadsense 2.0): the fused geometry of roadgeom_msg() plus position, junction, lanes."""
+def view_road(junction=None, trusted=True, approximate=False, synthetic=False, lanes=None, route=None, **geom):
+    """A `view.road` object (roadsense 2.0): the fused geometry of roadgeom_msg() plus position, junction, lanes.
+    route: the navigation route (`{"active": True}`: a future feed; None as the integrator sends it today)."""
     rd = roadgeom_msg(**geom)
     rd.pop("type")
+    rd["route"] = route
     rd.update(position={"state": "good", "trusted": trusted, "approximate": approximate, "synthetic": synthetic,
                         "hacc_m": 4.0, "why": ["dead_reckoning"] if approximate else []},
               junction=junction,
@@ -1194,3 +1197,41 @@ def test_view_road_users_cap_keeps_what_stands_in_the_way():
     assert {"ru:1", "ru:2", "ru:3"} <= set(ids)
     assert [o["d"] for o in vw["objs"]] == sorted(o["d"] for o in vw["objs"])
     assert "ru:19" not in ids and "ru:18" not in ids and "ru:17" not in ids     # the farthest parked ones go
+
+
+def test_nothing_that_looks_like_navigation_without_a_navigation_route():
+    """Owner 2026-11-19 and again 2026-11-27 (the junction schematic and the map's lane boxes were on the glass on
+    the first drive with a map position since): without a route the scene carries no junction view and no `nav`
+    mark, whatever the map knows. No route source exists today: `view.road.route` is null."""
+    arm = lambda ang, **kw: dict({"angle_deg": ang, "class": "secondary", "name": None, "ref": None,   # noqa: E731
+                                  "exit": True, "entry": True, "path": False, "minor": False}, **kw)
+    jv = {"kind": "junction", "dist_m": 171.4, "confidence": 0.9, "control": "signals",
+          "approach": {"lanes": 2, "lanes_source": "tagged"},
+          "arms": [arm(-91.0, name="1 Maja", path=True), arm(7.0)], "ring": None}
+    turn = {"lanes": [["left"], ["through"]], "arrows": ["l", "t"], "count": 2, "dist_m": 0.0, "junction_m": 60.0,
+            "path": [False, True], "here": True}
+    lanes = {"count": 3, "forward": 2, "backward": 1, "ego_index": 0, "likely_index": None, "probs": [0.9, 0.1],
+             "probs_from": "left", "confidence": 0.9, "oncoming_left": True, "count_source": "map:tagged", "turn": turn}
+    for route in (None, {}, {"active": False}, {"active": "yes"}, "on", 1, [1]):
+        b = SceneBuilder(SceneFeedConfig())
+        b.feed(json.dumps({"type": "fused", "map": {"available": True, "state": "good", "match_confidence": 0.9}}), 0.0)
+        b.feed(json.dumps(view_msg(1, 1_000_000_000, road=view_road(junction=jv, lanes=lanes, route=route))), 0.0)
+        mp = b.build(0.0)["map"]
+        assert "jv" not in mp and "nav" not in mp, route
+        assert "tl" not in mp["lanes"] and "tp" not in mp["lanes"], route
+        assert mp["lanes"]["fwd"] == 2                        # the lane count stays as data (the oncoming tint)
+    # a view without the key at all (an older integrator): the same
+    rd = view_road(junction=jv, lanes=lanes)
+    rd.pop("route")
+    b = SceneBuilder(SceneFeedConfig())
+    b.feed(json.dumps({"type": "fused", "map": {"available": True, "state": "good", "match_confidence": 0.9}}), 0.0)
+    b.feed(json.dumps(view_msg(1, 1_000_000_000, road=rd)), 0.0)
+    mp = b.build(0.0)["map"]
+    assert "jv" not in mp and "nav" not in mp
+    # ... and with a route (a future navigation feed) all of it comes
+    b = SceneBuilder(SceneFeedConfig())
+    b.feed(json.dumps({"type": "fused", "map": {"available": True, "state": "good", "match_confidence": 0.9}}), 0.0)
+    b.feed(json.dumps(view_msg(1, 1_000_000_000, road=view_road(junction=jv, lanes=lanes, route={"active": True}))), 0.0)
+    mp = b.build(0.0)["map"]
+    assert mp["nav"] is True and mp["jv"]["m"] == 171 and mp["lanes"]["tl"] == ["l", "t"]
+

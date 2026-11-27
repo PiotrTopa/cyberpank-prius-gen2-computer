@@ -926,6 +926,58 @@ a drop-out), whether a junction is near enough for the position error, and when 
 shows the camera's road, the fused facts and the lane boxes from `fused`, but no junction schematic and no
 `geo`: the car computer of this branch needs roadsense 2.0 for those.
 
+### 7.7 Drive of 2026-11-26/27: which way a vehicle faces, where it stands, no navigation boxes
+
+**Which way a vehicle faces.** The road view had one picture of a vehicle: from behind, with red tail lamps. An
+oncoming car and a car crossing from the left were drawn like that. chris-integrator's `view` now carries the
+heading of every road user it draws from its radar (`hdg`, with `hdg_src`: `motion` once the object was seen
+driving, `guess` before); the backend passes it as `vw.objs[].h` (whole degrees, 0 = the car's own direction,
+positive to the right, +-180 = towards the car), `hm: 1` (known from its motion) and `ln` (length, m).
+`inputs.vehicle_face` turns it into what the vehicle shows the car, and `render.draw_road_user` draws that:
+
+| heading (from the car's direction) | drawn | lamps |
+|---|---|---|
+| within 50 degrees | its rear (`draw_vehicle_rear`) | red tail lamps |
+| beyond 130 degrees | its front (the same body, `face="front"`) | white head lamps low on the body, a glow, nothing red |
+| between | its side (`draw_vehicle_side`: as long as `ln`, within the kind's range), nose to the left or right | white at the nose, red at the tail |
+| not sent (an older integrator, a camera-only object) | the body | none |
+| any, with the front end only a guess (`hm` absent) | the body in that shape | none |
+
+No lamps on a guess: on the recordings a standing vehicle's guessed front is wrong for about half of those that
+face the car (the pose head calls a car with its head lamps on "rear" often enough). A vehicle that was seen
+driving keeps its lamps when it stops. The lead keeps its own picture (the `lead` topic: from behind, stop
+lamps). People, bicycles and motorbikes are drawn as before.
+
+**Where it stands.** The view's `x`, `y` of a road user were the radar's near point: for a vehicle in the next
+lane its corner towards the car's own lane, and the screen drew the vehicle's whole width centred on it: half a
+metre and more into the car's lane (chris-integrator docs/TOPICS.md has the numbers). The view now gives the
+middle of the body; nothing changed here for it (the screen's scale is right: 1.8 m is 22 px at 10 m and 14 px
+at 40 m where a 3.5 m lane is 44 and 27 px; the least width of 7 px is never reached within 70 m).
+
+**No navigation boxes without navigation** (owner 2026-11-27: "direction (nav-like) boxes started to show up
+again; they were supposed to be disabled completely until navigation is implemented"). L36 (2026-11-19) had
+removed the turn arrows from the lane boxes and kept the junction schematic and the map's lane boxes. Both need
+a map position; the drives between had none (`map.state: no_source` on 2026-11-22 and 2026-11-26), the evening
+drives of 2026-11-27 had one again, and both came back: the schematic for 40 s and 38 s, the boxes for 127 s
+and 84 s of the two drives (281 s and 542 s; `SceneBuilder` and the director on the recorded messages). Now
+one condition gates all of it, on both sides:
+
+* backend: `route_active(view.road)` (true only for `view.road.route = {"active": true}`; no route source
+  exists) decides `map.jv` (not sent without a route), `map.lanes.tl` / `tp` (as since L36) and the mark
+  `map.nav: true`;
+* screen: `mapinfo.NAV_ONLY = ("junction", "lane_boxes")`: `MapDirector.junction` stays None and
+  `maplayer.lane_boxes` / `maplayer.junction` draw nothing unless the scene says `map.nav` is true. No tuning
+  switches them on without it (`map_junction`, `map_lanes` only switch them off with a route).
+
+`map.lanes` still travels as data (the tint of an oncoming neighbour lane reads it). The camera's own lane
+boxes (drawn when a neighbouring lane is SEEN, on every drive, also without a map) are not navigation and stay;
+`lane_indicator: false` in `mfd_scene_tuning.json` removes them too. The road picture's continuation on the
+map (section 6.7: the lane beyond the camera's reach, side roads, a roundabout as a ring) is not a box and
+stays as well (`road_geo`). On the same recordings with this code: schematic 0 s, map lane boxes 0 s.
+Tests: `test_no_navigation_no_direction_boxes`, `test_the_backend_and_the_screen_share_one_navigation_gate`
+(tests/test_mfd_scene.py), `test_nothing_that_looks_like_navigation_without_a_navigation_route`
+(tests/test_roadsense_scene.py). The demo's map shots show the schematic and the boxes as with a route.
+
 ## 8. Requests
 
 ### 8.1 Backend (this repository)
